@@ -2,16 +2,35 @@
 // its own instance over a per-app unix socket (see runtime/worker.js for the client side).
 // Same shape is implemented by cresslet-cli (local dev) and the studio (in-browser preview).
 // Keep in sync with docs/app-format.md.
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { constants, DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, normalize, resolve, sep } from "node:path";
 
 const num = (v: number | bigint) => (typeof v === "bigint" ? Number(v) : v);
 
+/**
+ * App SQL runs in the control plane with its file access, so it must stay inside its own database:
+ * no ATTACH of a file (other apps' databases, cresslet.db; also covers VACUUM INTO), no process-wide
+ * temp-dir pragmas, no fts3_tokenizer (native pointers). Plain VACUUM attaches an unnamed temp db: ok.
+ */
+const DENIED_PRAGMAS = new Set(["temp_store_directory", "data_store_directory"]);
+export function confine(db: DatabaseSync) {
+  db.enableDefensive(true); // no writable_schema tricks on its own file either
+  db.setAuthorizer((action, arg1, arg2) => {
+    const { SQLITE_ATTACH, SQLITE_PRAGMA, SQLITE_FUNCTION, SQLITE_DENY, SQLITE_OK } = constants;
+    if (action === SQLITE_ATTACH) return arg1 === "" ? SQLITE_OK : SQLITE_DENY;
+    if (action === SQLITE_PRAGMA && DENIED_PRAGMAS.has(String(arg1).toLowerCase())) return SQLITE_DENY;
+    if (action === SQLITE_FUNCTION && String(arg2).toLowerCase() === "fts3_tokenizer") return SQLITE_DENY;
+    return SQLITE_OK;
+  });
+  return db;
+}
+
 export function createDb(path: string) {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+  confine(db);
   return {
     query(sql: string, ...params: SQLInputValue[]) {
       return db.prepare(sql).all(...params);
