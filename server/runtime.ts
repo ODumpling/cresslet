@@ -7,6 +7,8 @@ import { randomBytes } from "node:crypto";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { connect } from "node:net";
+import { type IncomingMessage, request as httpRequest } from "node:http";
+import type { Duplex } from "node:stream";
 import { join, relative } from "node:path";
 import { Readable } from "node:stream";
 import { getRequestListener } from "@hono/node-server";
@@ -34,6 +36,7 @@ export interface AppSpec {
 
 interface Proc {
   spec: AppSpec;
+  sockPath: string;
   child: ChildProcess;
   client: Client;
   bindings: { server: Server; egress: Server | null; close(): void };
@@ -171,6 +174,91 @@ export class Runtime {
     }
   }
 
+  /**
+   * WebSocket (HTTP upgrade): forward the handshake to the sandbox; only a 101 gets the two sockets
+   * spliced. Any other answer is relayed once and the connection closed, so a client can't reuse it
+   * to talk to the sandbox directly. Open sockets count as in-flight (the idle reaper keeps it up).
+   */
+  async upgrade(spec: AppSpec, req: IncomingMessage, client: Duplex, head: Buffer, url: string): Promise<number> {
+    let proc: Proc;
+    try {
+      proc = await this.#get(spec);
+    } catch (e) {
+      this.logs.push(spec.appId, "system", `failed to start: ${(e as Error).message}`);
+      client.end("HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+      return 502;
+    }
+    if (client.destroyed) return 0;
+    const headers: string[] = [];
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      // Clients can't forge control-plane headers.
+      if (!req.rawHeaders[i].toLowerCase().startsWith("x-cresslet-")) headers.push(req.rawHeaders[i], req.rawHeaders[i + 1]);
+    }
+    headers.push("x-cresslet-url", url);
+    const u = new URL(url);
+    let done = false;
+    let responded = false;
+    let upstream: Duplex | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const close = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      proc.inflight--;
+      proc.lastUsed = Date.now();
+      client.destroy();
+      upstream?.destroy();
+      up.destroy();
+    };
+    const up = httpRequest({ socketPath: proc.sockPath, method: req.method, path: u.pathname + u.search, headers, setHost: false });
+    proc.inflight++;
+    proc.lastUsed = Date.now();
+    client.on("error", close).on("close", close);
+    return await new Promise<number>((resolve) => {
+      timer = setTimeout(() => {
+        // A handler that never answers the handshake (same limit as HTTP requests).
+        if (!client.destroyed) client.end("HTTP/1.1 504 Gateway Timeout\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+        resolve(504);
+        close();
+      }, this.#cfg.limits.requestMs);
+      timer.unref?.();
+      up.on("upgrade", (res, socket, upHead) => {
+        clearTimeout(timer);
+        responded = true;
+        upstream = socket;
+        let raw = `HTTP/1.1 101 ${res.statusMessage ?? "Switching Protocols"}\r\n`;
+        for (let i = 0; i < res.rawHeaders.length; i += 2) raw += `${res.rawHeaders[i]}: ${res.rawHeaders[i + 1]}\r\n`;
+        client.write(raw + "\r\n", "latin1");
+        if (upHead.length) client.write(upHead);
+        if (head.length) socket.write(head);
+        socket.on("error", close).on("close", close);
+        socket.pipe(client);
+        client.pipe(socket);
+        resolve(101);
+      });
+      up.on("response", (res) => {
+        clearTimeout(timer);
+        responded = true;
+        let raw = `HTTP/1.1 ${res.statusCode} ${res.statusMessage ?? ""}\r\n`;
+        for (let i = 0; i < res.rawHeaders.length; i += 2) {
+          if (!/^(connection|keep-alive|transfer-encoding)$/i.test(res.rawHeaders[i])) raw += `${res.rawHeaders[i]}: ${res.rawHeaders[i + 1]}\r\n`;
+        }
+        client.write(raw + "connection: close\r\n\r\n", "latin1");
+        // pipe: backpressure, and end() only after the body is flushed; then tear down.
+        res.pipe(client);
+        client.once("finish", close);
+        res.on("error", close);
+        resolve(res.statusCode ?? 0);
+      });
+      up.on("error", () => {
+        if (!client.destroyed && !responded) client.end("HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+        resolve(502);
+        close();
+      });
+      up.end();
+    });
+  }
+
   async #get(spec: AppSpec): Promise<Proc> {
     const cur = this.procs.get(spec.appId);
     // Network policy is part of the identity: a sandbox started under an old policy (e.g. a cold
@@ -242,6 +330,7 @@ export class Runtime {
     failed.catch(() => {});
     const proc: Proc = {
       spec,
+      sockPath: sock,
       child,
       client: new Client("http://app", { socketPath: sock }),
       bindings: {

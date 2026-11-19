@@ -30,6 +30,17 @@ export default {
 }
 ```
 
+WebSockets: requests with `Upgrade: websocket` on a server route reach `fetch`; answer with a `WebSocketPair` (Workers API). Open sockets keep the sandbox running; a redeploy closes them (clients should reconnect). Works on the platform; not yet in `cresslet dev` or the studio preview.
+
+```ts
+if (req.headers.get("upgrade") === "websocket") {
+  const [client, server] = Object.values(new WebSocketPair());
+  server.accept();
+  server.addEventListener("message", (e) => server.send(`echo ${e.data}`));
+  return new Response(null, { status: 101, webSocket: client });
+}
+```
+
 | Binding | API |
 |---|---|
 | `env.db` | `query(sql, ...params) → rows[]`, `first(...) → row \| null`, `run(...) → {changes, lastInsertRowid}`, `exec(sql)` — per-app SQLite |

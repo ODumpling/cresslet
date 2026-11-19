@@ -3,8 +3,10 @@ import { stat } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { serveFile } from "./static.ts";
 import { appUrl, type Config, paths } from "./config.ts";
-import type { Store } from "./store.ts";
-import type { Runtime } from "./runtime.ts";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
+import type { App, Store } from "./store.ts";
+import type { AppSpec, Runtime } from "./runtime.ts";
 
 export function matchRoute(pattern: string, path: string): boolean {
   if (pattern.endsWith("/*")) {
@@ -23,6 +25,39 @@ async function isFile(p: string) {
   }
 }
 
+export function appSpec(cfg: Config, store: Store, app: App): AppSpec {
+  return {
+    appId: app.id,
+    appName: app.name,
+    appUrl: appUrl(cfg, app.name),
+    deployId: app.current_deploy_id!,
+    secrets: () => store.secrets(app.id),
+    // Outbound network is only for claimed apps (enforced by the sandbox).
+    net: !!app.account_id,
+    egress: app.egress ? JSON.parse(app.egress) : null,
+  };
+}
+
+/** HTTP upgrades (WebSockets) on server routes go to the sandbox; anything else is refused. */
+export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
+  return async (req: IncomingMessage, socket: Duplex, head: Buffer, appName: string) => {
+    const app = store.appByName(appName);
+    const target = req.url ?? "/";
+    if (!target.startsWith("/") || target.startsWith("//")) {
+      socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+      return;
+    }
+    const url = new URL(`${cfg.scheme}://${req.headers.host ?? appName}${target}`);
+    const config = app ? JSON.parse(app.config) as { routes?: string[]; server?: boolean } : {};
+    if (!app?.current_deploy_id || !config.server || !(config.routes ?? ["/api/*"]).some((r) => matchRoute(r, url.pathname))) {
+      socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+      return;
+    }
+    const status = await runtime.upgrade(appSpec(cfg, store, app), req, socket, head, url.href);
+    runtime.logs.push(app.id, "request", `WS ${url.pathname} ${status}`);
+  };
+}
+
 export function host(cfg: Config, store: Store, runtime: Runtime) {
   return async (req: Request, appName: string): Promise<Response> => {
     const app = store.appByName(appName);
@@ -38,16 +73,7 @@ export function host(cfg: Config, store: Store, runtime: Runtime) {
     const p = paths(cfg, app.id);
 
     if (config.server && (config.routes ?? ["/api/*"]).some((r) => matchRoute(r, url.pathname))) {
-      const res = await runtime.fetch({
-        appId: app.id,
-        appName: app.name,
-        appUrl: appUrl(cfg, app.name),
-        deployId: app.current_deploy_id,
-        secrets: () => store.secrets(app.id),
-        // Outbound network is only for claimed apps (enforced by the sandbox).
-        net: !!app.account_id,
-        egress: app.egress ? JSON.parse(app.egress) : null,
-      }, req);
+      const res = await runtime.fetch(appSpec(cfg, store, app), req);
       runtime.logs.push(
         app.id,
         "request",

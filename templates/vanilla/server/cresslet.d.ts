@@ -29,4 +29,16 @@ declare global {
   interface Body {
     json<T = unknown>(): Promise<T>;
   }
+  /** WebSockets: `const [client, server] = Object.values(new WebSocketPair()); server.accept();` */
+  class WebSocketPair {
+    0: WebSocket;
+    1: WebSocket & { accept(): void };
+  }
+  interface WebSocket {
+    accept(): void;
+  }
+  interface ResponseInit {
+    /** With status 101: hand the client end of a WebSocketPair back to the caller. */
+    webSocket?: WebSocket;
+  }
 }
