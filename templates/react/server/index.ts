@@ -1,6 +1,6 @@
-// Server API. Runs in a sandbox on Clover; handles requests matching `routes` in clover.json.
+// Server API. Runs in a sandbox on Cresslet; handles requests matching `routes` in cresslet.json.
 // Web-standard APIs only (fetch, Request, Response, URL, crypto). No Node/Deno filesystem.
-import type { Env } from "./clover";
+import type { Env } from "./cresslet";
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS todos (

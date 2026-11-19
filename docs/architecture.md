@@ -1,11 +1,11 @@
 # Architecture
 
 ```
-            clover-cli (Node)          studio (browser, clover-container)          agents (curl / CLI)
+            cresslet-cli (Node)          studio (browser, cresslet-container)          agents (curl / CLI)
                   │                                  │                                     │
                   └──────────────── POST /v1/deploys, /v1/apps/… ──────────────────────────┘
                                                      │
-                       ┌─────────────────── clover server (Deno) ───────────────────┐
+                       ┌─────────────────── cresslet server (Deno) ───────────────────┐
                        │ main.ts   host routing: <app>.<domain> → host.ts, else /v1 │
                        │ api.ts    control plane (Hono)                              │
                        │ store.ts  metadata SQLite: accounts, tokens, apps, deploys, │
@@ -26,12 +26,12 @@
 ## Data layout
 
 ```
-data/clover.db                         metadata
+data/cresslet.db                         metadata
 data/apps/<appId>/deploys/<depId>/     immutable: public/, server.js, deploy.json
 data/apps/<appId>/data/db.sqlite       app database (survives deploys)
 data/apps/<appId>/data/files/          app file storage
 data/apps/<appId>/run/config.json      sandbox config (0600)
-/tmp/clover-sock/<appId>.sock          sandbox socket
+/tmp/cresslet-sock/<appId>.sock          sandbox socket
 ```
 
 ## Isolation
@@ -42,14 +42,14 @@ data/apps/<appId>/run/config.json      sandbox config (0600)
 
 ## Deploy lifecycle
 
-1. Client builds (CLI: native esbuild; studio: esbuild-wasm in clover-container).
+1. Client builds (CLI: native esbuild; studio: esbuild-wasm in cresslet-container).
 2. `POST /v1/deploys` with files + server bundle → written to new immutable deploy dir.
 3. Pointer swap (`apps.current_deploy_id`), sandbox stopped → next request cold-starts new code (~70 ms).
 4. Last 10 deploys kept; `rollback` swaps the pointer back.
 
 ## Studio (browser)
 
-Root host serves `studio/` with COOP/COEP. It embeds clover-container (our in-browser runtime: VFS, shell, npm, esbuild-wasm dev server, service-worker previews) and registers a `clover` command so `clover dev|build|deploy` work inside the browser. Server code runs in a Web Worker with the same `Env` API (sql.js DB persisted into the VFS).
+Root host serves `studio/` with COOP/COEP. It embeds cresslet-container (our in-browser runtime: VFS, shell, npm, esbuild-wasm dev server, service-worker previews) and registers a `cresslet` command so `cresslet dev|build|deploy` work inside the browser. Server code runs in a Web Worker with the same `Env` API (sql.js DB persisted into the VFS).
 
 ## Roadmap
 

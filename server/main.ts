@@ -10,7 +10,7 @@ import { removeAppFiles } from "./deploys.ts";
 
 const STUDIO = fromFileUrl(new URL("../studio/", import.meta.url));
 
-/** Cross-origin isolation is required by clover-container (SharedArrayBuffer). */
+/** Cross-origin isolation is required by cresslet-container (SharedArrayBuffer). */
 const ISOLATION = {
   "cross-origin-opener-policy": "same-origin",
   "cross-origin-embedder-policy": "require-corp",
@@ -44,12 +44,12 @@ export function createServer(cfg: Config = loadConfig()) {
     if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return control.fetch(req);
     if (url.pathname === "/healthz") return new Response("ok");
     // The container's service worker must be served from the root to control preview URLs.
-    const res = url.pathname === "/clover-sw.js"
-      ? await serveFile(req, join(STUDIO, "vendor/clover-container/clover-sw.js"))
+    const res = url.pathname === "/cresslet-sw.js"
+      ? await serveFile(req, join(STUDIO, "vendor/cresslet-container/cresslet-sw.js"))
       : await serveDir(req, { fsRoot: STUDIO, quiet: true });
     const h = new Headers(res.headers);
     for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
-    if (url.pathname === "/clover-sw.js") {
+    if (url.pathname === "/cresslet-sw.js") {
       h.set("service-worker-allowed", "/");
       h.set("cache-control", "no-cache");
     }
@@ -73,6 +73,6 @@ if (import.meta.main) {
   const srv = createServer();
   Deno.serve({
     port: srv.cfg.port,
-    onListen: () => console.log(`clover listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`),
+    onListen: () => console.log(`cresslet listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`),
   }, srv.handler);
 }

@@ -1,8 +1,8 @@
-import { Container } from "/vendor/clover-container/clover-container.js";
+import { Container } from "/vendor/cresslet-container/cresslet-container.js";
 import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWithTab, javascript, json, keymap, oneDark } from "/vendor/editor.js";
 import { FitAddon, Terminal } from "/vendor/terminal.js";
 import { auth, fromTree, ignored, projects, toTree } from "/store.js";
-import { createClover } from "/clover-plugin.js";
+import { createCresslet } from "/cresslet-plugin.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, props = {}, ...children) => {
@@ -77,7 +77,7 @@ async function renderHome() {
   $("project-title").hidden = true;
   $("deploy-btn").hidden = true;
   $("deploy-link").hidden = true;
-  document.title = "Clover Studio";
+  document.title = "Cresslet Studio";
 
   api("/v1/templates").then(({ templates }) => {
     $("templates").replaceChildren(...templates.map((t) =>
@@ -147,7 +147,7 @@ async function openProject(id) {
   $("project-title").hidden = false;
   $("deploy-btn").hidden = false;
   $("project-name").value = project.name;
-  document.title = `${project.name} · Clover Studio`;
+  document.title = `${project.name} · Cresslet Studio`;
   showDeployLink(project.deploy);
 
   $("project-name").onchange = async (e) => {
@@ -172,7 +172,7 @@ async function openProject(id) {
   setStatus("Booting");
   let c;
   try {
-    c = await Container.boot({ serviceWorkerUrl: "/clover-sw.js" });
+    c = await Container.boot({ serviceWorkerUrl: "/cresslet-sw.js" });
   } catch (e) {
     setStatus("Runtime failed", "error");
     $("preview-msg").textContent = `Could not start the runtime: ${e.message}`;
@@ -187,7 +187,7 @@ async function openProject(id) {
   const save = () => {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(async () => {
-      const tree = await c.export(wd, { excludes: ["node_modules/**", "dist/**", ".clover/**"] });
+      const tree = await c.export(wd, { excludes: ["node_modules/**", "dist/**", ".cresslet/**"] });
       project.files = Object.fromEntries(Object.entries(fromTree(tree)).filter(([p]) => !ignored(p)));
       await projects.put(project);
       renderTree();
@@ -195,7 +195,7 @@ async function openProject(id) {
   };
   addEventListener("beforeunload", () => clearTimeout(saveTimer));
 
-  const clover = createClover(c, {
+  const cresslet = createCresslet(c, {
     auth: () => ({ token: auth.token }),
     project: () => project,
     onDeployed: async (r) => {
@@ -331,7 +331,7 @@ async function openProject(id) {
   term.onData((d) => input.write(d));
   setStatus("Installing");
   $("preview-msg").textContent = "Installing dependencies…";
-  input.write("npm install && clover dev\r");
+  input.write("npm install && cresslet dev\r");
 
   // deploy
   $("deploy-btn").onclick = async () => {
@@ -342,7 +342,7 @@ async function openProject(id) {
     log.textContent = "";
     selectTab("deploy-log");
     try {
-      const r = await clover.deploy((line) => (log.textContent += line + "\n"));
+      const r = await cresslet.deploy((line) => (log.textContent += line + "\n"));
       toast(el("span", {}, "Deployed: ", el("a", { href: r.app.url, target: "_blank", rel: "noopener", textContent: r.app.url })), 8000);
     } catch (e) {
       log.textContent += `\nerror: ${e.message}\n`;

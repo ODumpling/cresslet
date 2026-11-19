@@ -1,4 +1,4 @@
-// Runs an app's server bundle in the browser with the Clover Env API.
+// Runs an app's server bundle in the browser with the Cresslet Env API.
 // Protocol (postMessage):
 //   in:  {type:"init", code, app, secrets, db: Uint8Array|null}  → out: {type:"ready"} | {type:"fatal", message}
 //   in:  {type:"request", id, url, method, headers, body}        → out: {type:"response", id, status, headers, body}

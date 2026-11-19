@@ -1,6 +1,6 @@
 // Browser-local project storage (IndexedDB). A project = { id, name, template, files, deploy, updatedAt }.
 // `files` is a flat map path → string | Uint8Array, excluding node_modules / build output.
-const DB = "clover-studio";
+const DB = "cresslet-studio";
 let dbp;
 
 function db() {
@@ -29,7 +29,7 @@ export const projects = {
   delete: (id) => tx("readwrite", (s) => s.delete(id)),
 };
 
-export const IGNORE = [/^node_modules(\/|$)/, /^dist(\/|$)/, /^\.clover(\/|$)/];
+export const IGNORE = [/^node_modules(\/|$)/, /^dist(\/|$)/, /^\.cresslet(\/|$)/];
 export const ignored = (path) => IGNORE.some((re) => re.test(path));
 
 /** Flat map → WebContainer-style tree. */
@@ -57,26 +57,26 @@ export function fromTree(tree, prefix = "", out = {}) {
 export const auth = {
   get token() {
     try {
-      return localStorage.getItem("clover.token");
+      return localStorage.getItem("cresslet.token");
     } catch {
       return null;
     }
   },
   set token(v) {
     try {
-      v ? localStorage.setItem("clover.token", v) : localStorage.removeItem("clover.token");
+      v ? localStorage.setItem("cresslet.token", v) : localStorage.removeItem("cresslet.token");
     } catch { /* storage blocked */ }
   },
   get email() {
     try {
-      return localStorage.getItem("clover.email");
+      return localStorage.getItem("cresslet.email");
     } catch {
       return null;
     }
   },
   set email(v) {
     try {
-      v ? localStorage.setItem("clover.email", v) : localStorage.removeItem("clover.email");
+      v ? localStorage.setItem("cresslet.email", v) : localStorage.removeItem("cresslet.email");
     } catch { /* storage blocked */ }
   },
 };

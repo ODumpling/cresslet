@@ -1,16 +1,16 @@
 # App format
 
-A Clover app = static client + optional server fetch handler.
+A Cresslet app = static client + optional server fetch handler.
 
 ```
-clover.json          { "name": "my-app", "routes": ["/api/*"] }
+cresslet.json          { "name": "my-app", "routes": ["/api/*"] }
 index.html           entry; local <script type="module" src> / <link rel="stylesheet"> get bundled
 src/                 client code (TS/TSX/JSX/CSS/JSON/images)
 public/              copied as-is to site root
 server/index.ts      export default { fetch(req, env, ctx) }
-.env                 CLOVER_PUBLIC_* / VITE_* → import.meta.env (client, build time)
-.env.clover          local dev secrets (not deployed)
-.clover/             build output + app.json (deploy key). Gitignored.
+.env                 CRESSLET_PUBLIC_* / VITE_* → import.meta.env (client, build time)
+.env.cresslet          local dev secrets (not deployed)
+.cresslet/             build output + app.json (deploy key). Gitignored.
 ```
 
 ## Routing
@@ -34,10 +34,10 @@ export default {
 |---|---|
 | `env.db` | `query(sql, ...params) → rows[]`, `first(...) → row \| null`, `run(...) → {changes, lastInsertRowid}`, `exec(sql)` — per-app SQLite |
 | `env.files` | `put(key, body, {contentType})`, `get(key) → Response \| null`, `delete(key)`, `list(prefix) → {key,size,contentType,updatedAt}[]` |
-| `env.secrets` | `Record<string,string>`, set via `clover secrets set` (claimed apps) |
+| `env.secrets` | `Record<string,string>`, set via `cresslet secrets set` (claimed apps) |
 | `env.app` | `{ id, name, url, deployId }` |
 
-Same API in three runtimes: platform sandbox (Deno), `clover dev` (Node), studio preview (browser worker, sql.js). Types: `server/clover.d.ts` in templates.
+Same API in three runtimes: platform sandbox (Deno), `cresslet dev` (Node), studio preview (browser worker, sql.js). Types: `server/cresslet.d.ts` in templates.
 
 Runtime: Web-standard APIs (fetch, Request/Response, URL, crypto, streams, TextEncoder). npm deps are bundled by esbuild (`platform: neutral`, conditions `worker`/`browser`). No filesystem, env vars, or subprocesses.
 

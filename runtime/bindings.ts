@@ -1,4 +1,4 @@
-// Env bindings handed to app code. Same shape is implemented by clover-cli (local dev)
+// Env bindings handed to app code. Same shape is implemented by cresslet-cli (local dev)
 // and the studio (in-browser preview). Keep in sync with docs/app-format.md.
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { dirname, join, normalize } from "node:path";

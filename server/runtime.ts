@@ -6,7 +6,7 @@ import { Logs } from "./logs.ts";
 
 const RUNNER = fromFileUrl(new URL("../runtime/runner.ts", import.meta.url));
 const RUNTIME_DIR = fromFileUrl(new URL("../runtime/", import.meta.url));
-const READY = "__CLOVER_READY__";
+const READY = "__CRESSLET_READY__";
 
 export interface AppSpec {
   appId: string;
@@ -43,7 +43,7 @@ export class Runtime {
       proc = await this.#get(spec);
     } catch (e) {
       this.logs.push(spec.appId, "system", `failed to start: ${(e as Error).message}`);
-      return new Response("App failed to start. See `clover logs`.", { status: 502 });
+      return new Response("App failed to start. See `cresslet logs`.", { status: 502 });
     }
     proc.inflight++;
     proc.lastUsed = Date.now();
@@ -51,7 +51,7 @@ export class Runtime {
     const signal = AbortSignal.any([timeout, req.signal]);
     try {
       const headers = new Headers(req.headers);
-      headers.set("x-clover-url", req.url);
+      headers.set("x-cresslet-url", req.url);
       const res = await fetch("http://app" + new URL(req.url).pathname, {
         method: req.method,
         headers,

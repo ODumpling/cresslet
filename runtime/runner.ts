@@ -3,7 +3,7 @@
 // Serves the app's fetch handler on a unix socket.
 import { createEnv, type RunConfig } from "./bindings.ts";
 
-export const READY = "__CLOVER_READY__";
+export const READY = "__CRESSLET_READY__";
 
 const cfg: RunConfig = JSON.parse(await Deno.readTextFile(Deno.args[0]));
 const env = createEnv(cfg);
@@ -36,9 +36,9 @@ Deno.serve({
     return new Response("Internal Server Error", { status: 500 });
   },
 }, async (raw) => {
-  const url = raw.headers.get("x-clover-url") ?? raw.url;
+  const url = raw.headers.get("x-cresslet-url") ?? raw.url;
   const headers = new Headers(raw.headers);
-  headers.delete("x-clover-url");
+  headers.delete("x-cresslet-url");
   const req = new Request(url, {
     method: raw.method,
     headers,

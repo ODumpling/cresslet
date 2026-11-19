@@ -1,11 +1,11 @@
 {
-  "name": "clover-app",
+  "name": "cresslet-app",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "clover dev",
-    "build": "clover build",
-    "deploy": "clover deploy"
+    "dev": "cresslet dev",
+    "build": "cresslet build",
+    "deploy": "cresslet deploy"
   },
   "dependencies": {
     "react": "^19.3.1",
@@ -14,6 +14,6 @@
   "devDependencies": {
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@odumpling/clover-cli": "github:ODumpling/clover-cli"
+    "@odumpling/cresslet-cli": "github:ODumpling/cresslet-cli"
   }
 }

@@ -1,4 +1,4 @@
-// Control-plane HTTP API (/v1). Used by clover-cli, the studio, and agents.
+// Control-plane HTTP API (/v1). Used by cresslet-cli, the studio, and agents.
 import { type Context, Hono } from "@hono/hono";
 import { cors } from "@hono/hono/cors";
 import { DatabaseSync } from "node:sqlite";
@@ -25,7 +25,7 @@ type Env = { Variables: { account?: Account; bearer?: string } };
 
 export function api(cfg: Config, store: Store, runtime: Runtime) {
   const app = new Hono<Env>().basePath("/v1");
-  app.use("*", cors({ origin: "*", allowHeaders: ["authorization", "content-type", "x-clover-deploy-key"] }));
+  app.use("*", cors({ origin: "*", allowHeaders: ["authorization", "content-type", "x-cresslet-deploy-key"] }));
 
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.code, message: err.message }, err.status as 400);
@@ -48,7 +48,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   });
 
   const deployKey = (c: Context<Env>) =>
-    c.req.header("x-clover-deploy-key") ??
+    c.req.header("x-cresslet-deploy-key") ??
       (c.get("bearer")?.startsWith("clv_app_") ? c.get("bearer") : undefined);
 
   async function authorize(c: Context<Env>, a: App) {
@@ -88,13 +88,13 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   // ---- meta
   app.get("/", (c) =>
     c.json({
-      name: "clover",
+      name: "cresslet",
       version: VERSION,
       url: rootUrl(cfg),
       appUrlTemplate: appUrl(cfg, "{name}"),
       openSignup: cfg.openSignup,
       limits: cfg.limits,
-      docs: "https://github.com/ODumpling/clover/blob/main/docs/api.md",
+      docs: "https://github.com/ODumpling/cresslet/blob/main/docs/api.md",
     }));
 
   // ---- accounts
@@ -240,10 +240,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
 
   app.post("/apps/:name/claim", async (c) => {
     const acct = c.get("account");
-    if (!acct) throw new HttpError(401, "login required (clover login)", "unauthorized");
+    if (!acct) throw new HttpError(401, "login required (cresslet login)", "unauthorized");
     const a = getApp(c.req.param("name"));
     const { deployKey: k } = await body<{ deployKey?: string }>(c).catch(() => ({ deployKey: undefined }));
-    const key = k ?? c.req.header("x-clover-deploy-key");
+    const key = k ?? c.req.header("x-cresslet-deploy-key");
     if (a.account_id === acct.id) return c.json({ app: view(a) });
     if (a.account_id) throw new HttpError(409, "app already claimed", "conflict");
     if (!key || !await store.checkDeployKey(a.id, key)) throw new HttpError(403, "deploy key required", "forbidden");
@@ -297,7 +297,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   app.put("/apps/:name/secrets", async (c) => {
     const a = getApp(c.req.param("name"));
     await authorize(c, a);
-    if (!a.account_id) throw new HttpError(403, "secrets require a claimed app (clover claim)", "unclaimed");
+    if (!a.account_id) throw new HttpError(403, "secrets require a claimed app (cresslet claim)", "unclaimed");
     const input = await body<Record<string, string | null>>(c);
     for (const [k, v] of Object.entries(input)) {
       if (!SECRET_KEY_RE.test(k)) throw new HttpError(400, `invalid secret name: ${k} (use UPPER_SNAKE)`);

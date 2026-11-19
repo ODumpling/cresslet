@@ -1,7 +1,7 @@
 // Browser e2e: template → in-browser npm install → preview → API → Deploy → live app.
 // Run: start the server (deno task dev), then: cd tests/e2e && npm i && npx playwright install chromium && node studio.mjs
 import { chromium } from "@playwright/test";
-const base = process.env.CLOVER_URL ?? "http://localhost:8787";
+const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const browser = await chromium.launch();
 const page = await browser.newPage();
 const logs = [];
@@ -26,9 +26,9 @@ try {
   const p2 = await browser.newPage();
   await p2.goto(url);
   await p2.getByRole("heading", { name: "Todos" }).waitFor({ timeout: 15000 });
-  await p2.getByPlaceholder("Add a todo").fill("on clover");
+  await p2.getByPlaceholder("Add a todo").fill("on cresslet");
   await p2.getByRole("button", { name: "Add" }).click();
-  await p2.getByText("on clover").waitFor({ timeout: 15000 });
+  await p2.getByText("on cresslet").waitFor({ timeout: 15000 });
   console.log("deployed app works");
   await page.screenshot({ path: (process.argv[2] ?? ".") + "/studio.png" });
 } catch (e) {

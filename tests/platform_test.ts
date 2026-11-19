@@ -27,7 +27,7 @@ export default {
 };`;
 
 async function setup() {
-  const dataDir = await Deno.makeTempDir({ prefix: "clover-test-" });
+  const dataDir = await Deno.makeTempDir({ prefix: "cresslet-test-" });
   const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, limits: { requestMs: 1500 } as never }));
   const call = (path: string, init: RequestInit & { host?: string } = {}) => {
     const headers = new Headers(init.headers);
@@ -100,7 +100,7 @@ Deno.test("anonymous deploy, static + server routes, sandbox limits, claim, secr
   assertEquals((await t.json("/api/count", { host })).body.n, 3);
 
   // auth
-  const keyH = { "x-clover-deploy-key": deployKey };
+  const keyH = { "x-cresslet-deploy-key": deployKey };
   assertEquals((await t.json(`/v1/apps/${app.name}`)).status, 401);
   assertEquals((await t.json(`/v1/apps/${app.name}`, { headers: keyH })).status, 200);
   const redeployNoKey = await t.json("/v1/deploys", { method: "POST", body: deployBody({ app: app.name }) });
@@ -181,7 +181,7 @@ Deno.test("templates are served", async () => {
   assert(names.includes("react") && names.includes("vanilla"));
   const react = await t.json("/v1/templates/react");
   const paths = react.body.files.map((f: { path: string }) => f.path);
-  for (const p of ["clover.json", "index.html", "server/index.ts", "AGENTS.md", "package.json"]) {
+  for (const p of ["cresslet.json", "index.html", "server/index.ts", "AGENTS.md", "package.json"]) {
     assert(paths.includes(p), `missing ${p}`);
   }
   assertEquals((await t.json("/v1/templates/..%2Fserver")).status, 404);
@@ -193,7 +193,7 @@ Deno.test("studio is cross-origin isolated", async () => {
   assertEquals(r.status, 200);
   assertEquals(r.headers.get("cross-origin-opener-policy"), "same-origin");
   assertEquals(r.headers.get("cross-origin-embedder-policy"), "require-corp");
-  assertMatch(await r.text(), /Clover Studio/);
+  assertMatch(await r.text(), /Cresslet Studio/);
   const llms = await t.call("/llms.txt");
   assertMatch(await llms.text(), /POST \/v1\/deploys/);
 });

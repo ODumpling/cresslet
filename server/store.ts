@@ -42,7 +42,7 @@ export class Store {
 
   constructor(dataDir: string) {
     Deno.mkdirSync(dataDir, { recursive: true });
-    this.db = new DatabaseSync(join(dataDir, "clover.db"));
+    this.db = new DatabaseSync(join(dataDir, "cresslet.db"));
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;

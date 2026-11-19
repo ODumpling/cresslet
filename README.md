@@ -1,32 +1,32 @@
-# Clover
+# Cresslet
 
-Build and deploy small web apps. Template → code (locally, by an agent, or in the browser) → `clover deploy` → live on `<app>.<domain>` in under a second. Each app is siloed: own sandbox, SQLite DB, file storage, secrets, subdomain.
+Build and deploy small web apps. Template → code (locally, by an agent, or in the browser) → `cresslet deploy` → live on `<app>.<domain>` in under a second. Each app is siloed: own sandbox, SQLite DB, file storage, secrets, subdomain.
 
 This repo: **platform server** (control plane + app host + studio) and app **templates**.
 
 | Repo | What |
 |---|---|
-| [clover](https://github.com/ODumpling/clover) | Deno server: API, sandboxed app runtime, static hosting, browser studio, templates |
-| [clover-cli](https://github.com/ODumpling/clover-cli) | `clover` CLI: new, dev, build, deploy, logs, db, secrets |
-| [clover-container](https://github.com/ODumpling/clover-container) | In-browser runtime (our WebContainer): VFS, shell, npm, dev server, previews |
+| [cresslet](https://github.com/ODumpling/cresslet) | Deno server: API, sandboxed app runtime, static hosting, browser studio, templates |
+| [cresslet-cli](https://github.com/ODumpling/cresslet-cli) | `cresslet` CLI: new, dev, build, deploy, logs, db, secrets |
+| [cresslet-container](https://github.com/ODumpling/cresslet-container) | In-browser runtime (our WebContainer): VFS, shell, npm, dev server, previews |
 
 ## Quickstart
 
 Requires Deno ≥ 2.2 (server) and Node ≥ 22.13 (CLI).
 
 ```sh
-git clone https://github.com/ODumpling/clover && cd clover
+git clone https://github.com/ODumpling/cresslet && cd cresslet
 deno task dev                          # http://localhost:8787, apps on http://<name>.localhost:8787
 
-npx github:ODumpling/clover-cli new my-app
+npx github:ODumpling/cresslet-cli new my-app
 cd my-app && npm install
 npm run dev                            # http://localhost:3000
-npx clover deploy                      # → http://<name>.localhost:8787
-npx clover logs -f
-npx clover login && npx clover claim   # keep it: no expiry, outbound fetch, secrets
+npx cresslet deploy                      # → http://<name>.localhost:8787
+npx cresslet logs -f
+npx cresslet login && npx cresslet claim   # keep it: no expiry, outbound fetch, secrets
 ```
 
-Browser: open http://localhost:8787 → pick a template → edits, `npm install`, dev server and preview all run in-browser on clover-container → **Deploy**.
+Browser: open http://localhost:8787 → pick a template → edits, `npm install`, dev server and preview all run in-browser on cresslet-container → **Deploy**.
 
 Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`. Raw API: [docs/api.md](docs/api.md). Server also serves `/llms.txt`.
 
@@ -43,7 +43,7 @@ Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`
 deno task dev     # watch mode
 deno task test    # integration tests (spawn real sandboxes)
 deno task check
-deno task vendor  # refresh studio/vendor/clover-container (../clover-container or GitHub)
+deno task vendor  # refresh studio/vendor/cresslet-container (../cresslet-container or GitHub)
 # browser e2e: see tests/e2e/studio.mjs
 ```
 

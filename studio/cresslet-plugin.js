@@ -1,4 +1,4 @@
-// Registers the `clover` command inside clover-container so `clover dev|build|deploy`
+// Registers the `cresslet` command inside cresslet-container so `cresslet dev|build|deploy`
 // behave like the real CLI, entirely in the browser.
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -29,10 +29,10 @@ function toBase64(bytes) {
 }
 
 /**
- * @param {import("./vendor/clover-container/index").Container} c
+ * @param {import("./vendor/cresslet-container/index").Container} c
  * @param {{ auth: () => { token?: string|null }, project: () => any, onDeployed?: (r: any) => void }} opts
  */
-export function createClover(c, opts) {
+export function createCresslet(c, opts) {
   const wd = c.workdir;
   const p = (rel) => `${wd}/${rel}`;
 
@@ -45,11 +45,11 @@ export function createClover(c, opts) {
   }
 
   async function config() {
-    const raw = await readText("clover.json");
+    const raw = await readText("cresslet.json");
     try {
       return raw ? JSON.parse(raw) : {};
     } catch (e) {
-      throw new Error(`invalid clover.json: ${e.message}`);
+      throw new Error(`invalid cresslet.json: ${e.message}`);
     }
   }
 
@@ -72,7 +72,7 @@ export function createClover(c, opts) {
       mainFields: ["module", "main"],
       conditions: ["worker", "browser", "import", "default"],
       external: ["node:*"],
-      outfile: p(".clover/build/server.js"),
+      outfile: p(".cresslet/build/server.js"),
       write: false,
     });
     const out = r.outputFiles.find((f) => f.path.endsWith(".js")) ?? r.outputFiles[0];
@@ -83,7 +83,7 @@ export function createClover(c, opts) {
     const t = performance.now();
     const r = await c.build({ root: wd, outDir: "dist" });
     const server = await bundleServer();
-    if (server) await c.fs.writeFile(p(".clover/build/server.js"), server);
+    if (server) await c.fs.writeFile(p(".cresslet/build/server.js"), server);
     log(`built ${r.files.length} files${server ? " + server" : ""} in ${Math.round(performance.now() - t)}ms`);
     return { files: r.files, server };
   }
@@ -102,7 +102,7 @@ export function createClover(c, opts) {
     const headers = { "content-type": "application/json" };
     const token = opts.auth().token;
     if (token) headers.authorization = `Bearer ${token}`;
-    if (project?.deploy?.deployKey) headers["x-clover-deploy-key"] = project.deploy.deployKey;
+    if (project?.deploy?.deployKey) headers["x-cresslet-deploy-key"] = project.deploy.deployKey;
     log(`uploading ${files.length} files…`);
     const res = await fetch("/v1/deploys", {
       method: "POST",
@@ -118,7 +118,7 @@ export function createClover(c, opts) {
     const body = await res.json();
     if (!res.ok) throw new Error(body.message ?? `deploy failed (${res.status})`);
     if (!cfg.name) {
-      await c.fs.writeFile(p("clover.json"), JSON.stringify({ ...cfg, name: body.app.name }, null, 2) + "\n");
+      await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...cfg, name: body.app.name }, null, 2) + "\n");
     }
     log(`deployed ${body.app.name} → ${body.app.url}`);
     if (!body.app.claimed) log(`unclaimed: expires ${new Date(body.app.expiresAt).toLocaleString()}. Log in to keep it.`);
@@ -131,8 +131,8 @@ export function createClover(c, opts) {
     const out = (s) => ctx.stdout.write(s.replace(/\n/g, "\r\n") + "\r\n");
     const cfg = await config();
     const routes = cfg.routes ?? ["/api/*"];
-    const dbPath = p(".clover/dev/db.sqlite");
-    const filesDir = p(".clover/dev/files");
+    const dbPath = p(".cresslet/dev/db.sqlite");
+    const filesDir = p(".cresslet/dev/files");
     let worker = null;
     let workerError = null;
     let reqId = 0;
@@ -140,7 +140,7 @@ export function createClover(c, opts) {
 
     async function fileOp(m) {
       const indexPath = `${filesDir}/index.json`;
-      const index = JSON.parse((await readText(".clover/dev/files/index.json")) ?? "{}");
+      const index = JSON.parse((await readText(".cresslet/dev/files/index.json")) ?? "{}");
       const key = String(m.key ?? "").replace(/^\/+/, "");
       if (m.op !== "list" && (!key || key.split("/").includes(".."))) throw new Error(`invalid file key: ${m.key}`);
       if (m.op === "put") {
@@ -184,7 +184,7 @@ export function createClover(c, opts) {
       try {
         db = await c.fs.readFile(dbPath);
       } catch { /* fresh db */ }
-      const secrets = parseDotenv((await readText(".env.clover")) ?? "");
+      const secrets = parseDotenv((await readText(".env.cresslet")) ?? "");
       const w = new Worker(new URL("./server-worker.js", import.meta.url), { type: "module" });
       const ready = new Promise((resolve, reject) => {
         w.onmessage = async ({ data: m }) => {
@@ -227,8 +227,8 @@ export function createClover(c, opts) {
 
     async function middleware(req) {
       const url = new URL(req.url);
-      // Preview URLs are prefixed (/__clover__/<id>/<port>/…); match on the app-relative path.
-      const path = url.pathname.replace(/^\/__clover__\/[^/]+\/\d+/, "") || "/";
+      // Preview URLs are prefixed (/__cresslet__/<id>/<port>/…); match on the app-relative path.
+      const path = url.pathname.replace(/^\/__cresslet__\/[^/]+\/\d+/, "") || "/";
       if (!routes.some((r) => matchRoute(r, path)) || !(await serverEntry())) return undefined;
       if (!worker) {
         return new Response(workerError ?? "server is starting", { status: 503, headers: { "content-type": "text/plain" } });
@@ -262,7 +262,7 @@ export function createClover(c, opts) {
     return 0;
   }
 
-  c.registerCommand("clover", async (ctx) => {
+  c.registerCommand("cresslet", async (ctx) => {
     const [sub, ...args] = ctx.args;
     const out = (s) => ctx.stdout.write(s.replace(/\n/g, "\r\n") + "\r\n");
     const err = (s) => ctx.stderr.write(`\x1b[31m${s.replace(/\n/g, "\r\n")}\x1b[0m\r\n`);
@@ -279,7 +279,7 @@ export function createClover(c, opts) {
         await deploy(out);
         return 0;
       }
-      out("usage: clover dev [--port 3000] | build | deploy\r\n(other commands: use the real CLI, npx github:ODumpling/clover-cli)");
+      out("usage: cresslet dev [--port 3000] | build | deploy\r\n(other commands: use the real CLI, npx github:ODumpling/cresslet-cli)");
       return sub ? 1 : 0;
     } catch (e) {
       err(e.message ?? String(e));

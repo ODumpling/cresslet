@@ -4,14 +4,14 @@ Base: `http://localhost:8787` (self-hosted default). JSON in/out. CORS `*`.
 
 Auth (either):
 - `Authorization: Bearer clv_acct_…` — account token (`POST /v1/accounts`).
-- `X-Clover-Deploy-Key: clv_app_…` (or `Authorization: Bearer clv_app_…`) — per-app key, returned once on app creation.
+- `X-Cresslet-Deploy-Key: clv_app_…` (or `Authorization: Bearer clv_app_…`) — per-app key, returned once on app creation.
 
 Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/v1` | server info, limits, app URL template |
-| POST | `/v1/accounts` | `{email}` → `{account, token}`. v1: no verification (operator can disable: `CLOVER_OPEN_SIGNUP=false`) |
+| POST | `/v1/accounts` | `{email}` → `{account, token}`. v1: no verification (operator can disable: `CRESSLET_OPEN_SIGNUP=false`) |
 | GET | `/v1/me` | account |
 | GET | `/v1/templates` | `{templates: [{name, description}]}` |
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
