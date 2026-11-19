@@ -292,3 +292,47 @@ test("unclaimed apps can't set an egress allowlist", async () => {
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("app SQL can't reach other databases (ATTACH / VACUUM INTO)", async () => {
+  const dataDir = await tmp();
+  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
+  const SQL = `export default { async fetch(req, env) {
+    const sql = new URL(req.url).searchParams.get("sql");
+    try { return Response.json(await env.db.query(sql)); } catch (e) { return new Response(e.message, { status: 400 }); }
+  } };`;
+  try {
+    const req = (path: string, host = "test.local", init: RequestInit = {}) =>
+      srv.handler(new Request(`http://${host}${path}`, { ...init, headers: { host, "content-type": "application/json", ...init.headers } }));
+    const d = await (await req("/v1/deploys", "test.local", {
+      method: "POST",
+      body: JSON.stringify({ files: [{ path: "index.html", data: "x" }], server: SQL }),
+    })).json();
+    const host = `${d.app.name}.test.local`;
+    const run = (sql: string) => req(`/api/q?sql=${encodeURIComponent(sql)}`, host);
+    const meta = join(dataDir, "cresslet.db");
+    for (const sql of [
+      `ATTACH '${meta}' AS m`,
+      `ATTACH 'file:${meta}?mode=ro' AS m`,
+      `VACUUM INTO '${join(dataDir, "copy.db")}'`,
+      `PRAGMA temp_store_directory = '${dataDir}'`,
+      "SELECT fts3_tokenizer('simple')",
+    ]) {
+      const r = await run(sql);
+      assert.equal(r.status, 400, sql);
+      assert.match(await r.text(), /not authorized|denied/);
+    }
+    assert.ok(!existsSync(join(dataDir, "copy.db")));
+    assert.equal((await run("SELECT 1 AS one")).status, 200); // ordinary SQL still works
+    assert.equal((await run("VACUUM")).status, 200);
+    // Same for the owner's read-only inspection endpoint.
+    const q = await req(`/v1/apps/${d.app.name}/db/query`, "test.local", {
+      method: "POST",
+      headers: { "x-cresslet-deploy-key": d.deployKey },
+      body: JSON.stringify({ sql: `ATTACH '${meta}' AS m` }),
+    });
+    assert.equal(q.status, 400);
+  } finally {
+    srv.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

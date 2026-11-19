@@ -12,7 +12,7 @@ This repo: **platform server** (control plane + app host + studio) and app **tem
 
 ## Quickstart
 
-Requires Node ≥ 22.18 (server and CLI). The app sandbox ([workerd](https://github.com/cloudflare/workerd)) installs with `npm install`.
+Requires Node ≥ 24.12 for the server (≥ 22.18 for the CLI). The app sandbox ([workerd](https://github.com/cloudflare/workerd)) installs with `npm install`.
 
 ```sh
 git clone https://github.com/ODumpling/cresslet && cd cresslet

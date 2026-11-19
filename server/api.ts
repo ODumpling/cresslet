@@ -11,6 +11,7 @@ import { appUrl, type Config, paths, rootUrl } from "./config.ts";
 import type { Account, App, Domain, Store } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
 import { github } from "./github.ts";
+import { confine } from "./bindings.ts";
 import { normalizeEgress } from "./egress.ts";
 import {
   type DeployInput,
@@ -492,7 +493,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   function openAppDb(a: App) {
     const p = paths(cfg, a.id).db;
     if (!existsSync(p)) return null;
-    return new DatabaseSync(p, { readOnly: true });
+    return confine(new DatabaseSync(p, { readOnly: true }));
   }
 
   app.post("/apps/:name/db/query", async (c) => {
