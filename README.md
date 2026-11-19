@@ -26,6 +26,8 @@ npx clover logs -f
 npx clover login && npx clover claim   # keep it: no expiry, outbound fetch, secrets
 ```
 
+Browser: open http://localhost:8787 → pick a template → edits, `npm install`, dev server and preview all run in-browser on clover-container → **Deploy**.
+
 Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`. Raw API: [docs/api.md](docs/api.md). Server also serves `/llms.txt`.
 
 ## Docs
@@ -41,7 +43,8 @@ Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`
 deno task dev     # watch mode
 deno task test    # integration tests (spawn real sandboxes)
 deno task check
-deno task vendor  # refresh studio/vendor/clover-container from GitHub
+deno task vendor  # refresh studio/vendor/clover-container (../clover-container or GitHub)
+# browser e2e: see tests/e2e/studio.mjs
 ```
 
 MIT

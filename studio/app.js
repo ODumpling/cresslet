@@ -325,7 +325,7 @@ async function openProject(id) {
   $("preview-path").onkeydown = (e) => e.key === "Enter" && loadPreview();
 
   // shell
-  const shell = await c.spawn("jsh", [], { cwd: wd });
+  const shell = await c.spawn("jsh", [], { cwd: wd, terminal: true });
   shell.output.pipeTo(new WritableStream({ write: (d) => term.write(d) }));
   const input = shell.input.getWriter();
   term.onData((d) => input.write(d));
