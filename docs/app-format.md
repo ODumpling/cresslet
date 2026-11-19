@@ -51,4 +51,5 @@ Runtime: Web-standard APIs (fetch, Request/Response, URL, crypto, streams, TextE
 | Memory | 256 MB per app |
 | Idle | sandbox stopped after 5 min, cold start ~70 ms |
 | Unclaimed apps | expire after 72 h; no outbound network; no secrets |
+| Outbound network | claimed apps: any public host, or only an allowlist (`PUT /v1/apps/:name/egress`) |
 | Deploy history | last 10 (rollback) |

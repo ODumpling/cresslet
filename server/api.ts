@@ -11,6 +11,7 @@ import { appUrl, type Config, paths, rootUrl } from "./config.ts";
 import type { Account, App, Store } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
 import { github } from "./github.ts";
+import { normalizeEgress } from "./egress.ts";
 import {
   type DeployInput,
   HttpError,
@@ -85,6 +86,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     expiresAt: a.expires_at ? new Date(a.expires_at).toISOString() : null,
     currentDeployId: a.current_deploy_id,
     config: JSON.parse(a.config),
+    egress: a.egress ? JSON.parse(a.egress) : null,
     createdAt: new Date(a.created_at).toISOString(),
     updatedAt: new Date(a.updated_at).toISOString(),
   });
@@ -303,7 +305,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
         current: d.id === a.current_deploy_id,
       })),
       runtime: runtime.status(a.id),
-      secrets: Object.keys(store.secrets(a.id)),
+      secrets: store.secretKeys(a.id),
     });
   });
 
@@ -370,7 +372,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   app.get("/apps/:name/secrets", async (c) => {
     const a = getApp(c.req.param("name"));
     await authorize(c, a);
-    return c.json({ keys: Object.keys(store.secrets(a.id)) });
+    return c.json({ keys: store.secretKeys(a.id) });
   });
 
   app.put("/apps/:name/secrets", async (c) => {
@@ -385,7 +387,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       else throw new HttpError(400, `invalid value for ${k}`);
     }
     runtime.stop(a.id);
-    return c.json({ keys: Object.keys(store.secrets(a.id)) });
+    return c.json({ keys: store.secretKeys(a.id) });
   });
 
   app.delete("/apps/:name/secrets/:key", async (c) => {
@@ -393,7 +395,33 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     await authorize(c, a);
     store.deleteSecret(a.id, c.req.param("key"));
     runtime.stop(a.id);
-    return c.json({ keys: Object.keys(store.secrets(a.id)) });
+    return c.json({ keys: store.secretKeys(a.id) });
+  });
+
+  // ---- egress allowlist (claimed apps; null = any public host)
+  app.get("/apps/:name/egress", async (c) => {
+    const a = getApp(c.req.param("name"));
+    await authorize(c, a);
+    return c.json({ allow: a.egress ? JSON.parse(a.egress) : null });
+  });
+
+  app.put("/apps/:name/egress", async (c) => {
+    const a = getApp(c.req.param("name"));
+    await authorize(c, a);
+    if (!a.account_id) throw new HttpError(403, "outbound network requires a claimed app (cresslet claim)", "unclaimed");
+    const { allow } = await body<{ allow?: unknown }>(c);
+    let list: string[] | null = null;
+    if (allow !== null) {
+      try {
+        list = normalizeEgress(allow);
+      } catch (e) {
+        throw new HttpError(400, (e as Error).message);
+      }
+    }
+    store.setEgress(a.id, list);
+    runtime.stop(a.id);
+    runtime.logs.push(a.id, "system", list ? `egress allowlist: ${list.join(", ") || "(none)"}` : "egress: any public host");
+    return c.json({ allow: list });
   });
 
   // ---- database inspection (read-only)

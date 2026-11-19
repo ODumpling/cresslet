@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { SecretBox } from "./secretbox.ts";
 
 const encodeHex = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as ArrayBuffer).toString("hex");
 
@@ -19,6 +20,8 @@ export interface App {
   current_deploy_id: string | null;
   /** JSON: { routes: string[] } */
   config: string;
+  /** JSON string[] of allowed outbound hosts, or null = any public host. */
+  egress: string | null;
   expires_at: number | null;
   created_at: number;
   updated_at: number;
@@ -43,6 +46,7 @@ export async function sha256(s: string): Promise<string> {
 
 export class Store {
   db: DatabaseSync;
+  #box: SecretBox;
 
   constructor(dataDir: string) {
     mkdirSync(dataDir, { recursive: true });
@@ -50,6 +54,7 @@ export class Store {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
+      PRAGMA secure_delete = ON;
       CREATE TABLE IF NOT EXISTS accounts (
         id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS tokens (
@@ -73,6 +78,55 @@ export class Store {
       this.db.exec("ALTER TABLE accounts ADD COLUMN github_id INTEGER; ALTER TABLE accounts ADD COLUMN github_login TEXT;");
     }
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS accounts_github_id ON accounts (github_id)");
+    const appCols = (this.db.prepare("PRAGMA table_info(apps)").all() as { name: string }[]).map((c) => c.name);
+    if (!appCols.includes("egress")) this.db.exec("ALTER TABLE apps ADD COLUMN egress TEXT");
+    this.#box = SecretBox.load(dataDir);
+    this.#sealSecrets();
+  }
+
+  /**
+   * Sealed values are stored as BLOBs, plaintext ones (older versions, incl. after a rollback) as
+   * TEXT, so the storage class alone tells them apart. Seals plaintext rows and re-seals rows under
+   * an old key. The first run also rebuilds the file: overwritten or deleted plaintext otherwise
+   * survives in free pages and the WAL.
+   */
+  #sealSecrets() {
+    const rows = this.db.prepare("SELECT app_id, key, value FROM secrets").all() as {
+      app_id: string;
+      key: string;
+      value: string | Uint8Array;
+    }[];
+    const update = this.db.prepare("UPDATE secrets SET value = ? WHERE app_id = ? AND key = ?");
+    let plaintext = 0;
+    this.db.exec("BEGIN");
+    try {
+      for (const r of rows) {
+        if (typeof r.value === "string") {
+          update.run(this.#seal(r.app_id, r.key, r.value), r.app_id, r.key);
+          plaintext++;
+        } else {
+          const { value, stale } = this.#box.open(r.app_id, r.key, Buffer.from(r.value).toString());
+          if (stale) update.run(this.#seal(r.app_id, r.key, value), r.app_id, r.key);
+        }
+      }
+      // Cleanup pending until the rebuild below succeeds (retried next start if the checkpoint is busy).
+      if (plaintext) this.db.exec("PRAGMA user_version = 0");
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+    const { user_version } = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+    if (user_version < 1) {
+      this.db.exec("VACUUM");
+      const ck = this.db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy: number };
+      // Only mark done once the old pages are really gone (busy = a reader kept the WAL pinned).
+      if (!ck.busy) this.db.exec("PRAGMA user_version = 1");
+    }
+  }
+
+  #seal(appId: string, key: string, value: string): Uint8Array {
+    return Buffer.from(this.#box.seal(appId, key, value));
   }
 
   // ---- accounts
@@ -125,6 +179,7 @@ export class Store {
       account_id: accountId,
       current_deploy_id: null,
       config: "{}",
+      egress: null,
       expires_at: expiresAt,
       created_at: now,
       updated_at: now,
@@ -160,6 +215,10 @@ export class Store {
       "UPDATE apps SET current_deploy_id = ?, config = ?, updated_at = ? WHERE id = ?",
     ).run(deployId, JSON.stringify(config ?? {}), Date.now(), appId);
   }
+  setEgress(appId: string, allow: string[] | null) {
+    this.db.prepare("UPDATE apps SET egress = ?, updated_at = ? WHERE id = ?")
+      .run(allow ? JSON.stringify(allow) : null, Date.now(), appId);
+  }
   deleteApp(appId: string) {
     this.db.prepare("DELETE FROM apps WHERE id = ?").run(appId);
   }
@@ -186,18 +245,22 @@ export class Store {
     this.db.prepare("DELETE FROM deploys WHERE id = ?").run(deployId);
   }
 
-  // ---- secrets (plaintext at rest in v1; see docs/roadmap)
+  // ---- secrets (AES-GCM at rest, see secretbox.ts)
+  secretKeys(appId: string): string[] {
+    return (this.db.prepare("SELECT key FROM secrets WHERE app_id = ? ORDER BY key").all(appId) as { key: string }[])
+      .map((r) => r.key);
+  }
   secrets(appId: string): Record<string, string> {
     const rows = this.db.prepare("SELECT key, value FROM secrets WHERE app_id = ?").all(appId) as {
       key: string;
-      value: string;
+      value: Uint8Array;
     }[];
-    return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    return Object.fromEntries(rows.map((r) => [r.key, this.#box.open(appId, r.key, Buffer.from(r.value).toString()).value]));
   }
   setSecret(appId: string, key: string, value: string) {
     this.db.prepare(
       "INSERT INTO secrets (app_id, key, value) VALUES (?, ?, ?) ON CONFLICT (app_id, key) DO UPDATE SET value = excluded.value",
-    ).run(appId, key, value);
+    ).run(appId, key, this.#seal(appId, key, value));
   }
   deleteSecret(appId: string, key: string) {
     this.db.prepare("DELETE FROM secrets WHERE app_id = ? AND key = ?").run(appId, key);

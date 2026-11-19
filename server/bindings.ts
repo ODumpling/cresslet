@@ -113,7 +113,10 @@ const replacer = (_k: string, v: unknown) =>
     : v;
 
 /** One app's bindings, served as a fetch handler for its sandbox. */
-export function createBindings(dataDir: string, maxFileBytes = 25 * 1024 * 1024) {
+export function createBindings(
+  dataDir: string,
+  { secrets = {}, maxFileBytes = 25 * 1024 * 1024 }: { secrets?: Record<string, string>; maxFileBytes?: number } = {},
+) {
   const db = createDb(join(dataDir, "db.sqlite"));
   const files = createFiles(join(dataDir, "files"));
   const text = (s: string, status: number) => new Response(s, { status });
@@ -121,6 +124,7 @@ export function createBindings(dataDir: string, maxFileBytes = 25 * 1024 * 1024)
   async function fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     try {
+      if (req.method === "GET" && url.pathname === "/secrets") return Response.json(secrets);
       if (req.method === "POST" && url.pathname.startsWith("/db/")) {
         const op = url.pathname.slice(4);
         const { sql, params = [] } = JSON.parse(await req.text(), reviver) as {

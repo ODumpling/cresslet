@@ -30,9 +30,10 @@ data/cresslet.db                         metadata
 data/apps/<appId>/deploys/<depId>/     immutable: public/, server.js, deploy.json
 data/apps/<appId>/data/db.sqlite       app database (survives deploys)
 data/apps/<appId>/data/files/          app file storage
-data/apps/<appId>/run/                 generated workerd config, worker.js, secrets.json (0600)
+data/apps/<appId>/run/                 generated workerd config, worker.js (no secrets: fetched over HOST)
 /tmp/cresslet-sock/<appId>-<n>.sock      sandbox socket (fresh per spawn)
 /tmp/cresslet-sock/<appId>-<n>.host.sock bindings socket (one app per socket = identity)
+/tmp/cresslet-sock/<appId>-<n>.egress.sock egress proxy (apps with an allowlist)
 ```
 
 ## Isolation
@@ -40,7 +41,9 @@ data/apps/<appId>/run/                 generated workerd config, worker.js, secr
 - Per app: separate OS process running [workerd](https://github.com/cloudflare/workerd) (Cloudflare's open-source Workers runtime). App code sees only its bindings: no host filesystem (`node:fs` is virtual), no env, no subprocess, no native addons. V8 heap cap, request timeout → kill.
 - Data access goes through the `HOST` service binding to the control plane, over a unix socket dedicated to that app. Path-traversal checks on file keys live host-side.
 - Unclaimed: no outbound network. Claimed: public internet only (workerd `network = (allow = ["public"])`), so loopback/private ranges — including the control plane — are unreachable.
-- Not yet: CPU quotas (cgroups), per-app UID, egress allowlists. See roadmap.
+- Egress allowlist (optional, claimed apps): `globalOutbound` becomes an external `style = proxy` service on a per-app unix socket in the control plane (`server/egress.ts`). It forwards only to allowlisted hostnames (no IP literals), resolves them to public addresses only (checked at connect time), and refuses raw sockets (`CONNECT`). Blocked attempts are logged.
+- Secrets: AES-256-GCM in `cresslet.db`, bound to (app, key). Key from `CRESSLET_SECRETS_KEY`, else generated once in `<dataDir>/secrets.key`. The sandbox fetches them over `HOST` at start; they're never written to the run dir.
+- Not yet: CPU quotas (cgroups), per-app UID. See roadmap.
 
 ## Deploy lifecycle
 
@@ -58,7 +61,6 @@ Root host serves `studio/` with COOP/COEP. It embeds cresslet-container (our in-
 - Hosted instance + wildcard TLS. Named / scoped API tokens (today: one token list per account, regenerate revokes all).
 - Stronger isolation: per-app UID + cgroups, or Firecracker. workerd alone is not a hardened multi-tenant boundary (Cloudflare adds more layers in production).
 - Move db/file bindings off the control-plane thread (worker thread or per-app helper) if sync SQLite becomes a bottleneck.
-- Secrets encrypted at rest; egress allowlist for claimed apps.
 - Custom domains, cron/scheduled handlers, websockets.
 - Source sync (git) so studio and CLI edit the same project.
 - AI builder in the studio driving the same API (deferred from v1).

@@ -1,7 +1,7 @@
 // Per-app sandbox entry, run inside workerd (see server/runtime.ts). Wraps the app's fetch
 // handler and builds the documented `env` (docs/app-format.md) on top of workerd bindings:
 //   HOST     service binding to the control plane, which owns the app's db and files
-//   SECRETS  json binding
+//   (secrets are fetched once from HOST /secrets, so they never sit on disk in plaintext)
 //   APP      json binding { id, name, url, deployId }
 import { Buffer } from "node:buffer";
 import * as mod from "app";
@@ -28,7 +28,7 @@ const reviver = (_k, v) =>
     : v;
 
 let appEnv;
-function makeEnv(bindings) {
+async function makeEnv(bindings) {
   const host = bindings.HOST;
   const check = async (r) => {
     if (r.ok) return r;
@@ -41,6 +41,7 @@ function makeEnv(bindings) {
     );
     return JSON.parse(await r.text(), reviver);
   };
+  const secrets = await (await check(await host.fetch("http://host/secrets"))).json();
   const fileUrl = (key) => `http://host/files?key=${encodeURIComponent(key)}`;
   return {
     db: {
@@ -76,7 +77,7 @@ function makeEnv(bindings) {
         return r.json();
       },
     },
-    secrets: Object.freeze({ ...bindings.SECRETS }),
+    secrets: Object.freeze(secrets),
     app: Object.freeze({ ...bindings.APP }),
   };
 }
@@ -88,12 +89,20 @@ export default {
       return new Response("Internal Server Error", { status: 500 });
     }
     appEnv ??= makeEnv(bindings);
+    let env;
+    try {
+      env = await appEnv;
+    } catch (err) {
+      appEnv = undefined;
+      console.error(`failed to load secrets: ${err.message}`);
+      return new Response("Internal Server Error", { status: 500 });
+    }
     const url = raw.headers.get("x-cresslet-url") ?? raw.url;
     const headers = new Headers(raw.headers);
     headers.delete("x-cresslet-url");
     const req = new Request(url, { method: raw.method, headers, body: raw.body, redirect: "manual" });
     try {
-      const res = await handler(req, appEnv, ctx);
+      const res = await handler(req, env, ctx);
       if (!(res instanceof Response)) throw new Error("fetch handler must return a Response");
       return res;
     } catch (err) {

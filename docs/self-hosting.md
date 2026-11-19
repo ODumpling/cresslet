@@ -24,6 +24,7 @@ cresslet.example.com, *.cresslet.example.com {
 | `CRESSLET_WORKERD` | bundled `workerd` npm binary | binary used for sandboxes |
 | `CRESSLET_OPEN_SIGNUP` | true | any GitHub user can create an account (false: only operator-created accounts) |
 | `CRESSLET_ANON_DEPLOYS` | true | allow deploys without an account (expiring apps) |
+| `CRESSLET_SECRETS_KEY` | random, in `<dataDir>/secrets.key` | key for app secrets at rest (any string). Set it to keep the key out of the data volume; existing secrets are re-encrypted on start. Changing it later needs the old `secrets.key` still present. Rolling back to a version without encryption isn't supported (it would hand apps ciphertext). Back up `secrets.key` with `cresslet.db` (without it the server won't start); on the same volume it doesn't protect a leaked volume or backup, the env key does |
 | `CRESSLET_ADMIN_TOKEN` | — | bearer token for `POST /v1/accounts` (pre-create accounts / issue tokens) |
 | `CRESSLET_GITHUB_CLIENT_ID` / `_SECRET` | — | GitHub OAuth App: the only user login (studio + CLI). Unset = no login, anonymous deploys only |
 | `CRESSLET_GITHUB_URL` / `CRESSLET_GITHUB_API_URL` | github.com / api.github.com | GitHub Enterprise Server |
@@ -52,4 +53,4 @@ Docker: the repo `Dockerfile` runs the server on port 8787 with data in `/data` 
 
 `*.localhost` resolves to 127.0.0.1 in browsers and curl, so local dev needs no DNS setup.
 
-v1 caveats: secrets stored plaintext in `cresslet.db`; one server process (no horizontal scaling). See [architecture.md](architecture.md#roadmap).
+v1 caveats: one server process (no horizontal scaling). See [architecture.md](architecture.md#roadmap).

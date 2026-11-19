@@ -2,7 +2,7 @@
 // reaped when idle. Proxies requests over a unix socket. The sandbox reaches its db/files
 // through a per-app bindings socket served here (server/bindings.ts).
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
@@ -14,6 +14,7 @@ import { Client } from "undici";
 import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
 import { createBindings } from "./bindings.ts";
+import { createEgressProxy } from "./egress.ts";
 
 const WORKER = join(import.meta.dirname, "../runtime/worker.js");
 /** Pinned so a workerd upgrade doesn't silently change app semantics. */
@@ -24,15 +25,18 @@ export interface AppSpec {
   appName: string;
   appUrl: string;
   deployId: string;
-  secrets: Record<string, string>;
+  /** Read at sandbox start; served over the HOST binding, never written to disk. */
+  secrets: () => Record<string, string>;
   net: boolean;
+  /** Outbound allowlist (only with `net`); null = any public host. */
+  egress: string[] | null;
 }
 
 interface Proc {
   spec: AppSpec;
   child: ChildProcess;
   client: Client;
-  bindings: { server: Server; close(): void };
+  bindings: { server: Server; egress: Server | null; close(): void };
   ready: Promise<void>;
   lastUsed: number;
   inflight: number;
@@ -48,11 +52,21 @@ function capStr(s: string): string {
   return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function workerdConfig(spec: AppSpec, sock: string, hostSock: string, serverRel: string, memoryMb: number) {
-  const outbound = spec.net
+function workerdConfig(
+  spec: AppSpec,
+  sock: string,
+  hostSock: string,
+  egressSock: string | null,
+  serverRel: string,
+  memoryMb: number,
+) {
+  const outbound = !spec.net
+    ? `(name = "outbound", network = (allow = []))`
+    : egressSock
+    // Allowlist: every outbound request goes through the control plane's egress proxy (egress.ts).
+    ? `(name = "outbound", external = (address = ${capStr("unix:" + egressSock)}, http = (style = proxy)))`
     // "public" excludes loopback/private ranges, so apps can't reach the control plane or LAN.
-    ? `(name = "outbound", network = (allow = ["public"], tlsOptions = (trustBrowserCas = true)))`
-    : `(name = "outbound", network = (allow = []))`;
+    : `(name = "outbound", network = (allow = ["public"], tlsOptions = (trustBrowserCas = true)))`;
   return `using Workerd = import "/workerd/workerd.capnp";
 const config :Workerd.Config = (
   services = [
@@ -64,7 +78,6 @@ const config :Workerd.Config = (
       compatibilityDate = "${COMPAT_DATE}",
       bindings = [
         (name = "HOST", service = "host"),
-        (name = "SECRETS", json = embed "secrets.json"),
         (name = "APP", json = embed "app.json"),
       ],
       globalOutbound = "outbound",
@@ -78,6 +91,8 @@ const config :Workerd.Config = (
 `;
 }
 
+const samePolicy = (a: AppSpec, b: AppSpec) => a.net === b.net && JSON.stringify(a.egress) === JSON.stringify(b.egress);
+
 const canConnect = (path: string) =>
   new Promise<boolean>((res) => {
     const s = connect(path);
@@ -89,13 +104,18 @@ export class Runtime {
   procs = new Map<string, Proc>();
   logs: Logs;
   #cfg: Config;
-  #starting = new Map<string, Promise<Proc>>();
+  #starting = new Map<string, { spec: AppSpec; p: Promise<Proc> }>();
   #timer: ReturnType<typeof setInterval>;
 
   constructor(cfg: Config, logs: Logs) {
     this.#cfg = cfg;
     this.logs = logs;
     mkdirSync(cfg.sockDir, { recursive: true });
+    // Older versions left plaintext secrets in each app's run dir.
+    const apps = join(cfg.dataDir, "apps");
+    for (const app of existsSync(apps) ? readdirSync(apps, { withFileTypes: true }) : []) {
+      if (app.isDirectory()) rmSync(join(apps, app.name, "run", "secrets.json"), { force: true });
+    }
     this.#timer = setInterval(() => this.reapIdle(), 15_000);
   }
 
@@ -153,15 +173,24 @@ export class Runtime {
 
   async #get(spec: AppSpec): Promise<Proc> {
     const cur = this.procs.get(spec.appId);
-    if (cur && !cur.exited && cur.spec.deployId === spec.deployId) {
+    // Network policy is part of the identity: a sandbox started under an old policy (e.g. a cold
+    // start racing a PUT /egress) is replaced on the next request.
+    if (cur && !cur.exited && cur.spec.deployId === spec.deployId && samePolicy(cur.spec, spec)) {
       await cur.ready;
       return cur;
     }
     if (cur) this.stop(spec.appId);
     const starting = this.#starting.get(spec.appId);
-    if (starting) return starting;
+    if (starting) {
+      // Re-check once it's up: it may have been started for another deploy or policy. A failed start
+      // is shared by waiters that wanted the same sandbox (no serial retries of a crashing app).
+      const ok = await starting.p.then(() => true, () => false);
+      const same = starting.spec.deployId === spec.deployId && samePolicy(starting.spec, spec);
+      if (!ok && same) return starting.p;
+      return this.#get(spec);
+    }
     const p = this.#spawn(spec).finally(() => this.#starting.delete(spec.appId));
-    this.#starting.set(spec.appId, p);
+    this.#starting.set(spec.appId, { spec, p });
     return p;
   }
 
@@ -174,21 +203,33 @@ export class Runtime {
     const tag = `${spec.appId}-${randomBytes(4).toString("hex")}`;
     const sock = join(cfg.sockDir, `${tag}.sock`);
     const hostSock = join(cfg.sockDir, `${tag}.host.sock`);
+    const egressSock = spec.net && spec.egress ? join(cfg.sockDir, `${tag}.egress.sock`) : null;
 
     // Bindings socket: the sandbox's only way to its data. One per app, so identity = socket.
-    const bindings = createBindings(p.data);
+    const bindings = createBindings(p.data, { secrets: spec.secrets() });
     const server = createServer(getRequestListener(bindings.fetch));
     await new Promise<void>((res, rej) => server.once("error", rej).listen(hostSock, res));
+    const egress = egressSock
+      ? createEgressProxy(spec.egress!, (l) => this.logs.push(spec.appId, "system", l))
+      : null;
+    if (egress) {
+      await new Promise<void>((res, rej) => egress.once("error", rej).listen(egressSock!, res)).catch((e) => {
+        server.close();
+        bindings.close();
+        throw e;
+      });
+    }
 
     await copyFile(WORKER, join(p.run, "worker.js"));
-    await writeFile(join(p.run, "secrets.json"), JSON.stringify(spec.secrets), { mode: 0o600 });
+    // Older versions wrote secrets here in plaintext.
+    rmSync(join(p.run, "secrets.json"), { force: true });
     await writeFile(
       join(p.run, "app.json"),
       JSON.stringify({ id: spec.appId, name: spec.appName, url: spec.appUrl, deployId: spec.deployId }),
     );
     const serverRel = relative(p.run, join(p.deploy(spec.deployId), "server.js"));
     const configPath = join(p.run, "config.capnp");
-    await writeFile(configPath, workerdConfig(spec, sock, hostSock, serverRel, cfg.limits.memoryMb));
+    await writeFile(configPath, workerdConfig(spec, sock, hostSock, egressSock, serverRel, cfg.limits.memoryMb));
 
     const child = spawn(cfg.workerdPath, ["serve", configPath], {
       cwd: p.run,
@@ -205,7 +246,12 @@ export class Runtime {
       client: new Client("http://app", { socketPath: sock }),
       bindings: {
         server,
+        egress,
         close() {
+          if (egress?.listening) {
+            egress.close();
+            egress.closeAllConnections();
+          }
           if (!server.listening) return;
           server.close();
           server.closeAllConnections();
