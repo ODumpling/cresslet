@@ -1,1 +1,99 @@
-<!doctype html><title>Clover</title>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clover Studio</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#/" aria-label="Clover home">
+        <img src="/favicon.svg" alt="" width="20" height="20" />
+        <span>Clover</span>
+      </a>
+      <div class="project-title" id="project-title" hidden>
+        <span class="sep">/</span>
+        <input id="project-name" aria-label="Project name" spellcheck="false" />
+        <span class="status" id="status" data-state="idle">Idle</span>
+      </div>
+      <div class="spacer"></div>
+      <a class="deploy-link" id="deploy-link" target="_blank" rel="noopener" hidden></a>
+      <button class="btn primary" id="deploy-btn" hidden>Deploy</button>
+      <button class="btn ghost" id="account-btn">Log in</button>
+    </header>
+
+    <main id="home" class="home" hidden>
+      <section class="hero">
+        <h1>Build a small web app in your browser.</h1>
+        <p>Start from a template, edit with live preview, deploy to its own sandbox in one click. Prefer your terminal or an agent? <code>npx github:ODumpling/clover-cli new my-app</code></p>
+      </section>
+      <section>
+        <h2>Start from a template</h2>
+        <div class="grid" id="templates"><p class="muted">Loading templates…</p></div>
+      </section>
+      <section>
+        <h2>Your projects</h2>
+        <p class="muted small">Stored in this browser.</p>
+        <div class="list" id="projects"></div>
+      </section>
+      <section id="apps-section" hidden>
+        <h2>Deployed apps</h2>
+        <div class="list" id="apps"></div>
+      </section>
+    </main>
+
+    <main id="workspace" class="workspace" hidden>
+      <aside class="files">
+        <div class="pane-head">
+          <span>Files</span>
+          <button class="icon-btn" id="new-file" aria-label="New file" title="New file">+</button>
+        </div>
+        <nav id="tree" class="tree" aria-label="Project files"></nav>
+      </aside>
+      <section class="editor-pane">
+        <div class="pane-head"><span id="open-file" class="mono">No file open</span></div>
+        <div id="editor" class="editor"></div>
+      </section>
+      <section class="preview-pane">
+        <div class="pane-head">
+          <button class="icon-btn" id="preview-reload" aria-label="Reload preview" title="Reload">↻</button>
+          <input id="preview-path" class="mono" value="/" aria-label="Preview path" spellcheck="false" />
+          <a class="icon-btn" id="preview-open" target="_blank" rel="noopener" aria-label="Open preview in new tab" title="Open in new tab">↗</a>
+        </div>
+        <div class="preview-body">
+          <iframe id="preview" title="App preview"></iframe>
+          <div class="preview-empty" id="preview-empty">
+            <p id="preview-msg">Booting runtime…</p>
+          </div>
+        </div>
+      </section>
+      <section class="bottom-pane">
+        <div class="pane-head tabs" role="tablist">
+          <button role="tab" class="tab" aria-selected="true" data-tab="terminal">Terminal</button>
+          <button role="tab" class="tab" aria-selected="false" data-tab="deploy-log">Deploy</button>
+        </div>
+        <div id="terminal" class="terminal" data-panel="terminal"></div>
+        <pre id="deploy-log" class="deploy-log mono" data-panel="deploy-log" hidden></pre>
+      </section>
+    </main>
+
+    <dialog id="login-dialog">
+      <form method="dialog" id="login-form">
+        <h2>Log in to Clover</h2>
+        <p class="muted small">No password in v1: we create an account for this email. Logged-in deploys never expire and can use secrets and outbound fetch.</p>
+        <label>Email <input type="email" name="email" required autocomplete="email" /></label>
+        <p class="error small" id="login-error" hidden></p>
+        <div class="row">
+          <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
+          <button class="btn primary" value="ok">Log in</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

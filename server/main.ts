@@ -1,5 +1,5 @@
-import { serveDir } from "@std/http/file-server";
-import { fromFileUrl } from "@std/path";
+import { serveDir, serveFile } from "@std/http/file-server";
+import { fromFileUrl, join } from "@std/path";
 import { type Config, loadConfig, rootUrl } from "./config.ts";
 import { Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
@@ -43,10 +43,16 @@ export function createServer(cfg: Config = loadConfig()) {
     const url = new URL(req.url);
     if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return control.fetch(req);
     if (url.pathname === "/healthz") return new Response("ok");
-    const res = await serveDir(req, { fsRoot: STUDIO, quiet: true });
+    // The container's service worker must be served from the root to control preview URLs.
+    const res = url.pathname === "/clover-sw.js"
+      ? await serveFile(req, join(STUDIO, "vendor/clover-container/clover-sw.js"))
+      : await serveDir(req, { fsRoot: STUDIO, quiet: true });
     const h = new Headers(res.headers);
     for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
-    if (url.pathname.endsWith("clover-sw.js")) h.set("service-worker-allowed", "/");
+    if (url.pathname === "/clover-sw.js") {
+      h.set("service-worker-allowed", "/");
+      h.set("cache-control", "no-cache");
+    }
     return new Response(res.body, { status: res.status, headers: h });
   }
 

@@ -186,3 +186,14 @@ Deno.test("templates are served", async () => {
   }
   assertEquals((await t.json("/v1/templates/..%2Fserver")).status, 404);
 });
+
+Deno.test("studio is cross-origin isolated", async () => {
+  await using t = await setup();
+  const r = await t.call("/");
+  assertEquals(r.status, 200);
+  assertEquals(r.headers.get("cross-origin-opener-policy"), "same-origin");
+  assertEquals(r.headers.get("cross-origin-embedder-policy"), "require-corp");
+  assertMatch(await r.text(), /Clover Studio/);
+  const llms = await t.call("/llms.txt");
+  assertMatch(await llms.text(), /POST \/v1\/deploys/);
+});
