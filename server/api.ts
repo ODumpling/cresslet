@@ -8,7 +8,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { appUrl, type Config, paths, rootUrl } from "./config.ts";
-import type { Account, App, Store } from "./store.ts";
+import type { Account, App, Domain, Store } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
 import { github } from "./github.ts";
 import { normalizeEgress } from "./egress.ts";
@@ -424,6 +424,70 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     return c.json({ allow: list });
   });
 
+  // ---- custom domains (claimed apps). Ownership proof: TXT _cresslet.<domain> = token.
+  const MAX_DOMAINS = 10;
+  const domainView = (a: App, d: Domain) => ({
+    domain: d.domain,
+    verified: !!d.verified_at,
+    dns: [
+      { type: "CNAME", name: d.domain, value: new URL(appUrl(cfg, a.name)).hostname },
+      { type: "TXT", name: `_cresslet.${d.domain}`, value: d.token },
+    ],
+  });
+  const claimed = async (c: Context<Env>) => {
+    const a = getApp(c.req.param("name")!);
+    await authorize(c, a);
+    if (!a.account_id) throw new HttpError(403, "custom domains require a claimed app (cresslet claim)", "unclaimed");
+    return a;
+  };
+
+  app.get("/apps/:name/domains", async (c) => {
+    const a = await claimed(c);
+    return c.json({ domains: store.domains(a.id).map((d) => domainView(a, d)) });
+  });
+
+  app.post("/apps/:name/domains", async (c) => {
+    const a = await claimed(c);
+    const raw = (await body<{ domain?: unknown } | null>(c))?.domain;
+    const domain = typeof raw === "string" ? normDomain(raw) : "";
+    if (!validDomain(domain) || domain === cfg.domain || domain.endsWith("." + cfg.domain)) {
+      throw new HttpError(400, `invalid domain: ${String(raw)}`);
+    }
+    const existing = store.domains(a.id).find((d) => d.domain === domain);
+    if (existing) return c.json({ domain: domainView(a, existing) });
+    if (store.domains(a.id).length >= MAX_DOMAINS) throw new HttpError(400, `at most ${MAX_DOMAINS} domains per app`);
+    if (store.appByDomain(domain)) throw new HttpError(409, `${domain} is already in use`, "conflict");
+    return c.json({ domain: domainView(a, store.addDomain(a.id, domain)) }, 201);
+  });
+
+  app.post("/apps/:name/domains/:domain/verify", async (c) => {
+    const a = await claimed(c);
+    const d = store.domains(a.id).find((x) => x.domain === normDomain(c.req.param("domain")));
+    if (!d) throw new HttpError(404, "domain not found", "not_found");
+    if (!d.verified_at) {
+      const records = await cfg.resolveTxt(`_cresslet.${d.domain}`).catch(() => [] as string[][]);
+      if (!records.some((r) => r.join("") === d.token)) {
+        throw new HttpError(400, `TXT _cresslet.${d.domain} = ${d.token} not found (DNS can take a few minutes)`, "unverified");
+      }
+      const v = store.verifyDomain(a.id, d.domain, d.token);
+      if (v === "taken") throw new HttpError(409, `${d.domain} is already in use`, "conflict");
+      if (v === "gone") throw new HttpError(404, "domain was removed", "not_found");
+      runtime.logs.push(a.id, "system", `domain verified: ${d.domain}`);
+    }
+    return c.json({ domain: domainView(a, store.domains(a.id).find((x) => x.domain === d.domain)!) });
+  });
+
+  app.delete("/apps/:name/domains/:domain", async (c) => {
+    const a = await claimed(c);
+    store.deleteDomain(a.id, normDomain(c.req.param("domain")));
+    return c.json({ domains: store.domains(a.id).map((d) => domainView(a, d)) });
+  });
+
+  // For a TLS terminator's on-demand certificates (e.g. Caddy `on_demand_tls { ask … }`): 200 only for
+  // verified custom domains. The root and app subdomains use the wildcard cert, and approving every app
+  // name would let anyone burn the CA's per-domain rate limit by creating apps.
+  app.get("/domains/check", (c) => c.body(null, store.appByDomain(normDomain(c.req.query("domain") ?? "")) ? 200 : 404));
+
   // ---- database inspection (read-only)
   function openAppDb(a: App) {
     const p = paths(cfg, a.id).db;
@@ -473,6 +537,14 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
 
   app.notFound((c) => c.json({ error: "not_found", message: "no such endpoint" }, 404));
   return app;
+}
+
+/** Lowercase, no trailing dot. */
+export const normDomain = (d: string) => d.trim().toLowerCase().replace(/\.$/, "");
+// ≤ 243 so the `_cresslet.<domain>` TXT name stays within DNS's 253.
+const DOMAIN_RE = /^(?=.{1,243}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+function validDomain(d: string) {
+  return DOMAIN_RE.test(d);
 }
 
 function jsonSafe(v: unknown): unknown {

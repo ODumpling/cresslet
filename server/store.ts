@@ -37,6 +37,14 @@ export interface Deploy {
   source: string;
 }
 
+export interface Domain {
+  domain: string;
+  app_id: string;
+  token: string;
+  verified_at: number | null;
+  created_at: number;
+}
+
 export const id = (prefix: string, bytes = 10) =>
   `${prefix}_${encodeHex(crypto.getRandomValues(new Uint8Array(bytes)))}`;
 
@@ -80,6 +88,12 @@ export class Store {
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS accounts_github_id ON accounts (github_id)");
     const appCols = (this.db.prepare("PRAGMA table_info(apps)").all() as { name: string }[]).map((c) => c.name);
     if (!appCols.includes("egress")) this.db.exec("ALTER TABLE apps ADD COLUMN egress TEXT");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS domains (
+        domain TEXT NOT NULL, app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+        token TEXT NOT NULL, verified_at INTEGER, created_at INTEGER NOT NULL, PRIMARY KEY (domain, app_id));
+      CREATE UNIQUE INDEX IF NOT EXISTS domains_verified ON domains (domain) WHERE verified_at IS NOT NULL;
+    `);
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
   }
@@ -225,6 +239,36 @@ export class Store {
   expiredApps(now = Date.now()): App[] {
     return this.db.prepare("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ?")
       .all(now) as unknown as App[];
+  }
+
+  // ---- custom domains (pending until DNS-verified; one verified owner per domain)
+  domains(appId: string): Domain[] {
+    return this.db.prepare("SELECT * FROM domains WHERE app_id = ? ORDER BY domain").all(appId) as unknown as Domain[];
+  }
+  addDomain(appId: string, domain: string): Domain {
+    const d: Domain = { domain, app_id: appId, token: id("cresslet-verify", 16), verified_at: null, created_at: Date.now() };
+    this.db.prepare("INSERT INTO domains (domain, app_id, token, verified_at, created_at) VALUES (?, ?, ?, NULL, ?)")
+      .run(d.domain, d.app_id, d.token, d.created_at);
+    return d;
+  }
+  /** Marks the row whose `token` was checked as verified: "gone" if it was deleted/re-added meanwhile. */
+  verifyDomain(appId: string, domain: string, token: string): "ok" | "taken" | "gone" {
+    try {
+      const r = this.db.prepare("UPDATE domains SET verified_at = ? WHERE app_id = ? AND domain = ? AND token = ?")
+        .run(Date.now(), appId, domain, token);
+      return r.changes ? "ok" : "gone";
+    } catch (e) {
+      if (/UNIQUE/.test((e as Error).message)) return "taken";
+      throw e;
+    }
+  }
+  deleteDomain(appId: string, domain: string) {
+    this.db.prepare("DELETE FROM domains WHERE app_id = ? AND domain = ?").run(appId, domain);
+  }
+  appByDomain(domain: string): App | undefined {
+    return this.db.prepare(
+      "SELECT a.* FROM domains d JOIN apps a ON a.id = d.app_id WHERE d.domain = ? AND d.verified_at IS NOT NULL",
+    ).get(domain) as App | undefined;
   }
 
   // ---- deploys

@@ -9,10 +9,40 @@ Needs wildcard DNS (`*.cresslet.example.com` + `cresslet.example.com` → server
 
 ```
 cresslet.example.com, *.cresslet.example.com {
-  tls { dns cloudflare {env.CF_API_TOKEN} }
+  tls {
+    dns cloudflare {env.CF_API_TOKEN}
+  }
   reverse_proxy localhost:8787
 }
 ```
+
+Custom domains (`POST /v1/apps/:name/domains`, verified by a TXT record) also need certificates for hostnames you don't know in advance. With Caddy, on-demand TLS asks the server; the whole Caddyfile then is (global options first):
+
+```
+{
+  on_demand_tls {
+    ask http://localhost:8787/v1/domains/check
+  }
+}
+
+cresslet.example.com, *.cresslet.example.com {
+  tls {
+    dns cloudflare {env.CF_API_TOKEN}
+  }
+  reverse_proxy localhost:8787
+}
+
+https:// {
+  tls {
+    on_demand
+  }
+  reverse_proxy localhost:8787
+}
+```
+
+The check only approves verified custom domains; the root and `*.<domain>` are covered by the explicit site block above.
+
+Other proxies (Traefik, Coolify) need each verified domain added to the proxy by hand.
 
 | Env | Default | |
 |---|---|---|

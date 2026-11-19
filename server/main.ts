@@ -6,7 +6,7 @@ import { type Config, loadConfig, rootUrl } from "./config.ts";
 import { Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
 import { Logs } from "./logs.ts";
-import { api } from "./api.ts";
+import { api, normDomain } from "./api.ts";
 import { host } from "./host.ts";
 import { removeAppFiles } from "./deploys.ts";
 
@@ -37,10 +37,13 @@ export function createServer(cfg: Config = loadConfig()) {
   }, 10 * 60_000);
 
   async function handler(req: Request): Promise<Response> {
-    const hostname = (req.headers.get("host") ?? "").replace(/:\d+$/, "").toLowerCase();
+    const hostname = normDomain((req.headers.get("host") ?? "").replace(/:\d+$/, ""));
     if (hostname.endsWith(suffix)) {
       const sub = hostname.slice(0, -suffix.length);
       if (sub && !sub.includes(".")) return serveApp(req, sub);
+    } else if (hostname !== cfg.domain) {
+      const custom = store.appByDomain(hostname);
+      if (custom) return serveApp(req, custom.name);
     }
     const url = new URL(req.url);
     if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return control.fetch(req);
