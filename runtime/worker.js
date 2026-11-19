@@ -12,6 +12,7 @@ const handler = typeof exp === "function"
   : typeof exp?.fetch === "function"
   ? exp.fetch.bind(exp)
   : undefined;
+const scheduled = typeof exp?.scheduled === "function" ? exp.scheduled.bind(exp) : undefined;
 
 // SQL values cross the binding as JSON; bigints and blobs are tagged.
 const replacer = (_k, v) =>
@@ -82,8 +83,48 @@ async function makeEnv(bindings) {
   };
 }
 
+async function runScheduled({ cron, scheduledTime }, bindings, ctx) {
+  if (!scheduled) {
+    console.error(`cron "${cron}": server/index has no scheduled() export`);
+    return new Response(null, { status: 501 });
+  }
+  let env;
+  try {
+    env = await (appEnv ??= makeEnv(bindings));
+  } catch (err) {
+    appEnv = undefined;
+    console.error(`failed to load secrets: ${err.message}`);
+    return new Response(null, { status: 500 });
+  }
+  // The run counts as done (and failed) including work handed to ctx.waitUntil().
+  const pending = [];
+  const sctx = { waitUntil: (p) => void pending.push(Promise.resolve(p)), passThroughOnException: () => ctx.passThroughOnException?.() };
+  // Drain until empty: waitUntil work may register more waitUntil work.
+  const drain = async () => {
+    const results = [];
+    while (pending.length) results.push(...(await Promise.allSettled(pending.splice(0))));
+    return results;
+  };
+  try {
+    let results;
+    try {
+      await scheduled({ type: "scheduled", cron, scheduledTime }, env, sctx);
+    } finally {
+      results = await drain(); // never leave waitUntil work unhandled
+    }
+    for (const r of results) if (r.status === "rejected") throw r.reason;
+    return new Response(null, { status: 204 });
+  } catch (err) {
+    console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
+    return new Response(null, { status: 500 });
+  }
+}
+
 export default {
   async fetch(raw, bindings, ctx) {
+    // Only the control plane can set this (server/runtime.ts strips x-cresslet-* from clients).
+    const cron = raw.headers.get("x-cresslet-scheduled");
+    if (cron) return runScheduled(JSON.parse(cron), bindings, ctx);
     if (!handler) {
       console.error("server/index must `export default { fetch(req, env) {} }`");
       return new Response("Internal Server Error", { status: 500 });

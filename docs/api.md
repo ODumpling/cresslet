@@ -48,7 +48,7 @@ Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
   "files": [{ "path": "index.html", "data": "<h1>hi</h1>", "encoding": "utf8" },
             { "path": "assets/logo.png", "data": "iVBOR…", "encoding": "base64" }],
   "server": "export default { fetch(req, env) { … } }",
-  "config": { "routes": ["/api/*"] },
+  "config": { "routes": ["/api/*"], "crons": ["0 * * * *"] },
   "source": "cli"
 }
 ```
@@ -57,6 +57,7 @@ Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 - Anonymous create → app expires (`expiresAt`), response includes `deployKey` (store it).
 - Logged-in create → claimed immediately.
 - `files` = built static output. `server` = single ESM bundle (or omit for static).
+- `config.crons` (optional, ≤ 5, needs `server`): cron expressions that call the server's `scheduled()` export (claimed apps; see app-format.md).
 - Each deploy is immutable; activation is atomic; sandbox restarts on next request.
 
 Response `201`:

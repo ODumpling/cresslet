@@ -122,7 +122,8 @@ export class Runtime {
     this.#timer = setInterval(() => this.reapIdle(), 15_000);
   }
 
-  async fetch(spec: AppSpec, req: Request): Promise<Response> {
+  /** `internal`: a control-plane request (cron) that may carry x-cresslet-* headers. */
+  async fetch(spec: AppSpec, req: Request, { internal = false } = {}): Promise<Response> {
     let proc: Proc;
     try {
       proc = await this.#get(spec);
@@ -137,7 +138,8 @@ export class Runtime {
     try {
       const headers: Record<string, string> = {};
       req.headers.forEach((v, k) => {
-        if (!HOP.includes(k)) headers[k] = v;
+        // Clients can't forge control-plane headers.
+        if (!HOP.includes(k) && (internal || !k.startsWith("x-cresslet-"))) headers[k] = v;
       });
       headers["x-cresslet-url"] = req.url;
       const u = new URL(req.url);

@@ -7,7 +7,8 @@ import { Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
 import { Logs } from "./logs.ts";
 import { api, normDomain } from "./api.ts";
-import { host, upgrader } from "./host.ts";
+import { host, scheduled, upgrader } from "./host.ts";
+import { Scheduler } from "./cron.ts";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { removeAppFiles } from "./deploys.ts";
@@ -29,6 +30,8 @@ export function createServer(cfg: Config = loadConfig()) {
   const serveApp = host(cfg, store, runtime);
   const upgradeApp = upgrader(cfg, store, runtime);
   const suffix = "." + cfg.domain;
+  const scheduler = new Scheduler(store, scheduled(cfg, store, runtime));
+  scheduler.start();
 
   const reap = setInterval(async () => {
     for (const a of store.expiredApps()) {
@@ -80,9 +83,11 @@ export function createServer(cfg: Config = loadConfig()) {
     upgrade,
     store,
     runtime,
+    scheduler,
     handler,
     close() {
       clearInterval(reap);
+      scheduler.stop();
       runtime.close();
       store.db.close();
     },

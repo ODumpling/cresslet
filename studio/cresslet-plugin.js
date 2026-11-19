@@ -111,7 +111,7 @@ export function createCresslet(c, opts) {
         app: project?.deploy?.name ?? (cfg.name || undefined),
         files,
         server,
-        config: { routes: cfg.routes },
+        config: { routes: cfg.routes, crons: cfg.crons },
         source: "studio",
       }),
     });

@@ -3,7 +3,7 @@
 A Cresslet app = static client + optional server fetch handler.
 
 ```
-cresslet.json          { "name": "my-app", "routes": ["/api/*"] }
+cresslet.json          { "name": "my-app", "routes": ["/api/*"], "crons": ["*/15 * * * *"] }
 index.html           entry; local <script type="module" src> / <link rel="stylesheet"> get bundled
 src/                 client code (TS/TSX/JSX/CSS/JSON/images)
 public/              copied as-is to site root
@@ -38,6 +38,15 @@ if (req.headers.get("upgrade") === "websocket") {
   server.accept();
   server.addEventListener("message", (e) => server.send(`echo ${e.data}`));
   return new Response(null, { status: 101, webSocket: client });
+}
+```
+
+Cron triggers: each `crons` entry in `cresslet.json` (standard 5-field expression incl. `MON-FRI`/`JAN` names, UTC, ≤ 5, claimed apps; one run at a time per app) calls the server's `scheduled` export; the result is logged (`cresslet logs`).
+
+```ts
+export default {
+  fetch(req, env, ctx) { … },
+  async scheduled(event: ScheduledEvent, env: Env, ctx) { /* event.cron, event.scheduledTime */ },
 }
 ```
 
