@@ -1,0 +1,18 @@
+# Clover
+
+> Deploy small web apps (static client + optional fetch-handler server with SQLite, files, secrets). Each app is sandboxed on <name>.<domain>.
+
+## Fastest path (CLI)
+- `npx github:ODumpling/clover-cli new my-app --api <this server>` then `cd my-app && npm install`
+- Edit `src/` (client) and `server/index.ts` (`export default { fetch(req, env) }`, gets `/api/*`)
+- `npx clover deploy --api <this server>` → prints URL. Then `npx clover logs`, `npx clover db`.
+- Read the app's AGENTS.md for rules.
+
+## Raw HTTP
+- POST /v1/deploys {"files":[{"path":"index.html","data":"<h1>hi</h1>"}],"server":"<esm string|null>"} → {app.url, deployKey}
+- Reuse: same body + "app":"<name>" + header X-Clover-Deploy-Key.
+- GET /v1/apps/<name>/logs, GET /v1/apps/<name>/db
+
+## Docs
+- [App format](https://github.com/ODumpling/clover/blob/main/docs/app-format.md)
+- [API](https://github.com/ODumpling/clover/blob/main/docs/api.md)

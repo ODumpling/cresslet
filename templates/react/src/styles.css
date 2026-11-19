@@ -1,0 +1,18 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  --accent: #2f9e44;
+}
+body { margin: 0; display: grid; place-items: start center; min-height: 100vh; }
+main { width: min(32rem, 100% - 2rem); padding-block: 3rem; }
+h1 { margin: 0 0 1rem; }
+form { display: flex; gap: 0.5rem; }
+input:not([type]) { flex: 1; padding: 0.5rem 0.75rem; font: inherit; border-radius: 6px; border: 1px solid #8884; }
+button { font: inherit; padding: 0.5rem 1rem; border-radius: 6px; border: 0; background: var(--accent); color: white; cursor: pointer; }
+button.link { background: none; color: inherit; opacity: 0.5; padding: 0 0.5rem; font-size: 1.25rem; }
+ul { list-style: none; padding: 0; margin: 1rem 0 0; }
+li { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid #8882; }
+li label { display: flex; gap: 0.5rem; align-items: center; }
+li.done label { text-decoration: line-through; opacity: 0.6; }
+.muted { opacity: 0.6; }
+.error { color: #e03131; }

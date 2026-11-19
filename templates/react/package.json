@@ -1,0 +1,19 @@
+{
+  "name": "clover-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "clover dev",
+    "build": "clover build",
+    "deploy": "clover deploy"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@odumpling/clover-cli": "github:ODumpling/clover-cli"
+  }
+}
