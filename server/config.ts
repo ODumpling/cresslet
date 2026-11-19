@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { resolveTxt } from "node:dns/promises";
 import { join, resolve } from "node:path";
 
 const env = (k: string, d: string) => process.env[k] ?? d;
@@ -26,6 +27,8 @@ export interface Config {
   adminToken: string | null;
   /** GitHub OAuth App (web flow for the studio, device flow for the CLI). Null = disabled. */
   github: { clientId: string; clientSecret: string; webUrl: string; apiUrl: string } | null;
+  /** TXT lookup for custom-domain verification (tests stub it). */
+  resolveTxt: (name: string) => Promise<string[][]>;
   limits: {
     deployBytes: number;
     deployFiles: number;
@@ -62,6 +65,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
         apiUrl: env("CRESSLET_GITHUB_API_URL", "https://api.github.com").replace(/\/+$/, ""),
       }
       : null,
+    resolveTxt,
     limits: {
       deployBytes: num("CRESSLET_MAX_DEPLOY_MB", 25) * 1024 * 1024,
       deployFiles: num("CRESSLET_MAX_DEPLOY_FILES", 2000),
