@@ -136,7 +136,11 @@ test("anonymous deploy, static + server routes, sandbox limits, claim, secrets, 
   const s1 = await t.json(`/v1/apps/${app.name}/secrets`, { method: "PUT", headers: keyH, body: '{"FOO":"bar"}' });
   assert.deepEqual(s1.status, 403);
 
-  const acct = await t.json("/v1/accounts", { method: "POST", body: '{"email":"a@b.co"}' });
+  const acct = await t.json("/v1/accounts", {
+    method: "POST",
+    headers: { authorization: "Bearer adm" },
+    body: '{"email":"a@b.co"}',
+  });
   const auth = { authorization: `Bearer ${acct.body.token}` };
   const claim = await t.json(`/v1/apps/${app.name}/claim`, {
     method: "POST",
@@ -189,7 +193,7 @@ test("anonymous deploy, static + server routes, sandbox limits, claim, secrets, 
   const gone = await t.call("/", { host });
   await gone.body?.cancel();
   assert.equal(gone.status, 404);
-}));
+}, { adminToken: "adm" }));
 
 test("deploy validation", withServer(async (t) => {
   const bad = async (body: unknown) => (await t.json("/v1/deploys", { method: "POST", body: JSON.stringify(body) })).status;
@@ -225,7 +229,7 @@ test("studio is cross-origin isolated", withServer(async (t) => {
   assert.match(await llms.text(), /POST \/v1\/deploys/);
 }));
 
-test("closed instance: no anonymous deploys, admin-only signup", withServer(async (t) => {
+test("closed instance: no anonymous deploys, admin-only accounts", withServer(async (t) => {
   const files = [{ path: "index.html", data: "x" }];
   const anon = await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ files }) });
   assert.equal(anon.status, 401);

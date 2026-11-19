@@ -1,6 +1,7 @@
 // Control-plane HTTP API (/v1). Used by cresslet-cli, the studio, and agents.
 import { type Context, Hono } from "hono";
 import { cors } from "hono/cors";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { DatabaseSync } from "node:sqlite";
 import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -9,6 +10,7 @@ import { join, relative } from "node:path";
 import { appUrl, type Config, paths, rootUrl } from "./config.ts";
 import type { Account, App, Store } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
+import { github } from "./github.ts";
 import {
   type DeployInput,
   HttpError,
@@ -73,6 +75,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     return a;
   }
 
+  const accountView = (a: Account) => ({ id: a.id, email: a.email, github: a.github_login });
+
   const view = (a: App) => ({
     id: a.id,
     name: a.name,
@@ -102,28 +106,89 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       appUrlTemplate: appUrl(cfg, "{name}"),
       openSignup: cfg.openSignup,
       anonDeploys: cfg.anonDeploys,
+      auth: { github: !!cfg.github },
       limits: cfg.limits,
       docs: "https://github.com/ODumpling/cresslet/blob/main/docs/api.md",
     }));
 
-  // ---- accounts
+  // ---- accounts (users log in with GitHub; this is the operator's escape hatch)
+  // Admin-only: pre-create an account (a later GitHub login with the same verified email links to it)
+  // or issue a token for it.
   app.post("/accounts", async (c) => {
+    if (!isAdmin(c.get("bearer"))) throw new HttpError(403, "log in with GitHub", "forbidden");
     const { email } = await body<{ email?: string }>(c);
     if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
-    if (!cfg.openSignup && !isAdmin(c.get("bearer"))) {
-      throw new HttpError(403, "signup is closed; ask the operator for an access token", "forbidden");
-    }
-    // v1: no email verification. Re-login with the same email issues a new token.
     const account = store.accountByEmail(email) ?? store.createAccount(email);
     const token = await store.issueToken(account.id);
-    return c.json({ account: { id: account.id, email: account.email }, token }, 201);
+    return c.json({ account: accountView(account), token }, 201);
   });
 
   app.get("/me", (c) => {
     const a = c.get("account");
     if (!a) throw new HttpError(401, "login required", "unauthorized");
-    return c.json({ account: { id: a.id, email: a.email } });
+    return c.json({ account: accountView(a) });
   });
+
+  // Revoke every token for this account (studio, CLI, CI) and issue a fresh one.
+  app.post("/me/token", async (c) => {
+    const a = c.get("account");
+    if (!a) throw new HttpError(401, "login required", "unauthorized");
+    store.revokeTokens(a.id);
+    return c.json({ account: accountView(a), token: await store.issueToken(a.id) });
+  });
+
+  // ---- GitHub login (see server/github.ts)
+  if (cfg.github) {
+    const gh = github(cfg, store);
+    const redirectUri = gh.callbackUrl(rootUrl(cfg));
+    const STATE_COOKIE = "cresslet_oauth_state";
+    const studio = (hash: Record<string, string>) => `${rootUrl(cfg)}/#${new URLSearchParams(hash)}`;
+
+    // Studio: browser navigates here, comes back to /#cresslet_login=<one-time code>.
+    app.get("/auth/github", (c) => {
+      const { state, url } = gh.authorize(redirectUri);
+      setCookie(c, STATE_COOKIE, state, {
+        path: "/v1/auth/github",
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: cfg.scheme === "https",
+        maxAge: 600,
+      });
+      return c.redirect(url);
+    });
+
+    app.get("/auth/github/callback", async (c) => {
+      const { code, state, error, error_description } = c.req.query();
+      const cookie = getCookie(c, STATE_COOKIE);
+      deleteCookie(c, STATE_COOKIE, { path: "/v1/auth/github" });
+      try {
+        if (error) throw new HttpError(400, error_description ?? error);
+        // State must match the browser that started the flow (prevents login CSRF).
+        if (!code || !state || state !== cookie) throw new HttpError(400, "login expired, try again");
+        return c.redirect(studio({ cresslet_login: await gh.callback(code, state, redirectUri) }));
+      } catch (err) {
+        if (!(err instanceof HttpError)) console.error(err);
+        return c.redirect(studio({ cresslet_login_error: err instanceof HttpError ? err.message : "GitHub login failed" }));
+      }
+    });
+
+    app.post("/auth/exchange", async (c) => {
+      const { code } = await body<{ code?: string }>(c);
+      const l = gh.exchange(String(code ?? ""));
+      return c.json({ account: accountView(l.account), token: l.token });
+    });
+
+    // CLI: device flow, proxied so the client secret never leaves the server.
+    app.post("/auth/github/device", async (c) => c.json(await gh.deviceStart()));
+
+    app.post("/auth/github/device/token", async (c) => {
+      const { deviceCode } = await body<{ deviceCode?: string }>(c);
+      if (!deviceCode) throw new HttpError(400, "deviceCode required");
+      const r = await gh.devicePoll(deviceCode);
+      if ("token" in r) return c.json({ status: "complete", account: accountView(r.account), token: r.token });
+      return c.json(r);
+    });
+  }
 
   // ---- templates
   app.get("/templates", async (c) => {

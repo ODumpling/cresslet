@@ -45,6 +45,36 @@
       </section>
     </main>
 
+    <main id="settings" class="home settings" hidden>
+      <section>
+        <h1>Settings</h1>
+      </section>
+      <section>
+        <h2>Account</h2>
+        <dl class="panel kv">
+          <dt>GitHub</dt><dd id="set-github">—</dd>
+          <dt>Email</dt><dd id="set-email">—</dd>
+        </dl>
+      </section>
+      <section>
+        <h2>API token</h2>
+        <p class="muted small">For the CLI, CI and agents. Anyone with it can deploy and manage your apps, so treat it like a password.</p>
+        <div class="token-row">
+          <input id="token" class="mono" type="password" readonly aria-label="API token" spellcheck="false" />
+          <button class="btn" id="token-show" aria-pressed="false">Show</button>
+          <button class="btn" id="token-copy">Copy</button>
+        </div>
+        <p class="muted small">CLI: <code>cresslet login --token &lt;token&gt;</code> &nbsp;or&nbsp; <code>export CRESSLET_TOKEN=&lt;token&gt;</code></p>
+        <div class="row start">
+          <button class="btn" id="token-regen">Regenerate token</button>
+          <span class="muted small">Revokes every existing token, including the CLI and other browsers.</span>
+        </div>
+      </section>
+      <section>
+        <button class="btn" id="logout-btn">Log out</button>
+      </section>
+    </main>
+
     <main id="workspace" class="workspace" hidden>
       <aside class="files">
         <div class="pane-head">
@@ -80,18 +110,6 @@
       </section>
     </main>
 
-    <dialog id="login-dialog">
-      <form method="dialog" id="login-form">
-        <h2>Log in to Cresslet</h2>
-        <p class="muted small">No password in v1: we create an account for this email (or paste an access token from the operator). Logged-in deploys never expire and can use secrets and outbound fetch.</p>
-        <label>Email or access token <input type="text" name="email" required autocomplete="email" /></label>
-        <p class="error small" id="login-error" hidden></p>
-        <div class="row">
-          <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
-          <button class="btn primary" value="ok">Log in</button>
-        </div>
-      </form>
-    </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script type="module" src="/app.js"></script>

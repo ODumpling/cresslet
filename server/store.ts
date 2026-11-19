@@ -8,6 +8,8 @@ export interface Account {
   id: string;
   email: string;
   created_at: number;
+  github_id: number | null;
+  github_login: string | null;
 }
 
 export interface App {
@@ -66,14 +68,35 @@ export class Store {
         app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE, key TEXT NOT NULL,
         value TEXT NOT NULL, PRIMARY KEY (app_id, key));
     `);
+    const cols = (this.db.prepare("PRAGMA table_info(accounts)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes("github_id")) {
+      this.db.exec("ALTER TABLE accounts ADD COLUMN github_id INTEGER; ALTER TABLE accounts ADD COLUMN github_login TEXT;");
+    }
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS accounts_github_id ON accounts (github_id)");
   }
 
   // ---- accounts
-  createAccount(email: string): Account {
-    const a = { id: id("acct"), email: email.toLowerCase(), created_at: Date.now() };
-    this.db.prepare("INSERT INTO accounts (id, email, created_at) VALUES (?, ?, ?)")
-      .run(a.id, a.email, a.created_at);
+  createAccount(email: string, github?: { id: number; login: string }): Account {
+    const a: Account = {
+      id: id("acct"),
+      email: email.toLowerCase(),
+      created_at: Date.now(),
+      github_id: github?.id ?? null,
+      github_login: github?.login ?? null,
+    };
+    this.db.prepare("INSERT INTO accounts (id, email, created_at, github_id, github_login) VALUES (?, ?, ?, ?, ?)")
+      .run(a.id, a.email, a.created_at, a.github_id, a.github_login);
     return a;
+  }
+  accountByGithub(githubId: number): Account | undefined {
+    return this.db.prepare("SELECT * FROM accounts WHERE github_id = ?").get(githubId) as Account | undefined;
+  }
+  linkGithub(accountId: string, github: { id: number; login: string }) {
+    this.db.prepare("UPDATE accounts SET github_id = ?, github_login = ? WHERE id = ?")
+      .run(github.id, github.login, accountId);
+  }
+  revokeTokens(accountId: string) {
+    this.db.prepare("DELETE FROM tokens WHERE account_id = ?").run(accountId);
   }
   accountByEmail(email: string): Account | undefined {
     return this.db.prepare("SELECT * FROM accounts WHERE email = ?").get(email.toLowerCase()) as

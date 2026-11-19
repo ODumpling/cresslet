@@ -55,7 +55,7 @@ Root host serves `studio/` with COOP/COEP. It embeds cresslet-container (our in-
 
 ## Roadmap
 
-- Hosted instance + wildcard TLS; GitHub OAuth / email-verified login.
+- Hosted instance + wildcard TLS. Named / scoped API tokens (today: one token list per account, regenerate revokes all).
 - Stronger isolation: per-app UID + cgroups, or Firecracker. workerd alone is not a hardened multi-tenant boundary (Cloudflare adds more layers in production).
 - Move db/file bindings off the control-plane thread (worker thread or per-app helper) if sync SQLite becomes a bottleneck.
 - Secrets encrypted at rest; egress allowlist for claimed apps.

@@ -29,61 +29,128 @@ async function api(path, init = {}) {
   const headers = { "content-type": "application/json", ...init.headers };
   if (auth.token) headers.authorization = `Bearer ${auth.token}`;
   const res = await fetch(path, { ...init, headers });
+  if (res.status === 401 && headers.authorization && auth.token) {
+    // Token revoked (e.g. regenerated elsewhere): drop it and retry logged out.
+    logOut();
+    toast("Your session expired. Log in again.");
+    return api(path, init);
+  }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.message ?? `${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(body.message ?? `${res.status}`), { status: res.status });
   return body;
 }
 
 function renderAccount() {
-  $("account-btn").textContent = auth.token ? (auth.email ?? "Account") : "Log in";
-  $("account-btn").title = auth.token ? "Log out" : "Log in";
+  $("account-btn").textContent = auth.token ? (auth.email ?? "Account") : "Log in with GitHub";
+  $("account-btn").title = auth.token ? "Settings" : "";
 }
 
-$("account-btn").addEventListener("click", () => {
+// Login is GitHub only: the server redirects back to /#cresslet_login=<one-time code>.
+const meta = fetch("/v1").then((r) => r.json()).catch(() => ({}));
+
+$("account-btn").addEventListener("click", async () => {
   if (auth.token) {
-    if (!confirm(`Log out of ${auth.email}?`)) return;
-    auth.token = null;
-    auth.email = null;
-    renderAccount();
-    route();
+    location.hash = "#/settings";
     return;
   }
-  $("login-error").hidden = true;
-  $("login-dialog").showModal();
+  if ((await meta).auth?.github) location.href = "/v1/auth/github";
+  else toast("Login isn't set up on this server (operator: set CRESSLET_GITHUB_CLIENT_ID / _SECRET).");
 });
 
-$("login-form").addEventListener("submit", async (e) => {
-  if (e.submitter?.value !== "ok") return;
-  e.preventDefault();
-  const email = String(new FormData(e.target).get("email")).trim();
-  try {
-    let r;
-    if (email.startsWith("clv_acct_")) {
-      const me = await fetch("/v1/me", { headers: { authorization: `Bearer ${email}` } });
-      if (!me.ok) throw new Error("invalid access token");
-      r = { token: email, ...(await me.json()) };
-    } else {
-      r = await api("/v1/accounts", { method: "POST", body: JSON.stringify({ email }) });
+function setAccount(r) {
+  auth.token = r.token ?? auth.token;
+  auth.email = r.account.github ?? r.account.email;
+  renderAccount();
+}
+
+function logOut() {
+  auth.token = null;
+  auth.email = null;
+  renderAccount();
+}
+
+{
+  const h = new URLSearchParams(location.hash.slice(1));
+  const code = h.get("cresslet_login"), err = h.get("cresslet_login_error");
+  if (code || err) {
+    history.replaceState(null, "", location.pathname + location.search);
+    if (err) toast(`GitHub login failed: ${err}`);
+    else {
+      api("/v1/auth/exchange", { method: "POST", body: JSON.stringify({ code }) }).then((r) => {
+        setAccount(r);
+        if (!$("home").hidden) renderHome();
+        toast(`Logged in as ${auth.email}`);
+      }, (e) => toast(`GitHub login failed: ${e.message}`));
     }
-    auth.token = r.token;
-    auth.email = r.account.email;
-    $("login-dialog").close();
-    renderAccount();
-    if (!$("home").hidden) renderHome();
-    toast(`Logged in as ${r.account.email}`);
-  } catch (err) {
-    $("login-error").textContent = err.message;
-    $("login-error").hidden = false;
   }
+}
+
+// ------------------------------------------------------------------ settings
+function showOnly(id) {
+  for (const m of ["home", "settings", "workspace"]) $(m).hidden = m !== id;
+  $("project-title").hidden = true;
+  $("deploy-btn").hidden = true;
+  $("deploy-link").hidden = true;
+}
+
+function renderSettings() {
+  if (!auth.token) {
+    location.hash = "#/";
+    return;
+  }
+  showOnly("settings");
+  document.title = "Settings · Cresslet Studio";
+  $("token").value = auth.token;
+  $("token").type = "password";
+  $("token-show").textContent = "Show";
+  $("token-show").setAttribute("aria-pressed", "false");
+  api("/v1/me").then(({ account }) => {
+    $("set-github").textContent = account.github ?? "—";
+    $("set-email").textContent = account.email;
+    setAccount({ account });
+  }, (e) => {
+    if (!auth.token) location.hash = "#/";
+    else toast(`Could not load account: ${e.message}`);
+  });
+}
+
+$("token-show").addEventListener("click", () => {
+  const show = $("token").type === "password";
+  $("token").type = show ? "text" : "password";
+  $("token-show").textContent = show ? "Hide" : "Show";
+  $("token-show").setAttribute("aria-pressed", String(show));
+});
+
+$("token-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(auth.token);
+    toast("Token copied");
+  } catch {
+    $("token").type = "text";
+    $("token").select();
+    toast("Copy failed: select the token and copy it manually.");
+  }
+});
+
+$("token-regen").addEventListener("click", async () => {
+  if (!confirm("Regenerate your token? Every existing token stops working, including the CLI and other browsers.")) return;
+  try {
+    setAccount(await api("/v1/me/token", { method: "POST", body: "{}" }));
+    renderSettings();
+    toast("New token generated. Update the CLI and any CI secrets.");
+  } catch (e) {
+    toast(`Could not regenerate: ${e.message}`);
+  }
+});
+
+$("logout-btn").addEventListener("click", () => {
+  logOut();
+  location.hash = "#/";
 });
 
 // ------------------------------------------------------------------ home
 async function renderHome() {
-  $("home").hidden = false;
-  $("workspace").hidden = true;
-  $("project-title").hidden = true;
-  $("deploy-btn").hidden = true;
-  $("deploy-link").hidden = true;
+  showOnly("home");
   document.title = "Cresslet Studio";
 
   api("/v1/templates").then(({ templates }) => {
@@ -149,8 +216,7 @@ async function openProject(id) {
     return;
   }
   booted = true;
-  $("home").hidden = true;
-  $("workspace").hidden = false;
+  showOnly("workspace");
   $("project-title").hidden = false;
   $("deploy-btn").hidden = false;
   $("project-name").value = project.name;
@@ -381,6 +447,7 @@ function route() {
   const m = location.hash.match(/^#\/p\/([\w-]+)/);
   if (m) openProject(m[1]);
   else if (booted) location.reload();
+  else if (location.hash === "#/settings") renderSettings();
   else renderHome();
 }
 addEventListener("hashchange", route);

@@ -18,11 +18,14 @@ export interface Config {
   dataDir: string;
   sockDir: string;
   workerdPath: string;
+  /** Let any GitHub user create an account (off: only accounts the operator pre-created). */
   openSignup: boolean;
   /** Allow deploys that create an app without an account (they expire after anonTtlMs). */
   anonDeploys: boolean;
-  /** Bearer token that may create accounts / issue tokens when openSignup is off. */
+  /** Bearer token that may pre-create accounts / issue tokens (`POST /v1/accounts`). */
   adminToken: string | null;
+  /** GitHub OAuth App (web flow for the studio, device flow for the CLI). Null = disabled. */
+  github: { clientId: string; clientSecret: string; webUrl: string; apiUrl: string } | null;
   limits: {
     deployBytes: number;
     deployFiles: number;
@@ -38,6 +41,7 @@ export interface Config {
 export function loadConfig(overrides: Partial<Config> = {}): Config {
   const port = num("PORT", 8787);
   const dataDir = resolve(env("CRESSLET_DATA_DIR", "data"));
+  const githubId = process.env.CRESSLET_GITHUB_CLIENT_ID, githubSecret = process.env.CRESSLET_GITHUB_CLIENT_SECRET;
   const base: Config = {
     port,
     domain: env("CRESSLET_DOMAIN", "localhost"),
@@ -50,6 +54,14 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     openSignup: env("CRESSLET_OPEN_SIGNUP", "true") === "true",
     anonDeploys: env("CRESSLET_ANON_DEPLOYS", "true") === "true",
     adminToken: process.env.CRESSLET_ADMIN_TOKEN || null,
+    github: githubId && githubSecret
+      ? {
+        clientId: githubId,
+        clientSecret: githubSecret,
+        webUrl: env("CRESSLET_GITHUB_URL", "https://github.com").replace(/\/+$/, ""),
+        apiUrl: env("CRESSLET_GITHUB_API_URL", "https://api.github.com").replace(/\/+$/, ""),
+      }
+      : null,
     limits: {
       deployBytes: num("CRESSLET_MAX_DEPLOY_MB", 25) * 1024 * 1024,
       deployFiles: num("CRESSLET_MAX_DEPLOY_FILES", 2000),

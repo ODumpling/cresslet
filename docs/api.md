@@ -3,16 +3,21 @@
 Base: `http://localhost:8787` (self-hosted default). JSON in/out. CORS `*`.
 
 Auth (either):
-- `Authorization: Bearer clv_acct_…` — account token (`POST /v1/accounts`).
+- `Authorization: Bearer clv_acct_…` — account token (GitHub login; shown in the studio under Settings).
 - `X-Cresslet-Deploy-Key: clv_app_…` (or `Authorization: Bearer clv_app_…`) — per-app key, returned once on app creation.
 
 Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/v1` | server info, limits, app URL template |
-| POST | `/v1/accounts` | `{email}` → `{account, token}`. v1: no verification (operator can disable: `CRESSLET_OPEN_SIGNUP=false`) |
-| GET | `/v1/me` | account |
+| GET | `/v1` | server info, limits, app URL template, `auth: {github}` |
+| POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it) |
+| GET | `/v1/me` | `{account: {id, email, github}}` (`github` = login or null) |
+| POST | `/v1/me/token` | revoke all of this account's tokens → `{account, token}` (new one) |
+| GET | `/v1/auth/github` | browser: GitHub web flow → redirects to `/#cresslet_login=<code>` (or `#cresslet_login_error=…`) |
+| POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` |
+| POST | `/v1/auth/github/device` | CLI/agents: → `{deviceCode, userCode, verificationUri, expiresIn, interval}` |
+| POST | `/v1/auth/github/device/token` | `{deviceCode}` → `{status: pending\|slow_down}` or `{status: complete, account, token}`; poll every `interval`s |
 | GET | `/v1/templates` | `{templates: [{name, description}]}` |
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |
