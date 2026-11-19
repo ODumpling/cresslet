@@ -122,6 +122,8 @@ async function runScheduled({ cron, scheduledTime }, bindings, ctx) {
 
 export default {
   async fetch(raw, bindings, ctx) {
+    // Readiness probe from the control plane (clients can't send x-cresslet-* headers).
+    if (raw.headers.get("x-cresslet-probe")) return new Response(null, { status: 204 });
     // Only the control plane can set this (server/runtime.ts strips x-cresslet-* from clients).
     const cron = raw.headers.get("x-cresslet-scheduled");
     if (cron) return runScheduled(JSON.parse(cron), bindings, ctx);

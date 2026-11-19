@@ -28,6 +28,7 @@ async function isFile(p: string) {
 export function appSpec(cfg: Config, store: Store, app: App): AppSpec {
   return {
     appId: app.id,
+    seq: () => store.uidSeq(app.id),
     appName: app.name,
     appUrl: appUrl(cfg, app.name),
     deployId: app.current_deploy_id!,

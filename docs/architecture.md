@@ -30,10 +30,10 @@ data/cresslet.db                         metadata
 data/apps/<appId>/deploys/<depId>/     immutable: public/, server.js, deploy.json
 data/apps/<appId>/data/db.sqlite       app database (survives deploys)
 data/apps/<appId>/data/files/          app file storage
-data/apps/<appId>/run/                 generated workerd config, worker.js (no secrets: fetched over HOST)
-/tmp/cresslet-sock/<appId>-<n>.sock      sandbox socket (fresh per spawn)
-/tmp/cresslet-sock/<appId>-<n>.host.sock bindings socket (one app per socket = identity)
-/tmp/cresslet-sock/<appId>-<n>.egress.sock egress proxy (apps with an allowlist)
+/tmp/cresslet-sock/<inst>-<appId>-<n>/  per-spawn run dir (<inst>: id in data/instance, so instances sharing the dir never sweep each other's; don't point copies of one data dir at the same socket or cgroup dir), fresh each start, all the sandbox can see:
+                                         config.capnp, worker.js, app.js (copy of server.js), app.json,
+                                         a.sock (workerd's listener, created by the control plane), h.sock (bindings: one app per socket = identity),
+                                         e.sock (egress proxy, apps with an allowlist). No secrets: fetched over HOST
 ```
 
 ## Isolation
@@ -43,7 +43,10 @@ data/apps/<appId>/run/                 generated workerd config, worker.js (no s
 - Unclaimed: no outbound network. Claimed: public internet only (workerd `network = (allow = ["public"])`), so loopback/private ranges — including the control plane — are unreachable.
 - Egress allowlist (optional, claimed apps): `globalOutbound` becomes an external `style = proxy` service on a per-app unix socket in the control plane (`server/egress.ts`). It forwards only to allowlisted hostnames (no IP literals), resolves them to public addresses only (checked at connect time), and refuses raw sockets (`CONNECT`). Blocked attempts are logged.
 - Secrets: AES-256-GCM in `cresslet.db`, bound to (app, key). Key from `CRESSLET_SECRETS_KEY`, else generated once in `<dataDir>/secrets.key`. The sandbox fetches them over `HOST` at start; they're never written to the run dir.
-- Not yet: CPU quotas (cgroups), per-app UID. See roadmap.
+- OS limits (Linux, opt-in, `server/sandbox.ts`):
+  - `CRESSLET_SANDBOX_UID_BASE`: each sandbox runs as its own uid/gid (`base` + a per-app number that is never reused; control plane must be root). `dataDir` is 0700. The run dir and everything in it is root-owned and only group-readable by that app, the sockets are root:app 0660, and workerd's listening socket is created by the control plane and passed as fd 3 (`--socket-fd`), so a sandbox that escaped workerd can't read metadata, other apps' data or run dirs, or bind/swap anything the control plane connects to. Readiness is an internal probe the sandbox entry answers (not "socket accepts").
+  - `CRESSLET_CGROUP_DIR`: each sandbox starts inside its own cgroup v2 child (joined before exec): `cpu.max` (`CRESSLET_APP_CPU_PERCENT`), `memory.max` (heap cap + 128 MB, no swap; OOM kill is logged), `pids.max`. Stop/exit kills the whole cgroup (`cgroup.kill`, Linux ≥ 5.14), so forked processes don't outlive it. Leftovers from a crash are swept at start.
+  - Residual: an escaped uid still has the host's network (bypassing the egress allowlist; add an owner-match firewall rule if that matters), and shares world-writable `/tmp` and `/dev/shm`. Without cgroups, processes it forks aren't reaped.
 
 ## Deploy lifecycle
 
@@ -59,7 +62,7 @@ Root host serves `studio/` with COOP/COEP. It embeds cresslet-container (our in-
 ## Roadmap
 
 - Hosted instance + wildcard TLS. Named / scoped API tokens (today: one token list per account, regenerate revokes all).
-- Stronger isolation: per-app UID + cgroups, or Firecracker. workerd alone is not a hardened multi-tenant boundary (Cloudflare adds more layers in production).
+- Stronger isolation: microVMs (Firecracker) or gVisor. workerd + uid + cgroups is not a hardened multi-tenant boundary (Cloudflare adds more layers in production).
 - Move db/file bindings off the control-plane thread (worker thread or per-app helper) if sync SQLite becomes a bottleneck.
 - Custom domains, cron/scheduled handlers, websockets.
 - Source sync (git) so studio and CLI edit the same project.

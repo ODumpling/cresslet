@@ -94,6 +94,8 @@ export class Store {
         token TEXT NOT NULL, verified_at INTEGER, created_at INTEGER NOT NULL, PRIMARY KEY (domain, app_id));
       CREATE UNIQUE INDEX IF NOT EXISTS domains_verified ON domains (domain) WHERE verified_at IS NOT NULL;
     `);
+    if (!appCols.includes("uid_seq")) this.db.exec("ALTER TABLE apps ADD COLUMN uid_seq INTEGER");
+    this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)");
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
   }
@@ -215,6 +217,26 @@ export class Store {
     return this.db.prepare(
       "SELECT * FROM apps WHERE account_id IS NOT NULL AND json_array_length(config, '$.crons') > 0",
     ).all() as unknown as App[];
+  }
+  /**
+   * Per-app number for sandbox uids, allocated on first use from a counter that never goes back
+   * (not the rowid: SQLite reuses the highest one after a delete), so a uid is never reused.
+   */
+  uidSeq(appId: string): number {
+    const row = this.db.prepare("SELECT uid_seq FROM apps WHERE id = ?").get(appId) as { uid_seq: number | null } | undefined;
+    if (!row) throw new Error(`no app ${appId}`);
+    if (row.uid_seq !== null) return row.uid_seq;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const n = ((this.db.prepare("SELECT value FROM meta WHERE key = 'uid_seq'").get() as { value: number } | undefined)?.value ?? 0) + 1;
+      this.db.prepare("INSERT INTO meta (key, value) VALUES ('uid_seq', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(n);
+      this.db.prepare("UPDATE apps SET uid_seq = ? WHERE id = ?").run(n, appId);
+      this.db.exec("COMMIT");
+      return n;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
   appsByAccount(accountId: string): App[] {
     return this.db.prepare("SELECT * FROM apps WHERE account_id = ? ORDER BY updated_at DESC")

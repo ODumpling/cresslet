@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server/main.ts";
-import { loadConfig, paths } from "../server/config.ts";
+import { loadConfig } from "../server/config.ts";
 import { Store } from "../server/store.ts";
 import { createEgressProxy, egressAllows, isPublicIp, normalizeEgress, publicLookup } from "../server/egress.ts";
 import { createServer as createHttp, request as httpRequest } from "node:http";
@@ -179,7 +179,7 @@ test("secrets: encrypted at rest, plaintext rows migrated, env key takes over fr
 
 test("claimed app: egress allowlist enforced at the network level; secrets never on disk", async () => {
   const dataDir = await tmp();
-  // Left behind by older versions: swept at startup.
+  // Left behind by older versions (run dir with plaintext secrets): swept at startup.
   await mkdir(join(dataDir, "apps", "app_old", "run"), { recursive: true });
   await writeFile(join(dataDir, "apps", "app_old", "run", "secrets.json"), '{"OLD":"plaintext"}');
   const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }));
@@ -194,7 +194,7 @@ test("claimed app: egress allowlist enforced at the network level; secrets never
     return { status: r.status, body: await r.json() };
   };
   try {
-    assert.ok(!existsSync(join(dataDir, "apps", "app_old", "run", "secrets.json")));
+    assert.ok(!existsSync(join(dataDir, "apps", "app_old", "run")));
     const acct = await json("/v1/accounts", { method: "POST", headers: { authorization: "Bearer adm" }, body: '{"email":"a@b.co"}' });
     const auth = { authorization: `Bearer ${acct.body.token}` };
     const d = await json("/v1/deploys", {
@@ -213,7 +213,8 @@ test("claimed app: egress allowlist enforced at the network level; secrets never
     assert.notEqual(open.local, "200");
     assert.equal(open.sock, "open");
     assert.deepEqual(open.secrets, { API_KEY: "s3cret" });
-    assert.ok(!existsSync(join(paths(srv.cfg, app.id).run, "secrets.json")));
+    const runDirs = readdirSync(srv.cfg.sockDir).filter((d) => d.includes(`-${app.id}-`));
+    assert.ok(runDirs.length && runDirs.every((d) => !readdirSync(join(srv.cfg.sockDir, d)).some((f) => f.includes("secret"))));
 
     // Validation + auth.
     assert.equal((await json(`/v1/apps/${app.name}/egress`, { method: "PUT", headers: auth, body: '{"allow":["10.0.0.1"]}' })).status, 400);
