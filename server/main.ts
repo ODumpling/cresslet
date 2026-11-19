@@ -51,10 +51,10 @@ export function createServer(cfg: Config = loadConfig()) {
       : await serveDir(req, STUDIO);
     const h = new Headers(res.headers);
     for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
-    if (url.pathname === "/cresslet-sw.js") {
-      h.set("service-worker-allowed", "/");
-      h.set("cache-control", "no-cache");
-    }
+    // Studio files aren't content-hashed: always revalidate (ETag), or a CDN/browser can pair new HTML
+    // with stale JS.
+    h.set("cache-control", "no-cache");
+    if (url.pathname === "/cresslet-sw.js") h.set("service-worker-allowed", "/");
     return new Response(res.body, { status: res.status, headers: h });
   }
 

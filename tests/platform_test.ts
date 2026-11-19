@@ -225,6 +225,9 @@ test("studio is cross-origin isolated", withServer(async (t) => {
   assert.deepEqual(r.headers.get("cross-origin-opener-policy"), "same-origin");
   assert.deepEqual(r.headers.get("cross-origin-embedder-policy"), "require-corp");
   assert.match(await r.text(), /Cresslet Studio/);
+  const js = await t.call("/app.js");
+  await js.body?.cancel();
+  assert.equal(js.headers.get("cache-control"), "no-cache");
   const llms = await t.call("/llms.txt");
   assert.match(await llms.text(), /POST \/v1\/deploys/);
 }));
