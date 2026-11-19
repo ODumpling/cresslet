@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server/main.ts";
@@ -299,3 +299,86 @@ test("a configured preview host is normalized and its name reserved", withServer
   await sw.body?.cancel();
   assert.equal(sw.headers.get("service-worker-allowed"), "/");
 }, { previewHost: "Sandbox.Test.Local." } as never));
+
+test("the studio's dotenv filter matches the server's", async () => {
+  const studioPlugin = "../studio/cresslet-plugin.js"; // untyped browser module
+  const { publicDotenv } = await import(studioPlugin);
+  const { publicDotenvText } = await import("../server/deploys.ts");
+  const cases = [
+    "# c\nCRESSLET_PUBLIC_API=https://x\nDB=1\nVITE_X=1\nKEY=\"-----BEGIN\nVITE_FAKE=leak\n-----END\"",
+    "VITE_A=1\nSECRET=\n\"multi\nVITE_N=leak\n\"", "S=\"abc\" # c\nVITE_Z='q r'\n\nT=x#y\nVITE_A=1\nSECRET: \"x\nVITE_C=leak\n\"",
+    "VITE_A=1\nSECRET=\"abc\\\\\"\nVITE_X=leak", "PEM=\"a\u2028b\nVITE_LS=leak\n\"", "\uFEFFVITE_A=1\r\nB=2\rVITE_C=3",
+  ];
+  for (const c of cases) assert.equal(publicDotenv(c), publicDotenvText(c), JSON.stringify(c));
+});
+
+test("deploys can carry project source; local secrets and build output are never stored", withServer(async (t) => {
+  const d = await t.json("/v1/deploys", {
+    method: "POST",
+    body: JSON.stringify({
+      files: [{ path: "index.html", data: "built" }],
+      sources: [
+        { path: "src/main.ts", data: "console.log('hi')" },
+        { path: "public/logo.bin", data: Buffer.from([0, 255, 1]).toString("base64"), encoding: "base64" },
+        { path: ".env.cresslet", data: "SECRET=1" },
+        { path: "node_modules/x/index.js", data: "x" },
+        { path: ".cresslet/app.json", data: "{}" },
+        { path: ".env.cresslet-backup", data: "SECRET=1" },
+        { path: ".env.local", data: "SECRET=1" },
+        { path: "apps/web/.env.production.local", data: "SECRET=1" },
+        { path: "pkg/node_modules/y.js", data: "y" },
+        { path: "apps/sub/.cresslet/app.json", data: '{"deployKey":"clv_app_x"}' },
+        { path: ".envrc", data: "export SECRET=1" },
+        { path: "worker/.dev.vars", data: "SECRET=1" },
+        { path: "worker/.dev.vars.staging", data: "SECRET=1" },
+        { path: "worker/.dev.vars-backup", data: "SECRET=1" },
+        { path: ".env-test.local", data: "SECRET=1" },
+        { path: ".envbackup.local", data: "SECRET=1" },
+        { path: "sub/.envrc.bak", data: "SECRET=1\nVITE_E=1" },
+        { path: "sub/.env.next", data: "VITE_A=1\nSECRET=\n\"multi\nVITE_N=leak\n\"\nVITE_K=1" },
+        { path: "sub/.env.mix", data: "S=\"abc\" # c\nVITE_Z='q r'\n\nT=x#y\nVITE_A=1\nSECRET: \"x\nVITE_C=leak\n\"" },
+        { path: "sub/.env.esc", data: "VITE_A=1\nSECRET=\"abc\\\\\"\nVITE_X=leak\nC=\"y\"" },
+        { path: "sub/.env.ls", data: "PEM=\"a\u2028b\nVITE_LS=leak\n\"\nVITE_ESC=\"x\\\\\"\nVITE_AFTER=1" },
+        { path: "sub/.env.extra", data: "my.key=\"a\nVITE_DOT=leak\n\"\nVITE_OK=1\nVITE_OPEN=\"never closed\nSECRET=after" },
+        { path: "sub/.ENV.LOCAL", data: "SECRET=1" },
+        { path: ".env/secrets", data: "SECRET=1" },
+        { path: ".env", data: "# public\nCRESSLET_PUBLIC_API=https://x\nDB_PASSWORD=hunter2\n# STRIPE_SECRET=sk_live_1\nVITE_X=1\nKEY=\"-----BEGIN\nVITE_FAKE=leak\n# fake\n-----END\"" },
+        { path: "bom.txt", data: Buffer.from([0xef, 0xbb, 0xbf, 0x68, 0x69]).toString("base64"), encoding: "base64" },
+      ],
+    }),
+  });
+  assert.equal(d.status, 201);
+  const keyH = { "x-cresslet-deploy-key": d.body.deployKey };
+  assert.equal((await t.json(`/v1/apps/${d.body.app.name}/source`)).status, 401);
+  const src = await t.json(`/v1/apps/${d.body.app.name}/source`, { headers: keyH });
+  assert.equal(src.body.deployId, d.body.app.currentDeployId);
+  const byPath = Object.fromEntries(src.body.files.map((f: { path: string }) => [f.path, f]));
+  assert.deepEqual(Object.keys(byPath).sort(), [".env", "bom.txt", "public/logo.bin", "src/main.ts", "sub/.env.esc", "sub/.env.extra", "sub/.env.ls", "sub/.env.mix", "sub/.env.next"]);
+  // Fail closed: the first line that isn't one complete single-line entry (a multi-line or escaped quote, a value
+  // on the next line, `KEY: v`, U+2028) ends the file; comments are dropped.
+  assert.equal(byPath[".env"].data, "CRESSLET_PUBLIC_API=https://x\nVITE_X=1");
+  assert.equal(byPath["sub/.env.extra"].data, "");
+  assert.equal(byPath["sub/.env.ls"].data, "");
+  assert.equal(byPath["sub/.env.next"].data, "VITE_A=1");
+  assert.equal(byPath["sub/.env.mix"].data, "VITE_Z='q r'\n\nVITE_A=1");
+  assert.equal(byPath["sub/.env.esc"].data, "VITE_A=1");
+  assert.deepEqual(byPath["public/logo.bin"], { path: "public/logo.bin", data: Buffer.from([0, 255, 1]).toString("base64"), encoding: "base64" });
+  assert.equal(Buffer.from(byPath["bom.txt"].data, byPath["bom.txt"].encoding === "base64" ? "base64" : "utf8")[0], 0xef); // BOM kept
+
+  // A later deploy without sources: current has none, the earlier one is still readable.
+  await t.json("/v1/deploys", { method: "POST", headers: keyH, body: JSON.stringify({ app: d.body.app.name, files: [{ path: "index.html", data: "v2" }] }) });
+  assert.equal((await t.json(`/v1/apps/${d.body.app.name}/source`, { headers: keyH })).body.error, "no_source");
+  const old = await t.json(`/v1/apps/${d.body.app.name}/source?deploy=${src.body.deployId}`, { headers: keyH });
+  assert.equal(old.body.files.length, 9);
+  // One budget for built files + source; file/dir conflicts rejected before anything is written.
+  // Source that doesn't fit the shared budget is dropped (with a warning), not the deploy.
+  const big = await t.json("/v1/deploys", { method: "POST", headers: keyH, body: JSON.stringify({
+    app: d.body.app.name, files: [{ path: "index.html", data: "x" }], sources: [{ path: "huge.bin", data: "x".repeat(t.srv.cfg.limits.deployBytes) }] }) });
+  assert.equal(big.status, 201);
+  assert.match(big.body.deploy.warning, /source not stored/);
+  const conflict = await t.json("/v1/deploys", { method: "POST", headers: keyH, body: JSON.stringify({ app: d.body.app.name, files: [{ path: "index.html", data: "x" }], sources: [{ path: "a", data: "" }, { path: "a/b", data: "" }] }) });
+  assert.equal(conflict.status, 400);
+  const deploysDir = join(t.srv.cfg.dataDir, "apps", d.body.app.id, "deploys");
+  assert.equal((await readdir(deploysDir)).length, 3);
+  assert.equal((await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ files: [], sources: [{ path: "../x", data: "" }] }) })).status, 400);
+}));

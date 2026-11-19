@@ -26,6 +26,7 @@ Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 | DELETE | `/v1/apps/:name` | delete app + data |
 | POST | `/v1/apps/:name/claim` | account auth + `{deployKey}` → no expiry, net + secrets |
 | POST | `/v1/apps/:name/rollback` | `{deployId?}` (default: previous) |
+| GET | `/v1/apps/:name/source?deploy=` | `{app, deployId, files: [{path, data, encoding}]}` source uploaded with the current (or given) deploy; 404 `no_source` if none |
 | GET | `/v1/apps/:name/logs?n=200&follow=1` | NDJSON `{t, kind: stdout\|stderr\|system\|request, msg}`; `follow` streams |
 | GET | `/v1/apps/:name/secrets` | `{keys}` (values are write-only) |
 | PUT | `/v1/apps/:name/secrets` | `{KEY: "value" \| null}` merge; claimed apps only |
@@ -58,6 +59,7 @@ Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 - Logged-in create → claimed immediately.
 - `files` = built static output. `server` = single ESM bundle (or omit for static).
 - `config.crons` (optional, ≤ 5, needs `server`): cron expressions that call the server's `scheduled()` export (claimed apps; see app-format.md).
+- `sources` (optional, same shape as `files`): the project source, stored with the deploy (not served) so another client can open it. Shares the size/file limits with `files`; if it doesn't fit, the deploy succeeds without it and the response's `deploy.warning` says so. Dropped (case-insensitive): any `.env*` name containing `local` or `cresslet`, `.envrc*`, `.dev.vars*`, top-level `dist/`, any `node_modules/`, `.git/` or `.cresslet/`. Other `.env*` files keep only their `CRESSLET_PUBLIC_*` / `VITE_*` entries, fail-closed: only single-line `NAME=value` lines (non-empty unquoted, or backslash-free `'…'`/`"…"`) are understood, comments are dropped, and the first other line ends the file. The studio sends it.
 - Each deploy is immutable; activation is atomic; sandbox restarts on next request.
 
 Response `201`:

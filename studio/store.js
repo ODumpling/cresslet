@@ -108,11 +108,15 @@ export const ignored = (path) => IGNORE.some((re) => re.test(path));
 
 /** Flat map → WebContainer-style tree. */
 export function toTree(files) {
-  const root = {};
+  // Prototype-free: file/dir names like "__proto__" or "constructor" are ordinary names here.
+  const root = Object.create(null);
   for (const [path, contents] of Object.entries(files)) {
     const parts = path.split("/");
     let node = root;
-    for (const dir of parts.slice(0, -1)) node = (node[dir] ??= { directory: {} }).directory;
+    for (const dir of parts.slice(0, -1)) {
+      if (!Object.hasOwn(node, dir)) node[dir] = { directory: Object.create(null) };
+      node = node[dir].directory;
+    }
     node[parts.at(-1)] = { file: { contents } };
   }
   return root;
