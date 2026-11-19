@@ -25,6 +25,15 @@ export interface Env {
   app: { id: string; name: string; url: string; deployId: string };
 }
 
+/** Argument of `scheduled(event, env, ctx)`, run for each `crons` entry in cresslet.json (UTC). */
+export interface ScheduledEvent {
+  type: "scheduled";
+  /** The cresslet.json expression that fired. */
+  cron: string;
+  /** Scheduled minute, ms since epoch. */
+  scheduledTime: number;
+}
+
 declare global {
   interface Body {
     json<T = unknown>(): Promise<T>;

@@ -2,6 +2,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import { type Config, paths } from "./config.ts";
 import { type App, id, type Store } from "./store.ts";
+import { normalizeCrons } from "./cron.ts";
 
 export interface DeployFile {
   path: string;
@@ -12,7 +13,7 @@ export interface DeployFile {
 export interface DeployInput {
   files: DeployFile[];
   server?: string | null;
-  config?: { routes?: string[] };
+  config?: { routes?: string[]; crons?: string[] };
   source?: string;
 }
 
@@ -73,6 +74,12 @@ export async function writeDeploy(cfg: Config, store: Store, app: App, input: De
     throw new HttpError(413, `too many files (max ${cfg.limits.deployFiles})`, "too_large");
   }
   const routes = normalizeRoutes(input.config?.routes);
+  let crons: string[];
+  try {
+    crons = normalizeCrons(input.config?.crons);
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
   const deployId = id("dep");
   const dir = paths(cfg, app.id).deploy(deployId);
   const pub = join(dir, "public");
@@ -99,13 +106,14 @@ export async function writeDeploy(cfg: Config, store: Store, app: App, input: De
     throw new HttpError(413, "server bundle too large", "too_large");
   }
 
+  if (crons.length && !server) throw new HttpError(400, "crons need a server (server/index.ts with a scheduled() export)");
   await mkdir(pub, { recursive: true });
   for (const [p, data] of decoded) {
     await mkdir(dirname(join(pub, p)), { recursive: true });
     await writeFile(join(pub, p), data);
   }
   if (server) await writeFile(join(dir, "server.js"), server);
-  const config = { routes, server: !!server };
+  const config = { routes, server: !!server, ...(crons.length ? { crons } : {}) };
   await writeFile(join(dir, "deploy.json"), JSON.stringify(config));
 
   store.addDeploy({

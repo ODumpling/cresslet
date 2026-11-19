@@ -58,6 +58,26 @@ export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
   };
 }
 
+/** One cron invocation: an internal request the sandbox entry routes to `scheduled()` (runtime/worker.js). */
+export function scheduled(cfg: Config, store: Store, runtime: Runtime) {
+  return async (appId: string, cron: string, at: Date) => {
+    const app = store.appById(appId);
+    // Checked at dispatch: a run queued behind another may outlive a redeploy that dropped the cron.
+    if (!app?.current_deploy_id || !app.account_id || !(JSON.parse(app.config).crons ?? []).includes(cron)) return;
+    const started = performance.now();
+    const res = await runtime.fetch(
+      appSpec(cfg, store, app),
+      new Request(`${appUrl(cfg, app.name)}/`, {
+        method: "POST",
+        headers: { "x-cresslet-scheduled": JSON.stringify({ cron, scheduledTime: at.getTime() }) },
+      }),
+      { internal: true },
+    );
+    await res.body?.cancel();
+    runtime.logs.push(app.id, "system", `cron "${cron}" ${res.ok ? "ok" : `failed (${res.status})`} ${Math.round(performance.now() - started)}ms`);
+  };
+}
+
 export function host(cfg: Config, store: Store, runtime: Runtime) {
   return async (req: Request, appName: string): Promise<Response> => {
     const app = store.appByName(appName);

@@ -210,6 +210,12 @@ export class Store {
   appById(appId: string): App | undefined {
     return this.db.prepare("SELECT * FROM apps WHERE id = ?").get(appId) as App | undefined;
   }
+  /** Claimed apps whose current deploy declares crons. */
+  appsWithCrons(): App[] {
+    return this.db.prepare(
+      "SELECT * FROM apps WHERE account_id IS NOT NULL AND json_array_length(config, '$.crons') > 0",
+    ).all() as unknown as App[];
+  }
   appsByAccount(accountId: string): App[] {
     return this.db.prepare("SELECT * FROM apps WHERE account_id = ? ORDER BY updated_at DESC")
       .all(accountId) as unknown as App[];
