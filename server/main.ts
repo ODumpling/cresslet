@@ -7,7 +7,9 @@ import { Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
 import { Logs } from "./logs.ts";
 import { api, normDomain } from "./api.ts";
-import { host } from "./host.ts";
+import { host, upgrader } from "./host.ts";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import { removeAppFiles } from "./deploys.ts";
 
 const STUDIO = join(import.meta.dirname, "../studio");
@@ -25,6 +27,7 @@ export function createServer(cfg: Config = loadConfig()) {
   const runtime = new Runtime(cfg, logs);
   const control = api(cfg, store, runtime);
   const serveApp = host(cfg, store, runtime);
+  const upgradeApp = upgrader(cfg, store, runtime);
   const suffix = "." + cfg.domain;
 
   const reap = setInterval(async () => {
@@ -61,8 +64,20 @@ export function createServer(cfg: Config = loadConfig()) {
     return new Response(res.body, { status: res.status, headers: h });
   }
 
+  /** `upgrade` event of the HTTP server: WebSockets to app servers. */
+  function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer) {
+    // Node detaches its own error handler before emitting `upgrade`: install ours first.
+    socket.on("error", () => socket.destroy());
+    const hostname = normDomain((req.headers.host ?? "").replace(/:\d+$/, ""));
+    let name = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : "";
+    if (!name && hostname !== cfg.domain) name = store.appByDomain(hostname)?.name ?? ""; // custom domain
+    if (!name || name.includes(".")) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+    void upgradeApp(req, socket, head, name).catch(() => socket.destroy());
+  }
+
   return {
     cfg,
+    upgrade,
     store,
     runtime,
     handler,
@@ -78,6 +93,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const srv = createServer();
   const http = serve({ fetch: srv.handler, port: srv.cfg.port }, () =>
     console.log(`cresslet listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`));
+  http.on("upgrade", srv.upgrade);
   const shutdown = () => {
     srv.close();
     http.close();
