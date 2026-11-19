@@ -43,9 +43,10 @@ export function host(cfg: Config, store: Store, runtime: Runtime) {
         appName: app.name,
         appUrl: appUrl(cfg, app.name),
         deployId: app.current_deploy_id,
-        secrets: store.secrets(app.id),
+        secrets: () => store.secrets(app.id),
         // Outbound network is only for claimed apps (enforced by the sandbox).
         net: !!app.account_id,
+        egress: app.egress ? JSON.parse(app.egress) : null,
       }, req);
       runtime.logs.push(
         app.id,

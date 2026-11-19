@@ -30,6 +30,8 @@ Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 | GET | `/v1/apps/:name/secrets` | `{keys}` (values are write-only) |
 | PUT | `/v1/apps/:name/secrets` | `{KEY: "value" \| null}` merge; claimed apps only |
 | DELETE | `/v1/apps/:name/secrets/:key` | |
+| GET | `/v1/apps/:name/egress` | `{allow}`: hostnames the server may `fetch`, or `null` = any public host |
+| PUT | `/v1/apps/:name/egress` | `{allow: ["api.stripe.com", "*.openai.com"] \| null}` (≤ 50; `*.` = subdomains only); claimed apps only. Blocked requests get 403 and a log line; raw sockets are refused under an allowlist |
 | GET | `/v1/apps/:name/db?limit=100` | tables → `{schema, count, rows}` |
 | POST | `/v1/apps/:name/db/query` | `{sql, params?}` read-only → `{rows}` |
 
