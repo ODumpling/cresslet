@@ -12,6 +12,7 @@ import { Scheduler } from "./cron.ts";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { removeAppFiles } from "./deploys.ts";
+import { settled as sandboxSettled } from "./sandbox.ts";
 
 const STUDIO = join(import.meta.dirname, "../studio");
 
@@ -99,9 +100,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const http = serve({ fetch: srv.handler, port: srv.cfg.port }, () =>
     console.log(`cresslet listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`));
   http.on("upgrade", srv.upgrade);
-  const shutdown = () => {
+  const shutdown = async () => {
     srv.close();
     http.close();
+    await sandboxSettled(); // cgroup kills on older kernels finish on timers
     process.exit(0);
   };
   process.once("SIGINT", shutdown);

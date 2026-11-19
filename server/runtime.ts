@@ -2,14 +2,14 @@
 // reaped when idle. Proxies requests over a unix socket. The sandbox reaches its db/files
 // through a per-app bindings socket served here (server/bindings.ts).
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { connect } from "node:net";
+import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import { type IncomingMessage, request as httpRequest } from "node:http";
 import type { Duplex } from "node:stream";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { getRequestListener } from "@hono/node-server";
 import { Client } from "undici";
@@ -17,6 +17,7 @@ import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
 import { createBindings } from "./bindings.ts";
 import { createEgressProxy } from "./egress.ts";
+import { instanceId, jail, prepareHost, sweep } from "./sandbox.ts";
 
 const WORKER = join(import.meta.dirname, "../runtime/worker.js");
 /** Pinned so a workerd upgrade doesn't silently change app semantics. */
@@ -24,6 +25,8 @@ const COMPAT_DATE = "2026-11-01";
 
 export interface AppSpec {
   appId: string;
+  /** Never-reused per-app number (store.uidSeq): uid = CRESSLET_SANDBOX_UID_BASE + seq. Only read with per-app uids. */
+  seq: () => number;
   appName: string;
   appUrl: string;
   deployId: string;
@@ -40,6 +43,8 @@ interface Proc {
   child: ChildProcess;
   client: Client;
   bindings: { server: Server; egress: Server | null; close(): void };
+  /** Kills whatever is left in the sandbox's cgroup and removes it (synchronous kill). */
+  release(): void;
   ready: Promise<void>;
   lastUsed: number;
   inflight: number;
@@ -57,10 +62,8 @@ function capStr(s: string): string {
 
 function workerdConfig(
   spec: AppSpec,
-  sock: string,
   hostSock: string,
   egressSock: string | null,
-  serverRel: string,
   memoryMb: number,
 ) {
   const outbound = !spec.net
@@ -76,7 +79,7 @@ const config :Workerd.Config = (
     (name = "app", worker = (
       modules = [
         (name = "worker.js", esModule = embed "worker.js"),
-        (name = "app", esModule = embed ${capStr(serverRel)}),
+        (name = "app", esModule = embed "app.js"),
       ],
       compatibilityDate = "${COMPAT_DATE}",
       bindings = [
@@ -88,7 +91,8 @@ const config :Workerd.Config = (
     (name = "host", external = (address = ${capStr("unix:" + hostSock)}, http = ())),
     ${outbound},
   ],
-  sockets = [(name = "http", address = ${capStr("unix:" + sock)}, http = (), service = "app")],
+  # Listener created by the control plane, passed as fd 3 (--socket-fd http=3).
+  sockets = [(name = "http", http = (), service = "app")],
   v8Flags = ["--max-old-space-size=${memoryMb}"],
 );
 `;
@@ -96,11 +100,18 @@ const config :Workerd.Config = (
 
 const samePolicy = (a: AppSpec, b: AppSpec) => a.net === b.net && JSON.stringify(a.egress) === JSON.stringify(b.egress);
 
-const canConnect = (path: string) =>
+/**
+ * Ready = the sandbox entry answers an internal probe (not just "socket accepts": the listener is ours
+ * and queues connections before workerd runs). Fails while the app module can't load.
+ */
+const probe = (path: string) =>
   new Promise<boolean>((res) => {
-    const s = connect(path);
-    s.once("connect", () => (s.destroy(), res(true)));
-    s.once("error", () => res(false));
+    const r = httpRequest({ socketPath: path, path: "/", method: "HEAD", headers: { "x-cresslet-probe": "1" }, timeout: 2000, agent: false }, (resp) => {
+      resp.resume();
+      res(resp.statusCode === 204);
+    });
+    r.on("error", () => res(false)).on("timeout", () => r.destroy());
+    r.end();
   });
 
 export class Runtime {
@@ -109,15 +120,21 @@ export class Runtime {
   #cfg: Config;
   #starting = new Map<string, { spec: AppSpec; p: Promise<Proc> }>();
   #timer: ReturnType<typeof setInterval>;
+  #instance: string;
+  /** After close(): no new sandboxes (a cold start in flight must not spawn during shutdown). */
+  #closed = false;
 
   constructor(cfg: Config, logs: Logs) {
     this.#cfg = cfg;
     this.logs = logs;
+    prepareHost(cfg);
+    this.#instance = instanceId(cfg.dataDir);
     mkdirSync(cfg.sockDir, { recursive: true });
-    // Older versions left plaintext secrets in each app's run dir.
+    sweep(cfg, this.#instance);
+    // Older versions kept run dirs (with plaintext secrets) under each app's data dir.
     const apps = join(cfg.dataDir, "apps");
     for (const app of existsSync(apps) ? readdirSync(apps, { withFileTypes: true }) : []) {
-      if (app.isDirectory()) rmSync(join(apps, app.name, "run", "secrets.json"), { force: true });
+      if (app.isDirectory()) rmSync(join(apps, app.name, "run"), { recursive: true, force: true });
     }
     this.#timer = setInterval(() => this.reapIdle(), 15_000);
   }
@@ -138,7 +155,7 @@ export class Runtime {
     try {
       const headers: Record<string, string> = {};
       req.headers.forEach((v, k) => {
-        // Clients can't forge control-plane headers.
+        // Clients can't forge control-plane headers (x-cresslet-url, -probe, -scheduled, …).
         if (!HOP.includes(k) && (internal || !k.startsWith("x-cresslet-"))) headers[k] = v;
       });
       headers["x-cresslet-url"] = req.url;
@@ -288,44 +305,69 @@ export class Runtime {
     const cfg = this.#cfg;
     const p = paths(cfg, spec.appId);
     await mkdir(p.data, { recursive: true });
-    await mkdir(p.run, { recursive: true });
-    // Fresh socket names per spawn: a dying predecessor's cleanup must not unlink ours.
-    const tag = `${spec.appId}-${randomBytes(4).toString("hex")}`;
-    const sock = join(cfg.sockDir, `${tag}.sock`);
-    const hostSock = join(cfg.sockDir, `${tag}.host.sock`);
-    const egressSock = spec.net && spec.egress ? join(cfg.sockDir, `${tag}.egress.sock`) : null;
+    // Fresh dir per spawn: a dying predecessor's cleanup must not touch ours. It holds everything
+    // the sandbox can see (config, code, sockets), and nothing under dataDir.
+    const tag = `${this.#instance}-${spec.appId}-${randomBytes(3).toString("hex")}`; // see RUN_DIR_RE
+    const run = join(cfg.sockDir, tag);
+    await mkdir(run, { mode: 0o700 });
+    // The control plane creates workerd's listening socket and hands it over as fd 3: nothing a
+    // sandbox (or anyone else) could bind first, and the path we connect to sits in a dir it can't write.
+    // Short names: unix socket paths are capped at ~104 bytes (macOS). a = app (workerd's listener),
+    // h = host bindings, e = egress proxy, b = bind name (unlinked once workerd has the fd).
+    const sock = join(run, "a.sock");
+    const hostSock = join(run, "h.sock");
+    const egressSock = spec.net && spec.egress ? join(run, "e.sock") : null;
 
-    // Bindings socket: the sandbox's only way to its data. One per app, so identity = socket.
-    const bindings = createBindings(p.data, { secrets: spec.secrets() });
-    const server = createServer(getRequestListener(bindings.fetch));
-    await new Promise<void>((res, rej) => server.once("error", rej).listen(hostSock, res));
-    const egress = egressSock
-      ? createEgressProxy(spec.egress!, (l) => this.logs.push(spec.appId, "system", l))
-      : null;
-    if (egress) {
-      await new Promise<void>((res, rej) => egress.once("error", rej).listen(egressSock!, res)).catch((e) => {
-        server.close();
-        bindings.close();
-        throw e;
-      });
+    // Everything acquired so far is undone by one path if the start fails before the child runs.
+    let bindings: ReturnType<typeof createBindings> | undefined;
+    let server: Server | undefined;
+    let egress: Server | null = null;
+    let j: ReturnType<typeof jail> | undefined;
+    let listener: NetServer | undefined;
+    const abort = () => {
+      listener?.close();
+      egress?.close();
+      server?.close();
+      bindings?.close();
+      j?.release();
+      rmSync(run, { recursive: true, force: true });
+    };
+    let child: ChildProcess;
+    try {
+      // Bindings socket: the sandbox's only way to its data. One per app, so identity = socket.
+      bindings = createBindings(p.data, { secrets: spec.secrets() });
+      const srv = server = createServer(getRequestListener(bindings.fetch));
+      await new Promise<void>((res, rej) => srv.once("error", rej).listen(hostSock, res));
+      if (egressSock) {
+        const eg = egress = createEgressProxy(spec.egress!, (l) => this.logs.push(spec.appId, "system", l));
+        await new Promise<void>((res, rej) => eg.once("error", rej).listen(egressSock, res));
+      }
+      await copyFile(WORKER, join(run, "worker.js"));
+      await copyFile(join(p.deploy(spec.deployId), "server.js"), join(run, "app.js"));
+      await writeFile(
+        join(run, "app.json"),
+        JSON.stringify({ id: spec.appId, name: spec.appName, url: spec.appUrl, deployId: spec.deployId }),
+      );
+      await writeFile(join(run, "config.capnp"), workerdConfig(spec, hostSock, egressSock, cfg.limits.memoryMb));
+      const lst = listener = createNetServer();
+      await new Promise<void>((res, rej) => lst.once("error", rej).listen(join(run, "b.sock"), res));
+      // Closing our copy below unlinks b.sock (libuv); a.sock is a second name for the same socket.
+      linkSync(join(run, "b.sock"), sock);
+      const fd = (lst as unknown as { _handle?: { fd?: number } })._handle?.fd;
+      if (typeof fd !== "number" || fd < 0) throw new Error("can't get the listening socket's fd");
+      if (this.#closed) throw new Error("shutting down");
+      j = jail(cfg, tag, spec.seq, run);
+      const cmd = j.command(cfg.workerdPath, ["serve", join(run, "config.capnp"), "--socket-fd", "http=3"]);
+      child = spawn(cmd.file, cmd.args, { cwd: run, stdio: ["ignore", "pipe", "pipe", fd], env: { HOME: run } });
+      lst.close();
+    } catch (e) {
+      abort();
+      throw e;
     }
-
-    await copyFile(WORKER, join(p.run, "worker.js"));
-    // Older versions wrote secrets here in plaintext.
-    rmSync(join(p.run, "secrets.json"), { force: true });
-    await writeFile(
-      join(p.run, "app.json"),
-      JSON.stringify({ id: spec.appId, name: spec.appName, url: spec.appUrl, deployId: spec.deployId }),
-    );
-    const serverRel = relative(p.run, join(p.deploy(spec.deployId), "server.js"));
-    const configPath = join(p.run, "config.capnp");
-    await writeFile(configPath, workerdConfig(spec, sock, hostSock, egressSock, serverRel, cfg.limits.memoryMb));
-
-    const child = spawn(cfg.workerdPath, ["serve", configPath], {
-      cwd: p.run,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { HOME: p.run },
-    });
+    const jl = j;
+    const egressServer = egress;
+    const bindingsServer = server;
+    const binds = bindings;
 
     let fail!: (e: Error) => void;
     const failed = new Promise<never>((_, rej) => (fail = rej));
@@ -333,21 +375,22 @@ export class Runtime {
     const proc: Proc = {
       spec,
       sockPath: sock,
+      release: () => jl.release(),
       child,
       client: new Client("http://app", { socketPath: sock }),
       bindings: {
-        server,
-        egress,
+        server: bindingsServer,
+        egress: egressServer,
         close() {
-          if (egress?.listening) {
-            egress.close();
-            egress.closeAllConnections();
+          if (egressServer?.listening) {
+            egressServer.close();
+            egressServer.closeAllConnections();
           }
-          if (!server.listening) return;
-          server.close();
-          server.closeAllConnections();
-          bindings.close();
-          rmSync(sock, { force: true });
+          if (!bindingsServer.listening) return;
+          bindingsServer.close();
+          bindingsServer.closeAllConnections();
+          binds.close();
+          rmSync(run, { recursive: true, force: true });
         },
       },
       ready: Promise.resolve(),
@@ -374,21 +417,33 @@ export class Runtime {
     };
     pipe(child.stdout!, "stdout");
     pipe(child.stderr!, "stderr");
-    child.once("error", (e) => fail(e));
+    child.once("error", (e) => {
+      // e.g. spawn failure: no `exit` follows.
+      proc.exited = true;
+      proc.client.close().catch(() => {});
+      proc.bindings.close();
+      jl.release();
+      if (this.procs.get(spec.appId) === proc) this.procs.delete(spec.appId);
+      fail(e);
+    });
     child.once("exit", (code, sig) => {
       proc.exited = true;
       proc.client.close().catch(() => {});
       proc.bindings.close();
       if (this.procs.get(spec.appId) === proc) this.procs.delete(spec.appId);
       fail(new Error(`sandbox exited with code ${code}`));
-      if (code !== 0 && sig !== "SIGTERM" && sig !== "SIGKILL") {
+      if (jl.oomKilled()) this.logs.push(spec.appId, "system", "sandbox killed: out of memory");
+      // Kills anything the sandbox forked that outlived it, then removes the cgroup.
+      jl.release();
+      if (code === 97) this.logs.push(spec.appId, "system", "sandbox couldn't join its cgroup");
+      else if (code !== 0 && sig !== "SIGTERM" && sig !== "SIGKILL") {
         this.logs.push(spec.appId, "system", `sandbox exited (code ${code})`);
       }
     });
 
     proc.ready = (async () => {
       const deadline = Date.now() + 10_000;
-      while (!(await canConnect(sock))) {
+      while (!(await probe(sock))) {
         if (proc.exited) throw new Error("sandbox exited during start");
         if (Date.now() > deadline) throw new Error("start timeout");
         await new Promise((r) => setTimeout(r, 25));
@@ -409,6 +464,8 @@ export class Runtime {
     this.procs.delete(appId);
     proc.child.kill("SIGKILL");
     proc.bindings.close();
+    // Synchronously, so a shutdown that exits right after still kills forked processes.
+    proc.release();
   }
 
   reapIdle() {
@@ -426,6 +483,7 @@ export class Runtime {
   }
 
   close() {
+    this.#closed = true;
     clearInterval(this.#timer);
     for (const id of [...this.procs.keys()]) this.stop(id);
   }

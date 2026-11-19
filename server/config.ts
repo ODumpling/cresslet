@@ -29,6 +29,8 @@ export interface Config {
   github: { clientId: string; clientSecret: string; webUrl: string; apiUrl: string } | null;
   /** TXT lookup for custom-domain verification (tests stub it). */
   resolveTxt: (name: string) => Promise<string[][]>;
+  /** OS-level sandbox limits (server/sandbox.ts); Linux, opt-in. */
+  sandbox: { uidBase: number | null; cgroupDir: string | null; cpuPercent: number; pidsMax: number };
   limits: {
     deployBytes: number;
     deployFiles: number;
@@ -66,6 +68,12 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       }
       : null,
     resolveTxt,
+    sandbox: {
+      uidBase: process.env.CRESSLET_SANDBOX_UID_BASE ? num("CRESSLET_SANDBOX_UID_BASE", 0) : null,
+      cgroupDir: process.env.CRESSLET_CGROUP_DIR || null,
+      cpuPercent: num("CRESSLET_APP_CPU_PERCENT", 100),
+      pidsMax: num("CRESSLET_APP_PIDS", 256),
+    },
     limits: {
       deployBytes: num("CRESSLET_MAX_DEPLOY_MB", 25) * 1024 * 1024,
       deployFiles: num("CRESSLET_MAX_DEPLOY_FILES", 2000),
@@ -77,7 +85,12 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       logLines: num("CRESSLET_LOG_LINES", 1000),
     },
   };
-  return { ...base, ...overrides, limits: { ...base.limits, ...overrides.limits } };
+  return {
+    ...base,
+    ...overrides,
+    sandbox: { ...base.sandbox, ...overrides.sandbox },
+    limits: { ...base.limits, ...overrides.limits },
+  };
 }
 
 export function appUrl(cfg: Config, name: string): string {
@@ -101,6 +114,5 @@ export const paths = (cfg: Config, appId: string) => {
     data: join(app, "data"),
     db: join(app, "data", "db.sqlite"),
     files: join(app, "data", "files"),
-    run: join(app, "run"),
   };
 };
