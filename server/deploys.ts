@@ -1,5 +1,5 @@
-import { dirname, join, normalize } from "@std/path";
-import { decodeBase64 } from "@std/encoding/base64";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join, posix } from "node:path";
 import { type Config, paths } from "./config.ts";
 import { type App, id, type Store } from "./store.ts";
 
@@ -17,8 +17,12 @@ export interface DeployInput {
 }
 
 export class HttpError extends Error {
-  constructor(public status: number, message: string, public code = "error") {
+  status: number;
+  code: string;
+  constructor(status: number, message: string, code = "error") {
     super(message);
+    this.status = status;
+    this.code = code;
   }
 }
 
@@ -31,7 +35,7 @@ export function validName(name: string) {
 
 export function safePath(p: string): string {
   const raw = p.replace(/\\/g, "/");
-  const n = normalize("/" + raw).slice(1);
+  const n = posix.normalize("/" + raw).slice(1);
   if (!n || raw.split("/").includes("..") || n.includes("\0") || n.length > 300 || n.endsWith("/")) {
     throw new HttpError(400, `invalid file path: ${p}`, "invalid_path");
   }
@@ -82,7 +86,7 @@ export async function writeDeploy(cfg: Config, store: Store, app: App, input: De
     const p = safePath(f.path);
     if (seen.has(p)) throw new HttpError(400, `duplicate file: ${p}`);
     seen.add(p);
-    const data = f.encoding === "base64" ? decodeBase64(f.data) : new TextEncoder().encode(f.data);
+    const data = f.encoding === "base64" ? new Uint8Array(Buffer.from(f.data, "base64")) : new TextEncoder().encode(f.data);
     bytes += data.byteLength;
     if (bytes > cfg.limits.deployBytes) {
       throw new HttpError(413, `deploy exceeds ${cfg.limits.deployBytes} bytes`, "too_large");
@@ -95,14 +99,14 @@ export async function writeDeploy(cfg: Config, store: Store, app: App, input: De
     throw new HttpError(413, "server bundle too large", "too_large");
   }
 
-  await Deno.mkdir(pub, { recursive: true });
+  await mkdir(pub, { recursive: true });
   for (const [p, data] of decoded) {
-    await Deno.mkdir(dirname(join(pub, p)), { recursive: true });
-    await Deno.writeFile(join(pub, p), data);
+    await mkdir(dirname(join(pub, p)), { recursive: true });
+    await writeFile(join(pub, p), data);
   }
-  if (server) await Deno.writeTextFile(join(dir, "server.js"), server);
+  if (server) await writeFile(join(dir, "server.js"), server);
   const config = { routes, server: !!server };
-  await Deno.writeTextFile(join(dir, "deploy.json"), JSON.stringify(config));
+  await writeFile(join(dir, "deploy.json"), JSON.stringify(config));
 
   store.addDeploy({
     id: deployId,
@@ -124,12 +128,11 @@ async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: stri
   for (const d of all.slice(10)) {
     if (d.id === keep) continue;
     store.deleteDeploy(d.id);
-    await Deno.remove(paths(cfg, appId).deploy(d.id), { recursive: true }).catch(() => {});
+    await rm(paths(cfg, appId).deploy(d.id), { recursive: true, force: true });
   }
 }
 
 export async function removeAppFiles(cfg: Config, appId: string) {
   const p = paths(cfg, appId);
-  await Deno.remove(p.app, { recursive: true }).catch(() => {});
-  await Deno.remove(p.sock).catch(() => {});
+  await rm(p.app, { recursive: true, force: true });
 }

@@ -83,8 +83,8 @@
     <dialog id="login-dialog">
       <form method="dialog" id="login-form">
         <h2>Log in to Cresslet</h2>
-        <p class="muted small">No password in v1: we create an account for this email. Logged-in deploys never expire and can use secrets and outbound fetch.</p>
-        <label>Email <input type="email" name="email" required autocomplete="email" /></label>
+        <p class="muted small">No password in v1: we create an account for this email (or paste an access token from the operator). Logged-in deploys never expire and can use secrets and outbound fetch.</p>
+        <label>Email or access token <input type="text" name="email" required autocomplete="email" /></label>
         <p class="error small" id="login-error" hidden></p>
         <div class="row">
           <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>

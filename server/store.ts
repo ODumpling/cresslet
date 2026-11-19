@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
-import { join } from "@std/path";
-import { encodeHex } from "@std/encoding/hex";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+
+const encodeHex = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as ArrayBuffer).toString("hex");
 
 export interface Account {
   id: string;
@@ -41,7 +43,7 @@ export class Store {
   db: DatabaseSync;
 
   constructor(dataDir: string) {
-    Deno.mkdirSync(dataDir, { recursive: true });
+    mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSync(join(dataDir, "cresslet.db"));
     this.db.exec(`
       PRAGMA journal_mode = WAL;

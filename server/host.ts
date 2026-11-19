@@ -1,6 +1,7 @@
 // Serves deployed apps on `<name>.<domain>`: static assets, then the app's server for matching routes.
-import { serveFile } from "@std/http/file-server";
-import { join, normalize } from "@std/path";
+import { stat } from "node:fs/promises";
+import { join, posix } from "node:path";
+import { serveFile } from "./static.ts";
 import { appUrl, type Config, paths } from "./config.ts";
 import type { Store } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
@@ -16,7 +17,7 @@ export function matchRoute(pattern: string, path: string): boolean {
 
 async function isFile(p: string) {
   try {
-    return (await Deno.stat(p)).isFile;
+    return (await stat(p)).isFile();
   } catch {
     return false;
   }
@@ -60,7 +61,7 @@ export function host(cfg: Config, store: Store, runtime: Runtime) {
     const pub = join(p.deploy(app.current_deploy_id), "public");
     let rel: string;
     try {
-      rel = normalize(decodeURIComponent(url.pathname)).replace(/^\/+/, "");
+      rel = posix.normalize(decodeURIComponent(url.pathname)).replace(/^\/+/, "");
     } catch {
       return new Response("Bad Request", { status: 400 });
     }

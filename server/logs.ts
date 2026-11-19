@@ -9,14 +9,18 @@ export class Logs {
   #lines = new Map<string, LogLine[]>();
   #subs = new Map<string, Set<(l: LogLine) => void>>();
 
-  constructor(private max = 1000) {}
+  #max: number;
+
+  constructor(max = 1000) {
+    this.#max = max;
+  }
 
   push(appId: string, kind: LogLine["kind"], msg: string) {
     const line = { t: Date.now(), kind, msg };
     let arr = this.#lines.get(appId);
     if (!arr) this.#lines.set(appId, arr = []);
     arr.push(line);
-    if (arr.length > this.max) arr.splice(0, arr.length - this.max);
+    if (arr.length > this.#max) arr.splice(0, arr.length - this.#max);
     for (const fn of this.#subs.get(appId) ?? []) fn(line);
   }
 

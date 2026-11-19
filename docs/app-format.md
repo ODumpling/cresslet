@@ -37,9 +37,9 @@ export default {
 | `env.secrets` | `Record<string,string>`, set via `cresslet secrets set` (claimed apps) |
 | `env.app` | `{ id, name, url, deployId }` |
 
-Same API in three runtimes: platform sandbox (Deno), `cresslet dev` (Node), studio preview (browser worker, sql.js). Types: `server/cresslet.d.ts` in templates.
+Same API in three runtimes: platform sandbox (workerd), `cresslet dev` (Node), studio preview (browser worker, sql.js). Types: `server/cresslet.d.ts` in templates.
 
-Runtime: Web-standard APIs (fetch, Request/Response, URL, crypto, streams, TextEncoder). npm deps are bundled by esbuild (`platform: neutral`, conditions `worker`/`browser`). No filesystem, env vars, or subprocesses.
+Runtime: Web-standard APIs (fetch, Request/Response, URL, crypto, streams, TextEncoder). npm deps are bundled by esbuild (`platform: neutral`, conditions `worker`/`browser`). No filesystem, env vars, or subprocesses. `node:` built-ins work on the platform (workerd Node compat) but not necessarily in the studio preview, so prefer Web APIs.
 
 ## Limits (defaults, configurable by operator)
 

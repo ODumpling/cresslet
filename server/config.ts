@@ -1,7 +1,11 @@
-import { join, resolve } from "@std/path";
+import { createRequire } from "node:module";
+import { join, resolve } from "node:path";
 
-const env = (k: string, d: string) => Deno.env.get(k) ?? d;
-const num = (k: string, d: number) => Number(Deno.env.get(k) ?? d);
+const env = (k: string, d: string) => process.env[k] ?? d;
+const num = (k: string, d: number) => Number(process.env[k] ?? d);
+
+/** workerd binary from the `workerd` npm package (platform-specific optional dependency). */
+const bundledWorkerd = (): string => createRequire(import.meta.url)("workerd").default;
 
 export interface Config {
   port: number;
@@ -13,8 +17,12 @@ export interface Config {
   publicPort: number;
   dataDir: string;
   sockDir: string;
-  denoPath: string;
+  workerdPath: string;
   openSignup: boolean;
+  /** Allow deploys that create an app without an account (they expire after anonTtlMs). */
+  anonDeploys: boolean;
+  /** Bearer token that may create accounts / issue tokens when openSignup is off. */
+  adminToken: string | null;
   limits: {
     deployBytes: number;
     deployFiles: number;
@@ -38,8 +46,10 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     dataDir,
     // Unix socket paths are capped at ~104 bytes on macOS, keep them short.
     sockDir: env("CRESSLET_SOCK_DIR", "/tmp/cresslet-sock"),
-    denoPath: env("CRESSLET_DENO", Deno.execPath()),
+    workerdPath: process.env.CRESSLET_WORKERD ?? bundledWorkerd(),
     openSignup: env("CRESSLET_OPEN_SIGNUP", "true") === "true",
+    anonDeploys: env("CRESSLET_ANON_DEPLOYS", "true") === "true",
+    adminToken: process.env.CRESSLET_ADMIN_TOKEN || null,
     limits: {
       deployBytes: num("CRESSLET_MAX_DEPLOY_MB", 25) * 1024 * 1024,
       deployFiles: num("CRESSLET_MAX_DEPLOY_FILES", 2000),
@@ -76,6 +86,5 @@ export const paths = (cfg: Config, appId: string) => {
     db: join(app, "data", "db.sqlite"),
     files: join(app, "data", "files"),
     run: join(app, "run"),
-    sock: join(cfg.sockDir, `${appId}.sock`),
   };
 };

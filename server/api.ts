@@ -1,10 +1,11 @@
 // Control-plane HTTP API (/v1). Used by cresslet-cli, the studio, and agents.
-import { type Context, Hono } from "@hono/hono";
-import { cors } from "@hono/hono/cors";
+import { type Context, Hono } from "hono";
+import { cors } from "hono/cors";
 import { DatabaseSync } from "node:sqlite";
+import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
-import { fromFileUrl, join, relative } from "@std/path";
-import { encodeBase64 } from "@std/encoding/base64";
+import { readdir, readFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { appUrl, type Config, paths, rootUrl } from "./config.ts";
 import type { Account, App, Store } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
@@ -18,7 +19,8 @@ import {
 } from "./deploys.ts";
 
 export const VERSION = "0.1.0";
-const TEMPLATES = fromFileUrl(new URL("../templates/", import.meta.url));
+const TEMPLATES = join(import.meta.dirname, "../templates");
+const encodeBase64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 const SECRET_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 
 type Env = { Variables: { account?: Account; bearer?: string } };
@@ -46,6 +48,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     }
     await next();
   });
+
+  const isAdmin = (bearer?: string) => {
+    if (!cfg.adminToken || !bearer) return false;
+    const a = Buffer.from(bearer), b = Buffer.from(cfg.adminToken);
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
 
   const deployKey = (c: Context<Env>) =>
     c.req.header("x-cresslet-deploy-key") ??
@@ -93,6 +101,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       url: rootUrl(cfg),
       appUrlTemplate: appUrl(cfg, "{name}"),
       openSignup: cfg.openSignup,
+      anonDeploys: cfg.anonDeploys,
       limits: cfg.limits,
       docs: "https://github.com/ODumpling/cresslet/blob/main/docs/api.md",
     }));
@@ -101,7 +110,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   app.post("/accounts", async (c) => {
     const { email } = await body<{ email?: string }>(c);
     if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
-    if (!cfg.openSignup) throw new HttpError(403, "signup disabled", "forbidden");
+    if (!cfg.openSignup && !isAdmin(c.get("bearer"))) {
+      throw new HttpError(403, "signup is closed; ask the operator for an access token", "forbidden");
+    }
     // v1: no email verification. Re-login with the same email issues a new token.
     const account = store.accountByEmail(email) ?? store.createAccount(email);
     const token = await store.issueToken(account.id);
@@ -117,11 +128,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   // ---- templates
   app.get("/templates", async (c) => {
     const out = [];
-    for await (const e of Deno.readDir(TEMPLATES)) {
-      if (!e.isDirectory) continue;
+    for (const e of await readdir(TEMPLATES, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
       let meta = {};
       try {
-        meta = JSON.parse(await Deno.readTextFile(join(TEMPLATES, e.name, "template.json")));
+        meta = JSON.parse(await readFile(join(TEMPLATES, e.name, "template.json"), "utf8"));
       } catch { /* optional */ }
       out.push({ name: e.name, ...meta });
     }
@@ -136,11 +147,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const root = join(TEMPLATES, name);
     const files: { path: string; data: string; encoding: "utf8" | "base64" }[] = [];
     const walk = async (dir: string) => {
-      for await (const e of Deno.readDir(dir)) {
+      for (const e of await readdir(dir, { withFileTypes: true })) {
         const full = join(dir, e.name);
-        if (e.isDirectory) await walk(full);
+        if (e.isDirectory()) await walk(full);
         else if (e.name !== "template.json") {
-          const bytes = await Deno.readFile(full);
+          const bytes = await readFile(full);
           try {
             files.push({
               path: relative(root, full),
@@ -166,6 +177,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     if (target) {
       await authorize(c, target);
     } else {
+      if (!acct && !cfg.anonDeploys) {
+        throw new HttpError(401, "login required to deploy here (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
+      }
       const name = input.app ?? uniqueName();
       if (!validName(name)) {
         throw new HttpError(400, "app name must be 1-40 chars of a-z, 0-9 and single dashes", "invalid_name");
@@ -258,7 +272,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const { deployId } = await body<{ deployId?: string }>(c);
     const d = deployId ? store.deploy(deployId) : store.deploys(a.id, 2)[1];
     if (!d || d.app_id !== a.id) throw new HttpError(404, "deploy not found", "not_found");
-    const config = JSON.parse(await Deno.readTextFile(join(paths(cfg, a.id).deploy(d.id), "deploy.json")));
+    const config = JSON.parse(await readFile(join(paths(cfg, a.id).deploy(d.id), "deploy.json"), "utf8"));
     store.setCurrentDeploy(a.id, d.id, config);
     runtime.stop(a.id);
     runtime.logs.push(a.id, "system", `rolled back to ${d.id}`);
@@ -332,7 +346,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const db = openAppDb(a);
     if (!db) return c.json({ rows: [] });
     try {
-      // deno-lint-ignore no-explicit-any
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rows = db.prepare(sql).all(...(params as any[]));
       return c.json({ rows: jsonSafe(rows) });
     } catch (e) {

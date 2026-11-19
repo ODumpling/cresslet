@@ -1,5 +1,7 @@
-import { serveDir, serveFile } from "@std/http/file-server";
-import { fromFileUrl, join } from "@std/path";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { serve } from "@hono/node-server";
+import { serveDir, serveFile } from "./static.ts";
 import { type Config, loadConfig, rootUrl } from "./config.ts";
 import { Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
@@ -8,7 +10,7 @@ import { api } from "./api.ts";
 import { host } from "./host.ts";
 import { removeAppFiles } from "./deploys.ts";
 
-const STUDIO = fromFileUrl(new URL("../studio/", import.meta.url));
+const STUDIO = join(import.meta.dirname, "../studio");
 
 /** Cross-origin isolation is required by cresslet-container (SharedArrayBuffer). */
 const ISOLATION = {
@@ -46,7 +48,7 @@ export function createServer(cfg: Config = loadConfig()) {
     // The container's service worker must be served from the root to control preview URLs.
     const res = url.pathname === "/cresslet-sw.js"
       ? await serveFile(req, join(STUDIO, "vendor/cresslet-container/cresslet-sw.js"))
-      : await serveDir(req, { fsRoot: STUDIO, quiet: true });
+      : await serveDir(req, STUDIO);
     const h = new Headers(res.headers);
     for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
     if (url.pathname === "/cresslet-sw.js") {
@@ -69,10 +71,15 @@ export function createServer(cfg: Config = loadConfig()) {
   };
 }
 
-if (import.meta.main) {
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const srv = createServer();
-  Deno.serve({
-    port: srv.cfg.port,
-    onListen: () => console.log(`cresslet listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`),
-  }, srv.handler);
+  const http = serve({ fetch: srv.handler, port: srv.cfg.port }, () =>
+    console.log(`cresslet listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`));
+  const shutdown = () => {
+    srv.close();
+    http.close();
+    process.exit(0);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }

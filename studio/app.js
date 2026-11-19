@@ -55,9 +55,16 @@ $("account-btn").addEventListener("click", () => {
 $("login-form").addEventListener("submit", async (e) => {
   if (e.submitter?.value !== "ok") return;
   e.preventDefault();
-  const email = new FormData(e.target).get("email");
+  const email = String(new FormData(e.target).get("email")).trim();
   try {
-    const r = await api("/v1/accounts", { method: "POST", body: JSON.stringify({ email }) });
+    let r;
+    if (email.startsWith("clv_acct_")) {
+      const me = await fetch("/v1/me", { headers: { authorization: `Bearer ${email}` } });
+      if (!me.ok) throw new Error("invalid access token");
+      r = { token: email, ...(await me.json()) };
+    } else {
+      r = await api("/v1/accounts", { method: "POST", body: JSON.stringify({ email }) });
+    }
     auth.token = r.token;
     auth.email = r.account.email;
     $("login-dialog").close();

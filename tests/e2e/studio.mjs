@@ -1,5 +1,5 @@
 // Browser e2e: template → in-browser npm install → preview → API → Deploy → live app.
-// Run: start the server (deno task dev), then: cd tests/e2e && npm i && npx playwright install chromium && node studio.mjs
+// Run: start the server (npm run dev), then: cd tests/e2e && npm i && npx playwright install chromium && node studio.mjs
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const browser = await chromium.launch();

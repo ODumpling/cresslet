@@ -5,21 +5,21 @@
                   │                                  │                                     │
                   └──────────────── POST /v1/deploys, /v1/apps/… ──────────────────────────┘
                                                      │
-                       ┌─────────────────── cresslet server (Deno) ───────────────────┐
+                       ┌─────────────────── cresslet server (Node) ───────────────────┐
                        │ main.ts   host routing: <app>.<domain> → host.ts, else /v1 │
                        │ api.ts    control plane (Hono)                              │
                        │ store.ts  metadata SQLite: accounts, tokens, apps, deploys, │
                        │           secrets                                           │
                        │ host.ts   static files from active deploy; routes → runtime │
                        │ runtime.ts one sandbox process per app, on demand, reaped   │
-                       └────────────────────────────┬───────────────────────────────┘
-                                                    │ HTTP over unix socket
-                          ┌─────────────────────────┴─────────────────────────┐
-                          │ deno run runtime/runner.ts (per app)               │
-                          │  --allow-read=<app dir>  --allow-write=<app data>  │
-                          │  --allow-net=unix:<sock> (unclaimed) | all (claimed)│
-                          │  --no-remote --no-npm, clearEnv, heap cap          │
-                          │  env.db (node:sqlite) env.files env.secrets        │
+                       │ bindings.ts env.db / env.files backend (node:sqlite, disk)  │
+                       └──────────────┬─────────────────────────────▲───────────────┘
+                     HTTP over unix sock                 HOST binding│ (per-app unix sock)
+                          ┌───────────┴─────────────────────────────┴─────────┐
+                          │ workerd serve run/config.capnp (per app)           │
+                          │  runtime/worker.js wraps server.js, builds env     │
+                          │  no fs, no env, no subprocess; heap cap            │
+                          │  network: none (unclaimed) | public only (claimed) │
                           └────────────────────────────────────────────────────┘
 ```
 
@@ -30,14 +30,16 @@ data/cresslet.db                         metadata
 data/apps/<appId>/deploys/<depId>/     immutable: public/, server.js, deploy.json
 data/apps/<appId>/data/db.sqlite       app database (survives deploys)
 data/apps/<appId>/data/files/          app file storage
-data/apps/<appId>/run/config.json      sandbox config (0600)
-/tmp/cresslet-sock/<appId>.sock          sandbox socket
+data/apps/<appId>/run/                 generated workerd config, worker.js, secrets.json (0600)
+/tmp/cresslet-sock/<appId>-<n>.sock      sandbox socket (fresh per spawn)
+/tmp/cresslet-sock/<appId>-<n>.host.sock bindings socket (one app per socket = identity)
 ```
 
 ## Isolation
 
-- Per app: separate OS process, Deno permission sandbox (fs scoped to its own dir, writes only to its data dir, no env, no subprocess, no FFI, no remote imports), V8 heap cap, request timeout → kill.
-- Unclaimed: no outbound network (only its own socket). Claimed: outbound network.
+- Per app: separate OS process running [workerd](https://github.com/cloudflare/workerd) (Cloudflare's open-source Workers runtime). App code sees only its bindings: no host filesystem (`node:fs` is virtual), no env, no subprocess, no native addons. V8 heap cap, request timeout → kill.
+- Data access goes through the `HOST` service binding to the control plane, over a unix socket dedicated to that app. Path-traversal checks on file keys live host-side.
+- Unclaimed: no outbound network. Claimed: public internet only (workerd `network = (allow = ["public"])`), so loopback/private ranges — including the control plane — are unreachable.
 - Not yet: CPU quotas (cgroups), per-app UID, egress allowlists. See roadmap.
 
 ## Deploy lifecycle
@@ -54,7 +56,8 @@ Root host serves `studio/` with COOP/COEP. It embeds cresslet-container (our in-
 ## Roadmap
 
 - Hosted instance + wildcard TLS; GitHub OAuth / email-verified login.
-- Stronger isolation: per-app UID + cgroups, or move sandboxes to workerd / Firecracker.
+- Stronger isolation: per-app UID + cgroups, or Firecracker. workerd alone is not a hardened multi-tenant boundary (Cloudflare adds more layers in production).
+- Move db/file bindings off the control-plane thread (worker thread or per-app helper) if sync SQLite becomes a bottleneck.
 - Secrets encrypted at rest; egress allowlist for claimed apps.
 - Custom domains, cron/scheduled handlers, websockets.
 - Source sync (git) so studio and CLI edit the same project.

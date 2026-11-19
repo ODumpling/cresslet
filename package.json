@@ -1,0 +1,25 @@
+{
+  "name": "cresslet",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "node --watch-path=server --watch-path=runtime server/main.ts",
+    "start": "node server/main.ts",
+    "test": "node --test --test-concurrency=1 \"tests/*_test.ts\"",
+    "check": "tsc --noEmit",
+    "vendor": "node scripts/vendor-container.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.9",
+    "hono": "^4.13.19",
+    "undici": "^8.12.4",
+    "workerd": "^1.20261119.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
