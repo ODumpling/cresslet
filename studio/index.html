@@ -40,6 +40,11 @@
         <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
         <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
         <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+        <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></symbol>
+        <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+        <symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></symbol>
+        <symbol id="i-window" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M2 9h20M6 6.5h.01M9 6.5h.01"/></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
       </defs>
     </svg>
 
@@ -100,24 +105,202 @@
           </button>
         </header>
 
-        <main id="home" class="page" hidden aria-labelledby="home-title">
-          <section class="hero">
+        <!-- Landing: what logged-out visitors with no projects see at #/ (no sidebar; the studio starts at a template). -->
+        <header class="site-nav" id="site-nav" hidden>
+          <a class="site-brand" href="#/">
+            <svg class="brand-mark" aria-hidden="true"><use href="#i-logo" /></svg>
+            <span>Cresslet</span>
+          </a>
+          <nav class="site-links" aria-label="Site">
+            <a href="https://github.com/ODumpling/cresslet#docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a>
+            <a href="https://github.com/ODumpling/cresslet-cli" target="_blank" rel="noopener">CLI<span class="sr-only"> (opens in a new tab)</span></a>
+            <a href="https://github.com/ODumpling/cresslet" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a>
+          </nav>
+          <div class="spacer"></div>
+          <button class="btn" id="landing-login" type="button"><svg class="icon" aria-hidden="true"><use href="#i-github" /></svg>Log in</button>
+          <button class="btn primary site-start" type="button" data-start>Start building</button>
+        </header>
+
+        <main id="landing" class="landing" hidden aria-labelledby="landing-title">
+          <section class="l-hero">
             <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>Open source · self-hostable</p>
-            <h1 id="home-title" tabindex="-1">Build it in the browser. <span class="accent-text">Ship it in a second.</span></h1>
-            <p class="lede">Start from a template, edit with a live preview, and deploy to its own sandbox, database and subdomain in one click.</p>
-            <div class="cli">
-              <span class="cli-label" id="cli-label">Prefer your terminal or an agent?</span>
-              <div class="cli-box">
-                <code id="cli-cmd"><span class="cli-prompt" aria-hidden="true">$ </span>npx github:ODumpling/cresslet-cli new my-app</code>
-                <button class="icon-btn" id="cli-copy" type="button" aria-describedby="cli-label">
-                  <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg><span class="sr-only">Copy command</span>
-                </button>
+            <h1 id="landing-title" tabindex="-1">Build it in the browser. <span class="accent-text">Ship it in a second.</span></h1>
+            <p class="lede">Pick a template, edit it with a live preview, and deploy it to its own sandbox, database and subdomain. No setup, nothing to install.</p>
+            <div class="cta-row">
+              <button class="btn primary lg" type="button" data-start>Start building<svg class="icon" aria-hidden="true"><use href="#i-arrow" /></svg></button>
+              <a class="btn lg" href="https://github.com/ODumpling/cresslet" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-github" /></svg>View on GitHub<span class="sr-only"> (opens in a new tab)</span></a>
+            </div>
+            <p class="l-note" id="landing-note">Free and open source. No account needed to try it.</p>
+
+            <!-- A picture of the studio, drawn in HTML so it follows the theme. -->
+            <div class="mock" role="img" aria-label="The studio: files, code and a live preview of a todo app side by side, with a Deploy button">
+              <div class="mock-bar">
+                <span class="mock-dots"><i></i><i></i><i></i></span>
+                <span class="mock-name"><svg class="brand-mark" aria-hidden="true"><use href="#i-logo" /></svg>my-app</span>
+                <span class="mock-status"><span class="dot" data-s="live"></span>Ready</span>
+                <span class="spacer"></span>
+                <span class="mock-deploy"><svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Deploy</span>
               </div>
+              <div class="mock-body">
+                <div class="mock-files">
+                  <span class="mock-dir">server</span>
+                  <span class="d1 on">index.ts</span>
+                  <span class="mock-dir">src</span>
+                  <span class="d1">App.tsx</span>
+                  <span class="d1">main.tsx</span>
+                  <span class="d1">styles.css</span>
+                  <span>cresslet.json</span>
+                  <span>index.html</span>
+                  <span>package.json</span>
+                </div>
+<pre class="mock-code"><span class="c">// server/index.ts: handles /api/*</span>
+<span class="k">export default</span> {
+  <span class="k">async</span> <span class="f">fetch</span>(req, env) {
+    <span class="k">const</span> todos = <span class="k">await</span> env.db.<span class="f">query</span>(
+      <span class="s">"SELECT * FROM todos"</span>,
+    );
+    <span class="k">return</span> Response.<span class="f">json</span>(todos);
+  },
+};</pre>
+                <div class="mock-preview">
+                  <div class="mock-url"><svg class="icon" aria-hidden="true"><use href="#i-globe" /></svg><span class="js-app-host">my-app.cresslet.dev</span></div>
+                  <div class="mock-app">
+                    <strong>Todos</strong>
+                    <span class="mock-input">What needs doing?</span>
+                    <span class="mock-todo done"><i></i>Pick a template</span>
+                    <span class="mock-todo done"><i></i>Edit with a live preview</span>
+                    <span class="mock-todo"><i></i>Deploy it</span>
+                  </div>
+                </div>
+              </div>
+              <span class="mock-toast"><span class="dot" data-s="live"></span>Live on <span class="js-app-host">my-app.cresslet.dev</span></span>
             </div>
           </section>
-          <section class="block" aria-labelledby="templates-title">
+
+          <section class="l-section" aria-labelledby="how-title">
+            <p class="kicker">How it works</p>
+            <h2 id="how-title">From idea to a live URL in three steps</h2>
+            <ol class="steps">
+              <li>
+                <span class="step-n" aria-hidden="true">1</span>
+                <h3>Pick a template</h3>
+                <p>A React app with an API and SQLite, or plain HTML and TypeScript. It opens in the studio, ready to run.</p>
+              </li>
+              <li>
+                <span class="step-n" aria-hidden="true">2</span>
+                <h3>Edit with a live preview</h3>
+                <p>Code, terminal and preview side by side. <code>npm install</code> and the dev server run right in your tab.</p>
+              </li>
+              <li>
+                <span class="step-n" aria-hidden="true">3</span>
+                <h3>Deploy</h3>
+                <p>One click and it's live on <code class="js-app-host">my-app.cresslet.dev</code>, with its own database and files.</p>
+              </li>
+            </ol>
+          </section>
+
+          <section class="l-section" aria-labelledby="features-title">
+            <p class="kicker">Everything included</p>
+            <h2 id="features-title">A whole platform, not just a preview</h2>
+            <p class="l-sub">Every app comes with what it needs to be real, and none of it needs wiring up.</p>
+            <ul class="features">
+              <li>
+                <span class="feature-icon" aria-hidden="true"><svg class="icon"><use href="#i-window" /></svg></span>
+                <h3>Runs in your browser</h3>
+                <p>npm, a dev server and hot reload run in the tab on Cresslet's own runtime. No VM, no install.</p>
+              </li>
+              <li>
+                <span class="feature-icon" aria-hidden="true"><svg class="icon"><use href="#i-rocket" /></svg></span>
+                <h3>Live in a second</h3>
+                <p>Deploys go live on their own subdomain in under a second. Your last 10 stay a rollback away.</p>
+              </li>
+              <li>
+                <span class="feature-icon" aria-hidden="true"><svg class="icon"><use href="#i-database" /></svg></span>
+                <h3>Database and files built in</h3>
+                <p>Each app gets a SQLite database, file storage and secrets. No services to set up.</p>
+              </li>
+              <li>
+                <span class="feature-icon" aria-hidden="true"><svg class="icon"><use href="#i-shield" /></svg></span>
+                <h3>Every app in its own sandbox</h3>
+                <p>Apps run isolated from each other, with memory, request and network limits.</p>
+              </li>
+              <li>
+                <span class="feature-icon" aria-hidden="true"><svg class="icon"><use href="#i-bot" /></svg></span>
+                <h3>Made for agents</h3>
+                <p>Templates ship <code>AGENTS.md</code>, every CLI command speaks <code>--json</code>, and the server serves <code>/llms.txt</code>.</p>
+              </li>
+              <li>
+                <span class="feature-icon" aria-hidden="true"><svg class="icon"><use href="#i-github" /></svg></span>
+                <h3>Open source, self-hostable</h3>
+                <p>MIT licensed. Run the whole platform on your own server with Node or Docker.</p>
+              </li>
+            </ul>
+          </section>
+
+          <section class="l-section" aria-labelledby="landing-templates-title">
+            <p class="kicker">Start now</p>
+            <h2 id="landing-templates-title" tabindex="-1">Pick a template</h2>
+            <p class="l-sub">It opens in the studio, ready to edit, run and deploy.</p>
+            <div class="grid l-templates" id="landing-templates"><p class="muted">Loading templates…</p></div>
+          </section>
+
+          <section class="l-section l-split" aria-labelledby="cli-title">
+            <div>
+              <p class="kicker">Terminal and agents</p>
+              <h2 id="cli-title">Prefer your terminal or an agent?</h2>
+              <p class="l-sub">The same apps, from your editor or a coding agent. The CLI scaffolds, runs and deploys, and every command takes <code>--json</code>.</p>
+              <ul class="checks">
+                <li><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>Same runtime locally, in the browser and in production</li>
+                <li><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>Logs, database and secrets from the command line</li>
+                <li><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>Deploy from CI with a scoped API token</li>
+              </ul>
+            </div>
+            <div class="term">
+              <div class="term-bar">
+                <span class="mock-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span class="term-title" id="term-title">Terminal</span>
+                <button class="icon-btn" type="button" data-copy="npx github:ODumpling/cresslet-cli new my-app" aria-describedby="term-title">
+                  <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg><span class="sr-only">Copy the first command</span>
+                </button>
+              </div>
+<pre class="term-body" tabindex="0" aria-labelledby="term-title"><code><span class="p" aria-hidden="true">$ </span>npx github:ODumpling/cresslet-cli new my-app
+<span class="p" aria-hidden="true">$ </span>cd my-app &amp;&amp; npm install &amp;&amp; npm run dev
+<span class="p" aria-hidden="true">$ </span>npx cresslet deploy
+<span class="ok">✓ Live at <span class="js-app-url">https://my-app.cresslet.dev</span></span></code></pre>
+            </div>
+          </section>
+
+          <section class="l-cta" aria-labelledby="cta-title">
+            <h2 id="cta-title">Your next app is one click away</h2>
+            <p class="l-sub" id="cta-note">Free and open source. Start in the browser, no account needed.</p>
+            <div class="cta-row">
+              <button class="btn primary lg" type="button" data-start>Start building<svg class="icon" aria-hidden="true"><use href="#i-arrow" /></svg></button>
+              <a class="btn lg" href="https://github.com/ODumpling/cresslet/blob/main/docs/self-hosting.md" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-server" /></svg>Self-host it<span class="sr-only"> (opens in a new tab)</span></a>
+            </div>
+          </section>
+
+          <footer class="l-foot">
+            <span class="site-brand small"><svg class="brand-mark" aria-hidden="true"><use href="#i-logo" /></svg>Cresslet</span>
+            <span class="muted small">MIT licensed</span>
+            <span class="spacer"></span>
+            <a href="https://github.com/ODumpling/cresslet/blob/main/docs/api.md" target="_blank" rel="noopener">API<span class="sr-only"> (opens in a new tab)</span></a>
+            <a href="/llms.txt">llms.txt</a>
+            <a href="https://github.com/ODumpling/cresslet-container" target="_blank" rel="noopener">Runtime<span class="sr-only"> (opens in a new tab)</span></a>
+            <a href="https://github.com/ODumpling/cresslet" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a>
+          </footer>
+        </main>
+
+        <main id="home" class="page" hidden aria-labelledby="home-title">
+          <header class="page-head">
+            <div>
+              <h1 id="home-title" tabindex="-1">Projects</h1>
+              <p class="muted">Start something new, or pick up where you left off.</p>
+            </div>
+          </header>
+          <section class="block first" aria-labelledby="templates-title">
             <div class="block-head">
-              <h2 id="templates-title">Start from a template</h2>
+              <h2 id="templates-title">New project</h2>
+              <p class="muted small">Pick a template</p>
             </div>
             <div class="grid" id="templates"><p class="muted">Loading templates…</p></div>
           </section>
@@ -134,6 +317,20 @@
               <p class="muted small">Live on this server</p>
             </div>
             <div id="apps"></div>
+          </section>
+          <section class="block" aria-labelledby="cli-label">
+            <div class="panel split cli-panel">
+              <div>
+                <h2 id="cli-label">Prefer your terminal or an agent?</h2>
+                <p class="muted small">Scaffold, run and deploy with the CLI. Every command takes <code>--json</code>.</p>
+              </div>
+              <div class="cli-box">
+                <code id="cli-cmd"><span class="cli-prompt" aria-hidden="true">$ </span>npx github:ODumpling/cresslet-cli new my-app</code>
+                <button class="icon-btn" id="cli-copy" type="button" aria-describedby="cli-label">
+                  <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg><span class="sr-only">Copy command</span>
+                </button>
+              </div>
+            </div>
           </section>
         </main>
 
