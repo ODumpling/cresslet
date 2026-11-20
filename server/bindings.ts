@@ -28,7 +28,23 @@ const TEMP_CREATE = new Set([
   constants.SQLITE_CREATE_TEMP_TRIGGER,
   constants.SQLITE_CREATE_TEMP_VIEW,
 ]);
-const VACUUM = /^\s*vacuum(\s+main)?\s*;?\s*$/i;
+/** True if `sql` is one plain VACUUM (comments allowed). Any quote: no (strings can hide comment marks). */
+function isVacuum(sql: string): boolean {
+  let out = "";
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i];
+    if (c === "-" && sql[i + 1] === "-") {
+      while (i < sql.length && sql[i] !== "\n") i++;
+      out += " ";
+    } else if (c === "/" && sql[i + 1] === "*") {
+      const end = sql.indexOf("*/", i + 2);
+      i = end < 0 ? sql.length : end + 1;
+      out += " ";
+    } else if (`'"\`[`.includes(c)) return false;
+    else out += c;
+  }
+  return /^\s*vacuum(\s+main)?\s*;?\s*$/i.test(out);
+}
 export function confine(db: DatabaseSync, vacuum: () => boolean = () => false) {
   db.enableDefensive(true); // no writable_schema tricks on its own file either
   db.setAuthorizer((action, arg1, arg2) => {
@@ -55,7 +71,7 @@ export function createDb(path: string, maxBytes?: number) {
   confine(db, () => vacuuming);
   /** Runs `fn` for `sql`, letting VACUUM's own temp attach through only when `sql` is just VACUUM. */
   const guard = <T>(sql: string, fn: () => T): T => {
-    vacuuming = VACUUM.test(sql);
+    vacuuming = isVacuum(sql);
     try {
       return fn();
     } finally {
@@ -103,14 +119,12 @@ export function createFiles(dir: string) {
   return {
     async put(key: string, bytes: Uint8Array, contentType: string) {
       const k = safeKey(key);
-      // Index first: its size counts against the quota from now on, even if this write is cut off
-      // (a redeploy closes these bindings) and another instance checks the quota meanwhile.
+      await mkdir(dirname(blob(k)), { recursive: true });
+      await writeFile(blob(k), bytes);
       meta.prepare(
         `INSERT INTO files (key, size, content_type, updated_at) VALUES (?, ?, ?, ?)
          ON CONFLICT (key) DO UPDATE SET size = excluded.size, content_type = excluded.content_type, updated_at = excluded.updated_at`,
       ).run(k, bytes.byteLength, contentType || "application/octet-stream", Date.now());
-      await mkdir(dirname(blob(k)), { recursive: true });
-      await writeFile(blob(k), bytes);
     },
     async get(key: string): Promise<Response | null> {
       const k = safeKey(key);
@@ -168,6 +182,20 @@ const replacer = (_k: string, v: unknown) =>
     ? { $bytes: Buffer.from(v).toString("base64") }
     : v;
 
+/**
+ * One queue per app's files, shared by every bindings instance of it (a redeploy opens new ones while
+ * the old one's requests finish): writes and deletes run one at a time, in order, each quota check
+ * seeing every earlier write.
+ */
+const fileQueues = new Map<string, Promise<unknown>>();
+function serialized<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  const run = (fileQueues.get(dir) ?? Promise.resolve()).then(fn);
+  const tail = run.catch(() => {});
+  fileQueues.set(dir, tail);
+  void tail.then(() => fileQueues.get(dir) === tail && fileQueues.delete(dir));
+  return run;
+}
+
 /** One app's bindings, served as a fetch handler for its sandbox. */
 export function createBindings(
   dataDir: string,
@@ -182,13 +210,9 @@ export function createBindings(
 ) {
   const db = createDb(join(dataDir, "db.sqlite"), maxDbBytes);
   // File writes and deletes run one at a time, so the quota check sees every earlier write.
-  let queue: Promise<unknown> = Promise.resolve();
-  const serial = <T>(fn: () => Promise<T>): Promise<T> => {
-    const run = queue.then(fn);
-    queue = run.catch(() => {});
-    return run;
-  };
-  const files = createFiles(join(dataDir, "files"));
+  const filesDir = resolve(dataDir, "files");
+  const serial = <T>(fn: () => Promise<T>) => serialized(filesDir, fn);
+  const files = createFiles(filesDir);
   const text = (s: string, status: number) => new Response(s, { status });
 
   async function fetch(req: Request): Promise<Response> {
@@ -242,7 +266,8 @@ export function createBindings(
     fetch,
     close() {
       db.close();
-      files.close();
+      // Writes already accepted finish first (they're in the app's queue, which outlives us).
+      void serialized(filesDir, async () => files.close());
     },
   };
 }

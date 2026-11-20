@@ -242,3 +242,42 @@ test("files cap counts a write cut off by a redeploy (another bindings instance 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("files across a redeploy: writes to one key land in order; a failed write leaves nothing behind", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-filecap4-"));
+  try {
+    const put = (b: ReturnType<typeof createBindings>, key: string, n: number) =>
+      b.fetch(new Request(`http://h/files?key=${key}`, { method: "PUT", body: new Uint8Array(n) }));
+    const list = async (b: ReturnType<typeof createBindings>) =>
+      (await (await b.fetch(new Request("http://h/files/list"))).json()) as { key: string; size: number }[];
+    const old = createBindings(dir, { maxFilesBytes: 1000 });
+    const first = put(old, "a", 60);
+    await new Promise((r) => setImmediate(r)); // body read, write queued (accepted)
+    old.close();
+    const next = createBindings(dir, { maxFilesBytes: 1000 });
+    const second = put(next, "a", 20);
+    assert.deepEqual([(await first).status, (await second).status], [204, 204]);
+    assert.deepEqual((await list(next)).map((f) => [f.key, f.size]), [["a", 20]]);
+    assert.equal((await (await next.fetch(new Request("http://h/files?key=a"))).arrayBuffer()).byteLength, 20);
+
+    assert.equal((await put(next, "d/x", 10)).status, 204);
+    assert.equal((await put(next, "d", 10)).status, 400, "d is a directory");
+    assert.deepEqual((await list(next)).map((f) => f.key), ["a", "d/x"], "no phantom entry");
+    next.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("VACUUM with comments works; comments can't smuggle a second statement", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-vac-"));
+  try {
+    const db = createDb(join(dir, "db.sqlite"), 256 * 1024);
+    db.exec("/* tidy */ VACUUM -- now\n");
+    assert.throws(() => db.exec("VACUUM -- /*\n; ATTACH '' AS x; -- */"), /not authorized|authorization denied/);
+    assert.throws(() => db.exec("VACUUM /* '*/; ATTACH '' AS x"), /not authorized|authorization denied/);
+    db.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
