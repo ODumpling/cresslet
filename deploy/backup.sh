@@ -21,20 +21,24 @@ KEEP=${CRESSLET_BACKUP_KEEP:-14}
 REMOTE=${CRESSLET_BACKUP_RCLONE:-}
 KEY_REMOTE=${CRESSLET_BACKUP_KEY_RCLONE:-}
 ENV_KEY=${CRESSLET_BACKUP_ENV_KEY:-}
-for r in "$REMOTE" "$KEY_REMOTE"; do
-  [ -n "$r" ] || continue
-  # name:path, name a configured remote exactly (not a local path, not `name,option:`).
-  case $r in *:?*) rclone listremotes | grep -qxF "${r%%:*}:" && continue ;; esac
-  echo "cresslet-backup: $r isn't name:path with a remote from \`rclone listremotes\`" >&2
-  exit 1
-done
-if [ -n "$REMOTE" ] && [ "${KEY_REMOTE%%:*}" = "${REMOTE%%:*}" ]; then
-  echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE needs its own rclone remote (other credentials), not ${REMOTE%%:*}:" >&2
-  exit 1
-fi
+# At --install, and before uploading (after the local snapshot, which a broken rclone setup mustn't stop).
+check_remotes() {
+  for r in "$REMOTE" "$KEY_REMOTE"; do
+    [ -n "$r" ] || continue
+    # name:path, name a configured remote exactly (not a local path, not `name,option:`).
+    case $r in *:?*) rclone listremotes | grep -qxF "${r%%:*}:" && continue ;; esac
+    echo "cresslet-backup: $r isn't name:path with a remote from \`rclone listremotes\` (rclone set up for root?)" >&2
+    exit 1
+  done
+  if [ -n "$REMOTE" ] && [ "${KEY_REMOTE%%:*}" = "${REMOTE%%:*}" ]; then
+    echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE needs its own rclone remote (other credentials), not ${REMOTE%%:*}:" >&2
+    exit 1
+  fi
+}
 
 docker volume inspect "$VOL" >/dev/null
 if [ "${2:-}" = --install ]; then
+  check_remotes
   case $DIR$KEEP$REMOTE$KEY_REMOTE$ENV_KEY in
     *[%\\\"]*) echo "cresslet-backup: % \\ and \" can't go into the unit's Environment=" >&2; exit 1 ;;
   esac
@@ -139,6 +143,7 @@ echo "cresslet-backup: $DIR/$NAME ($(du -h "$DIR/$NAME" | cut -f1))"
 ls -1t "$DIR"/cresslet-*.tgz | tail -n +"$((KEEP + 1))" | while read -r old; do rm -f "$old"; done
 
 # Off-site: the keys first. A snapshot doesn't go without its key (it couldn't be restored).
+check_remotes
 if [ -n "$KEY_REMOTE" ]; then
   # --immutable: an existing copy that differs is an error, not overwritten (copyto would replace it).
   rclone copy --immutable --checksum --include "/secrets-*.key" "$DIR" "$KEY_REMOTE"
