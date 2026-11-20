@@ -365,10 +365,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .status[data-state="error"] { color: var(--danger); background: var(--danger-soft); border-color: transparent; }
 @keyframes pulse { 50% { opacity: 0.35; } }
 .spacer { flex: 1; }
-.deploy-link {
-  display: inline-flex; align-items: center; gap: 6px; font-size: 13px; max-width: 22rem;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
+.deploy-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; max-width: 22rem; min-width: 0; }
+.deploy-url { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .workspace {
   flex: 1; min-height: 0; display: grid; gap: 1px; background: var(--line); overflow: auto;
@@ -399,14 +397,17 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 /* How to leave the editor/terminal (Tab is theirs): shown over the pane while it has focus, at every width. */
 .pane { position: relative; }
 .kbd-hint {
-  position: absolute; z-index: 5; right: 10px; bottom: 10px; max-width: calc(100% - 20px); display: none;
+  position: absolute; z-index: 202; right: 8px; bottom: 6px; max-width: calc(100% - 20px); display: none;
   padding: 4px 9px; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--surface-2);
   box-shadow: var(--shadow); font-size: 12px; color: var(--text-2); pointer-events: none;
 }
 .editor-pane:has(.editor:focus-within) .kbd-hint, .bottom-pane:has(.terminal:focus-within) .kbd-hint { display: block; }
 .kbd-hint kbd { font: 500 11px var(--mono); padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--text); }
 .editor { flex: 1; min-height: 0; overflow: hidden; }
-.editor:focus-within, .terminal:focus-within { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* The editor's ring sits on an overlay: CodeMirror's opaque layers and sticky gutters (z-index 200) cover its box. */
+.editor { position: relative; }
+.editor:focus-within::after { content: ""; position: absolute; inset: 0; z-index: 201; pointer-events: none; outline: 2px solid var(--focus); outline-offset: -2px; }
+.terminal:focus-within { outline: 2px solid var(--focus); outline-offset: -2px; }
 .editor .cm-editor.cm-focused { outline: none; }
 .editor .cm-editor { height: 100%; }
 .editor .cm-editor, .editor .cm-gutters { background: var(--surface) !important; }
@@ -504,7 +505,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   .topbar { flex-wrap: wrap; height: auto; min-height: 52px; padding: 8px 12px; }
   #project-name { width: 9rem; }
   .deploy-link { min-width: 0; flex: 0 1 auto; }
-  .list-row { flex-wrap: wrap; }
+  .list > .list-row { flex-wrap: wrap; }
   .list > .list-row .meta { margin-left: 0; text-align: left; }
 }
 @media (max-width: 520px) {
@@ -529,5 +530,5 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   .usage-bar span { forced-color-adjust: none; border: 1px solid CanvasText; }
   .brand-mark { color: CanvasText; }
   .nav a[aria-current="page"] .icon, .tree li > button[aria-current="true"] .icon { color: inherit; }
-  :focus-visible, .editor:focus-within, .terminal:focus-within { outline-color: Highlight; }
+  :focus-visible, .editor:focus-within::after, .terminal:focus-within { outline-color: Highlight; }
 }

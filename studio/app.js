@@ -376,10 +376,11 @@ function siteActions(site, after) {
       ariaLabel: `${label} ${site.name}`,
       onclick: async (e) => {
         const b = e.currentTarget; // null after the await
-        const gen = routeGen;
+        const gen = [routeGen, adminView.gen];
         b.disabled = true;
         const done = await adminAction(site, action);
-        if (gen !== routeGen) return; // navigated away meanwhile: leave the new view alone
+        // navigated away or refreshed meanwhile: leave the new view alone
+        if (gen[0] !== routeGen || gen[1] !== adminView.gen) return;
         if (done) after(action);
         else {
           b.disabled = false;
@@ -1002,7 +1003,7 @@ function showDeployLink(deploy) {
   a.hidden = !deploy?.url;
   if (deploy?.url) {
     a.href = deploy.url;
-    a.replaceChildren(icon("globe"), deploy.url.replace(/^https?:\/\//, ""), srOnly(" (live app, opens in a new tab)"));
+    a.replaceChildren(icon("globe"), el("span", { className: "deploy-url", textContent: deploy.url.replace(/^https?:\/\//, "") }), srOnly(" (live app, opens in a new tab)"));
   }
 }
 

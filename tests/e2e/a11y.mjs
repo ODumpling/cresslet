@@ -75,7 +75,14 @@ try {
   await page.keyboard.press("Escape");
   await page.keyboard.press("Tab");
   assert(!(await page.evaluate(() => !!document.activeElement.closest(".xterm"))), "Esc, Tab didn't leave the terminal");
+  // The editor's focus ring must be painted (CodeMirror's layers can cover it): the editor's bottom-left
+  // edge (gutter, away from the active line) looks different focused and unfocused.
+  const box = await page.locator("#editor").boundingBox();
+  const edge = { x: box.x, y: box.y + box.height - 24, width: 3, height: 20 };
+  const unfocused = await page.screenshot({ clip: edge });
   await page.locator(".cm-content").click();
+  await page.waitForTimeout(100);
+  assert(!(await page.screenshot({ clip: edge })).equals(unfocused), "editor focus ring not visible");
   assert(await page.locator("#editor-help").isVisible(), "editor exit hint not shown while the editor has focus");
   await page.keyboard.press("Escape");
   await page.keyboard.press("Tab");
