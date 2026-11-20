@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { bindingsSettled, createBindings, serveBindings } from "../server/bindings.ts";
 import { createServer } from "../server/main.ts";
@@ -64,6 +65,27 @@ test("bindings after a restart hold file writes until the previous thread is gon
     assert.equal((await put).status, 204);
     await b.close();
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("bindings thread: a write waits for a lock the app's previous thread still holds", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-bbusy-"));
+  const run = await mkdtemp("/tmp/cbt-");
+  const old = new DatabaseSync(join(dir, "db.sqlite")); // stands in for the previous thread, mid-transaction
+  let b: { close(): void } | undefined;
+  try {
+    old.exec("PRAGMA journal_mode = WAL; CREATE TABLE t (x); BEGIN IMMEDIATE; INSERT INTO t VALUES (1)");
+    b = await serveBindings(dir, join(run, "h.sock"), {});
+    const write = call(join(run, "h.sock"), "/db/run", "POST", JSON.stringify({ sql: "INSERT INTO t VALUES (2)" }));
+    setTimeout(() => old.exec("COMMIT"), 200);
+    assert.deepEqual(JSON.parse((await write).text).changes, 1);
+    assert.deepEqual(old.prepare("SELECT x FROM t ORDER BY x").all().map((r) => r.x), [1, 2]);
+  } finally {
+    b?.close();
+    await bindingsSettled();
+    old.close();
+    await rm(run, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
   }
 });

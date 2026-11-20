@@ -61,9 +61,15 @@ export function confine(db: DatabaseSync, vacuum: () => boolean = () => false) {
   return db;
 }
 
+/**
+ * Lock waits: a restarted app's bindings thread opens its files while the previous thread may still
+ * be finishing a write (it runs on its own thread, so only that app waits).
+ */
+const BUSY_MS = 5000;
+
 /** `maxBytes`: size cap (writes past it fail with SQLITE_FULL, "database or disk is full"). */
 export function createDb(path: string, maxBytes?: number) {
-  const db = new DatabaseSync(path);
+  const db = new DatabaseSync(path, { timeout: BUSY_MS });
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA journal_size_limit = 67108864;");
   if (maxBytes) {
     const { page_size } = db.prepare("PRAGMA page_size").get() as { page_size: number };
@@ -110,7 +116,7 @@ export function safeKey(key: string): string {
 export function createFiles(dir: string) {
   const root = resolve(dir, "blobs");
   mkdirSync(root, { recursive: true });
-  const meta = new DatabaseSync(join(dir, "index.sqlite"));
+  const meta = new DatabaseSync(join(dir, "index.sqlite"), { timeout: BUSY_MS });
   meta.exec(`PRAGMA journal_mode = WAL; CREATE TABLE IF NOT EXISTS files (
     key TEXT PRIMARY KEY, size INTEGER NOT NULL, content_type TEXT NOT NULL, updated_at INTEGER NOT NULL)`);
   const blob = (k: string) => {
