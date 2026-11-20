@@ -17,7 +17,11 @@ export default {
       if (req.headers.get("upgrade") !== "websocket") return new Response("expected a WebSocket", { status: 426 });
       const [client, server] = Object.values(new WebSocketPair());
       server.accept();
-      console.log("clone sees upgrade " + req.clone().headers.get("upgrade"));
+      req.headers.set("x-edit", "1");
+      const copy = req.clone();
+      console.log("clone sees upgrade " + copy.headers.get("upgrade") + " edit " + copy.headers.get("x-edit"));
+      class Mine extends Response {}
+      console.log("plain is Mine " + (new Response("x") instanceof Mine) + ", Mine is Response " + (new Mine("x") instanceof Response));
       server.send("welcome " + boot + " " + url.search);
       let queue = Promise.resolve();
       server.onmessage = (e) => (queue = queue.then(async () => {
@@ -56,6 +60,8 @@ const waitFor = async (fn, what, tries = 150) => {
     await page.waitForTimeout(200);
   }
 };
+// Socket waits in the preview fail after 20 s rather than hang.
+const within = (p, what) => Promise.race([p, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out: ${what}`)), 20000))]);
 const frame = async () => (await page.locator("#preview").elementHandle()).contentFrame();
 // Replaces (or appends to) server/index.ts in the editor; the dev server restarts the app's server.
 const editServer = async (text, append = false) => {
@@ -78,7 +84,7 @@ try {
 
   // Round trip: subprotocol, text, binary (ArrayBuffer and Blob), server-initiated close.
   const f = await frame();
-  const roundTrip = await f.evaluate(() => new Promise((resolve, reject) => {
+  const roundTrip = await within(f.evaluate(() => new Promise((resolve, reject) => {
     const events = [];
     const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/ws?room=1`, ["chat", "other"]);
     ws.binaryType = "arraybuffer";
@@ -92,44 +98,45 @@ try {
     };
     ws.onmessage = (e) => events.push(typeof e.data === "string" ? e.data.replace(/^welcome \w+/, "welcome") : [...new Uint8Array(e.data)]);
     ws.onclose = (e) => resolve({ events, code: e.code, reason: e.reason, wasClean: e.wasClean });
-  }));
+  })), "round trip");
   assert(same(roundTrip, {
     events: [{ open: "chat" }, "welcome ?room=1", "echo hi", [1, 2, 3], [98, 108, 111, 98]],
     code: 4000, reason: "bye yourself", wasClean: true,
   }), `round trip: ${JSON.stringify(roundTrip)}`);
   await waitFor(async () => /after close\(\) readyState 2[\s\S]*\[server\] server saw close 4000 bye yourself/.test(await term.innerText()), "the server end's own close, after close() returned");
-  assert(/\[server\] clone sees upgrade websocket/.test(await term.innerText()), "req.clone() keeps the handshake headers");
+  assert(/\[server\] clone sees upgrade websocket edit 1/.test(await term.innerText()), "req.clone() keeps the handshake headers and edits");
+  assert(/\[server\] plain is Mine false, Mine is Response true/.test(await term.innerText()), "app Response subclasses keep the usual instanceof");
   console.log("round trip:", JSON.stringify(roundTrip));
 
   // Client close reaches the app's server end; HTTP still works alongside.
-  const clientClose = await f.evaluate(() => new Promise((resolve) => {
+  const clientClose = await within(f.evaluate(() => new Promise((resolve) => {
     const ws = new WebSocket("/api/ws");
     ws.onmessage = () => ws.close(1000, "done here");
     ws.onclose = async (e) => resolve({ code: e.code, api: (await (await fetch("/api/x")).json()).native });
-  }));
+  })), "client close");
   assert(same(clientClose, { code: 1000, api: true }), `client close: ${JSON.stringify(clientClose)}`);
   await waitFor(async () => /\[server\] server saw close 1000 done here/.test(await term.innerText()), "the server end's close");
   console.log("client close reached the server");
 
   // A refused upgrade (no WebSocketPair): error, then close 1006, like a browser.
-  const refused = await f.evaluate(() => new Promise((resolve) => {
+  const refused = await within(f.evaluate(() => new Promise((resolve) => {
     const events = [];
     const ws = new WebSocket("/api/nope");
     ws.onopen = () => events.push("open");
     ws.onerror = () => events.push("error");
     ws.onclose = (e) => resolve({ events, code: e.code });
-  }));
+  })), "refused upgrade");
   assert(same(refused, { events: ["error"], code: 1006 }), `refused: ${JSON.stringify(refused)}`);
   console.log("refused upgrade:", JSON.stringify(refused));
 
   // Worker restart, with the old server stuck in a loop: an open socket gets close 1012, the stuck request a 503,
   // and reconnecting reaches the new server.
-  await f.evaluate(() => new Promise((resolve) => {
+  await within(f.evaluate(() => new Promise((resolve) => {
     const ws = (window.__ws = new WebSocket("/api/ws"));
     window.__closed = null;
     ws.onmessage = (e) => ((window.__welcome = e.data), resolve());
     ws.onclose = (e) => (window.__closed = { code: e.code, reason: e.reason, wasClean: e.wasClean });
-  }));
+  })), "socket before the restart");
   await f.evaluate(() => void (window.__spin = fetch("/api/spin").then(async (r) => `${r.status} ${await r.text()}`)));
   await page.waitForTimeout(500);
   await editServer("\n// v2\n", true);
@@ -138,11 +145,11 @@ try {
   const spin = await f.evaluate(() => window.__spin);
   assert(spin === "503 server restarted", `stuck request: ${spin}`);
   assert(same(closed, { code: 1012, reason: "server restarting", wasClean: true }), `restart close: ${JSON.stringify(closed)}`);
-  const welcome2 = await f.evaluate(() => new Promise((resolve, reject) => {
+  const welcome2 = await within(f.evaluate(() => new Promise((resolve, reject) => {
     const ws = new WebSocket("/api/ws");
     ws.onerror = () => reject(new Error("reconnect failed"));
     ws.onmessage = (e) => (ws.close(), resolve(e.data));
-  }));
+  })), "reconnect");
   const boot2 = welcome2.split(" ")[1];
   assert(boot2 && boot2 !== boot1, `reconnect reached the old server: ${welcome2}`);
   console.log("worker restart (old one stuck): close", JSON.stringify(closed), "; stuck request:", spin, "; reconnected to boot", boot2, "(was", boot1 + ")");

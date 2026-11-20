@@ -106,9 +106,10 @@ globalThis.WebSocketPair = class WebSocketPair {
 };
 const NativeResponse = Response;
 globalThis.Response = class Response extends NativeResponse {
-  // fetch(), Response.json(), clone()… return native ones: still `instanceof Response` (Hono checks).
+  // fetch(), Response.json(), clone()… return native ones: still `instanceof Response` (Hono checks). Apps' own
+  // subclasses keep the usual check.
   static [Symbol.hasInstance](v) {
-    return v instanceof NativeResponse;
+    return this === globalThis.Response ? v instanceof NativeResponse : Function.prototype[Symbol.hasInstance].call(this, v);
   }
   constructor(body, init) {
     if (init?.status !== 101) return super(body, init);
@@ -252,11 +253,14 @@ onmessage = async ({ data: m, ports }) => {
       });
       const upgrade = new Headers(m.headers).get("upgrade")?.toLowerCase() === "websocket";
       // `Request` drops Upgrade, Connection, Sec-WebSocket-*, Origin.
-      const shadow = (r) => {
+      const shadow = (r, headers) => {
         const clone = r.clone.bind(r);
-        return Object.defineProperties(r, { headers: { value: new Headers(m.headers) }, clone: { value: () => shadow(clone()) } });
+        return Object.defineProperties(r, {
+          headers: { value: new Headers(headers) },
+          clone: { value: () => shadow(clone(), r.headers) }, // with any edits made since
+        });
       };
-      if (upgrade) shadow(req);
+      if (upgrade) shadow(req, m.headers);
       const res = await handler(req, env, { waitUntil() {} });
       if (!(res instanceof NativeResponse)) throw new Error("fetch handler must return a Response");
       if (res.status === 101) {
