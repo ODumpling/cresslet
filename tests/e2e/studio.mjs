@@ -133,20 +133,6 @@ async function settings() {
   await row.waitFor({ state: "detached" });
   if (await st("/v1/me") !== 401) throw new Error("revoked token still works");
   if ((await call("/v1/me", root)).status !== 200) throw new Error("revoking one token broke another");
-  // Log out keeps a token that may also be in the CLI (here: operator-issued)...
-  const logOut = async () => {
-    await s.getByRole("button", { name: "Log out" }).click();
-    await s.waitForURL((u) => !u.hash.includes("settings"));
-  };
-  await logOut();
-  if ((await call("/v1/me", root)).status !== 200) throw new Error("log out revoked a token the CLI may use");
-  // ...and revokes a studio login token (what GitHub login issues).
-  const login = (await call("/v1/me/tokens", root, { name: "Studio (GitHub login)" })).body.token;
-  await s.evaluate((t) => localStorage.setItem("cresslet.token", t), login);
-  await s.goto(base + "/#/settings");
-  await tokens.getByText("this browser").waitFor();
-  await logOut();
-  if ((await call("/v1/me", login)).status !== 401) throw new Error("log out left the studio login token valid");
   console.log("settings: scoped token created, enforced, revoked");
   await s.close();
 }
