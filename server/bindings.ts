@@ -15,8 +15,11 @@ const num = (v: number | bigint) => (typeof v === "bigint" ? Number(v) : v);
  * temp-dir pragmas, no fts3_tokenizer (native pointers). Plain VACUUM attaches an unnamed temp db: ok.
  */
 const DENIED_PRAGMAS = new Set(["temp_store_directory", "data_store_directory"]);
-/** Settable only by the host: they size the database's quota (max_page_count × page_size). */
-const SIZE_PRAGMAS = new Set(["max_page_count", "page_size"]);
+/**
+ * Settable only by the host: the quota (max_page_count × page_size) and what keeps the WAL file from
+ * growing past it (WAL mode, automatic checkpoints, journal_size_limit).
+ */
+const SIZE_PRAGMAS = new Set(["max_page_count", "page_size", "journal_mode", "wal_autocheckpoint", "journal_size_limit"]);
 export function confine(db: DatabaseSync) {
   db.enableDefensive(true); // no writable_schema tricks on its own file either
   db.setAuthorizer((action, arg1, arg2) => {
@@ -33,7 +36,7 @@ export function confine(db: DatabaseSync) {
 /** `maxBytes`: size cap (writes past it fail with SQLITE_FULL, "database or disk is full"). */
 export function createDb(path: string, maxBytes?: number) {
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+  db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA journal_size_limit = 67108864;");
   if (maxBytes) {
     const { page_size } = db.prepare("PRAGMA page_size").get() as { page_size: number };
     db.exec(`PRAGMA max_page_count = ${Math.max(1, Math.floor(maxBytes / page_size))}`);
@@ -156,6 +159,13 @@ export function createBindings(
   } = {},
 ) {
   const db = createDb(join(dataDir, "db.sqlite"), maxDbBytes);
+  // File writes and deletes run one at a time, so the quota check sees every earlier write.
+  let queue: Promise<unknown> = Promise.resolve();
+  const serial = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = queue.then(fn);
+    queue = run.catch(() => {});
+    return run;
+  };
   const files = createFiles(join(dataDir, "files"));
   const text = (s: string, status: number) => new Response(s, { status });
 
@@ -187,14 +197,16 @@ export function createBindings(
         if (req.method === "PUT") {
           const bytes = await readCapped(req, maxFileBytes);
           if (!bytes) return text(`file exceeds ${maxFileBytes} bytes`, 413);
-          if (maxFilesBytes && files.usage(key) + bytes.byteLength > maxFilesBytes) {
-            return text(`storage quota exceeded (${maxFilesBytes} bytes of files per app)`, 413);
-          }
-          await files.put(key, bytes, req.headers.get("content-type") ?? "");
-          return new Response(null, { status: 204 });
+          return await serial(async () => {
+            if (maxFilesBytes && files.usage(key) + bytes.byteLength > maxFilesBytes) {
+              return text(`storage quota exceeded (${maxFilesBytes} bytes of files per app)`, 413);
+            }
+            await files.put(key, bytes, req.headers.get("content-type") ?? "");
+            return new Response(null, { status: 204 });
+          });
         }
         if (req.method === "DELETE") {
-          await files.delete(key);
+          await serial(() => files.delete(key));
           return new Response(null, { status: 204 });
         }
       }

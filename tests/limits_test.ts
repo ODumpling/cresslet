@@ -166,3 +166,44 @@ test("storage caps apply to a running app's env.db and env.files", async () => {
     await t.done();
   }
 });
+
+test("quotas hold under concurrent requests", async () => {
+  const t = await setup({ maxAppsPerAccount: 2, maxAnonApps: 2, anonAppsPerHour: 100 });
+  try {
+    const a = t.bearer(await t.account("a@b.co"));
+    const mine = await Promise.all(["c1", "c2", "c3", "c4"].map((n) => t.deploy(a, n)));
+    assert.equal(mine.filter((r) => r.status === 201).length, 2, "account quota");
+    const anon = await Promise.all([1, 2, 3, 4].map(() => t.deploy({})));
+    assert.equal(anon.filter((r) => r.status === 201).length, 2, "instance-wide anonymous cap");
+  } finally {
+    await t.done();
+  }
+});
+
+test("files cap holds under concurrent puts", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-filecap2-"));
+  const b = createBindings(dir, { maxFilesBytes: 100 });
+  try {
+    const put = (key: string, n: number) =>
+      b.fetch(new Request(`http://h/files?key=${key}`, { method: "PUT", body: new Uint8Array(n) }));
+    const rs = await Promise.all([put("a", 60), put("b", 60), put("c", 60)]);
+    assert.deepEqual(rs.map((r) => r.status).sort(), [204, 413, 413]);
+  } finally {
+    b.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("apps can't turn off WAL checkpoints or change the journal mode", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-wal-"));
+  try {
+    const db = createDb(join(dir, "db.sqlite"), 1024 * 1024);
+    assert.throws(() => db.exec("PRAGMA wal_autocheckpoint = 0"), /not authorized/);
+    assert.throws(() => db.exec("PRAGMA journal_mode = DELETE"), /not authorized/);
+    assert.throws(() => db.exec("PRAGMA journal_size_limit = -1"), /not authorized/);
+    assert.equal((db.first("PRAGMA journal_mode") as { journal_mode: string }).journal_mode, "wal", "reading it is fine");
+    db.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

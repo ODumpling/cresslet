@@ -356,17 +356,21 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       if (!validName(name, cfg)) {
         throw new HttpError(400, "app name must be 1-40 chars of a-z, 0-9 and single dashes", "invalid_name");
       }
-      if (acct) checkAppQuota(acct);
-      else {
+      const anonCap = () => {
         if (store.anonAppCount() >= cfg.limits.maxAnonApps) {
           throw new HttpError(429, "too many anonymous apps on this server right now: log in to deploy (cresslet login)", "rate_limited");
         }
+      };
+      if (acct) checkAppQuota(acct);
+      else {
+        anonCap();
         if (!anonApps.take(clientIp(c))) {
           throw new HttpError(429, `too many new anonymous apps from your address (${cfg.limits.anonAppsPerHour} per hour): log in, or try later`, "rate_limited");
         }
       }
       const expires = acct ? null : Date.now() + cfg.limits.anonTtlMs;
-      const created = await store.createApp(name, expires, acct?.id ?? null);
+      // Checked again just before the insert: concurrent deploys can't share the last slot.
+      const created = await store.createApp(name, expires, acct?.id ?? null, () => acct ? checkAppQuota(acct) : anonCap());
       target = created.app;
       createdKey = created.deployKey;
       appDeploys.take(target.id);
