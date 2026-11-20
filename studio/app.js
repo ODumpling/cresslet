@@ -568,7 +568,8 @@ async function renderAdminSite(name) {
   const stats = el("div", { className: "stats" },
     stat("Status", [STATUS[s.status]], rt.running ? `pid ${rt.pid}` : s.server ? "Starts on the next request" : "Static site", el("i", { className: "dot", ariaHidden: "true", dataset: { s: s.status } })),
     stat("Site size", [fmtBytes(s.usage.deploys)], `${d.deploys.length} deploy${d.deploys.length === 1 ? "" : "s"} kept${dep ? ` · current ${fmtBytes(dep.bytes)}` : ""}`),
-    stat("Database", [s.usage.database ? fmtBytes(s.usage.database) : "—"], d.database.error ? "Couldn't read" : !d.database.tables.length ? "No database yet" : `${d.database.tables.length} tables · ${d.database.tables.reduce((n, t) => n + t.rows, 0).toLocaleString()} rows`),
+    // `database` is null unless you own the site: admins see its size, not its tables.
+    stat("Database", [s.usage.database ? fmtBytes(s.usage.database) : "—"], !d.database ? (s.usage.database ? "Tables visible to the owner only" : "No database yet") : d.database.error ? "Couldn't read" : !d.database.tables.length ? "No database yet" : `${d.database.tables.length} tables · ${d.database.tables.reduce((n, t) => n + t.rows, 0).toLocaleString()} rows`),
     stat("Files", [fmtBytes(s.usage.files)], `${fmtBytes(s.usage.total)} total on disk`));
 
   const kv = (pairs) => el("dl", { className: "kv" }, ...pairs.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
@@ -590,7 +591,7 @@ async function renderAdminSite(name) {
         el("thead", {}, el("tr", {}, ...heads.map((h, i) => el("th", { scope: "col", textContent: h, className: i ? "num" : "" })))),
         el("tbody", {}, ...rows.map((r) => el("tr", {}, ...r.map((c, i) => el("td", { className: i ? "num" : "" }, c)))))))
       : el("p", { className: "muted small", textContent: empty });
-  const db = el("div", { className: "panel" }, el("h2", { textContent: "Database tables" }),
+  const db = d.database && el("div", { className: "panel" }, el("h2", { textContent: "Database tables" }),
     d.database.error ? el("p", { className: "error small", textContent: d.database.error })
       : tableOf(["Table", "Rows"], d.database.tables.map((t) => [el("span", { className: "mono", textContent: t.name }), t.rows.toLocaleString()]), "No database yet."));
   const deploys = el("div", { className: "panel" }, el("h2", { textContent: "Deploys" }),
