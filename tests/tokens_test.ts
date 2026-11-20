@@ -69,18 +69,24 @@ test("named tokens: create, list (no secrets), last used, revoke one", async () 
 
     // A token revoked while its create request is still sending the body can't mint one.
     const doomed = (await t.mint(root, { name: "doomed" })).body;
-    const { readable, writable } = new TransformStream();
+    let reading!: () => void, send!: () => void;
+    const started = new Promise<void>((r) => (reading = r)), go = new Promise<void>((r) => (send = r));
     const slow = t.srv.handler(new Request("http://test.local/v1/me/tokens", {
       method: "POST",
       headers: { host: "test.local", "content-type": "application/json", ...t.bearer(doomed.token) },
-      body: readable,
+      body: new ReadableStream({
+        async pull(ctrl) { // first pull = the handler (past auth) reads the body
+          reading();
+          await go;
+          ctrl.enqueue(new TextEncoder().encode('{"name":"sneaky"}'));
+          ctrl.close();
+        },
+      }, { highWaterMark: 0 }),
       duplex: "half",
     } as RequestInit));
-    await new Promise((r) => setTimeout(r, 10));
+    await started;
     assert.equal((await t.json(`/v1/me/tokens/${doomed.info.id}`, { method: "DELETE", headers: t.bearer(root) })).status, 200);
-    const w = writable.getWriter();
-    await w.write(new TextEncoder().encode('{"name":"sneaky"}'));
-    await w.close();
+    send();
     assert.equal((await slow).status, 401);
     const names = (await t.json("/v1/me/tokens", { headers: t.bearer(root) })).body.tokens.map((x: { name: string }) => x.name);
     assert.ok(!names.includes("sneaky"), names.join());
