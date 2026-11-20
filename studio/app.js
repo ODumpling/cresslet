@@ -45,7 +45,10 @@ function toast(content, ms = 6000) {
 // Tab, which brings it back) until focus moves or the page scrolls.
 function avoidFocus() {
   const t = $("toast"), a = document.activeElement;
-  if (a && t.contains(a)) return; // stay put while it's used (a click focuses × before it lands)
+  if (a && t.contains(a)) {
+    if (t.dataset.top === "hide") t.dataset.top = "false"; // Tab into a transparent toast: show it
+    return; // otherwise stay put while it's used (a click focuses × before it lands)
+  }
   t.dataset.top = "false";
   if (t.dataset.open !== "true" || !a || a === document.body) return;
   const r = a.getBoundingClientRect();
@@ -632,6 +635,14 @@ async function renderHome() {
       templateCard(t)));
   }).catch((e) => $("templates").replaceChildren(el("p", { className: "error", textContent: `Could not load templates: ${e.message}` })));
 
+  await renderProjects();
+
+  $("apps-section").hidden = !auth.token;
+  if (auth.token) renderApps();
+}
+
+/** Local projects only (after a delete, the rest of the home view stays as it is, focus included). */
+async function renderProjects() {
   const list = await projects.list().catch(() => []);
   $("projects").replaceChildren(list.length
     ? dataTable("projects-title", [["Project"], ["Template"], ["Deployed to"], ["Edited"], ["Actions", "actions", true]], list.map((p) =>
@@ -652,28 +663,27 @@ async function renderHome() {
             if (!confirm(`Delete local project ${p.name}? Deployed apps are not affected.`)) return;
             await projects.delete(p.id);
             toast(`Deleted ${p.name}`);
-            await renderHome();
+            await Promise.all([renderProjects(), renderRecent()]);
             refocus();
           },
         }, icon("trash"))))))
     : emptyState("No projects yet", "Pick a template above. Projects are saved in this browser as you edit."));
+}
 
-  $("apps-section").hidden = !auth.token;
-  if (auth.token) {
-    api("/v1/apps").then(({ apps }) => {
-      $("apps").replaceChildren(apps.length
-        ? dataTable("apps-title", [["App"], ["Updated"], ["Actions", "actions", true]], apps.map((a) =>
-          el("tr", { className: "list-row" },
-            el("td", {}, el("div", { className: "name-cell" },
-              el("span", { className: "file-ico" }, icon("globe")),
-              el("div", {}, extLink(a.url, a.name), el("span", { className: "sub", textContent: a.url.replace(/^https?:\/\//, "") })))),
-            el("td", { className: "muted" }, timeAgo(a.updatedAt)),
-            el("td", { className: "actions" },
-              el("button", { className: "btn sm", type: "button", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) },
-                icon("download"), "Open source")))))
-        : emptyState("Nothing deployed yet", "Open a project and press Deploy, or run cresslet deploy."));
-    }).catch((e) => $("apps").replaceChildren(el("p", { className: "error", textContent: `Could not load apps: ${e.message}` })));
-  }
+function renderApps() {
+  api("/v1/apps").then(({ apps }) => {
+    $("apps").replaceChildren(apps.length
+      ? dataTable("apps-title", [["App"], ["Updated"], ["Actions", "actions", true]], apps.map((a) =>
+        el("tr", { className: "list-row" },
+          el("td", {}, el("div", { className: "name-cell" },
+            el("span", { className: "file-ico" }, icon("globe")),
+            el("div", {}, extLink(a.url, a.name), el("span", { className: "sub", textContent: a.url.replace(/^https?:\/\//, "") })))),
+          el("td", { className: "muted" }, timeAgo(a.updatedAt)),
+          el("td", { className: "actions" },
+            el("button", { className: "btn sm", type: "button", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) },
+              icon("download"), "Open source")))))
+      : emptyState("Nothing deployed yet", "Open a project and press Deploy, or run cresslet deploy."));
+  }).catch((e) => $("apps").replaceChildren(el("p", { className: "error", textContent: `Could not load apps: ${e.message}` })));
 }
 
 $("cli-copy").addEventListener("click", async () => {
