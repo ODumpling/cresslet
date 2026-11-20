@@ -3,3 +3,4 @@ data/
 node_modules/
 deploy/.env
 deploy/cresslet.env
+deploy/caddy.env

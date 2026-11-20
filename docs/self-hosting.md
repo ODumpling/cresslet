@@ -13,12 +13,12 @@ Needs wildcard DNS (`*.cresslet.example.com` + `cresslet.example.com` → server
 
 ```sh
 cd deploy
-cp .env.example .env             # CRESSLET_DOMAIN, CLOUDFLARE_API_TOKEN
+cp .env.example .env             # CRESSLET_DOMAIN, CLOUDFLARE_API_TOKEN (Compose ≥ 2.24)
 $EDITOR cresslet.env             # optional: other CRESSLET_* settings (GitHub login, admin token, limits)
 docker compose up -d --build
 ```
 
-DNS: `A`/`AAAA` for `cresslet.example.com` and `*.cresslet.example.com` → the server. Ports 80 and 443 (TCP, plus UDP for HTTP/3) open. Data lives in the `cresslet_data` volume (back it up, with `secrets.key`); Caddy's certificates and ACME account in `caddy_data` (losing it means re-issuing everything, against the CA rate limits).
+DNS: `A`/`AAAA` for `cresslet.example.com` and `*.cresslet.example.com` → the server, DNS only (on Cloudflare: not proxied, or Cloudflare's edge certificate, which doesn't cover `*.cresslet.example.com`, answers instead of Caddy). Ports 80 and 443 (TCP, plus UDP for HTTP/3) open. Data lives in the `cresslet_data` volume (back it up, with `secrets.key`); Caddy's certificates and ACME account in `caddy_data` (losing it means re-issuing everything, against the CA rate limits).
 
 Certificates ([`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile)):
 
@@ -31,11 +31,11 @@ Certificates ([`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile)):
 
 Why Caddy instead of ACME in the server: wildcard certs need DNS-01 (a DNS provider API) and custom domains need certs for names known only at runtime. Caddy does both (DNS provider modules, on-demand TLS gated by an `ask` endpoint), plus renewal and HTTP/3, so the server stays a plain HTTP process with one read-only endpoint for it. The check approves only DNS-verified custom domains (and an off-domain preview host): app subdomains are on the wildcard, and approving every app name would let anyone spend the CA's rate limit by creating apps.
 
-DNS provider: Cloudflare by default (token with Zone → DNS → Edit on the zone). Another provider: set `CADDY_DNS_MODULE` in `.env` to its [`caddy-dns`](https://github.com/caddy-dns) module and put its config in `deploy/caddy/dns.caddy`. Try a new setup against Let's Encrypt staging first (`acme_ca …` in `deploy/caddy/options.caddy`).
+DNS provider: Cloudflare by default (API token with Zone → Zone → Read and Zone → DNS → Edit on the zone). Another provider: set `CADDY_DNS_MODULE` in `.env` to its [`caddy-dns`](https://github.com/caddy-dns) module, put its config in `deploy/caddy/dns.caddy` and its credentials in `deploy/caddy.env`. Try a new setup against Let's Encrypt staging first (`acme_ca …` in `deploy/caddy/options.caddy`).
 
-Without Compose, the same Caddyfile (and its two imported files) works with `cresslet:8787` replaced by the server's address. Other proxies (Traefik, Coolify) need the wildcard cert configured by hand and each verified custom domain added by hand (or their own on-demand mechanism pointed at `/v1/domains/check`).
+Without Compose: a Caddy built with the DNS module (`xcaddy build --with github.com/caddy-dns/cloudflare`), `CRESSLET_DOMAIN` and the token in its environment, and the same Caddyfile (plus its two imported files) with `cresslet:8787` replaced by the server's address. Other proxies (Traefik, Coolify) need the wildcard cert configured by hand and each verified custom domain added by hand (or their own on-demand mechanism pointed at `/v1/domains/check`).
 
-`deploy/test/acme.sh` runs this compose file end to end against [Pebble](https://github.com/letsencrypt/pebble) (a test CA) and a local bind9: wildcard via real DNS-01, a verified custom domain via on-demand TLS, an unverified one refused. It needs only Docker and touches no real DNS.
+`deploy/test/acme.sh` runs this compose file end to end against [Pebble](https://github.com/letsencrypt/pebble) (a test CA) and a local bind9: wildcard via real DNS-01, a verified custom domain via on-demand TLS, an unverified one refused. It needs Docker and Node, and touches no real DNS.
 
 ## Configuration
 

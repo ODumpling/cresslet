@@ -1,8 +1,10 @@
 # Overlay for deploy/test/acme.sh: the production compose against a local ACME CA (Pebble) and an
 # authoritative DNS server (bind9) that takes RFC 2136 updates, so DNS-01 runs for real. Test only.
+# Uses subnet 10.77.0.0/24 (change it here and in test/ if the host already has it).
 services:
   cresslet:
     dns: [10.77.0.53] # custom-domain TXT verification reads the test zones
+    env_file: !reset [] # never an operator's cresslet.env
     environment:
       CRESSLET_ADMIN_TOKEN: test-admin
     networks:
@@ -13,6 +15,7 @@ services:
       args:
         DNS_MODULE: github.com/caddy-dns/rfc2136@v1.0.0
     depends_on: [bind, pebble]
+    env_file: !reset []
     ports: !reset []
     volumes:
       - ./test/dns.caddy:/etc/caddy/dns.caddy:ro

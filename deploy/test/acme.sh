@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # End-to-end TLS check of deploy/compose.yaml: real ACME flows against Pebble (a test CA) and bind9.
 #   wildcard *.cresslet.test via DNS-01, a verified custom domain via on-demand TLS, and an
-#   unverified one refused by the control plane's ask endpoint. Needs Docker; touches no real DNS.
+#   unverified one refused by the control plane's ask endpoint. Needs Docker and Node; touches no real DNS.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 P=cresslet-acme-test
 KEY=o3/lA6ITes+dU+yezlfMGzfrVggvIlfkRO0hHGWNSqw= # test-only TSIG key (test/named.conf)
 tmp=$(mktemp -d)
 export CRESSLET_DOMAIN=cresslet.test PEBBLE_MINICA="$tmp/minica.pem"
-dc() { docker compose -p "$P" -f compose.yaml -f test/compose.acme.yaml "$@"; }
+dc() { docker compose -p "$P" --env-file /dev/null -f compose.yaml -f test/compose.acme.yaml "$@"; } # not deploy/.env
 cleanup() {
   [ "${ok:-}" = 1 ] || dc logs caddy cresslet | tail -60
   [ -n "${KEEP:-}" ] || dc down -v --remove-orphans >/dev/null 2>&1
@@ -29,7 +29,11 @@ c -k https://pebble:15000/roots/0 -o /w/root.pem
 https() { c --cacert /w/root.pem "$@"; }
 json() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(eval("JSON.parse(s)."+process.argv[1])))' "$1"; }
 
-for _ in $(seq 60); do https -o /dev/null https://cresslet.test/healthz 2>/dev/null && break; sleep 2; done
+# Root and wildcard are separate orders: wait for both.
+for _ in $(seq 60); do
+  https -o /dev/null https://cresslet.test/healthz 2>/dev/null && https -o /dev/null https://preview.cresslet.test/cresslet-relay.html 2>/dev/null && break
+  sleep 2
+done
 [ "$(https https://cresslet.test/healthz)" = ok ] || fail "studio root over TLS"
 pass "studio root https://cresslet.test (DNS-01)"
 

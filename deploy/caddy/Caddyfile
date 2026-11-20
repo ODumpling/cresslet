@@ -1,5 +1,5 @@
 # Caddy in front of cresslet (see docs/self-hosting.md#production).
-# Root + `*.<domain>` (apps, preview host): one wildcard cert via ACME DNS-01.
+# Root and `*.<domain>` (apps, preview host): a cert each via ACME DNS-01.
 # Custom domains: on-demand certs, only for names the control plane approves.
 {
 	import options.caddy

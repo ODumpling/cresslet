@@ -26,6 +26,9 @@ services:
     depends_on:
       cresslet:
         condition: service_healthy
+    env_file:
+      - path: caddy.env # credentials for a DNS provider other than Cloudflare
+        required: false
     environment:
       CRESSLET_DOMAIN: ${CRESSLET_DOMAIN}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
