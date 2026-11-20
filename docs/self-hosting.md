@@ -13,8 +13,8 @@ Needs wildcard DNS (`*.cresslet.example.com` + `cresslet.example.com` → server
 
 ```sh
 cd deploy
-cp .env.example .env             # CRESSLET_DOMAIN
-cp caddy.env.example caddy.env   # CLOUDFLARE_API_TOKEN
+cp .env.example .env && $EDITOR .env                  # set CRESSLET_DOMAIN
+cp caddy.env.example caddy.env && $EDITOR caddy.env   # set CLOUDFLARE_API_TOKEN (only read from here)
 $EDITOR cresslet.env             # optional: other CRESSLET_* settings (GitHub login, admin token, limits)
 docker compose up -d --build
 ```
