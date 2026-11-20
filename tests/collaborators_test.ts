@@ -51,11 +51,16 @@ test("collaborators: invite by email, accept, and each role gets what it allows"
     assert.equal(inv.body.invite.role, "viewer"); // default
     assert.equal(inv.body.invite.invitedBy.email, "own@b.co");
     const adminTok = await t.account("adm@b.co");
-    assert.equal((await t.send("POST", "/v1/apps/shop/collaborators", owner, { email: "adm@b.co", role: "viewer" })).status, 201);
-    // Inviting the same email again changes the pending invite's role.
+    const first = await t.send("POST", "/v1/apps/shop/collaborators", owner, { email: "adm@b.co", role: "viewer" });
+    assert.equal(first.status, 201);
+    // Inviting the same email again changes the pending invite's role; a new role is a new invite (id).
     const again = await t.send("POST", "/v1/apps/shop/collaborators", owner, { email: "adm@b.co", role: "admin" });
     assert.equal(again.status, 200);
     assert.equal(again.body.invite.role, "admin");
+    assert.notEqual(again.body.invite.id, first.body.invite.id);
+    assert.equal((await t.send("POST", `/v1/me/invites/${first.body.invite.id}/accept`, adminTok)).status, 404);
+    const same = await t.send("POST", "/v1/apps/shop/collaborators", owner, { email: "adm@b.co", role: "admin" });
+    assert.equal(same.body.invite.id, again.body.invite.id);
     assert.equal((await t.send("POST", "/v1/apps/shop/collaborators", owner, { email: "own@b.co" })).status, 400);
     assert.equal((await t.send("POST", "/v1/apps/shop/collaborators", owner, { email: "nope" })).status, 400);
     assert.equal((await t.send("POST", "/v1/apps/shop/collaborators", owner, { email: "x@b.co", role: "owner" })).status, 400);

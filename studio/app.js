@@ -738,13 +738,17 @@ async function renderInvites() {
 }
 
 async function answerInvite(i, accept) {
+  let r;
   try {
-    await api(`/v1/me/invites/${encodeURIComponent(i.id)}${accept ? "/accept" : ""}`, accept ? { method: "POST", body: "{}" } : { method: "DELETE" });
+    r = await api(`/v1/me/invites/${encodeURIComponent(i.id)}${accept ? "/accept" : ""}`, accept ? { method: "POST", body: "{}" } : { method: "DELETE" });
   } catch (e) {
+    // e.g. 404: cancelled, or re-sent with another role (a new invite): show the current ones.
     toast(`Could not ${accept ? "accept" : "decline"} the invite: ${e.message}`);
+    await renderInvites();
+    refocus($("invites-section").hidden ? $("apps-title") : $("invites-title"));
     return;
   }
-  toast(accept ? `${i.app} is in your deployed apps (${ACCESS_LABEL[i.role].toLowerCase()})` : `Declined the invite to ${i.app}`);
+  toast(accept ? `${i.app} is in your deployed apps (${ACCESS_LABEL[r.app.access]?.toLowerCase() ?? r.app.access})` : `Declined the invite to ${i.app}`);
   await Promise.all([renderInvites(), accept ? renderApps() : null]);
   refocus($("invites-section").hidden ? $("apps-title") : $("invites-title"));
 }
@@ -834,23 +838,28 @@ async function renderPeople(gen = routeGen) {
   );
 }
 
-async function setRole(p, select) {
-  const app = encodeURIComponent(shareApp);
-  // Demoting yourself ends your access to this page: only after a confirmation (a select can fire change per arrow key).
-  if (p.id === myAccountId && select.value === "viewer" && !confirm(`Make yourself a viewer of ${shareApp}? You won't be able to change it or share it any more.`)) {
+/** One role update per row at a time, in order (a select can fire change per arrow key); shows what the server stored. */
+function setRole(p, select) {
+  const role = select.value;
+  // Demoting yourself ends your access to this page: only after a confirmation.
+  if (p.id === myAccountId && role === "viewer" && !confirm(`Make yourself a viewer of ${shareApp}? You won't be able to change it or share it any more.`)) {
     select.value = p.role;
     return;
   }
-  try {
-    await api(`/v1/apps/${app}/collaborators/${encodeURIComponent(p.id)}`, { method: "PUT", body: JSON.stringify({ role: select.value }) });
-  } catch (e) {
+  const url = `/v1/apps/${encodeURIComponent(shareApp)}/collaborators/${encodeURIComponent(p.id)}`;
+  p.saving = (p.saving ?? Promise.resolve()).then(async () => {
+    try {
+      p.role = (await api(url, { method: "PUT", body: JSON.stringify({ role }) })).role;
+    } catch (e) {
+      toast(`Could not change the role: ${e.message}`);
+      select.value = p.role;
+      return;
+    }
+    if (select.value !== role) return; // a later change is queued: it reports
     select.value = p.role;
-    toast(`Could not change the role: ${e.message}`);
-    return;
-  }
-  p.role = select.value;
-  toast(`${personText(p)} is now ${ACCESS_LABEL[p.role].toLowerCase()}`);
-  if (p.id === myAccountId && p.role === "viewer") location.hash = "#/";
+    toast(`${personText(p)} is now ${ACCESS_LABEL[p.role].toLowerCase()}`);
+    if (p.id === myAccountId && p.role === "viewer") location.hash = "#/";
+  });
 }
 
 async function removePerson(p, me) {
