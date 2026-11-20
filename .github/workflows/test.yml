@@ -1,0 +1,40 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+
+  # The Linux-only isolation tests (per-app uids, cgroups, gVisor) need root and a writable cgroup2
+  # mount: run them as the test files describe, in a privileged container on its own cgroup.
+  isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: per-app uids + cgroups
+        run: |
+          docker run --rm --privileged --cgroupns=private -v "$PWD":/src -v /src/node_modules -w /src node:24-bookworm-slim \
+            sh -c 'npm ci --omit=dev && exec node --test --test-isolation=none tests/sandbox_test.ts'
+      - name: gVisor sandboxes
+        run: |
+          docker run --rm --privileged --cgroupns=private -v "$PWD":/src -v /src/node_modules -w /src node:24-bookworm-slim sh -c '
+            apt-get update -qq && apt-get install -qq -y curl bzip2 >/dev/null &&
+            curl -fsSL https://storage.googleapis.com/gvisor/releases/release/20261109.0/$(uname -m)/gvisor.tar.bz2 |
+              tar -xj -C /usr/local/bin runsc gvisor-bin &&
+            npm ci --omit=dev && CRESSLET_RUNSC=/usr/local/bin/runsc exec node --test --test-isolation=none tests/gvisor_test.ts'
