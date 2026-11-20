@@ -184,10 +184,30 @@ async function renderHome() {
       $("apps").replaceChildren(...apps.map((a) =>
         el("div", { className: "list-row" },
           el("a", { href: a.url, target: "_blank", rel: "noopener", textContent: a.name }),
-          el("span", { className: "meta", textContent: `updated ${new Date(a.updatedAt).toLocaleString()}` }))
+          el("span", { className: "meta", textContent: `updated ${new Date(a.updatedAt).toLocaleString()}` }),
+          el("button", { className: "btn", textContent: "Open source", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) }))
       ));
     }).catch(() => {});
   }
+}
+
+/** New local project from the source uploaded with the app's current deploy (CLI or studio). */
+async function openDeployed({ name, url }) {
+  let src;
+  try {
+    src = await api(`/v1/apps/${encodeURIComponent(name)}/source`);
+  } catch (e) {
+    alert(`Could not open ${name}: ${e.message}`);
+    return;
+  }
+  const files = Object.create(null); // any file name, incl. "__proto__"
+  for (const f of src.files) {
+    files[f.path] = f.encoding === "base64" ? Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)) : f.data;
+  }
+  const id = crypto.randomUUID().slice(0, 8);
+  // Whoever holds the app's deploy key may have uploaded this source: don't run it until the user says so.
+  await projects.put({ id, name, template: "deployed", files, deploy: { name, url }, trusted: false });
+  location.hash = `#/p/${id}`;
 }
 
 async function createProject(template) {
@@ -432,9 +452,26 @@ async function openProject(id) {
   shell.output.pipeTo(new WritableStream({ write: (d) => term.write(d) }));
   const input = shell.input.getWriter();
   term.onData((d) => input.write(d));
-  setStatus("Installing");
-  $("preview-msg").textContent = "Installing dependencies…";
-  input.write("npm install && cresslet dev\r");
+  const start = () => {
+    setStatus("Installing");
+    $("preview-msg").textContent = "Installing dependencies…";
+    input.write("npm install && cresslet dev\r");
+  };
+  if (project.trusted === false) {
+    // Opened from a deployed app's source: its code (and npm deps) would run in this browser.
+    setStatus("Not running");
+    const btn = el("button", { className: "btn", textContent: "Run it", onclick: async () => {
+      project.trusted = true;
+      await projects.put(project);
+      btn.remove();
+      start();
+    } });
+    $("preview-msg").replaceChildren(
+      "This project was opened from a deployed app's source. Review it, then ",
+      btn,
+      " to install its dependencies and start it here.",
+    );
+  } else start();
 
   // deploy
   $("deploy-btn").onclick = async () => {

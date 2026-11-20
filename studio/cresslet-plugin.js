@@ -21,6 +21,31 @@ export function parseDotenv(text) {
   return out;
 }
 
+// Keep in sync with server/deploys.ts (NOT_SOURCE, DOTENV, publicDotenv).
+const NOT_SOURCE = /(?:^|\/)(?:node_modules|\.git|\.cresslet|\.env[^/]*)\/|^dist\/|(?:^|\/)\.env[^/]*(?:local|cresslet)[^/]*$|(?:^|\/)(?:\.envrc[^/]*|\.dev\.vars(?:[._-][^/]*)?)$/i;
+// Any .env-prefixed file (sanitized: only public entries kept).
+const DOTENV = /(?:^|\/)\.env[^/]*$/i;
+/**
+ * Same as server/deploys.ts publicDotenvText. Fail closed: dotenv parsers differ (multi-line quotes, escapes, values starting on the next line, `KEY: v`), so
+ * only lines that every parser reads as one complete single-line entry are understood: `NAME=value`, a non-empty
+ * unquoted value or a backslash-free single-line '…' / "…", optional `# comment`. Public ones (CRESSLET_PUBLIC_*,
+ * VITE_*) are kept verbatim, comments are dropped, and the first line not understood ends the file.
+ */
+const SAFE_ENTRY = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][\w.-]*)[ \t]*=[ \t]*(?:[^\s"'\x60\\#][^"'\x60\\\r\n#]*|"[^"\\\r\n]*"|'[^'\\\r\n]*')[ \t]*(?:#[^"'\x60\\\r\n]*)?$/;
+export function publicDotenv(text) {
+  const out = [];
+  for (const l of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
+    if (/[\r\u2028\u2029]/.test(l)) break; // a line break to some parsers, not to others
+    if (/^[ \t]*$/.test(l)) out.push(l);
+    else if (!/^[ \t]*#/.test(l)) {
+      const m = SAFE_ENTRY.exec(l);
+      if (!m) break; // anything else may open a value that runs on: drop it and the rest
+      if (/^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[1])) out.push(l);
+    }
+  }
+  return out.join("\n");
+}
+
 function toBase64(bytes) {
   if (bytes.toBase64) return bytes.toBase64();
   let s = "";
@@ -103,6 +128,23 @@ export function createCresslet(c, opts) {
     const token = opts.auth().token;
     if (token) headers.authorization = `Bearer ${token}`;
     if (project?.deploy?.deployKey) headers["x-cresslet-deploy-key"] = project.deploy.deployKey;
+    // Project source too, so the CLI (`cresslet pull`) or another browser can open it. Never local secrets.
+    const sources = [];
+    const walk = (tree, prefix) => {
+      for (const [name, node] of Object.entries(tree)) {
+        // Same path form as the server's check (it normalizes "\\" to "/").
+        const rel = (prefix ? `${prefix}/${name}` : name).replace(/\\/g, "/");
+        if (node.directory) walk(node.directory, rel);
+        // Regular files only (symlinks have no contents); same secret rules as the server, applied here
+        // so local secrets never leave the browser.
+        else if (node.file && "contents" in node.file && !NOT_SOURCE.test(rel)) {
+          let v = node.file.contents;
+          if (DOTENV.test(rel)) v = publicDotenv(typeof v === "string" ? v : dec.decode(v));
+          sources.push(typeof v === "string" ? { path: rel, data: v } : { path: rel, data: toBase64(v), encoding: "base64" });
+        }
+      }
+    };
+    walk(await c.export(wd, { excludes: ["node_modules/**", "dist/**", ".cresslet/**", ".git/**"] }), "");
     log(`uploading ${files.length} files…`);
     const res = await fetch("/v1/deploys", {
       method: "POST",
@@ -113,6 +155,7 @@ export function createCresslet(c, opts) {
         server,
         config: { routes: cfg.routes, crons: cfg.crons },
         source: "studio",
+        sources,
       }),
     });
     const body = await res.json();
@@ -121,6 +164,7 @@ export function createCresslet(c, opts) {
       await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...cfg, name: body.app.name }, null, 2) + "\n");
     }
     log(`deployed ${body.app.name} → ${body.app.url}`);
+    if (body.deploy?.warning) log(`warning: ${body.deploy.warning}`);
     if (!body.app.claimed) log(`unclaimed: expires ${new Date(body.app.expiresAt).toLocaleString()}. Log in to keep it.`);
     opts.onDeployed?.(body);
     return body;

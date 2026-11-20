@@ -224,7 +224,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
           try {
             files.push({
               path: relative(root, full),
-              data: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+              data: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes),
               encoding: "utf8",
             });
           } catch {
@@ -346,6 +346,34 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     runtime.stop(a.id);
     runtime.logs.push(a.id, "system", `rolled back to ${d.id}`);
     return c.json({ app: view(store.appById(a.id)!) });
+  });
+
+  // ---- project source uploaded with a deploy (cresslet pull / studio "Open")
+  app.get("/apps/:name/source", async (c) => {
+    const a = getApp(c.req.param("name"));
+    await authorize(c, a);
+    const deployId = c.req.query("deploy") ?? a.current_deploy_id;
+    const d = deployId ? store.deploy(deployId) : undefined;
+    if (!d || d.app_id !== a.id) throw new HttpError(404, "deploy not found", "not_found");
+    const root = join(paths(cfg, a.id).deploy(d.id), "source");
+    if (!existsSync(root)) throw new HttpError(404, "this deploy has no source (deployed without it)", "no_source");
+    const files: { path: string; data: string; encoding: "utf8" | "base64" }[] = [];
+    for (const rel of (await readdir(root, { recursive: true, withFileTypes: true })).filter((e) => e.isFile())) {
+      const abs = join(rel.parentPath, rel.name);
+      const bytes = await readFile(abs);
+      const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+      let data: string, encoding: "utf8" | "base64" = "utf8";
+      try {
+        data = text.decode(bytes);
+      } catch {
+        data = encodeBase64(bytes);
+        encoding = "base64";
+      }
+      files.push({ path: relative(root, abs).split("\\").join("/"), data, encoding });
+    }
+    files.sort((x, y) => x.path.localeCompare(y.path));
+    c.header("cache-control", "no-store"); // private project source
+    return c.json({ app: a.name, deployId: d.id, files });
   });
 
   // ---- logs (NDJSON; ?follow=1 streams)
