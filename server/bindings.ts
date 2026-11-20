@@ -196,6 +196,9 @@ function serialized<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/** Resolves once the file writes queued for the files dir `dir` are done (before deleting it). */
+export const filesSettled = (dir: string) => (fileQueues.get(resolve(dir)) ?? Promise.resolve()).then(() => {});
+
 /** One app's bindings, served as a fetch handler for its sandbox. */
 export function createBindings(
   dataDir: string,
@@ -211,7 +214,10 @@ export function createBindings(
   const db = createDb(join(dataDir, "db.sqlite"), maxDbBytes);
   // File writes and deletes run one at a time, so the quota check sees every earlier write.
   const filesDir = resolve(dataDir, "files");
-  const serial = <T>(fn: () => Promise<T>) => serialized(filesDir, fn);
+  let closed = false;
+  /** Queues a file mutation, or refuses it once these bindings are closing (a redeploy or delete). */
+  const serial = <T>(fn: () => Promise<T>): Promise<T | Response> =>
+    closed ? Promise.resolve(text("app is restarting, try again", 503)) : serialized(filesDir, fn);
   const files = createFiles(filesDir);
   const text = (s: string, status: number) => new Response(s, { status });
 
@@ -265,6 +271,7 @@ export function createBindings(
   return {
     fetch,
     close() {
+      closed = true;
       db.close();
       // Writes already accepted finish first (they're in the app's queue, which outlives us).
       void serialized(filesDir, async () => files.close());

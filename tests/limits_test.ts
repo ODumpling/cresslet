@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { type Config, loadConfig } from "../server/config.ts";
 import { createBindings, createDb } from "../server/bindings.ts";
+import { removeAppFiles } from "../server/deploys.ts";
+import { existsSync, mkdirSync } from "node:fs";
+import { paths } from "../server/config.ts";
 
 async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-lim-"));
@@ -279,5 +282,35 @@ test("VACUUM with comments works; comments can't smuggle a second statement", as
     db.close();
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("deleting an app waits for its queued file writes; writes after close are refused", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "cresslet-purge-"));
+  try {
+    const cfg = loadConfig({ dataDir });
+    const p = paths(cfg, "app_x");
+    mkdirSync(p.data, { recursive: true });
+    const b = createBindings(p.data, { maxFilesBytes: 10_000_000 });
+    const put = (key: string, body: BodyInit) =>
+      b.fetch(new Request(`http://h/files?key=${key}`, { method: "PUT", body, duplex: "half" } as RequestInit));
+    const queued = Array.from({ length: 30 }, (_, i) => put(`f${i}`, new Uint8Array(1000)));
+    await new Promise((r) => setImmediate(r));
+    let release!: () => void;
+    const late = put("late", new ReadableStream({
+      async start(c) {
+        await new Promise<void>((r) => (release = r));
+        c.enqueue(new Uint8Array(10));
+        c.close();
+      },
+    }));
+    b.close();
+    release();
+    assert.equal((await late).status, 503, "body finished after close");
+    await removeAppFiles(cfg, "app_x");
+    await Promise.all(queued);
+    assert.ok(!existsSync(p.app), "nothing left behind");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
