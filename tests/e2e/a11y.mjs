@@ -18,6 +18,8 @@ const browser = await chromium.launch();
 try {
   const { token } = await call("/v1/accounts", admin, { email: "admin@example.com" });
   await call("/v1/deploys", token, { files: [{ path: "index.html", data: "a11y" }] });
+  const longName = "x".repeat(64); // the longest token name the form allows
+  const long = await call("/v1/me/tokens", token, { name: longName, role: "read", apps: null });
 
   // Reflow: no horizontal page scroll at 320 CSS px.
   const narrow = await browser.newPage({ viewport: { width: 320, height: 640 } });
@@ -29,7 +31,8 @@ try {
     assert(w <= 320, `${r} is ${w}px wide at 320px`);
   }
   await narrow.close();
-  console.log("reflow ok at 320px");
+  await fetch(`${base}/v1/me/tokens/${encodeURIComponent(long.info.id)}`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } });
+  console.log("reflow ok at 320px (incl. a 64-character token name)");
 
   const page = await browser.newPage();
   await page.addInitScript((t) => localStorage.setItem("cresslet.token", t), token);
@@ -73,9 +76,15 @@ try {
   await page.keyboard.press("Tab");
   assert(!(await page.evaluate(() => !!document.activeElement.closest(".xterm"))), "Esc, Tab didn't leave the terminal");
   await page.locator(".cm-content").click();
+  assert(await page.locator("#editor-help").isVisible(), "editor exit hint not shown while the editor has focus");
   await page.keyboard.press("Escape");
   await page.keyboard.press("Tab");
   assert(!(await page.evaluate(() => !!document.activeElement.closest(".cm-editor"))), "Esc, Tab didn't leave the editor");
+  await page.locator("#preview-path").fill("");
+  await page.locator("#preview-path").pressSequentially("/abc");
+  assert(await page.locator("#preview-path").inputValue() === "/abc", "can't type in the preview path");
+  await page.keyboard.press("Tab");
+  assert(await focused(page) !== "preview-path", "Tab didn't leave the preview path");
   console.log("no keyboard traps; tabs ok");
   await page.locator("#deploy-btn").focus();
   await page.keyboard.press("Enter");

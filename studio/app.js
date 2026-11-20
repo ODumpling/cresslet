@@ -62,7 +62,8 @@ function closeToast() {
   t.addEventListener("focusin", () => clearTimeout(toast.timer));
   t.addEventListener("focusout", () => setTimeout(armToast));
   $("toast-close").addEventListener("click", closeToast);
-  addEventListener("keydown", (e) => e.key === "Escape" && t.dataset.open === "true" && closeToast());
+  // Capture phase: xterm and CodeMirror stop Escape; the event still reaches them.
+  addEventListener("keydown", (e) => e.key === "Escape" && t.dataset.open === "true" && closeToast(), true);
 }
 
 function setStatus(text, state = "busy") {
@@ -375,9 +376,15 @@ function siteActions(site, after) {
       ariaLabel: `${label} ${site.name}`,
       onclick: async (e) => {
         const b = e.currentTarget; // null after the await
+        const gen = routeGen;
         b.disabled = true;
-        if (await adminAction(site, action)) after(action);
-        else b.disabled = false;
+        const done = await adminAction(site, action);
+        if (gen !== routeGen) return; // navigated away meanwhile: leave the new view alone
+        if (done) after(action);
+        else {
+          b.disabled = false;
+          if (document.activeElement === document.body) b.focus();
+        }
       },
     });
   return site.status === "deleted"
@@ -413,7 +420,10 @@ async function renderAdminSites() {
   $("admin-actions").replaceChildren(el("button", {
     className: "btn",
     type: "button",
-    onclick: () => renderAdmin().then(() => $("admin-actions").querySelector("button")?.focus()), // it's rebuilt
+    onclick: () => {
+      const gen = routeGen;
+      renderAdmin().then(() => gen === routeGen && $("admin-actions").querySelector("button")?.focus()); // it's rebuilt
+    },
   }, icon("refresh"), "Refresh"));
 
   const u = totals.usage;
@@ -709,6 +719,7 @@ async function openProject(id, gen) {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open($("terminal"));
+  term.textarea?.setAttribute("aria-describedby", "terminal-help");
   // xterm sends Tab to the shell; Esc then Tab (or Shift+Tab) moves focus out instead, like the editor.
   let escaped = false;
   term.attachCustomKeyEventHandler((e) => {
@@ -910,14 +921,18 @@ async function openProject(id, gen) {
   c.on("server-ready", (port, url) => {
     if (port !== 3000 && previewBase) return;
     previewBase = url;
+    const hadFocus = $("preview-empty").contains(document.activeElement); // e.g. the message after Run it
     $("preview-empty").hidden = true;
+    if (hadFocus) $("preview-path").focus();
     $("preview-spinner").hidden = false;
     setStatus("Running", "ready");
     loadPreview();
   });
   c.on("error", (e) => term.writeln(`\x1b[31m${e?.message ?? e}\x1b[0m`));
   $("preview-reload").onclick = loadPreview;
-  $("preview-path").onkeydown = (e) => e.key === "Enter" && loadPreview();
+  $("preview-path").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") loadPreview();
+  });
 
   // shell
   const shell = await c.spawn("jsh", [], { cwd: wd, terminal: true });
