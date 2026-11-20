@@ -123,14 +123,18 @@ export class Store {
     const tokCols = (this.db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((c) => c.name);
     if (!tokCols.includes("id")) {
       this.db.exec(`
+        BEGIN;
         ALTER TABLE tokens ADD COLUMN id TEXT;
         ALTER TABLE tokens ADD COLUMN name TEXT NOT NULL DEFAULT 'Token';
         ALTER TABLE tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'admin';
         ALTER TABLE tokens ADD COLUMN apps TEXT;
         ALTER TABLE tokens ADD COLUMN last_used_at INTEGER;
-        UPDATE tokens SET id = 'tok_' || lower(hex(randomblob(10))), name = 'Token (before named tokens)';
+        UPDATE tokens SET name = 'Token (before named tokens)';
+        COMMIT;
       `);
     }
+    // Also tokens a pre-named-tokens server inserted (after a rollback).
+    this.db.exec("UPDATE tokens SET id = 'tok_' || lower(hex(randomblob(10))) WHERE id IS NULL");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tokens_id ON tokens (id)");
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
@@ -221,7 +225,10 @@ export class Store {
     accountId: string,
     opts: { name: string; role?: Role; apps?: string[] | null },
   ): Promise<{ token: string; info: Token }> {
-    const token = id("clv_acct", 24);
+    const scoped = (opts.role ?? "admin") !== "admin" || !!opts.apps;
+    // Scoped tokens get their own prefix: a server from before scoped tokens (after a rollback) would
+    // otherwise accept them as full-access account tokens. It ignores this prefix instead.
+    const token = id(scoped ? "clv_scoped" : "clv_acct", 24);
     const info: Token = {
       id: id("tok"),
       account_id: accountId,

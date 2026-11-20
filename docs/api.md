@@ -3,7 +3,7 @@
 Base: `http://localhost:8787` (self-hosted default). JSON in/out. CORS `*`.
 
 Auth (either):
-- `Authorization: Bearer clv_acct_…` — account token (GitHub login, or created in the studio under Settings → API tokens).
+- `Authorization: Bearer clv_acct_…` (or `clv_scoped_…`) — account token (GitHub login, or created in the studio under Settings → API tokens).
 - `X-Cresslet-Deploy-Key: clv_app_…` (or `Authorization: Bearer clv_app_…`) — per-app key, returned once on app creation.
 
 Site admin = an account with the `SiteAdmin` role (or listed in `CRESSLET_SITE_ADMINS`) using a full-access token (`admin`, all apps), or the operator's `CRESSLET_ADMIN_TOKEN`. The studio shows them an **Admin** page (`/#/admin`).
@@ -12,7 +12,7 @@ Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 
 Account tokens have a **role** and optionally a list of **apps** (403 `forbidden` outside them):
 - `read`: `GET` endpoints of the account's apps (app, logs, source, secret names, egress, domains, db) and `POST /apps/:name/db/query` (read-only).
-- `deploy`: `read`, plus `POST /deploys` and `POST /apps/:name/rollback`.
+- `deploy`: `read`, plus `POST /deploys` (existing apps) and `POST /apps/:name/rollback`. Deployed code can read the app's secrets, so treat it as close to `admin` for that app.
 - `admin`: everything on the apps (secrets, egress, domains, delete).
 - `apps`: limit the token to these apps (by id: a deleted app doesn't come back into scope if its name is reused). Without it, the token covers every app, including new ones.
 
@@ -24,7 +24,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it) |
 | GET | `/v1/me` | `{account: {id, email, github, role}, token}` (`github` = login or null; `role` = `"SiteAdmin"` or null); `token: {id, name, role, apps, createdAt, lastUsedAt}` for the calling token (any scope) |
 | GET | `/v1/me/tokens` | `{tokens: [{id, name, role, apps, createdAt, lastUsedAt, current}]}`; never the secret |
-| POST | `/v1/me/tokens` | `{name, role?: read\|deploy\|admin (default admin), apps?: ["name", …] \| null}` → `{token, info}` (201). The secret is only in this response. Max 100 per account |
+| POST | `/v1/me/tokens` | `{name, role?: read\|deploy\|admin (default admin), apps?: ["name", …] \| null}` → `{token, info}` (201). The secret is only in this response. Scoped tokens start `clv_scoped_` |
 | DELETE | `/v1/me/tokens/:id` | revoke one token |
 | POST | `/v1/me/token` | revoke all of this account's tokens → `{account, token}` (new full-access one) |
 | GET | `/v1/auth/github` | browser: GitHub web flow → redirects to `/#cresslet_login=<code>` (or `#cresslet_login_error=…`) |

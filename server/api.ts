@@ -29,7 +29,6 @@ const encodeBase64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 const SECRET_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 
 type Env = { Variables: { account?: Account; token?: Token; bearer?: string } };
-const MAX_TOKENS = 100;
 
 export function api(cfg: Config, store: Store, runtime: Runtime) {
   const app = new Hono<Env>().basePath("/v1");
@@ -46,7 +45,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const bearer = auth?.startsWith("Bearer ") ? auth.slice(7).trim() : undefined;
     if (bearer) {
       c.set("bearer", bearer);
-      if (bearer.startsWith("clv_acct_")) {
+      if (bearer.startsWith("clv_acct_") || bearer.startsWith("clv_scoped_")) {
         const found = await store.useToken(bearer);
         if (!found) throw new HttpError(401, "invalid token", "unauthorized");
         c.set("account", found.account);
@@ -208,7 +207,6 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
         return app.id;
       }))];
     }
-    if (store.tokens(a.id).length >= MAX_TOKENS) throw new HttpError(400, `at most ${MAX_TOKENS} tokens per account`);
     const { token, info } = await store.issueToken(a.id, { name, role: role as Role, apps });
     return c.json({ token, info: tokenView(info) }, 201);
   });
@@ -324,7 +322,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     if (target) {
       await authorize(c, target, "deploy");
     } else {
-      if (acct) accountWide(c, "deploy"); // a new app: not for tokens limited to some apps
+      // A new app comes with a deploy key (full control of it): account-wide admin only.
+      if (acct) accountWide(c, "admin");
       if (!acct && !cfg.anonDeploys) {
         throw new HttpError(401, "login required to deploy here (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
       }

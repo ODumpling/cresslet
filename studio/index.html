@@ -75,8 +75,8 @@
           <label>Access
             <select id="token-role">
               <option value="read">Read: view apps, logs, source and data</option>
-              <option value="deploy">Deploy: read, plus deploy and roll back</option>
-              <option value="admin" selected>Admin: everything, incl. secrets, domains, deleting apps</option>
+              <option value="deploy" selected>Deploy: read, plus deploy and roll back (deployed code can read secrets)</option>
+              <option value="admin">Admin: everything, incl. secrets, domains, new apps, deleting apps</option>
             </select>
           </label>
           <fieldset>

@@ -49,7 +49,7 @@ test("named tokens: create, list (no secrets), last used, revoke one", async () 
       ["CI", false],
     ]);
     assert.ok(list.body.tokens[1].lastUsedAt, "use recorded");
-    assert.ok(!JSON.stringify(list.body).includes("clv_acct_"), "secrets never listed");
+    assert.ok(!/clv_(acct|scoped)_/.test(JSON.stringify(list.body)), "secrets never listed");
 
     // Revoke one: it stops working, the others keep going.
     const ciId = made.body.info.id;
@@ -87,6 +87,11 @@ test("scoped tokens: roles and app limits are enforced", async () => {
     const tok = async (input: unknown) => (await t.mint(root, input)).body.token as string;
     const read = await tok({ name: "dash", role: "read" });
     const dep = await tok({ name: "ci", role: "deploy", apps: [one] });
+    const depAll = await tok({ name: "ci all", role: "deploy" });
+    // Scoped tokens don't look like full-access ones: a server from before scoped tokens ignores them.
+    assert.match(read, /^clv_scoped_/);
+    assert.match(dep, /^clv_scoped_/);
+    assert.match(await tok({ name: "full", role: "admin" }), /^clv_acct_/);
     const adm1 = await tok({ name: "app admin", role: "admin", apps: [one] });
     const st = async (token: string, method: string, path: string, body?: unknown) =>
       (await t.json(path, { method, headers: t.bearer(token), body: body === undefined ? undefined : JSON.stringify(body) })).status;
@@ -115,6 +120,12 @@ test("scoped tokens: roles and app limits are enforced", async () => {
     assert.equal(await st(dep, "DELETE", `/v1/apps/${one}`), 403);
     assert.deepEqual((await t.json("/v1/apps", { headers: t.bearer(dep) })).body.apps.map((a: { name: string }) => a.name), [one]);
     assert.equal((await t.json("/v1/me", { headers: t.bearer(dep) })).status, 200); // `cresslet login --token` works
+
+    // deploy over all apps: every existing app, but no new apps (they come with a full-control deploy key).
+    assert.equal((await t.deploy(depAll, two)).status, 201);
+    assert.equal((await t.deploy(depAll)).status, 403);
+    assert.equal((await t.deploy(depAll, "brand-new-app")).status, 403);
+    assert.equal(await st(depAll, "PUT", `/v1/apps/${two}/secrets`, { K: "v" }), 403);
 
     // admin limited to one app: manages it, but not the account (tokens, claims) or other apps.
     assert.equal(await st(adm1, "PUT", `/v1/apps/${one}/secrets`, { K: "v" }), 200);
@@ -173,6 +184,19 @@ test("tokens from before named tokens keep full access", async () => {
       assert.equal((await t.mint(legacy, { name: "new" })).status, 201);
     } finally {
       t.srv.close();
+    }
+    // Rolled back, the old server inserts a token without an id; upgrading again gives it one.
+    const db2 = new DatabaseSync(join(dataDir, "cresslet.db"));
+    db2.prepare("INSERT INTO tokens (hash, account_id, created_at) VALUES (?, 'acct_1', 4)").run(await sha256(legacy + "3"));
+    db2.close();
+    const t2 = await setup(dataDir);
+    try {
+      const ids = (await t2.json("/v1/me/tokens", { headers: t2.bearer(legacy) })).body.tokens.map((x: { id: string }) => x.id);
+      assert.equal(ids.length, 4);
+      assert.ok(ids.every((x: string) => /^tok_/.test(x)));
+      assert.equal(new Set(ids).size, 4);
+    } finally {
+      t2.srv.close();
     }
   } finally {
     await rm(dataDir, { recursive: true, force: true });

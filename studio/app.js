@@ -208,7 +208,12 @@ $("token-copy").addEventListener("click", async () => {
   }
 });
 
-$("logout-btn").addEventListener("click", () => {
+$("logout-btn").addEventListener("click", async () => {
+  // Revoke this browser's token too (best effort), so logins don't pile up in the token list.
+  try {
+    const { token } = await api("/v1/me");
+    await api(`/v1/me/tokens/${encodeURIComponent(token.id)}`, { method: "DELETE" });
+  } catch { /* offline or already revoked */ }
   logOut();
   location.hash = "#/";
 });

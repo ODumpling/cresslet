@@ -114,7 +114,7 @@ async function settings() {
   await s.getByRole("button", { name: "Create token" }).click();
   await s.locator("#token-new").waitFor({ state: "visible" });
   const secret = await s.locator("#token-new-value").inputValue();
-  if (!secret.startsWith("clv_acct_")) throw new Error(`no token shown after create: ${secret}`);
+  if (!secret.startsWith("clv_scoped_")) throw new Error(`no token shown after create: ${secret}`);
   const row = tokens.locator(".list-row", { hasText: "e2e ci" });
   await row.getByText(`deploy · ${appName}`).waitFor();
   await s.screenshot({ path: (process.argv[2] ?? ".") + "/settings.png", fullPage: true });
@@ -125,13 +125,18 @@ async function settings() {
   if (await st("/v1/me/tokens") !== 403) throw new Error("deploy token can list tokens");
   await s.reload();
   await row.waitFor();
-  if ((await s.locator("body").innerText()).includes(secret)) throw new Error("secret shown again after reload");
+  if ((await s.locator("body").innerText()).includes(secret) || await s.locator("#token-new").isVisible() ||
+    await s.locator("#token-new-value").inputValue()) throw new Error("secret shown again after reload");
   await row.getByText(/last used (?!never)/).waitFor();
 
   await row.getByRole("button", { name: "Revoke e2e ci" }).click();
   await row.waitFor({ state: "detached" });
   if (await st("/v1/me") !== 401) throw new Error("revoked token still works");
   if ((await call("/v1/me", root)).status !== 200) throw new Error("revoking one token broke another");
+  // Log out revokes this browser's token.
+  await s.getByRole("button", { name: "Log out" }).click();
+  await s.waitForURL((u) => !u.hash.includes("settings"));
+  if ((await call("/v1/me", root)).status !== 401) throw new Error("log out left the browser's token valid");
   console.log("settings: scoped token created, enforced, revoked");
   await s.close();
 }
