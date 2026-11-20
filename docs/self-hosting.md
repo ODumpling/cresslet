@@ -48,6 +48,7 @@ Other proxies (Traefik, Coolify) need each verified domain added to the proxy by
 |---|---|---|
 | `PORT` | 8787 | listen port |
 | `CRESSLET_DOMAIN` | localhost | apps at `<name>.<domain>` |
+| `CRESSLET_PREVIEW_HOST` | `preview.<domain>` | origin for studio previews (covered by the wildcard DNS/cert); its name is reserved for apps. `CRESSLET_SCHEME` / `CRESSLET_PUBLIC_PORT` must match the studio's real URL, or the relay refuses to be framed and previews fail; studio pages on any other Host redirect to that URL (a proxy must pass the original Host) |
 | `CRESSLET_SCHEME` / `CRESSLET_PUBLIC_PORT` | http / PORT | used in generated URLs |
 | `CRESSLET_DATA_DIR` | ./data | metadata + app data |
 | `CRESSLET_SOCK_DIR` | /tmp/cresslet-sock | sandbox sockets (keep path short) |

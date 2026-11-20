@@ -1,7 +1,7 @@
 import { Container } from "/vendor/cresslet-container/cresslet-container.js";
 import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWithTab, javascript, json, keymap, oneDark } from "/vendor/editor.js";
 import { FitAddon, Terminal } from "/vendor/terminal.js";
-import { auth, fromTree, ignored, projects, toTree } from "/store.js";
+import { auth, fromTree, ignored, migrateDeployKeys, projects, toTree } from "/store.js";
 import { createCresslet } from "/cresslet-plugin.js";
 
 const $ = (id) => document.getElementById(id);
@@ -225,7 +225,7 @@ async function openProject(id) {
 
   $("project-name").onchange = async (e) => {
     project.name = e.target.value.trim() || project.name;
-    await projects.put(project);
+    await projects.rename(project.id, project.name);
   };
 
   // terminal
@@ -245,7 +245,34 @@ async function openProject(id) {
   setStatus("Booting");
   let c;
   try {
-    c = await Container.boot({ serviceWorkerUrl: "/cresslet-sw.js" });
+    // Previews on their own origin: preview code can't read this page's storage (the API token).
+    // Fail closed: never fall back to running previews on this origin.
+    const { previewOrigin } = await meta;
+    let po;
+    try {
+      po = new URL(previewOrigin).origin;
+    } catch {
+      throw new Error("the server didn't say where previews run (GET /v1 → previewOrigin); refusing to run them on the studio's origin");
+    }
+    if (po === location.origin) throw new Error("previewOrigin must differ from the studio's origin");
+    // Earlier versions registered the container's worker on this origin: drop it (only that one), and
+    // reload once if it still controls this page.
+    let dropped = false;
+    for (const r of await navigator.serviceWorker?.getRegistrations?.() ?? []) {
+      const w = r.active ?? r.waiting ?? r.installing;
+      if (w && new URL(w.scriptURL).origin === location.origin && new URL(w.scriptURL).pathname === "/cresslet-sw.js") {
+        dropped = (await r.unregister()) || dropped;
+      }
+    }
+    const ctl = navigator.serviceWorker?.controller;
+    if (dropped && ctl && new URL(ctl.scriptURL).origin === location.origin && new URL(ctl.scriptURL).pathname === "/cresslet-sw.js") {
+      return void location.reload();
+    }
+    // All local projects' deploy keys out of IndexedDB before any app code runs (workers can read it).
+    if (await migrateDeployKeys()) {
+      throw new Error("couldn't move deploy keys out of IndexedDB into localStorage (is site storage blocked for this site?). Not starting app code until it can; allow site storage and reload");
+    }
+    c = await Container.boot({ previewOrigin: po });
   } catch (e) {
     setStatus("Runtime failed", "error");
     $("preview-msg").textContent = `Could not start the runtime: ${e.message}`;
@@ -273,7 +300,11 @@ async function openProject(id) {
     project: () => project,
     onDeployed: async (r) => {
       project.deploy = { name: r.app.name, deployKey: r.deployKey ?? project.deploy?.deployKey, url: r.app.url };
-      await projects.put(project);
+      const saved = await projects.put(project).catch(() => false);
+      if (!saved && project.deploy.deployKey) {
+        // Site storage refused the key; it's not kept anywhere app code can read, so hand it over.
+        prompt("This browser blocked saving the app's deploy key. Copy it now (needed to redeploy without logging in):", project.deploy.deployKey);
+      }
       showDeployLink(project.deploy);
     },
   });
@@ -384,7 +415,6 @@ async function openProject(id) {
     const path = $("preview-path").value.trim() || "/";
     const url = previewBase.replace(/\/$/, "") + (path.startsWith("/") ? path : "/" + path);
     $("preview").src = url;
-    $("preview-open").href = url;
   };
   c.on("server-ready", (port, url) => {
     if (port !== 3000 && previewBase) return;

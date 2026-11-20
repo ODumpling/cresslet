@@ -1,6 +1,6 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
-import { type Config, paths } from "./config.ts";
+import { type Config, paths, previewAppName } from "./config.ts";
 import { type App, id, type Store } from "./store.ts";
 import { normalizeCrons } from "./cron.ts";
 
@@ -28,9 +28,10 @@ export class HttpError extends Error {
 }
 
 const NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
-const RESERVED = new Set(["www", "api", "studio", "admin", "app", "apps", "docs", "status", "mail"]);
+const RESERVED = new Set(["www", "api", "studio", "admin", "app", "apps", "docs", "status", "mail", "preview"]);
 
-export function validName(name: string) {
+export function validName(name: string, cfg?: Config) {
+  if (cfg && name === previewAppName(cfg)) return false; // the studio preview host
   return NAME_RE.test(name) && !RESERVED.has(name) && !name.includes("--");
 }
 

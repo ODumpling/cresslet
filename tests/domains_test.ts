@@ -44,7 +44,7 @@ test("custom domains: DNS-verified, first verifier wins, routed, TLS ask endpoin
     // Validation.
     assert.equal((await json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: "null" })).status, 400);
     assert.equal((await json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: JSON.stringify({ domain: "a".repeat(60) + "." + "b".repeat(60) + "." + "c".repeat(60) + "." + "d".repeat(60) + ".com" }) })).status, 400);
-    for (const bad of ["localhost", "1.2.3.4", "x.test.local", "test.local", "-a.com", "a_b.com"]) {
+    for (const bad of ["localhost", "1.2.3.4", "x.test.local", "test.local", "-a.com", "a_b.com", "preview.test.local"]) {
       assert.equal((await json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: JSON.stringify({ domain: bad }) })).status, 400, bad);
     }
     assert.equal((await json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: mallory, body: '{"domain":"x.com"}' })).status, 403);
