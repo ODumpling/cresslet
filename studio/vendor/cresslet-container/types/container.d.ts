@@ -1,6 +1,6 @@
 import { VFS, type Dirent, type Stats } from './vfs';
 import { type FileSystemTree } from './tree';
-import { PortTable, type PortHandler } from './ports';
+import { PortTable, type PortHandler, type WebSocketUpgrade } from './ports';
 import { type Command, type CommandContext, type ContainerProcess, type SpawnOptions } from './process';
 import { type Registry } from './npm/registry';
 import { type ResolveFs } from './resolve';
@@ -9,17 +9,29 @@ import { type DevServerHandle, type DevServerOptions } from './dev/server';
 import { type BuildOptions } from './build/build';
 import { type CssBackend } from './css/pipeline';
 import { type NodeChannel, type ProjectWorker } from './node/channel';
+import { type PersistOptions, type Persistence } from './persist';
 export interface BootOptions {
     /** Service worker URL served by the host at its origin root. Default '/cresslet-sw.js'. `false` disables previews. */
     serviceWorkerUrl?: string | false;
     /** esbuild.wasm URL (must match esbuild-wasm version). Default: jsDelivr. */
     esbuildWasmUrl?: string;
+    /**
+     * brotli WASM URL for `zlib` brotli in `node` where the browser's CompressionStream lacks it (Chromium); must match
+     * brotli-wasm 3.0.1 (`pkg.web/brotli_wasm_bg.wasm`). Fetched on first use. Default: jsDelivr.
+     */
+    brotliWasmUrl?: string;
     /** npm registry base. Default 'https://registry.npmjs.org'. */
     registry?: string;
     /** Project directory. Default '/home/project'. */
     workdir?: string;
-    /** Persist npm tarballs + packuments in IndexedDB across reloads. Default true; silently off if IndexedDB is unavailable. */
-    npmCache?: boolean;
+    /**
+     * Persist npm tarballs + packuments in IndexedDB across reloads. Default true; silently off if IndexedDB is unavailable.
+     * `{ maxBytes }` caps its total size (default 256 MiB, `Infinity` for no cap): past it, least-recently-used entries
+     * are evicted.
+     */
+    npmCache?: boolean | {
+        maxBytes?: number;
+    };
     /**
      * Serve previews from this origin (e.g. 'https://preview.example.com') instead of the host page's, so preview code
      * can't read the host's storage. The container frames `${previewOrigin}/cresslet-relay.html`, which registers
@@ -29,10 +41,17 @@ export interface BootOptions {
      */
     previewOrigin?: string;
     /**
-     * Run project code when processing CSS: PostCSS configs (and their plugins), Tailwind `@plugin` / `@config`.
-     * Default true. `false`: PostCSS configs are ignored and `@plugin`/`@config` fail; Tailwind v4 itself still compiles.
+     * Load project plugins and configs when processing CSS: PostCSS configs (and their plugins), Tailwind `@plugin` /
+     * `@config`, Less `@plugin`. Default true. `false`: PostCSS configs are ignored and those `@plugin`/`@config` fail;
+     * Tailwind v4, Sass and Less themselves still compile (the installed packages' own code still runs).
      */
     cssPlugins?: boolean;
+    /**
+     * Persist the workdir across reloads: snapshots (without `node_modules`, which `npm install` restores from the npm
+     * cache) go to OPFS, else IndexedDB, and `boot` restores the latest one before it resolves (see `c.persistence`).
+     * Default off. `true` uses key 'default'; give each project its own `key`.
+     */
+    persist?: boolean | PersistOptions;
 }
 export interface ContainerEvents {
     'server-ready': (port: number, url: string) => void;
@@ -96,12 +115,16 @@ export declare class Container {
     readonly ports: PortTable;
     readonly registry: Registry;
     readonly esbuildWasmUrl: string;
+    readonly brotliWasmUrl: string;
     readonly resolveFs: ResolveFs;
     readonly fs: FsApi;
     /** Origin previews are served from when it differs from the page's (`boot({ previewOrigin })`), else null. */
     readonly previewOrigin: string | null;
     /** Whether CSS processing runs project code (`boot({ cssPlugins })`). */
     readonly cssPlugins: boolean;
+    /** Workdir snapshots (`boot({ persist })`), else null. */
+    readonly persistence: Persistence | null;
+    private persist;
     private relayPort;
     /** Whether the relay connected at boot (previews, and `node`, run on the preview origin). */
     private relayBooted;
@@ -119,6 +142,8 @@ export declare class Container {
     private constructor();
     /** Boot a container. Registers the preview service worker (unless disabled). */
     static boot(opts?: BootOptions): Promise<Container>;
+    /** Delete a persisted workdir snapshot (`boot({ persist: { key } })`) without booting a container. */
+    static clearPersisted(key?: string): Promise<void>;
     on<E extends keyof ContainerEvents>(event: E, fn: ContainerEvents[E]): () => void;
     private emit;
     /** Resolve a path against the workdir. */
@@ -137,11 +162,22 @@ export declare class Container {
     which(name: string, cwd: string, env: Record<string, string | undefined>): string | null;
     /** Run a command by name in an existing context (used by jsh, npm run, …). */
     exec(name: string, ctx: CommandContext): Promise<number>;
+    /** `/usr/local/bin/node` and the like (`process.execPath`, what `which` reports): the built-in command's name, else null. */
+    private virtualBin;
     private runFile;
     servePort(port: number, handler: PortHandler): {
         url: string;
         close(): void;
     };
+    /**
+     * Accept a WebSocket a preview opened to its own host (`new WebSocket(...)` there is routed to this container's port
+     * handlers, dev server `middleware` included, as a GET with `Upgrade: websocket`). Call it on the request the handler
+     * got and return `response` from the handler; any other response refuses the socket. `protocol` must be one the
+     * preview offered (`Sec-WebSocket-Protocol`). Throws for any other request. See `WebSocketUpgrade.socket` for the port.
+     */
+    upgradeWebSocket(req: Request, opts?: {
+        protocol?: string;
+    }): WebSocketUpgrade;
     createDevServer(opts?: DevServerOptions): Promise<DevServerHandle>;
     build(opts?: BuildOptions): Promise<{
         files: string[];
@@ -192,4 +228,5 @@ export declare class Container {
     private connectServiceWorker;
     teardown(): void;
 }
+export type { PersistOptions, Persistence };
 export type { FileSystemTree, ContainerProcess, SpawnOptions, Command, CommandContext, DevServerOptions, DevServerHandle, BuildOptions, Dirent, Stats };

@@ -214,6 +214,16 @@ export function createCresslet(c, opts) {
       throw new Error(`unknown op ${m.op}`);
     }
 
+    // Before a worker is replaced or `cresslet dev` stops: it sends `close` (1012) on its WebSockets, so clients
+    // reconnect as after a redeploy (a terminated worker can't tell them).
+    const stopping = new WeakMap(); // worker → terminates it
+    function stopWorker(w) {
+      if (!w || stopping.has(w)) return;
+      const t = setTimeout(() => stopping.get(w)(), 1000); // it may be stuck in app code
+      stopping.set(w, () => (clearTimeout(t), w.terminate()));
+      w.postMessage({ type: "stop" });
+    }
+
     async function startWorker() {
       let code;
       try {
@@ -256,6 +266,7 @@ export function createCresslet(c, opts) {
         };
         w.onmessage = async ({ data: m }) => {
           if (m.type === "ready") resolve();
+          else if (m.type === "stopped") stopping.get(w)?.();
           else if (m.type === "fatal") reject(new Error(m.message));
           else if (m.type === "log") out(`${m.level === "error" ? "\x1b[31m" : "\x1b[2m"}[server] ${m.msg}\x1b[0m`);
           else if (m.type === "db") c.fs.writeFile(dbPath, m.bytes);
@@ -281,7 +292,7 @@ export function createCresslet(c, opts) {
       });
       try {
         await ready;
-        worker?.terminate();
+        stopWorker(worker);
         worker = w;
         workerError = null;
         out("\x1b[32m✔\x1b[0m server ready");
@@ -300,18 +311,37 @@ export function createCresslet(c, opts) {
       const id = ++reqId;
       const body = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
       // after reading the body: the worker may have stopped meanwhile
-      if (!worker) {
-        return new Response(workerError ?? "server is starting", { status: 503, headers: { "content-type": "text/plain" } });
-      }
+      const w = worker;
+      const unavailable = () =>
+        new Response(workerError ?? "server is starting", { status: 503, headers: { "content-type": "text/plain" } });
+      if (!w) return unavailable();
       const appUrl = new URL(path + url.search, cfg.name ? `https://${cfg.name}.preview` : location.origin);
+      // A WebSocket's `req.headers` (from cresslet-container) has Upgrade and the Sec-WebSocket-* headers.
       const res = await new Promise((resolve) => {
         waiting.set(id, resolve);
-        worker.postMessage(
+        w.postMessage(
           { type: "request", id, url: appUrl.href, method: req.method, headers: [...req.headers], body },
           body ? [body] : [],
         );
       });
       out(`\x1b[2m${req.method} ${path} ${res.status}\x1b[0m`);
+      if (res.status === 101) {
+        // The app accepted a WebSocket (WebSocketPair). Hand the preview's socket to the worker that holds its end.
+        if (w !== worker) {
+          // replaced meanwhile: refuse, so the client reconnects to the new one
+          w.postMessage({ type: "socket", id });
+          return unavailable();
+        }
+        let upgrade;
+        try {
+          upgrade = c.upgradeWebSocket(req, { protocol: res.protocol });
+        } catch (e) {
+          w.postMessage({ type: "socket", id }); // the preview gave up meanwhile: the app's end gets `close`
+          throw e;
+        }
+        w.postMessage({ type: "socket", id }, [upgrade.socket]);
+        return upgrade.response;
+      }
       return new Response(res.status === 204 || res.status === 304 ? null : res.body, { status: res.status, headers: res.headers });
     }
 
@@ -326,7 +356,7 @@ export function createCresslet(c, opts) {
     await new Promise((resolve) => ctx.signal.addEventListener("abort", resolve, { once: true }));
     watcher.close();
     server.close();
-    worker?.terminate();
+    stopWorker(worker);
     return 0;
   }
 
