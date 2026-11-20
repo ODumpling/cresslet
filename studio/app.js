@@ -239,6 +239,7 @@ async function openProject(id) {
   showOnly("workspace");
   $("project-title").hidden = false;
   $("deploy-btn").hidden = false;
+  $("deploy-btn").disabled = project.trusted === false; // locked from the start (gate() below takes over)
   $("project-name").value = project.name;
   document.title = `${project.name} · Cresslet Studio`;
   showDeployLink(project.deploy);

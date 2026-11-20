@@ -48,6 +48,16 @@ try {
   await home.getByRole("button", { name: "Run it" }).click();
   await home.locator("#deploy-btn:not([disabled])").waitFor({ timeout: 5000 });
   await home.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
+  // the terminal works again: stop the dev server, run a fresh command
+  await home.locator(".xterm").click();
+  await home.keyboard.press("Control+C");
+  await home.waitForTimeout(500);
+  await home.keyboard.type("pwd\n");
+  // its output: a line that's just a path (innerText: one line per terminal row)
+  for (let i = 0; !/^\/\S+\s*$/m.test(await home.locator(".xterm-rows").innerText()); i++) {
+    if (i > 50) throw new Error("terminal input still ignored after Run it");
+    await home.waitForTimeout(200);
+  }
   console.log("opened deployed source in a new project; preview runs");
 } catch (e) {
   process.exitCode = 1;
