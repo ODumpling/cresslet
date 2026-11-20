@@ -170,7 +170,7 @@ export function createCresslet(c, opts) {
     return body;
   }
 
-  // ---- dev: container dev server for the client, a Worker for the server handler
+  // ---- dev: container dev server for the client, a project Worker (on the preview origin) for the server handler
   async function dev(ctx, port) {
     const out = (s) => ctx.stdout.write(s.replace(/\n/g, "\r\n") + "\r\n");
     const cfg = await config();
@@ -229,8 +229,22 @@ export function createCresslet(c, opts) {
         db = await c.fs.readFile(dbPath);
       } catch { /* fresh db */ }
       const secrets = parseDotenv((await readText(".env.cresslet")) ?? "");
-      const w = new Worker(new URL("./server-worker.js", import.meta.url), { type: "module" });
+      // On the preview origin (cresslet-container runs project workers there), so server code can't open the
+      // studio's IndexedDB (every local project's files).
+      let w;
+      try {
+        w = await c.projectWorker(new URL("./server-worker.js", import.meta.url), { name: "cresslet-server" });
+      } catch (e) {
+        workerError = `server failed to start:\n${e.message}`;
+        out(`\x1b[31m${workerError}\x1b[0m`);
+        return;
+      }
       const ready = new Promise((resolve, reject) => {
+        w.onerror = (e) => {
+          reject(new Error(e.message));
+          // e.g. "preview relay restarted": the worker is gone, rerun `cresslet dev`
+          if (worker === w) out(`\x1b[31m[server] ${e.message}\x1b[0m`);
+        };
         w.onmessage = async ({ data: m }) => {
           if (m.type === "ready") resolve();
           else if (m.type === "fatal") reject(new Error(m.message));
