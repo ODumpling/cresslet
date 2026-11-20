@@ -61,23 +61,26 @@ Coolify names the data volume `<app uuid>_data`. Switching an existing Dockerfil
 U=<app uuid>
 docker volume create ${U}_data
 docker run --rm -v $U-cresslet-data:/old -v ${U}_data:/new alpine sh -ec '
-  apk add -q sqlite; cp -a /old/. /new/; rm -f /new/cresslet.db* /new/apps/*/data/db.sqlite-*
-  sqlite3 /old/cresslet.db ".backup /new/cresslet.db"
-  for f in /old/apps/*/data/db.sqlite; do [ -f "$f" ] && sqlite3 "$f" ".backup /new${f#/old}"; done'
+  apk add -q sqlite; cp -a /old/. /new/; cd /old
+  for db in cresslet.db apps/*/data/db.sqlite apps/*/data/files/index.sqlite; do
+    [ -f "$db" ] || continue; rm -f "/new/$db" "/new/$db-wal" "/new/$db-shm"; sqlite3 "$db" ".backup /new/$db"
+  done'
 ```
 
-Writes that reach the old container between the copy and the switch aren't carried over, so copy right before deploying.
+Writes that reach the old container between the copy and the switch aren't carried over, and a file an app stores during the copy can be missing from it, so copy right before deploying (or stop the old deploy first).
 
-Then keep that network off the host and private ranges (another app's database, the host's SSH and Coolify's own port, cloud metadata), re-applied every minute in case the network is recreated:
+Then keep that network off the host and private ranges (another app's database, the host's SSH and Coolify's own port, cloud metadata). The rules are re-applied every minute in case the network is recreated, and loaded at boot (from the bridge name the last run saved) before Docker starts containers:
 
 ```sh
 deploy/coolify/firewall.sh <app uuid> --install     # <app uuid> = the compose app's network
 ```
 
+A network that doesn't exist yet (the first deploy, or one Coolify recreated) is covered within a minute of its creation; a connection opened in that minute stays up. Run the script once right after the first deploy.
+
 Notes:
 - gVisor's network stack can't reach Docker's embedded DNS (127.0.0.11) on a user-defined network ([gVisor FAQ](https://gvisor.dev/docs/user_guide/faq/)), so the entrypoint writes public resolvers (`CRESSLET_RESOLVERS`, default `1.1.1.1 9.9.9.9`) into `/etc/resolv.conf`. The container can't look up other containers by name (it doesn't need to).
 - This mode doesn't use `CRESSLET_RUNSC` (gVisor per sandbox, which needs a privileged container) or `CRESSLET_CGROUP_DIR`. The uids keep apps out of each other's files and the control plane's. Each sandbox still has its heap cap and request timeout, and the container caps bound them all.
-- Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (it mounts the old `<app uuid>-cresslet-data` volume, without the writes made since; copy back the same way to keep them), then `firewall.sh <app uuid> --remove` and `systemctl disable --now cresslet-firewall.timer`.
+- Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (it mounts the old `<app uuid>-cresslet-data` volume, without the writes made since; copy back the same way to keep them). Then `systemctl disable --now cresslet-firewall.timer cresslet-firewall-boot.service` first (or the timer puts the rules back), and `firewall.sh <app uuid> --remove`.
 
 ## Configuration
 
