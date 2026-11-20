@@ -156,14 +156,15 @@ function renderAccount() {
 // Login is GitHub only: the server redirects back to /#cresslet_login=<one-time code>.
 const meta = fetch("/v1").then((r) => r.json()).catch(() => ({}));
 
-$("account-btn").addEventListener("click", async () => {
-  if (auth.token) {
-    location.hash = "#/settings";
-    return;
-  }
+async function logIn() {
   if ((await meta).auth?.github) location.href = "/v1/auth/github";
   else toast("Login isn't set up on this server (operator: set CRESSLET_GITHUB_CLIENT_ID / _SECRET).");
+}
+$("account-btn").addEventListener("click", () => {
+  if (auth.token) location.hash = "#/settings";
+  else logIn();
 });
+$("landing-login").addEventListener("click", logIn);
 
 function setAccount(r) {
   auth.token = r.token ?? auth.token;
@@ -188,7 +189,7 @@ function logOut() {
     else {
       api("/v1/auth/exchange", { method: "POST", body: JSON.stringify({ code }) }).then((r) => {
         setAccount(r);
-        if (!$("home").hidden) renderHome();
+        if (!$("home").hidden || !$("landing").hidden) renderHome();
         toast(`Logged in as ${auth.email}`);
       }, (e) => toast(`GitHub login failed: ${e.message}`));
     }
@@ -198,9 +199,10 @@ function logOut() {
 // ------------------------------------------------------------------ settings
 let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
 function showOnly(id) {
-  for (const m of ["home", "settings", "admin", "workspace"]) $(m).hidden = m !== id;
+  for (const m of ["landing", "home", "settings", "admin", "workspace"]) $(m).hidden = m !== id;
   $("app").dataset.view = id;
   $("topbar").hidden = id !== "workspace";
+  $("site-nav").hidden = id !== "landing";
   $("project-title").hidden = true;
   $("deploy-btn").hidden = true;
   $("deploy-link").hidden = true;
@@ -627,15 +629,27 @@ const templateCard = (t) =>
     el("span", { className: "desc", textContent: t.description ?? "" }),
     icon("arrow", "icon go"));
 
+let templatesReq;
+function renderTemplates(into) {
+  (templatesReq ??= api("/v1/templates")).then(({ templates }) => {
+    into.replaceChildren(...templates.map(templateCard));
+  }).catch((e) => {
+    templatesReq = null; // try again next time
+    into.replaceChildren(el("p", { className: "error", textContent: `Could not load templates: ${e.message}` }));
+  });
+}
+
+/** #/: the landing page for new visitors (logged out, no local projects), else the projects dashboard. */
 async function renderHome() {
+  if (!auth.token) {
+    const gen = routeGen;
+    const local = await projects.list().catch(() => []);
+    if (gen !== routeGen) return; // navigated away meanwhile
+    if (!local.length) return renderLanding();
+  }
   showOnly("home");
   document.title = "Cresslet Studio";
-
-  api("/v1/templates").then(({ templates }) => {
-    $("templates").replaceChildren(...templates.map((t) =>
-      templateCard(t)));
-  }).catch((e) => $("templates").replaceChildren(el("p", { className: "error", textContent: `Could not load templates: ${e.message}` })));
-
+  renderTemplates($("templates"));
   await renderProjects();
 
   $("apps-section").hidden = !auth.token;
@@ -687,16 +701,48 @@ function renderApps() {
   }).catch((e) => $("apps").replaceChildren(el("p", { className: "error", textContent: `Could not load apps: ${e.message}` })));
 }
 
-$("cli-copy").addEventListener("click", async () => {
-  const cmd = $("cli-cmd").lastChild.textContent.trim();
+async function copyCommand(cmd, fallback) {
   try {
     await navigator.clipboard.writeText(cmd);
     toast("Command copied");
   } catch {
-    getSelection().selectAllChildren($("cli-cmd"));
+    getSelection().selectAllChildren(fallback);
     toast("Copy failed: the command is selected, copy it manually.");
   }
-});
+}
+$("cli-copy").addEventListener("click", () => copyCommand($("cli-cmd").lastChild.textContent.trim(), $("cli-cmd")));
+for (const b of document.querySelectorAll("[data-copy]")) {
+  b.addEventListener("click", () => copyCommand(b.dataset.copy, b.closest(".term").querySelector("code")));
+}
+
+// ------------------------------------------------------------------ landing
+function renderLanding() {
+  showOnly("landing");
+  document.title = "Cresslet: build it in the browser, ship it in a second";
+  renderTemplates($("landing-templates"));
+  meta.then((m) => {
+    // This server's own app domain, and what visitors can do without an account.
+    if (m.appUrlTemplate) {
+      const url = m.appUrlTemplate.replace("{name}", "my-app");
+      for (const n of document.querySelectorAll(".js-app-url")) n.textContent = url;
+      for (const n of document.querySelectorAll(".js-app-host")) n.textContent = url.replace(/^https?:\/\//, "");
+    }
+    const hours = Math.round((m.limits?.anonTtlMs ?? 0) / 3600_000);
+    const keep = m.auth?.github ? " Log in with GitHub to keep them." : "";
+    $("landing-note").textContent = m.anonDeploys
+      ? `Free and open source. No account needed: apps deployed without one last ${hours} hours.${keep}`
+      : `Free and open source. Try it without an account${m.auth?.github ? "; log in with GitHub to deploy" : ""}.`;
+    $("landing-login").hidden = !m.auth?.github;
+  });
+}
+/** "Start building": to the templates, with focus on their heading so keyboard users land there too. */
+for (const b of document.querySelectorAll("[data-start]")) {
+  b.addEventListener("click", () => {
+    const h = $("landing-templates-title");
+    h.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+    h.focus({ preventScroll: true });
+  });
+}
 
 /** New local project from the source uploaded with the app's current deploy (CLI or studio). */
 async function openDeployed({ name, url }) {
