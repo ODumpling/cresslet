@@ -71,6 +71,7 @@ docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   apk add -q --no-cache sqlite tar >/dev/null
   mkdir /s
   cd /data
+  [ -f cresslet.db ] || { echo "no cresslet.db: not a Cresslet data volume?" >&2; exit 1; }
   # Everything except the databases and their sidecars (snapshotted below). A file changing or
   # vanishing mid-copy is tar status 1 (allowed: the server is running); anything worse fails.
   ex=""
@@ -101,6 +102,10 @@ docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
     chmod "$(stat -c %a "$db")" "/s/$db"
     [ "$(sqlite3 "/s/$db" "PRAGMA integrity_check")" = ok ] || { echo "integrity check failed: $db" >&2; exit 1; }
   done
+  # The key the databases were sealed with: still the one staged (a server starting up can create it).
+  k="/out/'"$TMP"'.key"
+  if [ -f secrets.key ]; then [ -f "$k" ] && cmp -s secrets.key "$k"; else [ ! -f "$k" ]; fi ||
+    { echo "secrets.key changed during the snapshot (the server starting?): run again" >&2; exit 1; }
   tar czf "/out/'"$TMP"'.part" -C /s .'
 
 # The key, apart. It never changes, so this is normally one file; a new one (a new volume?) is kept
@@ -125,18 +130,16 @@ echo "cresslet-backup: $DIR/$NAME ($(du -h "$DIR/$NAME" | cut -f1))"
 # Newest $KEEP stay.
 ls -1t "$DIR"/cresslet-*.tgz | tail -n +"$((KEEP + 1))" | while read -r old; do rm -f "$old"; done
 
-# Off-site: the keys first (a snapshot is no use without its key).
-rc=0
+# Off-site: the keys first. A snapshot doesn't go without its key (it couldn't be restored).
 if [ -n "$KEY_REMOTE" ]; then
   # --immutable: an existing copy that differs is an error, not overwritten (copyto would replace it).
   rclone copy --immutable --checksum --include "/secrets-*.key" "$DIR" "$KEY_REMOTE"
   [ -z "$FP" ] || echo "cresslet-backup: secrets$FP.key in $KEY_REMOTE"
 elif [ -n "$REMOTE" ] && [ -n "$FP" ]; then
-  echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE unset: snapshots off-site can't be restored without secrets$FP.key" >&2
-  rc=1
+  echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE unset: not copying $NAME off-site without secrets$FP.key" >&2
+  exit 1
 fi
 if [ -n "$REMOTE" ]; then
   rclone copyto "$DIR/$NAME" "$REMOTE/$NAME"
   echo "cresslet-backup: copied to $REMOTE/$NAME"
 fi
-exit "$rc"
