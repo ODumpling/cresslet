@@ -34,7 +34,14 @@ export interface Config {
   /** TXT lookup for custom-domain verification (tests stub it). */
   resolveTxt: (name: string) => Promise<string[][]>;
   /** OS-level sandbox limits (server/sandbox.ts); Linux, opt-in. */
-  sandbox: { uidBase: number | null; cgroupDir: string | null; cpuPercent: number; pidsMax: number };
+  sandbox: {
+    uidBase: number | null;
+    cgroupDir: string | null;
+    cpuPercent: number;
+    pidsMax: number;
+    /** gVisor's `runsc` binary: run each sandbox under gVisor (null = off; unset in overrides = from env). */
+    runsc?: string | null;
+  };
   limits: {
     deployBytes: number;
     deployFiles: number;
@@ -81,6 +88,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       cgroupDir: process.env.CRESSLET_CGROUP_DIR || null,
       cpuPercent: num("CRESSLET_APP_CPU_PERCENT", 100),
       pidsMax: num("CRESSLET_APP_PIDS", 256),
+      runsc: process.env.CRESSLET_RUNSC || null,
     },
     limits: {
       deployBytes: num("CRESSLET_MAX_DEPLOY_MB", 25) * 1024 * 1024,

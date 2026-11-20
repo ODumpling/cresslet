@@ -1,9 +1,10 @@
 // Egress allowlist for a sandbox. When an app has an allowlist, workerd's globalOutbound is this
 // proxy (external service, `style = proxy`: requests arrive with absolute URLs, raw sockets arrive
 // as CONNECT). Allowed requests are forwarded to public addresses only; everything else gets 403.
-// Apps without an allowlist use workerd's own `allow = ["public"]` network instead.
+// Apps without an allowlist use workerd's own `allow = ["public"]` network instead, except under gVisor
+// (no network in the sandbox): there this proxy runs with `allow = null`, any public host, raw sockets too.
 import { lookup } from "node:dns";
-import { BlockList, isIP, type LookupFunction } from "node:net";
+import { BlockList, connect, isIP, type LookupFunction } from "node:net";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { pipeline } from "node:stream/promises";
 import { Agent, request } from "undici";
@@ -76,7 +77,8 @@ function endToEnd(h: Record<string, string | string[] | undefined>): Record<stri
 const MAX_INFLIGHT = 64;
 
 export function createEgressProxy(
-  allow: string[],
+  /** null = any public host (gVisor sandboxes without an allowlist). */
+  allow: string[] | null,
   log: (line: string) => void,
   connectLookup: LookupFunction = publicLookup(), // tests point it at a local upstream
 ): Server {
@@ -96,8 +98,10 @@ export function createEgressProxy(
       return deny(res, `bad request target ${req.url}`);
     }
     if (url.protocol !== "http:" && url.protocol !== "https:") return deny(res, url.protocol);
-    if (isIP(url.hostname.replace(/^\[|\]$/g, ""))) return deny(res, `${url.hostname} (IP literals are not allowed)`);
-    if (!egressAllows(allow, url.hostname)) return deny(res, `${url.hostname} is not in the allowlist`);
+    const ip = url.hostname.replace(/^\[|\]$/g, "");
+    // An IP literal never goes through connectLookup, so it's checked here.
+    if (isIP(ip) && (allow || !isPublicIp(ip))) return deny(res, `${url.hostname} (${allow ? "IP literals are not allowed" : "not a public address"})`);
+    if (allow && !egressAllows(allow, url.hostname)) return deny(res, `${url.hostname} is not in the allowlist`);
     if (inflight >= MAX_INFLIGHT) {
       log(`egress: more than ${MAX_INFLIGHT} concurrent requests, rejecting`);
       return void res.writeHead(503, { "content-type": "text/plain" }).end("Cresslet egress: too many concurrent requests");
@@ -129,10 +133,42 @@ export function createEgressProxy(
       inflight--;
     }
   });
-  // Raw TCP (cloudflare:sockets connect()) isn't available under an allowlist.
-  server.on("connect", (req: IncomingMessage, socket) => {
-    log(`egress blocked: raw socket to ${req.url}`);
-    socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
+  // Raw TCP (cloudflare:sockets connect()) isn't available under an allowlist; without one (gVisor),
+  // it's tunnelled to public addresses only, like workerd's own "public" network.
+  server.on("connect", (req: IncomingMessage, socket: import("node:stream").Duplex, head: Buffer) => {
+    const forbid = (msg: string) => {
+      log(`egress blocked: ${msg}`);
+      socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
+    };
+    if (allow) return forbid(`raw socket to ${req.url}`);
+    const m = /^\[?([^\[\]]+?)\]?:(\d{1,5})$/.exec(req.url ?? "");
+    const port = Number(m?.[2]);
+    if (!m || port < 1 || port > 65535) return forbid(`bad CONNECT target ${req.url}`);
+    if (isIP(m[1]) && !isPublicIp(m[1])) return forbid(`raw socket to ${m[1]} (not a public address)`);
+    if (inflight >= MAX_INFLIGHT) return void socket.end("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+    inflight++;
+    let open = false;
+    const up = connect({ host: m[1], port, lookup: connectLookup });
+    const done = () => {
+      up.destroy();
+      socket.destroy();
+    };
+    up.once("close", () => inflight--);
+    up.once("connect", () => {
+      open = true;
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length) up.write(head);
+      up.pipe(socket);
+      socket.pipe(up);
+    });
+    up.on("error", (e) => {
+      if (open) return done();
+      const code = (e as { code?: string }).code;
+      if (code === "EACCES" || /non-public/.test(e.message)) return forbid(e.message);
+      log(`egress error: ${m[1]}: ${e.message}`);
+      socket.end("HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n");
+    });
+    socket.on("error", done).on("close", done);
   });
   server.on("close", () => void agent.close());
   return server;

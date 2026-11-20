@@ -63,6 +63,7 @@ Behind Cloudflare's proxy instead (no Caddy, e.g. on Coolify): if `CRESSLET_DOMA
 | `CRESSLET_REQUEST_TIMEOUT_MS` | 30000 | |
 | `CRESSLET_SANDBOX_UID_BASE` | — | Linux: run each sandbox as uid/gid `base + n` (e.g. `100000`; reserve that range, ≥ 1000). Needs the server to run as root, `CRESSLET_SOCK_DIR` (and its parents) root-owned, and the workerd binary executable by those uids |
 | `CRESSLET_CGROUP_DIR` | — | Linux: cgroup v2 dir for per-sandbox cgroups (e.g. `/sys/fs/cgroup/cresslet`); needs a writable cgroupfs |
+| `CRESSLET_RUNSC` | — | Linux: run each sandbox under gVisor; the path to `runsc` (e.g. `/usr/local/bin/runsc`). Needs the server to run as root and `CRESSLET_SOCK_DIR` (and its parents) root-owned. See below |
 | `CRESSLET_APP_CPU_PERCENT` / `CRESSLET_APP_PIDS` | 100 / 256 | per-sandbox `cpu.max` (100 = one core) / `pids.max` (threads count), with `CRESSLET_CGROUP_DIR` |
 | `CRESSLET_APP_MEMORY_MB` | 256 | V8 heap cap |
 | `CRESSLET_IDLE_MS` | 300000 | stop idle sandboxes |
@@ -93,6 +94,21 @@ docker run --user root --cgroupns=private --privileged \
 ```
 
 The server must be the only process in its cgroup (as the container's PID 1 it is); it moves itself into `/sys/fs/cgroup/control-plane` and delegates `cpu memory pids` to `CRESSLET_CGROUP_DIR`. `--privileged` widens what the *container* may do, so weigh it against your host: the per-app uids alone (`--user root`, no `--privileged`) are the low-risk half. `tests/sandbox_test.ts` shows how to verify a host.
+
+gVisor (Linux): `CRESSLET_RUNSC` runs each sandbox inside gVisor, so code that escapes workerd hits a user-space kernel with no network but its own unix sockets, a private `/tmp`, and a filesystem of only its run dir and system libraries ([architecture.md](architecture.md#isolation)). It combines with the uid and cgroup options. Install gVisor (the release tarball's `runsc` and `gvisor-bin/` go side by side):
+
+```sh
+curl -fsSL https://storage.googleapis.com/gvisor/releases/release/20261109.0/$(uname -m)/gvisor.tar.bz2 | tar -xj -C /usr/local/bin runsc gvisor-bin
+```
+
+In Docker, runsc needs the container to be privileged (it makes its own namespaces and mounts):
+
+```sh
+docker run --user root --privileged --cgroupns=private \
+  -e CRESSLET_RUNSC=/usr/local/bin/runsc -e CRESSLET_CGROUP_DIR=/sys/fs/cgroup/cresslet -e CRESSLET_SOCK_DIR=/run/cresslet …
+```
+
+Claimed apps' outbound goes through the control plane's egress proxy in this mode (any public host without an allowlist, raw sockets included). The one host dir a sandbox can write is its listener dir under `CRESSLET_SOCK_DIR`; keeping that on a tmpfs (`/run`) bounds it. `CRESSLET_SOCK_DIR` must be at most 50 bytes. `tests/gvisor_test.ts` shows how to verify a host, and the whole suite runs under gVisor with `CRESSLET_RUNSC` set.
 
 `*.localhost` resolves to 127.0.0.1 in browsers and curl, so local dev needs no DNS setup.
 
