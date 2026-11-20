@@ -95,7 +95,7 @@ test("gVisor: escaped code sees only its run dir, has no network but its sockets
     // Sanity: from the host, the plane answers on both addresses.
     assert.equal(await (await fetch(`http://${hostIp}:${port}`)).text(), "plane");
     const cmd = j.command(process.execPath, [join(run, "probe.mjs"), dataDir, String(port), hostIp, run]);
-    assert.equal(cmd.file, runsc);
+    assert.ok(cmd.file === cfg.sandbox.runsc && cmd.file.startsWith("/"), cmd.file);
     const child = spawn(cmd.file, cmd.args, { cwd: run, stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "";
     child.stdout.on("data", (d) => (out += d));

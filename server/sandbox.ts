@@ -102,7 +102,7 @@ export function prepareHost(cfg: Config) {
     // Sandboxes start with their run dir as cwd and no PATH: resolve it once, here.
     cfg.sandbox.runsc = runsc.includes("/")
       ? resolve(runsc)
-      : (process.env.PATH ?? "").split(":").filter(Boolean).map((d) => join(d, runsc)).find((f) => {
+      : (process.env.PATH ?? "").split(":").filter(Boolean).map((d) => resolve(d, runsc)).find((f) => {
         try {
           accessSync(f, constants.X_OK);
           return true;
