@@ -39,7 +39,9 @@ try {
   if ((await home.locator("#preview").getAttribute("src")) || /npm install/.test(termText)) {
     throw new Error("imported source started before Run it");
   }
+  if (!(await home.locator("#deploy-btn").isDisabled())) throw new Error("Deploy enabled before Run it (a build runs project CSS plugins)");
   await home.getByRole("button", { name: "Run it" }).click();
+  await home.locator("#deploy-btn:not([disabled])").waitFor({ timeout: 5000 });
   await home.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
   console.log("opened deployed source in a new project; preview runs");
 } catch (e) {

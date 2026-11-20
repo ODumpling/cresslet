@@ -457,13 +457,20 @@ async function openProject(id) {
     $("preview-msg").textContent = "Installing dependencies…";
     input.write("npm install && cresslet dev\r");
   };
+  // Opened from a deployed app's source: its code (and npm deps, and a deploy's build: PostCSS/Tailwind plugins)
+  // would run in this browser. Nothing runs, Deploy included, until the user says so.
+  const gate = (locked) => {
+    $("deploy-btn").disabled = locked;
+    $("deploy-btn").title = locked ? "Run the project first" : "";
+  };
+  gate(project.trusted === false);
   if (project.trusted === false) {
-    // Opened from a deployed app's source: its code (and npm deps) would run in this browser.
     setStatus("Not running");
     const btn = el("button", { className: "btn", textContent: "Run it", onclick: async () => {
       project.trusted = true;
       await projects.put(project);
       btn.remove();
+      gate(false);
       start();
     } });
     $("preview-msg").replaceChildren(
