@@ -58,7 +58,7 @@ docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   done
   set -f  # $ex holds patterns for tar, not the shell
   { tar -cf - --anchored --no-wildcards-match-slash \
-      --warning=no-file-changed --warning=no-file-removed --warning=no-file-shrank $ex . ; echo $? > /tmp/rc; } |
+      --warning=no-file-changed --warning=no-file-removed --warning=no-file-shrank $ex . || rc=$?; echo "${rc:-0}" > /tmp/rc; } |
     tar -xpf - -C /s
   set +f
   [ "$(cat /tmp/rc)" -le 1 ] || { echo "copying the volume failed (tar status $(cat /tmp/rc))" >&2; exit 1; }
