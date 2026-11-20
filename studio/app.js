@@ -1,8 +1,9 @@
-import { Container } from "/vendor/cresslet-container/cresslet-container.js";
-import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWithTab, javascript, json, keymap, oneDark } from "/vendor/editor.js";
-import { FitAddon, Terminal } from "/vendor/terminal.js";
-import { auth, fromTree, ignored, migrateDeployKeys, projects, toTree } from "/store.js";
-import { createCresslet } from "/cresslet-plugin.js";
+// Relative imports: index.html loads this from /_v/<release>/ (server/main.ts), so modules stay in step.
+import { Container } from "./vendor/cresslet-container/cresslet-container.js";
+import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWithTab, javascript, json, keymap, oneDark } from "./vendor/editor.js";
+import { FitAddon, Terminal } from "./vendor/terminal.js";
+import { auth, fromTree, ignored, migrateDeployKeys, projects, toTree } from "./store.js";
+import { createCresslet } from "./cresslet-plugin.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, { dataset, ...props } = {}, ...children) => {
