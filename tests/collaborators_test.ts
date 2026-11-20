@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -317,6 +317,19 @@ test("revoked mid-request: no re-promotion while the body was in flight; follow 
     assert.deepEqual(await viewerLogs.read(), { done: true, value: undefined });
     await until(ownerLogs, /after/);
     await ownerLogs.cancel();
+
+    // On a quiet app too: the stream closes within 15s of losing access, without another log line.
+    mock.timers.enable({ apis: ["setInterval"] });
+    try {
+      assert.equal((await t.send("PUT", `/v1/apps/shop/collaborators/${admId}`, owner, { role: "viewer" })).status, 200);
+      const quiet = await follow(adm);
+      await until(quiet, /after/);
+      assert.equal((await t.send("DELETE", `/v1/apps/shop/collaborators/${admId}`, owner)).status, 200);
+      mock.timers.tick(15_000);
+      assert.deepEqual(await quiet.read(), { done: true, value: undefined });
+    } finally {
+      mock.timers.reset();
+    }
   } finally {
     t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });

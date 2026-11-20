@@ -778,12 +778,13 @@ async function renderShare(name) {
   $("invite-form").hidden = true; // until the list loads: only the owner and admins may share
   inviteError("");
   $("people").replaceChildren(el("li", { className: "list-row muted", textContent: "Loading…" }));
+  const gen = routeGen;
   if (!myAccountId) await api("/v1/me").then(setAccount, () => {});
-  await renderPeople();
+  await renderPeople(gen);
 }
 
-async function renderPeople() {
-  const name = shareApp, gen = routeGen;
+async function renderPeople(gen = routeGen) {
+  const name = shareApp;
   let d;
   try {
     d = await api(`/v1/apps/${encodeURIComponent(name)}/collaborators`);

@@ -652,9 +652,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const a = getApp(c.req.param("name"));
     const access = await authorize(c, a, "read");
     const n = Math.min(Number(c.req.query("n") ?? 200), cfg.limits.logLines);
-    // A collaborator's stream ends when they lose access (removed, or left).
+    // A collaborator's stream ends when they lose access (removed, or left): checked per line and every 15s.
     const acct = c.get("account");
-    const revoked = access === "admin" || access === "viewer" ? () => !store.access(a, acct!.id) : () => false;
+    const collaborator = access === "admin" || access === "viewer";
+    const revoked = () => collaborator && !store.access(a, acct!.id);
     const follow = c.req.query("follow") === "1";
     const enc = new TextEncoder();
     const line = (l: unknown) => enc.encode(JSON.stringify(l) + "\n");
@@ -663,11 +664,18 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       start(ctrl) {
         for (const l of runtime.logs.recent(a.id, n)) ctrl.enqueue(line(l));
         if (!follow) return ctrl.close();
-        unsub = runtime.logs.subscribe(a.id, (l) => {
-          if (!revoked()) return ctrl.enqueue(line(l));
+        const end = () => {
           unsub();
           ctrl.close();
-        });
+        };
+        const sub = runtime.logs.subscribe(a.id, (l) => (revoked() ? end() : ctrl.enqueue(line(l))));
+        const timer = collaborator ? setInterval(() => revoked() && end(), 15_000) : undefined;
+        timer?.unref();
+        unsub = () => {
+          sub();
+          clearInterval(timer);
+          unsub = () => {};
+        };
       },
       cancel() {
         unsub();
