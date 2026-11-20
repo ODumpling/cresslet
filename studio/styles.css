@@ -311,6 +311,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .check > span { min-width: 0; overflow-wrap: anywhere; }
 .token-row { display: flex; gap: 8px; margin: 12px 0; }
 .token-row .input { flex: 1; min-width: 0; }
+.list > .list-row .role-select { width: auto; min-height: 28px; padding: 3px 8px; }
 .token-apps { display: flex; flex-wrap: wrap; gap: 2px 18px; margin: 4px 0 0 26px; }
 .token-new p { margin: 0; }
 

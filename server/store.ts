@@ -58,6 +58,29 @@ export interface Token {
   last_used_at: number | null;
 }
 
+/** An invited account's access to an app. The owner is the app's `account_id`, not a collaborator. */
+export const ACCESS = ["viewer", "admin"] as const;
+export type Access = (typeof ACCESS)[number];
+/** The caller's access to an app: its owner, or a collaborator's role. */
+export type AppAccess = "owner" | Access;
+
+export interface Collaborator {
+  app_id: string;
+  account_id: string;
+  role: Access;
+  created_at: number;
+}
+
+/** Pending until an account with this (verified) email accepts it. */
+export interface Invite {
+  id: string;
+  app_id: string;
+  email: string;
+  role: Access;
+  invited_by: string | null;
+  created_at: number;
+}
+
 export interface Domain {
   domain: string;
   app_id: string;
@@ -136,6 +159,21 @@ export class Store {
     // Also tokens a pre-named-tokens server inserted (after a rollback).
     this.db.exec("UPDATE tokens SET id = 'tok_' || lower(hex(randomblob(10))) WHERE id IS NULL");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tokens_id ON tokens (id)");
+    // Collaborators (an older server ignores these tables: invited accounts just lose access).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS collaborators (
+        app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK (role IN ('viewer', 'admin')), created_at INTEGER NOT NULL,
+        PRIMARY KEY (app_id, account_id));
+      CREATE INDEX IF NOT EXISTS collaborators_account ON collaborators (account_id);
+      CREATE TABLE IF NOT EXISTS invites (
+        id TEXT PRIMARY KEY, app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+        email TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('viewer', 'admin')),
+        invited_by TEXT REFERENCES accounts(id) ON DELETE SET NULL, created_at INTEGER NOT NULL,
+        UNIQUE (app_id, email));
+      CREATE INDEX IF NOT EXISTS invites_email ON invites (email);
+    `);
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
   }
@@ -345,6 +383,15 @@ export class Store {
     return this.db.prepare("SELECT * FROM apps WHERE account_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC")
       .all(accountId) as unknown as App[];
   }
+  /** Live apps the account owns or collaborates on, with its access to each. */
+  appsFor(accountId: string): (App & { access: AppAccess })[] {
+    return this.db.prepare(
+      `SELECT a.*, CASE WHEN a.account_id = ?1 THEN 'owner' ELSE c.role END access
+       FROM apps a LEFT JOIN collaborators c ON c.app_id = a.id AND c.account_id = ?1
+       WHERE a.deleted_at IS NULL AND (a.account_id = ?1 OR c.account_id IS NOT NULL)
+       ORDER BY a.updated_at DESC`,
+    ).all(accountId) as unknown as (App & { access: AppAccess })[];
+  }
   async checkDeployKey(appId: string, key: string): Promise<boolean> {
     const row = this.db.prepare("SELECT deploy_key_hash h FROM apps WHERE id = ?").get(appId) as
       | { h: string }
@@ -374,6 +421,81 @@ export class Store {
   expiredApps(now = Date.now()): App[] {
     return this.db.prepare("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ? AND deleted_at IS NULL")
       .all(now) as unknown as App[];
+  }
+
+  // ---- collaborators and invites
+  /** The account's access to the app, or undefined if it has none. */
+  access(a: App, accountId: string): AppAccess | undefined {
+    if (a.account_id === accountId) return "owner";
+    const row = this.db.prepare("SELECT role FROM collaborators WHERE app_id = ? AND account_id = ?")
+      .get(a.id, accountId) as { role: Access } | undefined;
+    return row?.role;
+  }
+  collaborators(appId: string): (Collaborator & { email: string; github_login: string | null })[] {
+    return this.db.prepare(
+      `SELECT c.*, ac.email, ac.github_login FROM collaborators c JOIN accounts ac ON ac.id = c.account_id
+       WHERE c.app_id = ? ORDER BY c.created_at, c.rowid`,
+    ).all(appId) as unknown as (Collaborator & { email: string; github_login: string | null })[];
+  }
+  /** False if the account isn't a collaborator on the app. */
+  setCollaboratorRole(appId: string, accountId: string, role: Access): boolean {
+    return this.db.prepare("UPDATE collaborators SET role = ? WHERE app_id = ? AND account_id = ?")
+      .run(role, appId, accountId).changes > 0;
+  }
+  removeCollaborator(appId: string, accountId: string): boolean {
+    return this.db.prepare("DELETE FROM collaborators WHERE app_id = ? AND account_id = ?").run(appId, accountId).changes > 0;
+  }
+  invites(appId: string): Invite[] {
+    return this.db.prepare("SELECT * FROM invites WHERE app_id = ? ORDER BY created_at, rowid").all(appId) as unknown as Invite[];
+  }
+  /** Creates the invite, or changes the role of a pending one for the same email. */
+  invite(appId: string, email: string, role: Access, invitedBy: string): { invite: Invite; created: boolean } {
+    email = email.toLowerCase();
+    const existing = this.db.prepare("SELECT * FROM invites WHERE app_id = ? AND email = ?").get(appId, email) as Invite | undefined;
+    if (existing) {
+      this.db.prepare("UPDATE invites SET role = ? WHERE id = ?").run(role, existing.id);
+      return { invite: { ...existing, role }, created: false };
+    }
+    const inv: Invite = { id: id("inv"), app_id: appId, email, role, invited_by: invitedBy, created_at: Date.now() };
+    this.db.prepare("INSERT INTO invites (id, app_id, email, role, invited_by, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(inv.id, inv.app_id, inv.email, inv.role, inv.invited_by, inv.created_at);
+    return { invite: inv, created: true };
+  }
+  /** Deletes a pending invite on the app; false if there was none. */
+  cancelInvite(appId: string, inviteId: string): boolean {
+    return this.db.prepare("DELETE FROM invites WHERE app_id = ? AND id = ?").run(appId, inviteId).changes > 0;
+  }
+  /** Pending invites for this email on live apps. */
+  invitesFor(email: string): (Invite & { app_name: string })[] {
+    return this.db.prepare(
+      `SELECT i.*, a.name app_name FROM invites i JOIN apps a ON a.id = i.app_id
+       WHERE i.email = ? AND a.deleted_at IS NULL ORDER BY i.created_at, i.rowid`,
+    ).all(email.toLowerCase()) as unknown as (Invite & { app_name: string })[];
+  }
+  inviteFor(email: string, inviteId: string): Invite | undefined {
+    return this.db.prepare("SELECT * FROM invites WHERE id = ? AND email = ?").get(inviteId, email.toLowerCase()) as
+      | Invite
+      | undefined;
+  }
+  /** The invite becomes a collaborator (unless the account owns the app) and is deleted, in one transaction. */
+  acceptInvite(inv: Invite, accountId: string) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.db.prepare("DELETE FROM invites WHERE id = ?").run(inv.id).changes) {
+        this.db.prepare(
+          `INSERT INTO collaborators (app_id, account_id, role, created_at)
+           SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM apps WHERE id = ? AND account_id = ?)
+           ON CONFLICT (app_id, account_id) DO UPDATE SET role = excluded.role`,
+        ).run(inv.app_id, accountId, inv.role, Date.now(), inv.app_id, accountId);
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  declineInvite(inviteId: string) {
+    this.db.prepare("DELETE FROM invites WHERE id = ?").run(inviteId);
   }
 
   // ---- custom domains (pending until DNS-verified; one verified owner per domain)

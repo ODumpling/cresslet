@@ -166,8 +166,10 @@ $("account-btn").addEventListener("click", () => {
 });
 $("landing-login").addEventListener("click", logIn);
 
+let myAccountId = null; // tells your own row apart on the Share page
 function setAccount(r) {
   auth.token = r.token ?? auth.token;
+  myAccountId = r.account.id;
   auth.email = r.account.github ?? r.account.email;
   $("admin-item").hidden = r.account.role !== "SiteAdmin";
   renderAccount();
@@ -175,6 +177,7 @@ function setAccount(r) {
 
 function logOut() {
   auth.token = null;
+  myAccountId = null;
   auth.email = null;
   $("admin-item").hidden = true;
   renderAccount();
@@ -199,7 +202,7 @@ function logOut() {
 // ------------------------------------------------------------------ settings
 let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
 function showOnly(id) {
-  for (const m of ["landing", "home", "settings", "admin", "workspace"]) $(m).hidden = m !== id;
+  for (const m of ["landing", "home", "settings", "share", "admin", "workspace"]) $(m).hidden = m !== id;
   $("app").dataset.view = id;
   $("topbar").hidden = id !== "workspace";
   $("site-nav").hidden = id !== "landing";
@@ -570,8 +573,8 @@ async function renderAdminSite(name) {
   const stats = el("div", { className: "stats" },
     stat("Status", [STATUS[s.status]], rt.running ? `pid ${rt.pid}` : s.server ? "Starts on the next request" : "Static site", el("i", { className: "dot", ariaHidden: "true", dataset: { s: s.status } })),
     stat("Site size", [fmtBytes(s.usage.deploys)], `${d.deploys.length} deploy${d.deploys.length === 1 ? "" : "s"} kept${dep ? ` · current ${fmtBytes(dep.bytes)}` : ""}`),
-    // `database` is null unless you own the site: admins see its size, not its tables.
-    stat("Database", [s.usage.database ? fmtBytes(s.usage.database) : "—"], !d.database ? (s.usage.database ? "Tables visible to the owner only" : "No database yet") : d.database.error ? "Couldn't read" : !d.database.tables.length ? "No database yet" : `${d.database.tables.length} tables · ${d.database.tables.reduce((n, t) => n + t.rows, 0).toLocaleString()} rows`),
+    // `database` is null unless you own the site or are one of its admins: site admins see its size, not its tables.
+    stat("Database", [s.usage.database ? fmtBytes(s.usage.database) : "—"], !d.database ? (s.usage.database ? "Tables visible to the owner and its admins" : "No database yet") : d.database.error ? "Couldn't read" : !d.database.tables.length ? "No database yet" : `${d.database.tables.length} tables · ${d.database.tables.reduce((n, t) => n + t.rows, 0).toLocaleString()} rows`),
     stat("Files", [fmtBytes(s.usage.files)], `${fmtBytes(s.usage.total)} total on disk`));
 
   const kv = (pairs) => el("dl", { className: "kv" }, ...pairs.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
@@ -653,7 +656,11 @@ async function renderHome() {
   await renderProjects();
 
   $("apps-section").hidden = !auth.token;
-  if (auth.token) renderApps();
+  $("invites-section").hidden = true;
+  if (auth.token) {
+    renderApps();
+    renderInvites();
+  }
 }
 
 /** Local projects only (after a delete, the rest of the home view stays as it is, focus included). */
@@ -686,20 +693,213 @@ async function renderProjects() {
 }
 
 function renderApps() {
-  api("/v1/apps").then(({ apps }) => {
+  return api("/v1/apps").then(({ apps }) => {
     $("apps").replaceChildren(apps.length
-      ? dataTable("apps-title", [["App"], ["Updated"], ["Actions", "actions", true]], apps.map((a) =>
+      ? dataTable("apps-title", [["App"], ["Access"], ["Updated"], ["Actions", "actions", true]], apps.map((a) =>
         el("tr", { className: "list-row" },
           el("td", {}, el("div", { className: "name-cell" },
             el("span", { className: "file-ico" }, icon("globe")),
             el("div", {}, extLink(a.url, a.name), el("span", { className: "sub", textContent: a.url.replace(/^https?:\/\//, "") })))),
+          el("td", { className: "muted", textContent: ACCESS_LABEL[a.access] ?? "" }),
           el("td", { className: "muted" }, timeAgo(a.updatedAt)),
           el("td", { className: "actions" },
             el("button", { className: "btn sm", type: "button", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) },
-              icon("download"), "Open source")))))
+              icon("download"), "Open source"),
+            a.access === "viewer" ? null
+              : el("a", { className: "btn sm", href: `#/share/${encodeURIComponent(a.name)}` }, icon("users"), "Share", srOnly(` ${a.name}`)),
+            a.access === "owner" ? null
+              : el("button", { className: "btn sm danger", type: "button", id: `leave-${a.id}`, ariaLabel: `Leave ${a.name}`, onclick: () => leaveApp(a) }, "Leave")))))
       : emptyState("Nothing deployed yet", "Open a project and press Deploy, or run cresslet deploy."));
   }).catch((e) => $("apps").replaceChildren(el("p", { className: "error", textContent: `Could not load apps: ${e.message}` })));
 }
+
+// ------------------------------------------------------------------ sharing (collaborators and invites)
+const ACCESS_LABEL = { owner: "Owner", admin: "Admin", viewer: "Viewer" };
+const personText = (p) => (p.github ? `${p.github} (${p.email})` : p.email);
+
+/** Invitations to apps other people shared with you (home). */
+async function renderInvites() {
+  const gen = routeGen;
+  let invites;
+  try {
+    ({ invites } = await api("/v1/me/invites"));
+  } catch {
+    invites = [];
+  }
+  if (gen !== routeGen) return;
+  $("invites-section").hidden = !invites.length;
+  $("invites").replaceChildren(...invites.map((i) =>
+    el("li", { className: "list-row" },
+      el("div", { className: "tok" },
+        el("strong", { textContent: i.app }),
+        el("span", { className: "meta", textContent: `${ACCESS_LABEL[i.role]}${i.invitedBy ? ` · invited by ${i.invitedBy.github ?? i.invitedBy.email}` : ""}` })),
+      el("button", { className: "btn sm primary", type: "button", id: `accept-${i.id}`, textContent: "Accept", ariaLabel: `Accept invite to ${i.app}`, onclick: () => answerInvite(i, true) }),
+      el("button", { className: "btn sm", type: "button", id: `decline-${i.id}`, textContent: "Decline", ariaLabel: `Decline invite to ${i.app}`, onclick: () => answerInvite(i, false) }))));
+}
+
+async function answerInvite(i, accept) {
+  try {
+    await api(`/v1/me/invites/${encodeURIComponent(i.id)}${accept ? "/accept" : ""}`, accept ? { method: "POST", body: "{}" } : { method: "DELETE" });
+  } catch (e) {
+    toast(`Could not ${accept ? "accept" : "decline"} the invite: ${e.message}`);
+    return;
+  }
+  toast(accept ? `${i.app} is in your deployed apps (${ACCESS_LABEL[i.role].toLowerCase()})` : `Declined the invite to ${i.app}`);
+  await Promise.all([renderInvites(), accept ? renderApps() : null]);
+  refocus($("invites-section").hidden ? $("apps-title") : $("invites-title"));
+}
+
+async function leaveApp(a) {
+  if (!confirm(`Leave ${a.name}? You lose access to it until someone invites you again.`)) return;
+  try {
+    const { account } = await api("/v1/me");
+    await api(`/v1/apps/${encodeURIComponent(a.name)}/collaborators/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+  } catch (e) {
+    toast(`Could not leave ${a.name}: ${e.message}`);
+    return;
+  }
+  toast(`You left ${a.name}`);
+  await renderApps();
+  refocus($("apps-title"));
+}
+
+/** #/share/<app>: who has access to an app (owner and admins only). */
+let shareApp = null;
+async function renderShare(name) {
+  if (!auth.token) {
+    location.hash = "#/";
+    return;
+  }
+  shareApp = name;
+  showOnly("share");
+  document.title = `Share ${name} · Cresslet Studio`;
+  $("share-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", `Share ${name}`);
+  $("invite-form").reset();
+  inviteError("");
+  $("people").replaceChildren(el("li", { className: "list-row muted", textContent: "Loading…" }));
+  if (!myAccountId) await api("/v1/me").then(setAccount, () => {});
+  await renderPeople();
+}
+
+async function renderPeople() {
+  const name = shareApp, gen = routeGen;
+  let d;
+  try {
+    d = await api(`/v1/apps/${encodeURIComponent(name)}/collaborators`);
+  } catch (e) {
+    if (gen === routeGen) $("people").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load who has access: ${e.message}` }));
+    return;
+  }
+  if (gen !== routeGen) return;
+  const who = (text, meta, badge) =>
+    el("div", { className: "tok" },
+      el("strong", { textContent: text }, badge ? el("span", { className: "badge", textContent: badge }) : null),
+      el("span", { className: "meta", textContent: meta }));
+  $("people").replaceChildren(
+    el("li", { className: "list-row" }, who(personText(d.owner), "Owner", d.owner.id === myAccountId ? "you" : null)),
+    ...d.collaborators.map((p) => {
+      const me = p.id === myAccountId;
+      const role = el("select", {
+        className: "input role-select",
+        id: `role-${p.id}`,
+        ariaLabel: `Role for ${personText(p)}`,
+        onchange: () => setRole(p, role),
+      }, ...["viewer", "admin"].map((v) => el("option", { value: v, textContent: ACCESS_LABEL[v], selected: v === p.role })));
+      return el("li", { className: "list-row" },
+        who(personText(p), `added ${when(p.createdAt)}`, me ? "you" : null),
+        role,
+        el("button", {
+          className: "btn sm danger",
+          type: "button",
+          id: `remove-${p.id}`,
+          textContent: me ? "Leave" : "Remove",
+          ariaLabel: me ? `Leave ${name}` : `Remove ${personText(p)}`,
+          onclick: () => removePerson(p, me),
+        }));
+    }),
+    ...d.invites.map((i) =>
+      el("li", { className: "list-row" },
+        who(i.email, `${ACCESS_LABEL[i.role]} · invited ${when(i.createdAt)}`, "pending"),
+        el("button", {
+          className: "btn sm",
+          type: "button",
+          id: `cancel-${i.id}`,
+          textContent: "Cancel invite",
+          ariaLabel: `Cancel invite for ${i.email}`,
+          onclick: () => cancelInvite(i),
+        }))),
+  );
+}
+
+async function setRole(p, select) {
+  const app = encodeURIComponent(shareApp);
+  try {
+    await api(`/v1/apps/${app}/collaborators/${encodeURIComponent(p.id)}`, { method: "PUT", body: JSON.stringify({ role: select.value }) });
+  } catch (e) {
+    select.value = p.role;
+    toast(`Could not change the role: ${e.message}`);
+    return;
+  }
+  p.role = select.value;
+  toast(`${personText(p)} is now ${ACCESS_LABEL[p.role].toLowerCase()}`);
+  // Demoting yourself ends your access to this page.
+  if (p.id === myAccountId && p.role === "viewer") location.hash = "#/";
+}
+
+async function removePerson(p, me) {
+  const name = shareApp;
+  if (!confirm(me ? `Leave ${name}? You lose access to it until someone invites you again.` : `Remove ${personText(p)} from ${name}?`)) return;
+  try {
+    await api(`/v1/apps/${encodeURIComponent(name)}/collaborators/${encodeURIComponent(p.id)}`, { method: "DELETE" });
+  } catch (e) {
+    toast(`Could not remove: ${e.message}`);
+    return;
+  }
+  toast(me ? `You left ${name}` : `Removed ${personText(p)}`);
+  if (me) {
+    location.hash = "#/";
+    return;
+  }
+  await renderPeople();
+  refocus($("people-title"));
+}
+
+async function cancelInvite(i) {
+  try {
+    await api(`/v1/apps/${encodeURIComponent(shareApp)}/invites/${encodeURIComponent(i.id)}`, { method: "DELETE" });
+  } catch (e) {
+    toast(`Could not cancel the invite: ${e.message}`);
+    return;
+  }
+  toast(`Cancelled the invite for ${i.email}`);
+  await renderPeople();
+  refocus($("people-title"));
+}
+
+function inviteError(text) {
+  $("invite-error").textContent = text;
+  $("invite-error").hidden = !text;
+}
+$("invite-form").addEventListener("input", () => inviteError(""));
+$("invite-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  inviteError("");
+  $("invite-send").disabled = true;
+  try {
+    const r = await api(`/v1/apps/${encodeURIComponent(shareApp)}/collaborators`, {
+      method: "POST",
+      body: JSON.stringify({ email: $("invite-email").value, role: $("invite-role").value }),
+    });
+    $("invite-form").reset();
+    toast(`Invited ${r.invite.email} as ${ACCESS_LABEL[r.invite.role].toLowerCase()}`);
+    await renderPeople();
+  } catch (err) {
+    inviteError(`Could not invite: ${err.message}`);
+  } finally {
+    $("invite-send").disabled = false;
+    if (document.activeElement === document.body) $("invite-send").focus(); // disabling it dropped focus
+  }
+});
 
 async function copyCommand(cmd, fallback) {
   try {
@@ -1158,6 +1358,7 @@ function route() {
   if (m) openProject(m[1], gen);
   else if (booted) reloadForRoute();
   else if (location.hash === "#/settings") renderSettings();
+  else if (location.hash.startsWith("#/share/")) renderShare(decodeURIComponent(location.hash.slice("#/share/".length)));
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();
 }

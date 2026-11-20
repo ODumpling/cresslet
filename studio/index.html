@@ -44,6 +44,7 @@
         <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
         <symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></symbol>
         <symbol id="i-window" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M2 9h20M6 6.5h.01M9 6.5h.01"/></symbol>
+        <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
         <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
       </defs>
     </svg>
@@ -311,10 +312,17 @@
             </div>
             <div id="projects"></div>
           </section>
+          <section class="block" id="invites-section" hidden aria-labelledby="invites-title">
+            <div class="block-head">
+              <h2 id="invites-title" tabindex="-1">Invitations</h2>
+              <p class="muted small">Apps other people shared with you</p>
+            </div>
+            <ul class="list" id="invites" aria-labelledby="invites-title"></ul>
+          </section>
           <section class="block" id="apps-section" hidden aria-labelledby="apps-title">
             <div class="block-head">
-              <h2 id="apps-title">Deployed apps</h2>
-              <p class="muted small">Live on this server</p>
+              <h2 id="apps-title" tabindex="-1">Deployed apps</h2>
+              <p class="muted small">Yours and the ones shared with you</p>
             </div>
             <div id="apps"></div>
           </section>
@@ -392,6 +400,38 @@
               <p class="muted small">Logs this browser out. Its token stays valid until you revoke it above.</p>
               <button class="btn" id="logout-btn" type="button"><svg class="icon" aria-hidden="true"><use href="#i-logout" /></svg>Log out</button>
             </div>
+          </section>
+        </main>
+
+        <main id="share" class="page narrow" hidden aria-labelledby="share-title">
+          <header class="page-head">
+            <div>
+              <h1 id="share-title" tabindex="-1">Share</h1>
+              <p class="muted">Invite accounts to this app. Viewers see it; admins can also change it.</p>
+            </div>
+          </header>
+          <section class="block" aria-labelledby="people-title">
+            <div class="block-head"><h2 id="people-title" tabindex="-1">People with access</h2></div>
+            <ul class="list" id="people" aria-labelledby="people-title"></ul>
+          </section>
+          <section class="block" aria-labelledby="invite-form-title">
+            <form id="invite-form" class="panel form" aria-labelledby="invite-form-title">
+              <h2 id="invite-form-title">Invite</h2>
+              <div class="field">
+                <label for="invite-email">Email</label>
+                <input class="input" id="invite-email" type="email" required maxlength="254" autocomplete="off" spellcheck="false" aria-describedby="invite-email-hint" />
+                <p class="muted small" id="invite-email-hint">The email on their Cresslet account (shown in their Settings). They accept the invite when they log in; no email is sent.</p>
+              </div>
+              <div class="field">
+                <label for="invite-role">Role</label>
+                <select class="input" id="invite-role">
+                  <option value="viewer" selected>Viewer: see the app, logs, source and data</option>
+                  <option value="admin">Admin: also deploy, roll back, secrets, domains and sharing (not deleting the app)</option>
+                </select>
+              </div>
+              <p class="error small" id="invite-error" role="alert" hidden></p>
+              <div class="row start"><button class="btn primary" id="invite-send" type="submit">Send invite</button></div>
+            </form>
           </section>
         </main>
 

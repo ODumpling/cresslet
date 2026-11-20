@@ -8,7 +8,20 @@ import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { appUrl, type Config, paths, previewAppName, previewOrigin, rootUrl } from "./config.ts";
-import { type Account, type App, type Domain, type Role, ROLES, SITE_ADMIN, type Store, type Token } from "./store.ts";
+import {
+  type Access,
+  ACCESS,
+  type Account,
+  type App,
+  type AppAccess,
+  type Domain,
+  type Invite,
+  type Role,
+  ROLES,
+  SITE_ADMIN,
+  type Store,
+  type Token,
+} from "./store.ts";
 import type { Runtime } from "./runtime.ts";
 import { github } from "./github.ts";
 import { confine } from "./bindings.ts";
@@ -80,17 +93,30 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     return acct;
   }
 
-  /** The app's owner with a token allowing `role` on it, or the app's deploy key (full access to that app). */
-  async function authorize(c: Context<Env>, a: App, role: Role) {
+  /**
+   * The app's owner or a collaborator, with a token allowing `role` on it, or the app's deploy key (full
+   * access to that app). Viewers get `read`, admins everything but `owner` actions. `account`: no deploy key.
+   * Returns the account's access (undefined when the deploy key let the request in).
+   */
+  async function authorize(
+    c: Context<Env>,
+    a: App,
+    role: Role,
+    opts: { owner?: boolean; account?: boolean } = {},
+  ): Promise<AppAccess | undefined> {
     const acct = c.get("account"), t = c.get("token");
     let scopeError: string | undefined;
-    if (acct && t && a.account_id === acct.id) {
-      const apps = tokenApps(t);
+    const access = acct && t ? store.access(a, acct.id) : undefined;
+    if (access) {
+      const apps = tokenApps(t!);
       if (apps && !apps.includes(a.id)) scopeError = `this token is not scoped to app ${a.name}`;
-      else if (!atLeast(t, role)) scopeError = `this token can't do that (needs ${role} access, has ${t.role})`;
-      else return;
+      else if (!atLeast(t!, role)) scopeError = `this token can't do that (needs ${role} access, has ${t!.role})`;
+      else if (opts.owner && access !== "owner") scopeError = `only the owner of ${a.name} can do that`;
+      else if (access === "viewer" && role !== "read") scopeError = `viewers of ${a.name} can't do that (ask one of its admins)`;
+      else return access;
     }
-    const key = deployKey(c);
+    if (opts.account && !acct) throw new HttpError(401, "login required (a deploy key can't do this)", "unauthorized");
+    const key = opts.account ? undefined : deployKey(c);
     if (key && await store.checkDeployKey(a.id, key)) return;
     throw new HttpError(a.account_id || key || acct ? 403 : 401, scopeError ?? `not authorized for app ${a.name}`, "forbidden");
   }
@@ -219,7 +245,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       }
       apps = [...new Set(input.apps.map((n) => {
         const app = typeof n === "string" ? store.appByName(n) : undefined;
-        if (!app || app.account_id !== a.id) throw new HttpError(400, `not one of your apps: ${String(n)}`);
+        if (!app || !store.access(app, a.id)) throw new HttpError(400, `not one of your apps: ${String(n)}`);
         return app.id;
       }))];
     }
@@ -407,14 +433,17 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const a = c.get("account"), t = c.get("token");
     if (!a || !t) throw new HttpError(401, "login required", "unauthorized");
     const only = tokenApps(t);
-    return c.json({ apps: store.appsByAccount(a.id).filter((x) => !only || only.includes(x.id)).map(view) });
+    // Owned and shared apps; `access`: owner, admin or viewer.
+    return c.json({
+      apps: store.appsFor(a.id).filter((x) => !only || only.includes(x.id)).map((x) => ({ ...view(x), access: x.access })),
+    });
   });
 
   app.get("/apps/:name", async (c) => {
     const a = getApp(c.req.param("name"));
-    await authorize(c, a, "read");
+    const access = await authorize(c, a, "read");
     return c.json({
-      app: view(a),
+      app: { ...view(a), access: access ?? null },
       deploys: store.deploys(a.id, 10).map((d) => ({
         id: d.id,
         createdAt: new Date(d.created_at).toISOString(),
@@ -431,7 +460,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
 
   app.delete("/apps/:name", async (c) => {
     const a = getApp(c.req.param("name"));
-    await authorize(c, a, "admin");
+    await authorize(c, a, "admin", { owner: true });
     await purgeApp(cfg, store, runtime, a);
     return c.json({ deleted: a.name });
   });
@@ -462,6 +491,121 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     runtime.stop(a.id);
     runtime.logs.push(a.id, "system", `rolled back to ${d.id}`);
     return c.json({ app: view(store.appById(a.id)!) });
+  });
+
+  // ---- collaborators: accounts invited to an app as admin or viewer (see docs/api.md)
+  const MAX_COLLABORATORS = 50; // collaborators + pending invites, per app
+  const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+  const person = (p: { id: string; email: string; github_login: string | null }) =>
+    ({ id: p.id, email: p.email, github: p.github_login });
+  const inviteView = (i: Invite) => {
+    const by = i.invited_by ? store.accountById(i.invited_by) : undefined;
+    return { id: i.id, email: i.email, role: i.role, invitedBy: by ? person(by) : null, createdAt: iso(i.created_at) };
+  };
+  const accessRole = (v: unknown): Access => {
+    if (!ACCESS.includes(v as Access)) throw new HttpError(400, `role must be one of ${ACCESS.join(", ")}`);
+    return v as Access;
+  };
+  /** Managing who has access: the owner or an admin, logged in (a deploy key isn't an account). */
+  const manage = async (c: Context<Env>) => {
+    const a = getApp(c.req.param("name")!);
+    await authorize(c, a, "admin", { account: true });
+    return a;
+  };
+
+  app.get("/apps/:name/collaborators", async (c) => {
+    const a = await manage(c);
+    const owner = store.accountById(a.account_id!)!;
+    return c.json({
+      owner: person(owner),
+      collaborators: store.collaborators(a.id).map((x) =>
+        ({ ...person({ id: x.account_id, email: x.email, github_login: x.github_login }), role: x.role, createdAt: iso(x.created_at) })),
+      invites: store.invites(a.id).map(inviteView),
+    });
+  });
+
+  // Invite by email: the account with that email accepts it (GET /v1/me/invites). No email is sent, and
+  // the response is the same whether or not such an account exists yet.
+  app.post("/apps/:name/collaborators", async (c) => {
+    const a = await manage(c);
+    const input = await body<{ email?: unknown; role?: unknown } | null>(c) ?? {};
+    const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
+    if (!EMAIL_RE.test(email) || email.length > 254) throw new HttpError(400, "valid email required");
+    const role = accessRole(input.role ?? "viewer");
+    const invitee = store.accountByEmail(email);
+    if (invitee && invitee.id === a.account_id) throw new HttpError(400, `${email} owns ${a.name}`);
+    if (invitee && store.access(a, invitee.id)) {
+      throw new HttpError(409, `${email} already has access: change their role instead`, "conflict");
+    }
+    const invites = store.invites(a.id);
+    if (!invites.some((i) => i.email === email) && invites.length + store.collaborators(a.id).length >= MAX_COLLABORATORS) {
+      throw new HttpError(400, `at most ${MAX_COLLABORATORS} collaborators and invites per app`);
+    }
+    const r = store.invite(a.id, email, role, c.get("account")!.id);
+    return c.json({ invite: inviteView(r.invite) }, r.created ? 201 : 200);
+  });
+
+  app.put("/apps/:name/collaborators/:account", async (c) => {
+    const a = await manage(c);
+    const role = accessRole((await body<{ role?: unknown } | null>(c))?.role);
+    if (!store.setCollaboratorRole(a.id, c.req.param("account"), role)) {
+      throw new HttpError(404, "collaborator not found", "not_found");
+    }
+    return c.json({ account: c.req.param("account"), role });
+  });
+
+  // Remove a collaborator (owner or admin), or leave an app you were invited to (any role, admin token).
+  app.delete("/apps/:name/collaborators/:account", async (c) => {
+    const target = c.req.param("account");
+    const me = c.get("account"), t = c.get("token");
+    if (me && t && target === me.id) {
+      const a = getApp(c.req.param("name"));
+      const access = store.access(a, me.id), apps = tokenApps(t);
+      if (!access) throw new HttpError(404, "collaborator not found", "not_found");
+      if (access === "owner") throw new HttpError(400, "the owner can't leave their own app");
+      if ((apps && !apps.includes(a.id)) || !atLeast(t, "admin")) {
+        throw new HttpError(403, `this token can't do that (needs admin access to ${a.name})`, "forbidden");
+      }
+      store.removeCollaborator(a.id, me.id);
+      return c.json({ removed: me.id });
+    }
+    const a = await manage(c);
+    if (!store.removeCollaborator(a.id, target)) throw new HttpError(404, "collaborator not found", "not_found");
+    return c.json({ removed: target });
+  });
+
+  app.delete("/apps/:name/invites/:id", async (c) => {
+    const a = await manage(c);
+    if (!store.cancelInvite(a.id, c.req.param("id"))) throw new HttpError(404, "invite not found", "not_found");
+    return c.json({ cancelled: c.req.param("id") });
+  });
+
+  // ---- invites to the calling account (matched by its email)
+  app.get("/me/invites", (c) => {
+    const acct = accountWide(c, "read");
+    return c.json({
+      invites: store.invitesFor(acct.email).map((i) => ({ ...inviteView(i), app: i.app_name })),
+    });
+  });
+
+  const myInvite = (c: Context<Env>) => {
+    const acct = accountWide(c, "admin");
+    const inv = store.inviteFor(acct.email, c.req.param("id")!);
+    const a = inv && store.appById(inv.app_id);
+    if (!inv || !a) throw new HttpError(404, "invite not found", "not_found");
+    return { acct, inv, a };
+  };
+
+  app.post("/me/invites/:id/accept", (c) => {
+    const { acct, inv, a } = myInvite(c);
+    store.acceptInvite(inv, acct.id);
+    return c.json({ app: { ...view(a), access: store.access(a, acct.id) ?? null } });
+  });
+
+  app.delete("/me/invites/:id", (c) => {
+    const { inv } = myInvite(c);
+    store.declineInvite(inv.id);
+    return c.json({ declined: inv.id });
   });
 
   // ---- project source uploaded with a deploy (cresslet pull / studio "Open")
