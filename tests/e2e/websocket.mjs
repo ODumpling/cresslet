@@ -36,6 +36,9 @@ export default {
       const offered = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map((s) => s.trim());
       const headers = offered.includes("chat") ? { "sec-websocket-protocol": "chat" } : {};
       const res = new Response(null, { status: 101, webSocket: client, headers });
+      let clones = "yes";
+      try { res.clone(); } catch { clones = "no"; }
+      console.log("101 ok " + res.ok + " clones " + clones);
       return new Response(res.body, res); // re-wrapped, as Hono middleware does
 
     }
@@ -61,7 +64,7 @@ const waitFor = async (fn, what, tries = 150) => {
   }
 };
 // Socket waits in the preview fail after 20 s rather than hang.
-const within = (p, what) => Promise.race([p, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out: ${what}`)), 20000))]);
+const within = (p, what) => Promise.race([p, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out: ${what}`)), 20000).unref())]);
 const frame = async () => (await page.locator("#preview").elementHandle()).contentFrame();
 // Replaces (or appends to) server/index.ts in the editor; the dev server restarts the app's server.
 const editServer = async (text, append = false) => {
@@ -105,6 +108,7 @@ try {
   }), `round trip: ${JSON.stringify(roundTrip)}`);
   await waitFor(async () => /after close\(\) readyState 2[\s\S]*\[server\] server saw close 4000 bye yourself/.test(await term.innerText()), "the server end's own close, after close() returned");
   assert(/\[server\] clone sees upgrade websocket edit 1/.test(await term.innerText()), "req.clone() keeps the handshake headers and edits");
+  assert(/\[server\] 101 ok false clones no/.test(await term.innerText()), "a 101 is not ok and can't be cloned");
   assert(/\[server\] plain is Mine false, Mine is Response true/.test(await term.innerText()), "app Response subclasses keep the usual instanceof");
   console.log("round trip:", JSON.stringify(roundTrip));
 

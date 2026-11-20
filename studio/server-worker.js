@@ -115,7 +115,12 @@ globalThis.Response = class Response extends NativeResponse {
     if (init?.status !== 101) return super(body, init);
     // `init` may be a 101 Response being re-wrapped (`new Response(res.body, res)`, as Hono middleware does).
     super(null, { status: 200, statusText: init.statusText, headers: init.headers });
-    Object.defineProperty(this, "status", { value: 101 });
+    // as in workerd: not ok, and not clonable (a clone couldn't carry the socket)
+    Object.defineProperties(this, {
+      status: { value: 101 },
+      ok: { value: false },
+      clone: { value: () => { throw new TypeError("Cannot clone a response to a WebSocket handshake."); } },
+    });
     this.webSocket = init.webSocket;
   }
 };
