@@ -11,6 +11,8 @@
 // are root-owned (group = app gid, read-only), the sockets are root-owned 0660, and workerd's listener
 // is created by the control plane and passed as an fd (runtime.ts), so there's nothing to squat.
 import {
+  accessSync,
+  constants,
   linkSync,
   readlinkSync,
   chmodSync,
@@ -97,8 +99,17 @@ export function prepareHost(cfg: Config) {
     if (process.platform !== "linux" || process.getuid?.() !== 0) {
       throw new Error("CRESSLET_RUNSC needs Linux and the control plane running as root");
     }
-    // Sandboxes start with their run dir as cwd: a relative path must not depend on it.
-    if (runsc.includes("/")) cfg.sandbox.runsc = resolve(runsc);
+    // Sandboxes start with their run dir as cwd and no PATH: resolve it once, here.
+    cfg.sandbox.runsc = runsc.includes("/")
+      ? resolve(runsc)
+      : (process.env.PATH ?? "").split(":").filter(Boolean).map((d) => join(d, runsc)).find((f) => {
+        try {
+          accessSync(f, constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      }) ?? runsc;
     const v = spawnSync(cfg.sandbox.runsc!, ["--version"], { encoding: "utf8" });
     if (v.status !== 0) throw new Error(`CRESSLET_RUNSC: can't run ${runsc} --version: ${v.error?.message ?? v.stderr}`);
   }
@@ -226,7 +237,8 @@ export function sweep(cfg: Config, instance: string) {
     if (!cfg.sandbox.runsc || !reapGvisor(cfg.sandbox.runsc, gv)) {
       console.error(
         `cresslet: can't confirm the gVisor sandbox in ${gv} is gone (CRESSLET_RUNSC unset or runsc failed); left in place. ` +
-          `Clean up by hand: runsc --root ${gv} delete --force a, then remove ${gv} and ${gv.slice(0, -3)}`,
+          `To clean up by hand: runsc --root ${gv} delete --force a; check no process has --root ${gv} in its ` +
+          `command line; umount anything mounted under ${gv}; then remove ${gv} and ${gv.slice(0, -3)}`,
       );
       keep.add(d).add(d.slice(0, -3));
     }
@@ -418,12 +430,21 @@ const runscArgs = (gv: string, ...a: string[]) => ["--root", gv, ...a];
 function gvisorGone(listOk: boolean, listOut: string, gv: string): boolean {
   if (!listOk || listOut.trim()) return false;
   const marks = [`--root=${gv}\0`, `--root\0${gv}\0`];
-  for (const p of readdirSync("/proc")) {
+  let pids: string[];
+  try {
+    pids = readdirSync("/proc");
+  } catch {
+    return false;
+  }
+  for (const p of pids) {
     if (!/^\d+$/.test(p)) continue;
     try {
       const cmd = readFileSync(`/proc/${p}/cmdline`, "utf8");
       if (marks.some((m) => cmd.includes(m))) return false;
-    } catch { /* exited */ }
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ESRCH") return false; // can't tell: not confirmed
+    }
   }
   return true;
 }
