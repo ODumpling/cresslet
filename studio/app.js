@@ -13,19 +13,72 @@ const el = (tag, { dataset, ...props } = {}, ...children) => {
   return n;
 };
 
+const SVG = "http://www.w3.org/2000/svg";
+/** A decorative icon from the sprite in index.html; the control around it carries the accessible name. */
+const icon = (name, className = "icon") => {
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("class", className);
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(SVG, "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.append(use);
+  return svg;
+};
+const srOnly = (text) => el("span", { className: "sr-only", textContent: text });
+/** A link that opens in a new tab, and says so to screen readers. */
+const extLink = (href, text, className = "ext") =>
+  el("a", { href, target: "_blank", rel: "noopener", className }, text, srOnly(" (opens in a new tab)"), icon("external"));
+
 // ------------------------------------------------------------------ shared UI
-function toast(content, ms = 5000) {
-  const t = $("toast");
-  t.replaceChildren(content);
-  t.hidden = false;
+// The toast's body is a live region that stays in the page (one that appears with its message may not be
+// announced). It stays open while hovered or focused (WCAG 2.2.1), and Escape or × dismisses it.
+function toast(content, ms = 6000) {
+  $("toast-body").replaceChildren(content);
+  $("toast").dataset.open = "true";
+  $("toast-close").hidden = false;
+  toast.ms = ms;
+  armToast();
+}
+function armToast() {
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (t.hidden = true), ms);
+  const t = $("toast");
+  if (t.dataset.open === "true" && !t.matches(":hover") && !t.contains(document.activeElement)) {
+    toast.timer = setTimeout(closeToast, toast.ms);
+  }
+}
+function closeToast() {
+  clearTimeout(toast.timer);
+  const t = $("toast");
+  const hadFocus = t.contains(document.activeElement);
+  t.dataset.open = "false";
+  $("toast-close").hidden = true;
+  $("toast-body").replaceChildren();
+  if (hadFocus) focusView();
+}
+{
+  const t = $("toast");
+  t.addEventListener("pointerenter", () => clearTimeout(toast.timer));
+  t.addEventListener("pointerleave", armToast);
+  t.addEventListener("focusin", () => clearTimeout(toast.timer));
+  t.addEventListener("focusout", () => setTimeout(armToast));
+  t.addEventListener("keydown", (e) => e.key === "Escape" && closeToast());
+  $("toast-close").addEventListener("click", closeToast);
 }
 
 function setStatus(text, state = "busy") {
-  $("status").textContent = text;
+  $("status-text").textContent = text;
   $("status").dataset.state = state;
 }
+
+/** Moves focus to the visible view's heading (after navigation, so screen readers hear where they are). */
+function focusView() {
+  const h = document.querySelector("main:not([hidden]) h1");
+  h?.focus({ preventScroll: true });
+}
+$("skip-link").addEventListener("click", (e) => {
+  e.preventDefault(); // its #content href would be read as a route
+  focusView();
+});
 
 async function api(path, init = {}) {
   const headers = { "content-type": "application/json", ...init.headers };
@@ -43,8 +96,10 @@ async function api(path, init = {}) {
 }
 
 function renderAccount() {
-  $("account-btn").textContent = auth.token ? (auth.email ?? "Account") : "Log in with GitHub";
-  $("account-btn").title = auth.token ? "Settings" : "";
+  $("account-label").replaceChildren(...(auth.token
+    ? [auth.email ?? "Account", srOnly(": account settings")]
+    : ["Log in with GitHub"]));
+  $("nav-settings-item").hidden = !auth.token;
 }
 
 // Login is GitHub only: the server redirects back to /#cresslet_login=<one-time code>.
@@ -62,14 +117,14 @@ $("account-btn").addEventListener("click", async () => {
 function setAccount(r) {
   auth.token = r.token ?? auth.token;
   auth.email = r.account.github ?? r.account.email;
-  $("admin-link").hidden = r.account.role !== "SiteAdmin";
+  $("admin-item").hidden = r.account.role !== "SiteAdmin";
   renderAccount();
 }
 
 function logOut() {
   auth.token = null;
   auth.email = null;
-  $("admin-link").hidden = true;
+  $("admin-item").hidden = true;
   renderAccount();
 }
 
@@ -90,11 +145,31 @@ function logOut() {
 }
 
 // ------------------------------------------------------------------ settings
+let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
 function showOnly(id) {
   for (const m of ["home", "settings", "admin", "workspace"]) $(m).hidden = m !== id;
+  $("app").dataset.view = id;
+  $("topbar").hidden = id !== "workspace";
   $("project-title").hidden = true;
   $("deploy-btn").hidden = true;
   $("deploy-link").hidden = true;
+  for (const a of document.querySelectorAll("[data-nav]")) {
+    if (a.dataset.nav === id) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  }
+  if (id !== "workspace") renderRecent();
+  if (focusOnShow) {
+    focusOnShow = false;
+    scrollTo(0, 0);
+    focusView();
+  }
+}
+
+async function renderRecent() {
+  const list = (await projects.list().catch(() => [])).slice(0, 6);
+  $("recent-wrap").hidden = !list.length;
+  $("recent").replaceChildren(...list.map((p) =>
+    el("li", {}, el("a", { href: `#/p/${p.id}` }, icon("code"), el("span", { textContent: p.name })))));
 }
 
 function renderSettings() {
@@ -116,9 +191,9 @@ function renderSettings() {
   });
   renderTokens();
   api("/v1/apps").then(({ apps }) => {
-    $("token-apps").replaceChildren(...apps.map((a) =>
-      el("label", { className: "inline" }, el("input", { type: "checkbox", value: a.name }), a.name)
-    ));
+    $("token-apps").replaceChildren(...(apps.length ? apps.map((a) =>
+      el("label", { className: "check" }, el("input", { type: "checkbox", value: a.name }), a.name)
+    ) : [el("p", { className: "muted small", textContent: "No apps yet." })]));
   }, () => {});
 }
 
@@ -129,17 +204,22 @@ async function renderTokens() {
   try {
     ({ tokens } = await api("/v1/me/tokens"));
   } catch (e) {
-    $("tokens").replaceChildren(el("p", { className: "list-row error", textContent: `Could not load tokens: ${e.message}` }));
+    $("tokens").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load tokens: ${e.message}` }));
+    return;
+  }
+  if (!tokens.length) {
+    $("tokens").replaceChildren(el("li", { className: "list-row muted", textContent: "No tokens yet." }));
     return;
   }
   $("tokens").replaceChildren(...tokens.map((t) =>
-    el("div", { className: "list-row" },
+    el("li", { className: "list-row" },
       el("div", { className: "tok" },
         el("strong", { textContent: t.name }, t.current ? el("span", { className: "badge", textContent: "this browser" }) : null),
         el("span", { className: "meta", textContent: `${t.role} · ${t.apps ? (t.apps.join(", ") || "no apps left") : "all apps"}` })),
       el("span", { className: "meta", textContent: `created ${when(t.createdAt)} · last used ${when(t.lastUsedAt)}` }),
       el("button", {
-        className: "btn",
+        className: "btn sm danger",
+        type: "button",
         textContent: "Revoke",
         ariaLabel: `Revoke ${t.name}`,
         onclick: () => revokeToken(t),
@@ -189,6 +269,7 @@ $("token-form").addEventListener("submit", async (e) => {
     $("token-new-name").textContent = r.info.name;
     $("token-new-value").value = r.token;
     $("token-new").hidden = false;
+    $("token-new").focus();
     $("token-form").reset();
     $("token-apps").hidden = true;
     renderTokens();
@@ -232,7 +313,7 @@ const ago = (iso) => {
   return rtf.format(Math.round(s), "second");
 };
 const STATUS = { running: "Running", idle: "Idle", empty: "Not deployed", deleted: "Deleted" };
-const statusPill = (s) => el("span", { className: "pill" }, el("i", { className: "dot", dataset: { s } }), STATUS[s] ?? s);
+const statusPill = (s, text = STATUS[s] ?? s) => el("span", { className: "pill", dataset: { s } }, el("i", { className: "dot", ariaHidden: "true" }), text);
 const ownerText = (o) => (o ? o.github ?? o.email : "Anonymous");
 const stat = (label, value, sub, extra) =>
   el("div", { className: "stat" },
@@ -285,7 +366,8 @@ async function adminAction(site, action) {
 function siteActions(site, after) {
   const btn = (label, action, danger) =>
     el("button", {
-      className: `btn${danger ? " danger" : ""}`,
+      className: `btn sm${danger ? " danger" : ""}`,
+      type: "button",
       textContent: label,
       ariaLabel: `${label} ${site.name}`,
       onclick: async (e) => {
@@ -323,7 +405,7 @@ async function renderAdminSites() {
   const gen = adminView.gen;
   const { totals, sites, retentionDays } = await api("/v1/admin/sites");
   if (gen !== adminView.gen) return; // navigated away meanwhile
-  $("admin-actions").replaceChildren(el("button", { className: "btn", textContent: "Refresh", onclick: () => renderAdmin() }));
+  $("admin-actions").replaceChildren(el("button", { className: "btn", type: "button", onclick: () => renderAdmin() }, icon("refresh"), "Refresh"));
 
   const u = totals.usage;
   const stats = el("div", { className: "stats" },
@@ -337,8 +419,9 @@ async function renderAdminSites() {
   const counts = { live: totals.live, deleted: totals.deleted, all: totals.sites };
   const seg = el("div", { className: "seg", role: "group", ariaLabel: "Show" },
     ...[["live", "Live"], ["deleted", "Deleted"], ["all", "All"]].map(([k, l]) =>
-      el("button", { textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminView.filter = k; draw(); } })));
-  const search = el("input", { type: "search", placeholder: "Search sites, owners, domains", ariaLabel: "Search sites", value: adminView.q, oninput: () => { adminView.q = search.value; draw(); } });
+      el("button", { type: "button", textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminView.filter = k; draw(); } })));
+  const search = el("input", { type: "search", className: "input", placeholder: "Search sites, owners, domains", ariaLabel: "Search sites", value: adminView.q, oninput: () => { adminView.q = search.value; draw(); } });
+  const shown = el("p", { className: "sr-only", role: "status" });
 
   function draw() {
     for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === adminView.filter));
@@ -346,28 +429,30 @@ async function renderAdminSites() {
     const rows = sites.filter((s) =>
       (adminView.filter === "all" || (adminView.filter === "deleted") === (s.status === "deleted")) &&
       (!q || [s.name, s.owner?.email, s.owner?.github, ...s.domains].some((v) => v?.toLowerCase().includes(q))));
+    shown.textContent = `${rows.length} site${rows.length === 1 ? "" : "s"} shown`;
     tbody.replaceChildren(...(rows.length ? rows.map((s) =>
       el("tr", { dataset: s.status === "deleted" ? { deleted: "" } : {} },
         el("td", {},
           el("a", { href: `#/admin/${encodeURIComponent(s.name)}`, textContent: s.name }),
-          el("span", { className: "muted small", textContent: s.domains[0] ?? s.url.replace(/^https?:\/\//, "") })),
+          el("span", { className: "sub", textContent: s.domains[0] ?? s.url.replace(/^https?:\/\//, "") })),
         el("td", { textContent: ownerText(s.owner), className: s.owner ? "" : "muted" }),
         el("td", {}, statusPill(s.status),
-          s.status === "deleted" ? el("span", { className: "muted small", textContent: `purged ${ago(s.purgeAt)}` }) : null),
+          s.status === "deleted" ? el("span", { className: "sub", textContent: `purged ${ago(s.purgeAt)}` }) : null),
         el("td", { className: "num", textContent: fmtBytes(s.usage.deploys + s.usage.files) }),
         el("td", { className: "num", textContent: s.usage.database ? fmtBytes(s.usage.database) : "—" }),
-        el("td", { textContent: ago(s.updatedAt), title: new Date(s.updatedAt).toLocaleString() }),
+        el("td", {}, el("time", { dateTime: s.updatedAt, title: new Date(s.updatedAt).toLocaleString(), textContent: ago(s.updatedAt) })),
         el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin()))))
       : [el("tr", {}, el("td", { colSpan: 7, className: "empty", textContent: q ? "No sites match." : "No sites here." }))]));
   }
   draw();
 
   $("admin-body").replaceChildren(stats, storage,
-    el("div", { className: "toolbar" }, search, seg),
+    el("div", { className: "toolbar" }, el("div", { className: "search" }, icon("search"), search), seg, shown),
     el("div", { className: "table-wrap" },
       el("table", { className: "table" },
-        el("thead", {}, el("tr", {}, ...["Site", "Owner", "Status", "Site size", "Database", "Updated", ""].map((h, i) =>
-          el("th", { textContent: h, className: i === 3 || i === 4 ? "num" : "" })))),
+        el("caption", { className: "sr-only", textContent: "Sites" }),
+        el("thead", {}, el("tr", {}, ...["Site", "Owner", "Status", "Site size", "Database", "Updated", "Actions"].map((h, i) =>
+          el("th", { scope: "col", className: i === 3 || i === 4 ? "num" : "" }, i === 6 ? srOnly(h) : h)))),
         tbody)),
     el("p", { className: "muted small", textContent: `Deleted sites go offline and can be restored for ${retentionDays} days, then they're purged with their data.` }));
 }
@@ -380,29 +465,29 @@ async function renderAdminSite(name) {
   if (gen !== adminView.gen) return;
   const s = d.site;
   $("admin-sub").textContent = s.owner ? `Owned by ${ownerText(s.owner)}` : "Anonymous site";
-  const visit = el("a", { className: "btn", href: s.url, target: "_blank", rel: "noopener", textContent: "Visit ↗" });
+  const visit = extLink(s.url, "Visit", "btn");
   visit.hidden = s.status === "deleted";
   $("admin-actions").replaceChildren(visit,
     ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name))));
 
   const dep = s.currentDeploy;
   const banner = s.status === "deleted"
-    ? el("div", { className: "banner deleted" }, el("strong", { textContent: "Deleted" }),
-      `${ago(s.deletedAt)}. Offline and hidden from its owner; purged with its data ${ago(s.purgeAt)} unless restored.`)
+    ? el("div", { className: "banner deleted" }, statusPill("deleted"),
+      el("span", { textContent: `${ago(s.deletedAt)}. Offline and hidden from its owner; purged with its data ${ago(s.purgeAt)} unless restored.` }))
     : dep
-    ? el("div", { className: "banner" }, el("strong", { textContent: "Live" }),
-      el("span", { className: "mono", textContent: dep.id }), ` deployed ${ago(dep.createdAt)} via ${dep.source}`)
+    ? el("div", { className: "banner" }, statusPill("live", "Live"),
+      el("span", {}, el("span", { className: "mono", textContent: dep.id }), ` deployed ${ago(dep.createdAt)} via ${dep.source}`))
     : el("div", { className: "banner" }, "Nothing deployed yet.");
 
   const rt = d.runtime;
   const stats = el("div", { className: "stats" },
-    stat("Status", [STATUS[s.status]], rt.running ? `pid ${rt.pid}` : s.server ? "Starts on the next request" : "Static site", el("i", { className: "dot", dataset: { s: s.status } })),
+    stat("Status", [STATUS[s.status]], rt.running ? `pid ${rt.pid}` : s.server ? "Starts on the next request" : "Static site", el("i", { className: "dot", ariaHidden: "true", dataset: { s: s.status } })),
     stat("Site size", [fmtBytes(s.usage.deploys)], `${d.deploys.length} deploy${d.deploys.length === 1 ? "" : "s"} kept${dep ? ` · current ${fmtBytes(dep.bytes)}` : ""}`),
     stat("Database", [s.usage.database ? fmtBytes(s.usage.database) : "—"], d.database.error ? "Couldn't read" : !d.database.tables.length ? "No database yet" : `${d.database.tables.length} tables · ${d.database.tables.reduce((n, t) => n + t.rows, 0).toLocaleString()} rows`),
     stat("Files", [fmtBytes(s.usage.files)], `${fmtBytes(s.usage.total)} total on disk`));
 
   const kv = (pairs) => el("dl", { className: "kv" }, ...pairs.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
-  const link = (href, text) => el("a", { href, target: "_blank", rel: "noopener", textContent: text });
+  const link = (href, text) => extLink(href, text);
   const info = el("div", { className: "panel" }, el("h2", { textContent: "Overview" }), kv([
     ["URL", s.status === "deleted" ? s.url : link(s.url, s.url.replace(/^https?:\/\//, ""))],
     ["Domains", d.domains.length ? el("span", {}, ...d.domains.flatMap((x, i) => [i ? ", " : null, x.verified ? link(`https://${x.domain}`, x.domain) : `${x.domain} (unverified)`])) : "—"],
@@ -411,12 +496,13 @@ async function renderAdminSite(name) {
     ["Secrets", String(d.secrets)],
     ["Created", new Date(s.createdAt).toLocaleString()],
     ["App ID", el("span", { className: "mono", textContent: s.id })],
-  ]), el("h2", { textContent: "Storage", style: "margin-top:20px" }), usageBar(s.usage));
+  ]), el("h2", { className: "mt", textContent: "Storage" }), usageBar(s.usage));
 
   const tableOf = (heads, rows, empty) =>
     rows.length
-      ? el("div", { className: "scroll-x" }, el("table", { className: "table" },
-        el("thead", {}, el("tr", {}, ...heads.map((h, i) => el("th", { textContent: h, className: i ? "num" : "" })))),
+      // Focusable, so a keyboard can scroll it when it's wider than the panel.
+      ? el("div", { className: "scroll-x", tabIndex: 0, role: "region", ariaLabel: `${heads[0]}s` }, el("table", { className: "table" },
+        el("thead", {}, el("tr", {}, ...heads.map((h, i) => el("th", { scope: "col", textContent: h, className: i ? "num" : "" })))),
         el("tbody", {}, ...rows.map((r) => el("tr", {}, ...r.map((c, i) => el("td", { className: i ? "num" : "" }, c)))))))
       : el("p", { className: "muted small", textContent: empty });
   const db = el("div", { className: "panel" }, el("h2", { textContent: "Database tables" }),
@@ -424,7 +510,7 @@ async function renderAdminSite(name) {
       : tableOf(["Table", "Rows"], d.database.tables.map((t) => [el("span", { className: "mono", textContent: t.name }), t.rows.toLocaleString()]), "No database yet."));
   const deploys = el("div", { className: "panel" }, el("h2", { textContent: "Deploys" }),
     tableOf(["Deploy", "Size", "When"], d.deploys.map((x) => [
-      el("span", {}, el("span", { className: "mono", textContent: x.id }), x.current ? el("span", { className: "muted small", textContent: "live" }) : null),
+      el("span", {}, el("span", { className: "mono", textContent: x.id }), x.current ? el("span", { className: "badge", textContent: "live" }) : null),
       fmtBytes(x.bytes),
       ago(x.createdAt),
     ]), "No deploys."));
@@ -434,47 +520,84 @@ async function renderAdminSite(name) {
 }
 
 // ------------------------------------------------------------------ home
+const TEMPLATE_ICONS = { react: "atom", vanilla: "zap" };
+const emptyState = (title, text) => el("div", { className: "empty-state" }, el("strong", { textContent: title }), el("span", { textContent: text }));
+const timeAgo = (iso) => el("time", { dateTime: new Date(iso).toISOString(), title: new Date(iso).toLocaleString(), textContent: ago(iso) });
+function dataTable(labelledBy, heads, rows) {
+  const t = el("table", { className: "table" },
+    el("thead", {}, el("tr", {}, ...heads.map(([h, cls, hide]) => el("th", { scope: "col", className: cls ?? "" }, hide ? srOnly(h) : h)))),
+    el("tbody", {}, ...rows));
+  t.setAttribute("aria-labelledby", labelledBy);
+  return el("div", { className: "table-wrap" }, t);
+}
+
 async function renderHome() {
   showOnly("home");
   document.title = "Cresslet Studio";
 
   api("/v1/templates").then(({ templates }) => {
     $("templates").replaceChildren(...templates.map((t) =>
-      el("button", { className: "card", onclick: () => createProject(t.name) },
-        el("strong", { textContent: t.name }), el("span", { textContent: t.description ?? "" }))
+      el("button", { className: "card", type: "button", onclick: () => createProject(t.name) },
+        el("span", { className: "card-icon" }, icon(TEMPLATE_ICONS[t.name] ?? "code")),
+        el("strong", { textContent: t.name }),
+        el("span", { className: "desc", textContent: t.description ?? "" }),
+        icon("arrow", "icon go"))
     ));
   }).catch((e) => $("templates").replaceChildren(el("p", { className: "error", textContent: `Could not load templates: ${e.message}` })));
 
   const list = await projects.list().catch(() => []);
-  $("projects").replaceChildren(...list.map((p) =>
-    el("div", { className: "list-row" },
-      el("a", { href: `#/p/${p.id}`, textContent: p.name }),
-      el("span", { className: "meta", textContent: `${p.template} · edited ${new Date(p.updatedAt).toLocaleString()}` }),
-      el("button", {
-        className: "icon-btn",
-        title: "Delete project",
-        ariaLabel: `Delete ${p.name}`,
-        textContent: "×",
-        onclick: async () => {
-          if (!confirm(`Delete local project ${p.name}? Deployed apps are not affected.`)) return;
-          await projects.delete(p.id);
-          renderHome();
-        },
-      }))
-  ));
+  $("projects").replaceChildren(list.length
+    ? dataTable("projects-title", [["Project"], ["Template"], ["Deployed to"], ["Edited"], ["Actions", "actions", true]], list.map((p) =>
+      el("tr", { className: "list-row" },
+        el("td", {}, el("div", { className: "name-cell" },
+          el("span", { className: "file-ico" }, icon(TEMPLATE_ICONS[p.template] ?? "code")),
+          el("a", { href: `#/p/${p.id}`, textContent: p.name }))),
+        el("td", { className: "muted", textContent: p.template }),
+        el("td", {}, p.deploy?.url ? extLink(p.deploy.url, p.deploy.url.replace(/^https?:\/\//, "")) : el("span", { className: "muted", textContent: "Not deployed" })),
+        el("td", { className: "muted" }, timeAgo(p.updatedAt)),
+        el("td", { className: "actions" }, el("button", {
+          className: "icon-btn danger",
+          type: "button",
+          title: "Delete project",
+          ariaLabel: `Delete ${p.name}`,
+          onclick: async () => {
+            if (!confirm(`Delete local project ${p.name}? Deployed apps are not affected.`)) return;
+            await projects.delete(p.id);
+            toast(`Deleted ${p.name}`);
+            await renderHome();
+            focusView();
+          },
+        }, icon("trash"))))))
+    : emptyState("No projects yet", "Pick a template above. Projects are saved in this browser as you edit."));
 
   $("apps-section").hidden = !auth.token;
   if (auth.token) {
     api("/v1/apps").then(({ apps }) => {
-      $("apps").replaceChildren(...apps.map((a) =>
-        el("div", { className: "list-row" },
-          el("a", { href: a.url, target: "_blank", rel: "noopener", textContent: a.name }),
-          el("span", { className: "meta", textContent: `updated ${new Date(a.updatedAt).toLocaleString()}` }),
-          el("button", { className: "btn", textContent: "Open source", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) }))
-      ));
-    }).catch(() => {});
+      $("apps").replaceChildren(apps.length
+        ? dataTable("apps-title", [["App"], ["Updated"], ["Actions", "actions", true]], apps.map((a) =>
+          el("tr", { className: "list-row" },
+            el("td", {}, el("div", { className: "name-cell" },
+              el("span", { className: "file-ico" }, icon("globe")),
+              el("div", {}, extLink(a.url, a.name), el("span", { className: "sub", textContent: a.url.replace(/^https?:\/\//, "") })))),
+            el("td", { className: "muted" }, timeAgo(a.updatedAt)),
+            el("td", { className: "actions" },
+              el("button", { className: "btn sm", type: "button", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) },
+                icon("download"), "Open source")))))
+        : emptyState("Nothing deployed yet", "Open a project and press Deploy, or run cresslet deploy."));
+    }).catch((e) => $("apps").replaceChildren(el("p", { className: "error", textContent: `Could not load apps: ${e.message}` })));
   }
 }
+
+$("cli-copy").addEventListener("click", async () => {
+  const cmd = $("cli-cmd").lastChild.textContent.trim();
+  try {
+    await navigator.clipboard.writeText(cmd);
+    toast("Command copied");
+  } catch {
+    getSelection().selectAllChildren($("cli-cmd"));
+    toast("Copy failed: the command is selected, copy it manually.");
+  }
+});
 
 /** New local project from the source uploaded with the app's current deploy (CLI or studio). */
 async function openDeployed({ name, url }) {
@@ -522,6 +645,7 @@ async function openProject(id) {
   }
   booted = true;
   showOnly("workspace");
+  $("workspace-title").textContent = `${project.name}: editor and preview`;
   $("project-title").hidden = false;
   $("deploy-btn").hidden = false;
   $("deploy-btn").disabled = project.trusted === false; // locked from the start (gate() below takes over)
@@ -531,7 +655,17 @@ async function openProject(id) {
 
   $("project-name").onchange = async (e) => {
     project.name = e.target.value.trim() || project.name;
+    e.target.value = project.name;
+    document.title = `${project.name} · Cresslet Studio`;
+    $("workspace-title").textContent = `${project.name}: editor and preview`;
     await projects.rename(project.id, project.name);
+  };
+
+  // Colors follow the light/dark preference; CSS tokens are the source of truth.
+  const scheme = matchMedia("(prefers-color-scheme: dark)");
+  const termTheme = () => {
+    const v = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+    return { background: v("--surface"), foreground: v("--text"), cursor: v("--accent-text"), cursorAccent: v("--surface"), selectionBackground: v("--accent-soft") };
   };
 
   // terminal
@@ -540,7 +674,8 @@ async function openProject(id) {
     cursorBlink: true,
     fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--mono"),
     fontSize: 12.5,
-    theme: { background: "#151a18", foreground: "#e4ebe7", cursor: "#3fb560", selectionBackground: "#3fb56055" },
+    screenReaderMode: true, // output is mirrored into a live region screen readers can read
+    theme: termTheme(),
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -581,6 +716,7 @@ async function openProject(id) {
     c = await Container.boot({ previewOrigin: po });
   } catch (e) {
     setStatus("Runtime failed", "error");
+    $("preview-spinner").hidden = true;
     $("preview-msg").textContent = `Could not start the runtime: ${e.message}`;
     term.writeln(`\x1b[31m${e.stack ?? e.message}\x1b[0m`);
     return;
@@ -617,6 +753,7 @@ async function openProject(id) {
 
   // editor
   const lang = new Compartment();
+  const theme = new Compartment();
   let current = null;
   let suppress = false;
   const view = new EditorView({
@@ -626,7 +763,8 @@ async function openProject(id) {
       extensions: [
         basicSetup,
         keymap.of([indentWithTab]),
-        oneDark,
+        theme.of(scheme.matches ? oneDark : []),
+        EditorView.contentAttributes.of({ "aria-label": "Code" }),
         lang.of([]),
         EditorView.updateListener.of((u) => {
           if (!u.docChanged || suppress || !current) return;
@@ -659,8 +797,13 @@ async function openProject(id) {
     });
     suppress = false;
     $("open-file").textContent = path;
+    view.contentDOM.setAttribute("aria-label", `Code: ${path}`);
     renderTree();
   }
+  scheme.addEventListener("change", () => {
+    view.dispatch({ effects: theme.reconfigure(scheme.matches ? oneDark : []) });
+    term.options.theme = termTheme();
+  });
 
   async function listFiles(dir = "", depth = 0, out = []) {
     const entries = await c.fs.readdir(`${wd}${dir ? "/" + dir : ""}`, { withFileTypes: true });
@@ -676,18 +819,20 @@ async function openProject(id) {
     return out;
   }
 
+  // Folders are labels, files are buttons named by their full path (the indent alone shows nesting).
   async function renderTree() {
     const items = await listFiles().catch(() => []);
-    $("tree").replaceChildren(...items.map((f) => {
-      const b = el("button", { textContent: f.dir ? `${f.name}/` : f.name, className: f.dir ? "dir" : "" });
-      b.style.setProperty("--depth", f.depth);
-      if (f.dir) b.tabIndex = -1;
-      else {
-        b.onclick = () => openFile(f.path);
-        if (f.path === current) b.setAttribute("aria-current", "true");
-      }
-      return b;
-    }));
+    const focused = document.activeElement?.closest?.("#tree") ? document.activeElement.dataset.path : null;
+    $("tree").replaceChildren(el("ul", {}, ...items.map((f) => {
+      const item = f.dir
+        ? el("span", { className: "dir" }, icon("folder"), el("span", { textContent: f.name }))
+        : el("button", { type: "button", dataset: { path: f.path }, onclick: () => openFile(f.path) },
+          icon("file"), el("span", { textContent: f.name }), f.depth ? srOnly(` in ${f.path.slice(0, -f.name.length - 1)}`) : null);
+      item.style.setProperty("--depth", f.depth);
+      if (!f.dir && f.path === current) item.setAttribute("aria-current", "true");
+      return el("li", {}, item);
+    })));
+    if (focused) $("tree").querySelector(`button[data-path="${CSS.escape(focused)}"]`)?.focus();
   }
 
   $("new-file").onclick = async () => {
@@ -726,6 +871,7 @@ async function openProject(id) {
     if (port !== 3000 && previewBase) return;
     previewBase = url;
     $("preview-empty").hidden = true;
+    $("preview-spinner").hidden = false;
     setStatus("Running", "ready");
     loadPreview();
   });
@@ -757,12 +903,14 @@ async function openProject(id) {
   };
   gate(project.trusted === false);
   if (project.trusted === false) {
-    setStatus("Not running");
-    const btn = el("button", { className: "btn", textContent: "Run it", onclick: async () => {
+    setStatus("Not running", "idle");
+    $("preview-spinner").hidden = true;
+    const btn = el("button", { className: "btn primary", type: "button", textContent: "Run it", onclick: async () => {
       project.trusted = true;
       await projects.put(project);
       btn.remove();
       gate(false);
+      $("preview-spinner").hidden = false;
       start();
     } });
     $("preview-msg").replaceChildren(
@@ -776,19 +924,19 @@ async function openProject(id) {
   $("deploy-btn").onclick = async () => {
     const btn = $("deploy-btn");
     btn.disabled = true;
-    btn.textContent = "Deploying…";
+    $("deploy-btn-label").textContent = "Deploying…";
     const log = $("deploy-log");
     log.textContent = "";
     selectTab("deploy-log");
     try {
       const r = await cresslet.deploy((line) => (log.textContent += line + "\n"));
-      toast(el("span", {}, "Deployed: ", el("a", { href: r.app.url, target: "_blank", rel: "noopener", textContent: r.app.url })), 8000);
+      toast(el("span", {}, "Deployed: ", extLink(r.app.url, r.app.url)), 10000);
     } catch (e) {
       log.textContent += `\nerror: ${e.message}\n`;
-      toast(`Deploy failed: ${e.message}`);
+      toast(`Deploy failed: ${e.message}`, 10000);
     } finally {
       btn.disabled = false;
-      btn.textContent = "Deploy";
+      $("deploy-btn-label").textContent = "Deploy";
     }
   };
 }
@@ -798,15 +946,31 @@ function showDeployLink(deploy) {
   a.hidden = !deploy?.url;
   if (deploy?.url) {
     a.href = deploy.url;
-    a.textContent = deploy.url.replace(/^https?:\/\//, "");
+    a.replaceChildren(icon("globe"), deploy.url.replace(/^https?:\/\//, ""), srOnly(" (live app, opens in a new tab)"));
   }
 }
 
-function selectTab(name) {
-  for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t.dataset.tab === name));
+// Tabs (ARIA tabs pattern): one tab stop, arrows/Home/End move between tabs and select them.
+const tabs = [...document.querySelectorAll(".tab")];
+function selectTab(name, focus = false) {
+  for (const t of tabs) {
+    const on = t.dataset.tab === name;
+    t.setAttribute("aria-selected", String(on));
+    t.tabIndex = on ? 0 : -1;
+    if (on && focus) t.focus();
+  }
   for (const p of document.querySelectorAll("[data-panel]")) p.hidden = p.dataset.panel !== name;
 }
-for (const t of document.querySelectorAll(".tab")) t.addEventListener("click", () => selectTab(t.dataset.tab));
+for (const t of tabs) {
+  t.addEventListener("click", () => selectTab(t.dataset.tab));
+  t.addEventListener("keydown", (e) => {
+    const i = tabs.indexOf(t);
+    const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (j === undefined) return;
+    e.preventDefault();
+    selectTab(tabs[(j + tabs.length) % tabs.length].dataset.tab, true);
+  });
+}
 
 // ------------------------------------------------------------------ routing
 function route() {
@@ -817,7 +981,10 @@ function route() {
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();
 }
-addEventListener("hashchange", route);
+addEventListener("hashchange", () => {
+  focusOnShow = true;
+  route();
+});
 renderAccount();
 // Role can change server-side: refresh it (shows the Admin link to site admins).
 if (auth.token) api("/v1/me").then(setAccount, () => {});
