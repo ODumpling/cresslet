@@ -1,0 +1,2 @@
+acme_ca https://pebble:14000/dir
+acme_ca_root /etc/caddy/pebble.minica.pem

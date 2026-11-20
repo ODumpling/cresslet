@@ -5,44 +5,40 @@ CRESSLET_DOMAIN=cresslet.example.com CRESSLET_SCHEME=https CRESSLET_PUBLIC_PORT=
 CRESSLET_DATA_DIR=/var/lib/cresslet npm start
 ```
 
-Needs wildcard DNS (`*.cresslet.example.com` + `cresslet.example.com` → server) and TLS in front, e.g. Caddy:
+Needs wildcard DNS (`*.cresslet.example.com` + `cresslet.example.com` → server) and TLS in front. The server speaks plain HTTP; [Production](#production) puts Caddy in front.
 
-```
-cresslet.example.com, *.cresslet.example.com {
-  tls {
-    dns cloudflare {env.CF_API_TOKEN}
-  }
-  reverse_proxy localhost:8787
-}
-```
+## Production
 
-Custom domains (`POST /v1/apps/:name/domains`, verified by a TXT record) also need certificates for hostnames you don't know in advance. With Caddy, on-demand TLS asks the server; the whole Caddyfile then is (global options first):
+[`deploy/`](../deploy) runs the server behind Caddy with Docker Compose (≥ 2.24):
 
-```
-{
-  on_demand_tls {
-    ask http://localhost:8787/v1/domains/check
-  }
-}
-
-cresslet.example.com, *.cresslet.example.com {
-  tls {
-    dns cloudflare {env.CF_API_TOKEN}
-  }
-  reverse_proxy localhost:8787
-}
-
-https:// {
-  tls {
-    on_demand
-  }
-  reverse_proxy localhost:8787
-}
+```sh
+cd deploy
+cp .env.example .env && $EDITOR .env                  # set CRESSLET_DOMAIN
+cp caddy.env.example caddy.env && $EDITOR caddy.env   # set CLOUDFLARE_API_TOKEN (only read from here)
+$EDITOR cresslet.env             # optional: other CRESSLET_* settings (GitHub login, admin token, limits)
+docker compose up -d --build
 ```
 
-The check only approves verified custom domains; the root and `*.<domain>` are covered by the explicit site block above.
+DNS: `A`/`AAAA` for `cresslet.example.com` and `*.cresslet.example.com` → the server, DNS only (on Cloudflare: not proxied, or Cloudflare's edge certificate, which doesn't cover `*.cresslet.example.com`, answers instead of Caddy). The same goes for custom domains' CNAMEs and an off-domain preview host: a TLS-terminating proxy in front answers with its own certificate and can block the ACME challenges, so the on-demand cert never issues. Ports 80 and 443 (TCP, plus UDP for HTTP/3) open. Data lives in the `cresslet_data` volume (back it up, with `secrets.key`); Caddy's certificates and ACME account in `caddy_data` (losing it means re-issuing everything, against the CA rate limits).
 
-Other proxies (Traefik, Coolify) need each verified domain added to the proxy by hand.
+Certificates ([`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile)):
+
+| Host | Certificate |
+|---|---|
+| `cresslet.example.com` (studio, API) | its own, DNS-01 |
+| `<app>.cresslet.example.com`, `preview.cresslet.example.com` | one wildcard `*.cresslet.example.com`, DNS-01 |
+| verified custom domains | per host, on demand (TLS-ALPN-01 / HTTP-01) at the first handshake, only if `GET /v1/domains/check?domain=…` returns 200 |
+| `CRESSLET_PREVIEW_HOST` outside the domain | on demand, same check |
+
+Why Caddy instead of ACME in the server: wildcard certs need DNS-01 (a DNS provider API) and custom domains need certs for names known only at runtime. Caddy does both (DNS provider modules, on-demand TLS gated by an `ask` endpoint), plus renewal and HTTP/3, so the server stays a plain HTTP process with one read-only endpoint for it. The check approves only DNS-verified custom domains (and an off-domain preview host): app subdomains are on the wildcard, and approving every app name would let anyone spend the CA's rate limit by creating apps.
+
+DNS provider: Cloudflare by default (API token with Zone → Zone → Read and Zone → DNS → Edit on the zone). Another provider: set `CADDY_DNS_MODULE` in `.env` to its [`caddy-dns`](https://github.com/caddy-dns) module, put its config in `deploy/caddy/dns.caddy` and its credentials in `deploy/caddy.env`. Try a new setup against Let's Encrypt staging first (`acme_ca …` in `deploy/caddy/options.caddy`).
+
+Without Compose: a Caddy built with the DNS module (`xcaddy build --with github.com/caddy-dns/cloudflare`), `CRESSLET_DOMAIN` and the token in its environment, and the same Caddyfile (plus its two imported files) with `cresslet:8787` replaced by the server's address. Other proxies (Traefik, Coolify) need the wildcard cert configured by hand and each verified custom domain added by hand (or their own on-demand mechanism pointed at `/v1/domains/check`).
+
+`deploy/test/acme.sh` runs this compose file end to end against [Pebble](https://github.com/letsencrypt/pebble) (a test CA) and a local bind9: wildcard via real DNS-01, a verified custom domain via on-demand TLS, an unverified one refused. It needs Docker and Node, and touches no real DNS.
+
+## Configuration
 
 | Env | Default | |
 |---|---|---|

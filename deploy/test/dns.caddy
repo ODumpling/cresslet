@@ -1,0 +1,7 @@
+dns rfc2136 {
+	key_name caddy
+	key_alg hmac-sha256
+	key o3/lA6ITes+dU+yezlfMGzfrVggvIlfkRO0hHGWNSqw=
+	server 10.77.0.53:53
+}
+resolvers 10.77.0.53:53

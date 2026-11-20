@@ -1,0 +1,6 @@
+$TTL 5
+@	IN SOA	ns.cresslet.test. admin.cresslet.test. 1 60 60 600 5
+@	IN NS	ns.cresslet.test.
+ns	IN A	10.77.0.53
+@	IN A	10.77.0.10
+*	IN A	10.77.0.10

@@ -1,0 +1,7 @@
+$TTL 5
+@	IN SOA	ns.example.test. admin.example.test. 1 60 60 600 5
+@	IN NS	ns.example.test.
+ns	IN A	10.77.0.53
+; custom domains pointed at the server; only shop gets verified
+shop	IN A	10.77.0.10
+evil	IN A	10.77.0.10
