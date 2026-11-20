@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { serve } from "@hono/node-server";
+import { type Http2Bindings, type HttpBindings, serve } from "@hono/node-server";
 import { serveDir, serveFile } from "./static.ts";
 import { type Config, loadConfig, previewAppName, rootUrl } from "./config.ts";
 import { Store } from "./store.ts";
@@ -103,7 +103,8 @@ export function createServer(cfg: Config = loadConfig()) {
     return new Response(res.body, { status: res.status, headers: h });
   }
 
-  async function handler(req: Request): Promise<Response> {
+  /** `env`: @hono/node-server's bindings; its TCP peer feeds per-IP limits (`CRESSLET_CLIENT_IP_HEADER` overrides it). */
+  async function handler(req: Request, env?: HttpBindings | Http2Bindings): Promise<Response> {
     const hostname = normDomain((req.headers.get("host") ?? "").replace(/:\d+$/, ""));
     if (hostname === cfg.previewHost) return servePreviewHost(req);
     if (hostname.endsWith(suffix)) {
@@ -114,7 +115,7 @@ export function createServer(cfg: Config = loadConfig()) {
       if (custom) return serveApp(req, custom.name);
     }
     const url = new URL(req.url);
-    if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return control.fetch(req);
+    if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return control.fetch(req, { remoteAddr: env?.incoming?.socket?.remoteAddress });
     if (url.pathname === "/healthz") return new Response("ok");
     // Previews moved to the preview host: browsers that registered the old studio-origin worker get
     // one that unregisters itself (and reloads the pages it controlled).
@@ -176,6 +177,11 @@ export function createServer(cfg: Config = loadConfig()) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const srv = createServer();
+  const { cfg } = srv;
+  if ((cfg.anonDeploys || (cfg.openSignup && cfg.github)) && cfg.sandbox.uidBase === null && !cfg.sandbox.runsc) {
+    console.warn("cresslet: strangers can deploy code here (open signup or anonymous deploys) but sandboxes share one uid: " +
+      "set CRESSLET_SANDBOX_UID_BASE and/or CRESSLET_RUNSC (docs/self-hosting.md)");
+  }
   const http = serve({ fetch: srv.handler, port: srv.cfg.port }, () =>
     console.log(`cresslet listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`));
   http.on("upgrade", srv.upgrade);

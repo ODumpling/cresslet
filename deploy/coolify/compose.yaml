@@ -35,6 +35,8 @@ services:
       CRESSLET_SITE_ADMINS: ${CRESSLET_SITE_ADMINS:-}
       CRESSLET_GITHUB_CLIENT_ID: ${CRESSLET_GITHUB_CLIENT_ID:-}
       CRESSLET_GITHUB_CLIENT_SECRET: ${CRESSLET_GITHUB_CLIENT_SECRET:-}
+      # Behind Cloudflare: cf-connecting-ip, so per-IP limits see clients, not Traefik.
+      CRESSLET_CLIENT_IP_HEADER: ${CRESSLET_CLIENT_IP_HEADER:-}
       CRESSLET_SANDBOX_UID_BASE: 100000
       CRESSLET_SOCK_DIR: /run/cresslet
     tmpfs:

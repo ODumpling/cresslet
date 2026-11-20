@@ -53,7 +53,7 @@ runsc install && systemctl reload docker
 docker run --rm --runtime=runsc alpine uname -r     # 4.19.0-gvisor (or newer)
 ```
 
-In Coolify: build pack Docker Compose, compose location as above, and the `CRESSLET_*` variables the compose file reads (`CRESSLET_DOMAIN` is required; `CRESSLET_OPEN_SIGNUP` and `CRESSLET_ANON_DEPLOYS` default to `false` here). `CRESSLET_CONTAINER_MEMORY` / `CRESSLET_CONTAINER_CPUS` (default `3g` / `2`) cap the whole container. No domain is set in Coolify: the compose file's Traefik labels route `<domain>` and `*.<domain>`. Coolify doesn't expand variables in labels, so edit the domain in them.
+In Coolify: build pack Docker Compose, compose location as above, and the `CRESSLET_*` variables the compose file reads (`CRESSLET_DOMAIN` is required; `CRESSLET_OPEN_SIGNUP` and `CRESSLET_ANON_DEPLOYS` default to `false` here). `CRESSLET_CONTAINER_MEMORY` / `CRESSLET_CONTAINER_CPUS` (default `3g` / `2`) cap the whole container. Behind Cloudflare, set `CRESSLET_CLIENT_IP_HEADER=cf-connecting-ip` for the per-IP limits. Other `CRESSLET_*` settings need a line under `environment:` too (Coolify passes only the variables the file names). No domain is set in Coolify: the compose file's Traefik labels route `<domain>` and `*.<domain>`. Coolify doesn't expand variables in labels, so edit the domain in them.
 
 Coolify names the data volume `<app uuid>_data`. Switching an existing Dockerfile deploy (volume `<app uuid>-cresslet-data`) means copying its data across once, just before the first compose deploy. SQLite's `.backup` makes the copy safe while the old container is still running:
 
@@ -129,6 +129,11 @@ docker run --rm -v <volume>:/data -v /var/backups/cresslet/<snapshot>.tgz:/b.tgz
 | `CRESSLET_APP_MEMORY_MB` | 256 | V8 heap cap |
 | `CRESSLET_IDLE_MS` | 300000 | stop idle sandboxes |
 | `CRESSLET_ANON_TTL_HOURS` | 72 | unclaimed app lifetime |
+| `CRESSLET_MAX_APPS_PER_ACCOUNT` | 50 | live apps an account may own (new apps and claims past it: 403 `quota`; site admins exempt) |
+| `CRESSLET_MAX_ANON_APPS` / `CRESSLET_ANON_APPS_PER_HOUR` | 200 / 10 | live unclaimed apps on the instance / new ones per client IP per hour (429 `rate_limited`) |
+| `CRESSLET_DEPLOYS_PER_HOUR` | 120 | deploys per app per hour (429) |
+| `CRESSLET_APP_DB_MB` / `CRESSLET_APP_FILES_MB` | 512 / 1024 | per-app database size (SQLite `max_page_count`; apps can't change it) / total size of its files |
+| `CRESSLET_CLIENT_IP_HEADER` | — | header with the real client IP for per-IP limits, e.g. `cf-connecting-ip` behind Cloudflare. Without it the TCP peer is used (behind a proxy that's the proxy, so every client shares one allowance). The proxy must set it to the one client address (Cloudflare does for `cf-connecting-ip`); a request that reaches the server some other way can send any value, so set it only if every request comes through that proxy |
 
 Closed instance (`CRESSLET_OPEN_SIGNUP=false CRESSLET_ANON_DEPLOYS=false`): pre-create accounts with the admin token; users then log in with GitHub using that (verified) email. Without GitHub configured, hand out the returned token (`CRESSLET_TOKEN` / `cresslet login --token`).
 

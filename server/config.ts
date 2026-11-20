@@ -31,6 +31,11 @@ export interface Config {
   siteAdmins: string[];
   /** GitHub OAuth App (web flow for the studio, device flow for the CLI). Null = disabled. */
   github: { clientId: string; clientSecret: string; webUrl: string; apiUrl: string } | null;
+  /**
+   * Request header with the real client IP (e.g. `cf-connecting-ip` behind Cloudflare), for per-IP
+   * limits. Only set it when every request comes through that proxy: clients can send it too.
+   */
+  clientIpHeader: string | null;
   /** TXT lookup for custom-domain verification (tests stub it). */
   resolveTxt: (name: string) => Promise<string[][]>;
   /** OS-level sandbox limits (server/sandbox.ts); Linux, opt-in. */
@@ -53,6 +58,18 @@ export interface Config {
     logLines: number;
     /** How long a site deleted by a site admin stays restorable before it's purged. */
     deletedRetentionMs: number;
+    /** Live apps one account may own (site admins: no limit). */
+    maxAppsPerAccount: number;
+    /** Live unclaimed (anonymous) apps on the whole instance. */
+    maxAnonApps: number;
+    /** Anonymous apps one client IP may create per hour. */
+    anonAppsPerHour: number;
+    /** Deploys per app per hour. */
+    deploysPerHour: number;
+    /** Size cap of an app's database (SQLite max_page_count). */
+    appDbBytes: number;
+    /** Total size of an app's stored files (env.files). */
+    appFilesBytes: number;
   };
 }
 
@@ -82,6 +99,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
         apiUrl: env("CRESSLET_GITHUB_API_URL", "https://api.github.com").replace(/\/+$/, ""),
       }
       : null,
+    clientIpHeader: process.env.CRESSLET_CLIENT_IP_HEADER?.trim().toLowerCase() || null,
     resolveTxt,
     sandbox: {
       uidBase: process.env.CRESSLET_SANDBOX_UID_BASE ? num("CRESSLET_SANDBOX_UID_BASE", 0) : null,
@@ -100,6 +118,12 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       anonTtlMs: num("CRESSLET_ANON_TTL_HOURS", 72) * 3600_000,
       logLines: num("CRESSLET_LOG_LINES", 1000),
       deletedRetentionMs: num("CRESSLET_DELETED_RETENTION_DAYS", 30) * 86_400_000,
+      maxAppsPerAccount: num("CRESSLET_MAX_APPS_PER_ACCOUNT", 50),
+      maxAnonApps: num("CRESSLET_MAX_ANON_APPS", 200),
+      anonAppsPerHour: num("CRESSLET_ANON_APPS_PER_HOUR", 10),
+      deploysPerHour: num("CRESSLET_DEPLOYS_PER_HOUR", 120),
+      appDbBytes: num("CRESSLET_APP_DB_MB", 512) * 1024 * 1024,
+      appFilesBytes: num("CRESSLET_APP_FILES_MB", 1024) * 1024 * 1024,
     },
   };
   const merged = { ...base, ...overrides };

@@ -52,7 +52,7 @@ export default {
 
 | Binding | API |
 |---|---|
-| `env.db` | `query(sql, ...params) → rows[]`, `first(...) → row \| null`, `run(...) → {changes, lastInsertRowid}`, `exec(sql)` — per-app SQLite (`ATTACH`/`VACUUM INTO`, `temp_store_directory` and `fts3_tokenizer` are refused) |
+| `env.db` | `query(sql, ...params) → rows[]`, `first(...) → row \| null`, `run(...) → {changes, lastInsertRowid}`, `exec(sql)` — per-app SQLite (`ATTACH`/`VACUUM INTO`, temp tables, `temp_store_directory`, `fts3_tokenizer` and the size/journal pragmas are refused; plain `VACUUM` works) |
 | `env.files` | `put(key, body, {contentType})`, `get(key) → Response \| null`, `delete(key)`, `list(prefix) → {key,size,contentType,updatedAt}[]` |
 | `env.secrets` | `Record<string,string>`, set via `cresslet secrets set` (claimed apps) |
 | `env.app` | `{ id, name, url, deployId }` |
@@ -73,3 +73,7 @@ Runtime: Web-standard APIs (fetch, Request/Response, URL, crypto, streams, TextE
 | Unclaimed apps | expire after 72 h; no outbound network; no secrets |
 | Outbound network | claimed apps: any public host, or only an allowlist (`PUT /v1/apps/:name/egress`) |
 | Deploy history | last 10 (rollback) |
+| Database | 512 MB per app (writes past it fail with "database or disk is full") |
+| Files | 1 GB per app in all, 25 MB per file (`put` past it fails with "storage quota exceeded") |
+| Apps | 50 per account |
+| Deploys | 120 per app per hour (429 past it) |

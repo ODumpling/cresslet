@@ -270,8 +270,11 @@ export class Store {
   }
 
   // ---- apps
-  async createApp(name: string, expiresAt: number | null, accountId: string | null) {
+  /** `check` runs right before the insert, with no await in between (quota checks can't race). */
+  async createApp(name: string, expiresAt: number | null, accountId: string | null, check?: () => void) {
     const deployKey = id("clv_app", 24);
+    const keyHash = await sha256(deployKey);
+    check?.();
     const now = Date.now();
     const app: App = {
       id: id("app"),
@@ -288,7 +291,7 @@ export class Store {
     this.db.prepare(
       `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(app.id, name, accountId, await sha256(deployKey), "{}", expiresAt, now, now);
+    ).run(app.id, name, accountId, keyHash, "{}", expiresAt, now, now);
     return { app, deployKey };
   }
   /** Live apps only; `includeDeleted` also finds ones a site admin deleted (their name stays taken until purged). */
@@ -363,6 +366,10 @@ export class Store {
   }
   deleteApp(appId: string) {
     this.db.prepare("DELETE FROM apps WHERE id = ?").run(appId);
+  }
+  /** Live unclaimed apps (anonymous deploys) on the instance. */
+  anonAppCount(): number {
+    return (this.db.prepare("SELECT count(*) n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL").get() as { n: number }).n;
   }
   expiredApps(now = Date.now()): App[] {
     return this.db.prepare("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ? AND deleted_at IS NULL")

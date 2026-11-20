@@ -3,6 +3,7 @@ import { dirname, join, posix } from "node:path";
 import { type Config, paths, previewAppName } from "./config.ts";
 import { type App, id, type Store } from "./store.ts";
 import { normalizeCrons } from "./cron.ts";
+import { filesSettled } from "./bindings.ts";
 
 export interface DeployFile {
   path: string;
@@ -214,5 +215,6 @@ async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: stri
 
 export async function removeAppFiles(cfg: Config, appId: string) {
   const p = paths(cfg, appId);
+  await filesSettled(p.files); // writes its stopped sandbox had queued land first, then go with it
   await rm(p.app, { recursive: true, force: true });
 }

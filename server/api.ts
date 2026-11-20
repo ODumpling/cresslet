@@ -14,6 +14,7 @@ import { github } from "./github.ts";
 import { confine } from "./bindings.ts";
 import { normalizeEgress } from "./egress.ts";
 import { adminRoutes, isSiteAdmin, purgeApp } from "./admin.ts";
+import { RateLimit } from "./limits.ts";
 import {
   type DeployInput,
   HttpError,
@@ -28,7 +29,8 @@ const TEMPLATES = join(import.meta.dirname, "../templates");
 const encodeBase64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 const SECRET_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 
-type Env = { Variables: { account?: Account; token?: Token; bearer?: string } };
+/** `remoteAddr`: the TCP peer (main.ts passes it; tests don't). */
+type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
 
 export function api(cfg: Config, store: Store, runtime: Runtime) {
   const app = new Hono<Env>().basePath("/v1");
@@ -132,6 +134,20 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     createdAt: new Date(a.created_at).toISOString(),
     updatedAt: new Date(a.updated_at).toISOString(),
   });
+
+  // ---- abuse limits (docs/self-hosting.md#configuration)
+  const HOUR = 3600_000;
+  const anonApps = new RateLimit(cfg.limits.anonAppsPerHour, HOUR);
+  const appDeploys = new RateLimit(cfg.limits.deploysPerHour, HOUR);
+  const clientIp = (c: Context<Env>) =>
+    (cfg.clientIpHeader && c.req.header(cfg.clientIpHeader)?.split(",")[0].trim()) || c.env?.remoteAddr || "unknown";
+  /** A new app (or a claimed one) for `acct` must fit its app quota. */
+  const checkAppQuota = (acct: Account) => {
+    if (isSiteAdmin(cfg, acct)) return;
+    if (store.appsByAccount(acct.id).length >= cfg.limits.maxAppsPerAccount) {
+      throw new HttpError(403, `app limit reached (${cfg.limits.maxAppsPerAccount} per account): delete one first`, "quota");
+    }
+  };
 
   const body = async <T>(c: Context<Env>): Promise<T> => {
     try {
@@ -326,6 +342,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     let createdKey: string | undefined;
     if (target) {
       await authorize(c, target, "deploy");
+      if (!appDeploys.take(target.id)) {
+        throw new HttpError(429, `too many deploys of ${target.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
+      }
     } else {
       // A new app comes with a deploy key (full control of it): account-wide admin only.
       if (acct) accountWide(c, "admin");
@@ -337,10 +356,24 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       if (!validName(name, cfg)) {
         throw new HttpError(400, "app name must be 1-40 chars of a-z, 0-9 and single dashes", "invalid_name");
       }
+      const anonCap = () => {
+        if (store.anonAppCount() >= cfg.limits.maxAnonApps) {
+          throw new HttpError(429, "too many anonymous apps on this server right now: log in to deploy (cresslet login)", "rate_limited");
+        }
+      };
+      if (acct) checkAppQuota(acct);
+      else {
+        anonCap();
+        if (!anonApps.take(clientIp(c))) {
+          throw new HttpError(429, `too many new anonymous apps from your address (${cfg.limits.anonAppsPerHour} per hour): log in, or try later`, "rate_limited");
+        }
+      }
       const expires = acct ? null : Date.now() + cfg.limits.anonTtlMs;
-      const created = await store.createApp(name, expires, acct?.id ?? null);
+      // Checked again just before the insert: concurrent deploys can't share the last slot.
+      const created = await store.createApp(name, expires, acct?.id ?? null, () => acct ? checkAppQuota(acct) : anonCap());
       target = created.app;
       createdKey = created.deployKey;
+      appDeploys.take(target.id);
     }
     let deploy;
     try {
@@ -412,6 +445,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     if (a.account_id === acct.id) return c.json({ app: view(a) });
     if (a.account_id) throw new HttpError(409, "app already claimed", "conflict");
     if (!key || !await store.checkDeployKey(a.id, key)) throw new HttpError(403, "deploy key required", "forbidden");
+    checkAppQuota(acct);
     store.claimApp(a.id, acct.id);
     runtime.stop(a.id); // restart with network access
     return c.json({ app: view(store.appById(a.id)!) });
