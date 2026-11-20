@@ -215,6 +215,8 @@ async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: stri
 
 export async function removeAppFiles(cfg: Config, appId: string) {
   const p = paths(cfg, appId);
-  await filesSettled(p.files); // writes its stopped sandbox had queued land first, then go with it
+  // Writes its stopped sandbox had queued land first, then go with it. Bounded: a bindings thread stuck
+  // in a runaway query never exits, and a purge (or the reaper running it) must not hang on it.
+  await Promise.race([filesSettled(p.files), new Promise((r) => setTimeout(r, 10_000).unref())]);
   await rm(p.app, { recursive: true, force: true });
 }

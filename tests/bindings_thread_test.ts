@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { filesSettled, serveBindings } from "../server/bindings.ts";
+import { bindingsSettled, filesSettled, serveBindings } from "../server/bindings.ts";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
 
@@ -22,8 +22,10 @@ const call = (sock: string, path: string, method = "GET", body?: string) =>
 test("bindings thread: serves db and files, exits on close, the app's next thread sees the data", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cresslet-bthread-"));
   const run = await mkdtemp("/tmp/cbt-"); // short: unix socket paths are capped at ~104 bytes
+  const open: { close(): void }[] = [];
   try {
     const a = await serveBindings(dir, join(run, "a.sock"), { secrets: { K: "v" }, maxFilesBytes: 1000 });
+    open.push(a);
     assert.deepEqual(JSON.parse((await call(join(run, "a.sock"), "/secrets")).text), { K: "v" });
     assert.equal((await call(join(run, "a.sock"), "/db/exec", "POST", JSON.stringify({ sql: "CREATE TABLE t (x)" }))).status, 200);
     assert.equal((await call(join(run, "a.sock"), "/db/run", "POST", JSON.stringify({ sql: "INSERT INTO t VALUES (?)", params: [7] }))).status, 200);
@@ -34,14 +36,15 @@ test("bindings thread: serves db and files, exits on close, the app's next threa
     let settled = false;
     const done = filesSettled(join(dir, "files")).then(() => (settled = true));
     const b = await serveBindings(dir, join(run, "b.sock"), { maxFilesBytes: 1000 });
+    open.push(b);
     assert.ok(settled, "the next thread started only after the closed one exited");
     await done;
     await assert.rejects(call(join(run, "a.sock"), "/secrets"), "closed thread no longer listens");
     assert.deepEqual(JSON.parse((await call(join(run, "b.sock"), "/db/query", "POST", JSON.stringify({ sql: "SELECT x FROM t" }))).text), [{ x: 7 }]);
     assert.equal((await call(join(run, "b.sock"), "/files?key=f")).text, "hello");
-    b.close();
-    await filesSettled(join(dir, "files"));
   } finally {
+    for (const o of open) o.close(); // a failed assertion must not leave a thread holding the test open
+    await bindingsSettled();
     await rm(run, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
   }
@@ -58,7 +61,7 @@ test("bindings thread: a failed start rejects (socket path taken)", async () => 
     } finally {
       a.close();
     }
-    await filesSettled(join(dir, "files"));
+    await bindingsSettled();
   } finally {
     await rm(run, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
@@ -108,6 +111,7 @@ test("a slow app query doesn't stall the control plane", async () => {
     assert.ok(healthz > 5, `${healthz} /healthz answered during the query`);
   } finally {
     srv.close();
+    await bindingsSettled(); // its thread closes the app's db before the dir goes
     await rm(dataDir, { recursive: true, force: true });
   }
 });

@@ -74,6 +74,7 @@ const SCENARIOS: Record<string, (i: number) => Route | null> = {
 };
 
 interface LoadJob { port: number; seconds: number; concurrency: number; targets: { host: string; route: Route }[] }
+/** `requests`: successful responses (errors counted apart). */
 interface LoadResult { route: Route; requests: number; errors: number; p50: number; p99: number }
 
 const pct = (xs: number[], p: number) => {
@@ -97,10 +98,10 @@ async function runLoad(job: LoadJob): Promise<LoadResult[]> {
           const r = await pool.request({ path: `/api/${route}`, method: "GET", headers: { host } });
           await r.body.text();
           if (r.statusCode !== 200) errors++;
+          else lat.push(performance.now() - t);
         } catch {
           errors++;
         }
-        lat.push(performance.now() - t);
       }
     }));
     await pool.close();
@@ -162,7 +163,8 @@ async function probe(port: number, appName: string, key: string, until: Promise<
   const out = { healthz: [] as number[], api: [] as number[], errors: [] as string[] };
   const pending: Promise<void>[] = [];
   let done = false;
-  void until.then(() => (done = true));
+  const stop = () => void (done = true);
+  until.then(stop, stop); // a failed load ends the probing too (the caller sees its error)
   const start = performance.now();
   for (let i = 0; !done; i++) {
     const at = start + i * 10;

@@ -212,6 +212,9 @@ const exiting = new Map<string, Promise<void>>();
 export const filesSettled = (dir: string) =>
   Promise.all([fileQueues.get(resolve(dir)), exiting.get(resolve(dir))]).then(() => {});
 
+/** Resolves once every closed bindings thread has exited (shutdown). */
+export const bindingsSettled = () => Promise.all(exiting.values()).then(() => {});
+
 export interface BindingsOptions {
   secrets?: Record<string, string>;
   maxFileBytes?: number;
@@ -221,6 +224,19 @@ export interface BindingsOptions {
   maxFilesBytes?: number;
 }
 
+const THREAD = new URL("./bindings-thread.ts", import.meta.url);
+/**
+ * A thread booted ahead of the next cold start: booting one (isolate + imports) takes ~40 ms, which
+ * would otherwise land on the app's first request. Unref'd while spare.
+ */
+let spare: Worker | undefined;
+function bootSpare() {
+  const w = spare = new Worker(THREAD);
+  w.unref();
+  w.on("error", () => {}); // a dead spare is dropped below, and the next start boots its own
+  w.once("exit", () => spare === w && (spare = undefined));
+}
+
 /**
  * Serves one app's bindings on the unix socket `sockPath` from a worker thread of its own. Resolves
  * once it listens. `onExit`: the thread died without close() (the sandbox has lost its data).
@@ -228,7 +244,10 @@ export interface BindingsOptions {
 export async function serveBindings(dataDir: string, sockPath: string, opts: BindingsOptions, onExit?: () => void) {
   const filesDir = resolve(dataDir, "files");
   await exiting.get(filesDir);
-  const worker = new Worker(new URL("./bindings-thread.ts", import.meta.url), { workerData: { dataDir, sockPath, opts } });
+  const worker = spare ?? new Worker(THREAD);
+  spare = undefined;
+  worker.ref();
+  worker.postMessage({ dataDir, sockPath, opts });
   let closing = false;
   const exited = new Promise<void>((res) => worker.once("exit", () => res()));
   const close = () => {
@@ -250,6 +269,7 @@ export async function serveBindings(dataDir: string, sockPath: string, opts: Bin
     close();
     throw e;
   }
+  bootSpare();
   worker.on("error", () => {}); // reported by "exit" below
   void exited.then(() => {
     if (!closing) {

@@ -346,7 +346,7 @@ export class Runtime {
         maxFilesBytes: cfg.limits.appFilesBytes,
       }, () => {
         lost = true;
-        this.logs.push(spec.appId, "system", "bindings thread crashed; restarting");
+        this.logs.push(spec.appId, "system", "bindings thread crashed; sandbox stopped");
         if (self && this.procs.get(spec.appId) === self) this.stop(spec.appId);
       });
       if (egressSock) {
@@ -482,6 +482,12 @@ export class Runtime {
     proc.bindings.close();
     // Synchronously, so a shutdown that exits right after still kills forked processes.
     proc.release();
+  }
+
+  /** stop(), after a start in flight for the app is done (it would serve, and recreate files of, a purged app). */
+  async stopSettled(appId: string) {
+    await this.#starting.get(appId)?.p.catch(() => {});
+    this.stop(appId);
   }
 
   reapIdle() {

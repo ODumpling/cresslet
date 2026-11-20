@@ -15,6 +15,7 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { purgeApp } from "./admin.ts";
 import { settled as sandboxSettled } from "./sandbox.ts";
+import { bindingsSettled } from "./bindings.ts";
 
 const STUDIO = join(import.meta.dirname, "../studio");
 const RETIRE_SW = `self.addEventListener("install", () => self.skipWaiting());
@@ -185,6 +186,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     srv.close();
     http.close();
     await sandboxSettled(); // cgroup kills on older kernels finish on timers
+    // Bindings threads finish the file writes they accepted (bounded: a runaway query never yields).
+    await Promise.race([bindingsSettled(), new Promise((r) => setTimeout(r, 5000).unref())]);
     process.exit(0);
   };
   process.once("SIGINT", shutdown);
