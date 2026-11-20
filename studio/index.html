@@ -238,7 +238,8 @@
             <div class="preview-body">
               <!-- No top navigation or popups: app server code runs in workers on this origin and could mint
                    blob: URLs here; a preview must not be able to open one as a top-level document. -->
-              <iframe id="preview" title="App preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock"></iframe>
+              <!-- hidden (out of the tab order) until its dev server is ready -->
+              <iframe id="preview" hidden title="App preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock"></iframe>
               <div class="preview-empty" id="preview-empty">
                 <div class="preview-empty-inner">
                   <span class="spinner" id="preview-spinner" aria-hidden="true"></span>

@@ -77,6 +77,14 @@ function focusView({ scroll = false } = {}) {
   h?.focus({ preventScroll: true });
   if (scroll) h?.scrollIntoView({ block: "nearest" });
 }
+/** After a re-render removed the focused control: focus `target` (or the view's heading), unless the user has
+ *  already moved focus somewhere else meanwhile. */
+function refocus(target) {
+  const a = document.activeElement;
+  if (a && a !== document.body && a.isConnected) return;
+  if (target) target.focus();
+  else focusView();
+}
 $("skip-link").addEventListener("click", (e) => {
   e.preventDefault(); // its #content href would be read as a route
   focusView({ scroll: true });
@@ -248,7 +256,7 @@ async function revokeToken(t) {
   }
   toast(`Revoked ${t.name}`);
   await renderTokens();
-  $("tokens-title").focus(); // the Revoke button is gone with its row
+  refocus($("tokens-title")); // the Revoke button is gone with its row
 }
 
 // Form errors stay beside the form (not a timed toast) until the user changes it.
@@ -393,7 +401,7 @@ function siteActions(site, after) {
         if (done) after(action);
         else {
           b.disabled = false;
-          if (document.activeElement === document.body) b.focus();
+          refocus(b.isConnected ? b : null);
         }
       },
     });
@@ -421,7 +429,7 @@ async function renderAdmin(name) {
     if (!current()) return false;
     $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 403 ? "Only site admins can see this page." : `Could not load: ${e.message}` }));
     if (e.status !== 403) {
-      const retry = el("button", { className: "btn", type: "button", onclick: () => renderAdmin(name).then((ok) => ok && $("admin-actions").querySelector("button")?.focus()) }, icon("refresh"), "Retry");
+      const retry = el("button", { className: "btn", type: "button", onclick: () => renderAdmin(name).then((ok) => ok && refocus(name ? null : $("admin-actions").querySelector("button"))) }, icon("refresh"), "Retry");
       $("admin-actions").replaceChildren(retry);
       if (document.activeElement === document.body) retry.focus(); // the Refresh/Retry that was clicked is gone
     }
@@ -439,7 +447,7 @@ async function renderAdminSites() {
   $("admin-actions").replaceChildren(el("button", {
     className: "btn",
     type: "button",
-    onclick: () => renderAdmin().then((ok) => ok && $("admin-actions").querySelector("button")?.focus()), // it's rebuilt
+    onclick: () => renderAdmin().then((ok) => ok && refocus($("admin-actions").querySelector("button"))), // it's rebuilt
   }, icon("refresh"), "Refresh"));
 
   const u = totals.usage;
@@ -476,7 +484,7 @@ async function renderAdminSites() {
         el("td", { className: "num", textContent: fmtBytes(s.usage.deploys + s.usage.files) }),
         el("td", { className: "num", textContent: s.usage.database ? fmtBytes(s.usage.database) : "—" }),
         el("td", {}, el("time", { dateTime: s.updatedAt, title: new Date(s.updatedAt).toLocaleString(), textContent: ago(s.updatedAt) })),
-        el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin().then((ok) => ok && focusView())))))
+        el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin().then((ok) => ok && refocus())))))
       : [el("tr", {}, el("td", { colSpan: 7, className: "empty", textContent: q ? "No sites match." : "No sites here." }))]));
   }
   draw();
@@ -503,7 +511,7 @@ async function renderAdminSite(name) {
   const visit = extLink(s.url, "Visit", "btn");
   visit.hidden = s.status === "deleted";
   $("admin-actions").replaceChildren(visit,
-    ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name).then((ok) => ok && focusView()))));
+    ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name).then((ok) => ok && refocus()))));
 
   const dep = s.currentDeploy;
   const banner = s.status === "deleted"
@@ -605,7 +613,7 @@ async function renderHome() {
             await projects.delete(p.id);
             toast(`Deleted ${p.name}`);
             await renderHome();
-            focusView();
+            refocus();
           },
         }, icon("trash"))))))
     : emptyState("No projects yet", "Pick a template above. Projects are saved in this browser as you edit."));
@@ -939,6 +947,7 @@ async function openProject(id, gen) {
     previewBase = url;
     const hadFocus = $("preview-empty").contains(document.activeElement); // e.g. the message after Run it
     $("preview-empty").hidden = true;
+    $("preview").hidden = false;
     if (hadFocus) $("preview-path").focus();
     $("preview-spinner").hidden = false;
     setStatus("Running", "ready");

@@ -34,8 +34,25 @@ try {
   await narrow.route("**/v1/apps", (r) => r.fulfill({ json: { apps: [{ name: "a".repeat(40), url: "http://x.localhost", updatedAt: new Date().toISOString() }] } }));
   await narrow.goto(base + "/#/settings");
   await narrow.getByLabel("Only these apps").check();
+  await narrow.getByLabel("a".repeat(40)).waitFor();
   const pw = await narrow.evaluate(() => document.documentElement.scrollWidth);
   assert(pw <= 320, `settings app picker is ${pw}px wide at 320px`);
+  await narrow.unroute("**/v1/apps");
+  // A new token with the longest allowed name, shown in its callout; a long account email in the sidebar.
+  await narrow.getByLabel("All apps (and new ones)").check();
+  await narrow.getByLabel("Name", { exact: true }).fill("y".repeat(64));
+  await narrow.getByRole("button", { name: "Create token" }).click();
+  await narrow.locator("#token-new").waitFor({ state: "visible" });
+  const tw = await narrow.evaluate(() => document.documentElement.scrollWidth);
+  assert(tw <= 320, `new token callout is ${tw}px wide at 320px`);
+  const longAcct = await call("/v1/accounts", admin, { email: `${"z".repeat(48)}-${Date.now()}@example.com` });
+  const lp = await browser.newPage({ viewport: { width: 320, height: 640 } });
+  await lp.addInitScript(([t, e]) => { localStorage.setItem("cresslet.token", t); localStorage.setItem("cresslet.email", e); }, [longAcct.token, longAcct.account?.email ?? "z".repeat(60)]);
+  await lp.goto(base + "/");
+  await lp.waitForTimeout(500);
+  const aw = await lp.evaluate(() => document.documentElement.scrollWidth);
+  assert(aw <= 320, `home with a long account email is ${aw}px wide at 320px`);
+  await lp.close();
   await narrow.close();
   await fetch(`${base}/v1/me/tokens/${encodeURIComponent(long.info.id)}`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } });
   console.log("reflow ok at 320px (incl. a 64-character token name)");
@@ -78,11 +95,13 @@ try {
   await page.getByRole("button", { name: /react/ }).click();
   await page.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
   // Dim terminal output (request logs) uses the muted text color, not 50% opacity.
+  // ("fetching N packages…" from npm install is always dim)
   const dim = await page.evaluate(() => {
     const d = document.querySelector(".xterm-rows .xterm-dim");
-    return d && [getComputedStyle(d).color, getComputedStyle(document.querySelector(".muted") ?? document.body).color];
+    return d && getComputedStyle(d).color;
   });
-  if (dim) assert(!/rgba/.test(dim[0]), `dim terminal text is translucent: ${dim[0]}`);
+  assert(dim, "no dim terminal output to check");
+  assert(!/rgba/.test(dim), `dim terminal text is translucent: ${dim}`);
   await page.getByRole("tab", { name: "Terminal" }).focus();
   await page.keyboard.press("ArrowRight");
   assert(await focused(page) === "tab-deploy-log", "ArrowRight didn't move to the Deploy log tab");
