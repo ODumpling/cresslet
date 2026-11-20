@@ -12,7 +12,8 @@
                        │           secrets                                           │
                        │ host.ts   static files from active deploy; routes → runtime │
                        │ runtime.ts one sandbox process per app, on demand, reaped   │
-                       │ bindings.ts env.db / env.files backend (node:sqlite, disk)  │
+                       │ bindings.ts env.db / env.files backend (node:sqlite, disk), │
+                       │           one worker thread per app (bindings-thread.ts)    │
                        └──────────────┬─────────────────────────────▲───────────────┘
                      HTTP over unix sock                 HOST binding│ (per-app unix sock)
                           ┌───────────┴─────────────────────────────┴─────────┐
@@ -44,6 +45,7 @@ data/apps/<appId>/data/files/          app file storage
 
 - Per app: separate OS process running [workerd](https://github.com/cloudflare/workerd) (Cloudflare's open-source Workers runtime). App code sees only its bindings: no host filesystem (`node:fs` is virtual), no env, no subprocess, no native addons. V8 heap cap, request timeout → kill.
 - Data access goes through the `HOST` service binding to the control plane, over a unix socket dedicated to that app. Path-traversal checks on file keys live host-side.
+- That socket is served from a worker thread of the app's own (`serveBindings` in `server/bindings.ts`), so the app's synchronous SQLite and file index never run on the control plane's main thread: a slow query stalls only that app's bindings, not the API, the studio, or other apps. If the thread dies, its sandbox is stopped; a restarted app's next thread starts only after the old one's accepted file writes have landed. `scripts/loadtest-bindings.ts` measures control-plane latency while apps hammer their bindings (numbers in #27).
 - Unclaimed: no outbound network. Claimed: public internet only (workerd `network = (allow = ["public"])`), so loopback/private ranges — including the control plane — are unreachable.
 - Egress allowlist (optional, claimed apps): `globalOutbound` becomes an external `style = proxy` service on a per-app unix socket in the control plane (`server/egress.ts`). It forwards only to allowlisted hostnames (no IP literals), resolves them to public addresses only (checked at connect time), and refuses raw sockets (`CONNECT`). Blocked attempts are logged.
 - Secrets: AES-256-GCM in `cresslet.db`, bound to (app, key). Key from `CRESSLET_SECRETS_KEY`, else generated once in `<dataDir>/secrets.key`. The sandbox fetches them over `HOST` at start; they're never written to the run dir.
@@ -80,5 +82,4 @@ Project code in workers runs there too: the app's *server* code in `cresslet dev
 ## Roadmap
 
 - Stronger isolation: the public instance runs the whole server under gVisor, and any other multi-tenant instance without a gVisor mode gets a startup warning (see [Isolation](#isolation)). Next, where KVM is available: Firecracker microVMs, a guest kernel per app (needs a vsock bridge for the unix sockets, and a kernel and rootfs per sandbox).
-- Move db/file bindings off the control-plane thread (worker thread or per-app helper) if sync SQLite becomes a bottleneck.
 - AI builder in the studio driving the same API (deferred from v1).

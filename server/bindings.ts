@@ -1,11 +1,13 @@
-// Host side of the app `env` bindings (db, files). Runs in the control plane; each sandbox reaches
-// its own instance over a per-app unix socket (see runtime/worker.js for the client side).
+// Host side of the app `env` bindings (db, files). Runs in the control plane, one worker thread per
+// app (serveBindings, server/bindings-thread.ts) so app SQL never blocks the main thread; each sandbox
+// reaches its own instance over a per-app unix socket (see runtime/worker.js for the client side).
 // Same shape is implemented by cresslet-cli (local dev) and the studio (in-browser preview).
 // Keep in sync with docs/app-format.md.
 import { constants, DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, normalize, resolve, sep } from "node:path";
+import { Worker } from "node:worker_threads";
 
 const num = (v: number | bigint) => (typeof v === "bigint" ? Number(v) : v);
 
@@ -196,20 +198,72 @@ function serialized<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Resolves once the file writes queued for the files dir `dir` are done (before deleting it). */
-export const filesSettled = (dir: string) => (fileQueues.get(resolve(dir)) ?? Promise.resolve()).then(() => {});
+/**
+ * Bindings threads that were closed but haven't exited yet (their accepted file writes are still
+ * landing), by files dir. The app's next thread starts only after them, so its writes and quota checks
+ * still come after every earlier one.
+ */
+const exiting = new Map<string, Promise<void>>();
+
+/**
+ * Resolves once the file writes queued for the files dir `dir` are done (before deleting it): this
+ * thread's queue, and closed bindings threads of the app.
+ */
+export const filesSettled = (dir: string) =>
+  Promise.all([fileQueues.get(resolve(dir)), exiting.get(resolve(dir))]).then(() => {});
+
+export interface BindingsOptions {
+  secrets?: Record<string, string>;
+  maxFileBytes?: number;
+  /** Size cap of the app's database. */
+  maxDbBytes?: number;
+  /** Total size cap of the app's files. */
+  maxFilesBytes?: number;
+}
+
+/**
+ * Serves one app's bindings on the unix socket `sockPath` from a worker thread of its own. Resolves
+ * once it listens. `onExit`: the thread died without close() (the sandbox has lost its data).
+ */
+export async function serveBindings(dataDir: string, sockPath: string, opts: BindingsOptions, onExit?: () => void) {
+  const filesDir = resolve(dataDir, "files");
+  await exiting.get(filesDir);
+  const worker = new Worker(new URL("./bindings-thread.ts", import.meta.url), { workerData: { dataDir, sockPath, opts } });
+  let closing = false;
+  const exited = new Promise<void>((res) => worker.once("exit", () => res()));
+  const close = () => {
+    if (closing) return;
+    closing = true;
+    worker.postMessage("close");
+    const p = Promise.all([exiting.get(filesDir), exited]).then(() => {});
+    exiting.set(filesDir, p);
+    void p.then(() => exiting.get(filesDir) === p && exiting.delete(filesDir));
+  };
+  try {
+    await new Promise<void>((res, rej) => {
+      // Other messages may come first (`node --watch` reports the thread's imports this way).
+      worker.on("message", (m: { ready?: true; error?: string }) => (m.ready ? res() : m.error !== undefined && rej(new Error(m.error))));
+      worker.once("error", rej);
+      worker.once("exit", (code) => rej(new Error(`bindings thread exited (${code})`)));
+    });
+  } catch (e) {
+    close();
+    throw e;
+  }
+  worker.on("error", () => {}); // reported by "exit" below
+  void exited.then(() => {
+    if (!closing) {
+      close();
+      onExit?.();
+    }
+  });
+  return { close };
+}
 
 /** One app's bindings, served as a fetch handler for its sandbox. */
 export function createBindings(
   dataDir: string,
-  { secrets = {}, maxFileBytes = 25 * 1024 * 1024, maxDbBytes, maxFilesBytes }: {
-    secrets?: Record<string, string>;
-    maxFileBytes?: number;
-    /** Size cap of the app's database. */
-    maxDbBytes?: number;
-    /** Total size cap of the app's files. */
-    maxFilesBytes?: number;
-  } = {},
+  { secrets = {}, maxFileBytes = 25 * 1024 * 1024, maxDbBytes, maxFilesBytes }: BindingsOptions = {},
 ) {
   const db = createDb(join(dataDir, "db.sqlite"), maxDbBytes);
   // File writes and deletes run one at a time, so the quota check sees every earlier write.
@@ -272,11 +326,11 @@ export function createBindings(
 
   return {
     fetch,
-    close() {
+    /** Resolves once the writes already accepted have landed (they're in the app's queue, which outlives us). */
+    close(): Promise<void> {
       closed = true;
       db.close();
-      // Writes already accepted finish first (they're in the app's queue, which outlives us).
-      void serialized(filesDir, async () => files.close());
+      return serialized(filesDir, async () => files.close());
     },
   };
 }
