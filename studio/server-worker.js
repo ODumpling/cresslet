@@ -26,6 +26,17 @@ for (const level of ["log", "info", "warn", "error", "debug"]) {
   };
 }
 
+// Uncaught errors in app code (timers, listeners) are logged and the server keeps running: an error that
+// reaches the studio's onerror means the worker is gone.
+addEventListener("error", (e) => {
+  e.preventDefault();
+  console.error(e.error ?? e.message);
+});
+addEventListener("unhandledrejection", (e) => {
+  e.preventDefault();
+  console.error(e.reason);
+});
+
 // ---- files RPC to the main thread (stored in the VFS)
 let rpcId = 0;
 const pending = new Map();

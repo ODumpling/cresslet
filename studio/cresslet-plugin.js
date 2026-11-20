@@ -240,14 +240,15 @@ export function createCresslet(c, opts) {
         return;
       }
       const ready = new Promise((resolve, reject) => {
-        // Errors in request handling are caught in the worker: one that gets here means it's gone (e.g. the
-        // preview relay restarted). Fail its requests and the next ones until `cresslet dev` is rerun.
+        // The worker catches and logs its own errors (server-worker.js): one that gets here means it's gone (e.g.
+        // the preview relay restarted). Fail its requests and the next ones until a server file is saved or
+        // `cresslet dev` is rerun (both start a new worker).
         w.onerror = (e) => {
           reject(new Error(e.message));
           if (worker !== w) return;
           worker = null;
           w.terminate();
-          workerError = `server stopped: ${e.message} (rerun \`cresslet dev\`)`;
+          workerError = `server stopped: ${e.message} (save a server file or rerun \`cresslet dev\`)`;
           out(`\x1b[31m${workerError}\x1b[0m`);
           const body = new TextEncoder().encode(workerError).buffer;
           for (const done of waiting.values()) done({ status: 503, headers: [["content-type", "text/plain"]], body });
@@ -296,11 +297,12 @@ export function createCresslet(c, opts) {
       // Preview URLs are prefixed (/__cresslet__/<id>/<port>/…); match on the app-relative path.
       const path = url.pathname.replace(/^\/__cresslet__\/[^/]+\/\d+/, "") || "/";
       if (!routes.some((r) => matchRoute(r, path)) || !(await serverEntry())) return undefined;
+      const id = ++reqId;
+      const body = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
+      // after reading the body: the worker may have stopped meanwhile
       if (!worker) {
         return new Response(workerError ?? "server is starting", { status: 503, headers: { "content-type": "text/plain" } });
       }
-      const id = ++reqId;
-      const body = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
       const appUrl = new URL(path + url.search, cfg.name ? `https://${cfg.name}.preview` : location.origin);
       const res = await new Promise((resolve) => {
         waiting.set(id, resolve);

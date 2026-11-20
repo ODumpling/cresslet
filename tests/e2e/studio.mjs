@@ -69,7 +69,7 @@ try {
   await p2.getByRole("button", { name: "Add" }).click();
   await p2.getByText("on cresslet").waitFor({ timeout: 15000 });
   console.log("deployed app works");
-  // App server code and `node` run on the preview origin too: neither can open the studio's IndexedDB (every
+  // App server code and `node` run on the preview origin too (and the server survives its own background errors): neither can open the studio's IndexedDB (every
   // local project's files, including .env.cresslet). Probe from a node script, then from the app's server route.
   const term = page.locator(".xterm-rows");
   const waitTerm = async (re, what) => {
@@ -89,7 +89,7 @@ try {
   if (nodeSees !== "false") throw new Error("a node script could see the studio's IndexedDB");
   console.log("node runs on", nodeAt);
   await page.waitForTimeout(1500); // its keep-alive timer, then the prompt is back
-  await page.keyboard.type(`node -e "require('fs').writeFileSync('server/index.ts', 'export default { fetch: async () => Response.json({ origin: self.origin, dbs: (await indexedDB.databases()).map((d) => d.name) }) }')" && npm run dev\n`);
+  await page.keyboard.type(`node -e "require('fs').writeFileSync('server/index.ts', 'setTimeout(() => { throw 42 }, 0); export default { fetch: async () => Response.json({ origin: self.origin, dbs: (await indexedDB.databases()).map((d) => d.name) }) }')" && npm run dev\n`);
   await waitTerm(/server ready[\s\S]*dev server on port/, "the restarted dev server");
   const probe = async () => {
     const f = await (await page.locator("#preview").elementHandle()).contentFrame();
