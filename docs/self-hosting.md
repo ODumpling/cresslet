@@ -36,6 +36,8 @@ DNS provider: Cloudflare by default (API token with Zone → Zone → Read and Z
 
 Without Compose: a Caddy built with the DNS module (`xcaddy build --with github.com/caddy-dns/cloudflare`), `CRESSLET_DOMAIN` and the token in its environment, and the same Caddyfile (plus its two imported files) with `cresslet:8787` replaced by the server's address. Other proxies (Traefik, Coolify) need the wildcard cert configured by hand and each verified custom domain added by hand (or their own on-demand mechanism pointed at `/v1/domains/check`).
 
+Behind Cloudflare's proxy instead (no Caddy, e.g. on Coolify): if `CRESSLET_DOMAIN` is the zone apex, Universal SSL already covers `<domain>` and `*.<domain>` at the edge, so proxied records work and the origin only needs a certificate Cloudflare accepts. Custom domains don't: Cloudflare won't proxy hostnames from other accounts' zones without Cloudflare for SaaS.
+
 `deploy/test/acme.sh` runs this compose file end to end against [Pebble](https://github.com/letsencrypt/pebble) (a test CA) and a local bind9: wildcard via real DNS-01, a verified custom domain via on-demand TLS, an unverified one refused. It needs Docker and Node, and touches no real DNS.
 
 ## Configuration
