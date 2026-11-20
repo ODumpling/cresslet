@@ -7,6 +7,8 @@
 #   CRESSLET_BACKUP_RCLONE      each new snapshot is copied there (e.g. `snaps:cresslet-snapshots`)
 #   CRESSLET_BACKUP_KEY_RCLONE  the keys are copied there, never overwritten: another rclone remote
 #                               (another bucket, other credentials), so one leak doesn't hold both.
+#   CRESSLET_BACKUP_ENV_KEY     true: the server uses CRESSLET_SECRETS_KEY, so snapshots without a
+#                               secrets.key go off-site too (otherwise a missing key file fails the run).
 #
 #   backup.sh <volume>             one snapshot now
 #   backup.sh <volume> --install   copy to /usr/local/sbin, snapshot daily (systemd timer)
@@ -18,10 +20,11 @@ DIR=${CRESSLET_BACKUP_DIR:-/var/backups/cresslet}
 KEEP=${CRESSLET_BACKUP_KEEP:-14}
 REMOTE=${CRESSLET_BACKUP_RCLONE:-}
 KEY_REMOTE=${CRESSLET_BACKUP_KEY_RCLONE:-}
+ENV_KEY=${CRESSLET_BACKUP_ENV_KEY:-}
 for r in "$REMOTE" "$KEY_REMOTE"; do
   [ -n "$r" ] || continue
   # name:path, name a configured remote exactly (not a local path, not `name,option:`).
-  case $r in *:*) rclone listremotes | grep -qxF "${r%%:*}:" && continue ;; esac
+  case $r in *:?*) rclone listremotes | grep -qxF "${r%%:*}:" && continue ;; esac
   echo "cresslet-backup: $r isn't name:path with a remote from \`rclone listremotes\`" >&2
   exit 1
 done
@@ -40,7 +43,8 @@ Description=Snapshot the Cresslet data volume ($VOL)
 After=docker.service
 [Service]
 Type=oneshot
-Environment=CRESSLET_BACKUP_DIR=$DIR CRESSLET_BACKUP_KEEP=$KEEP CRESSLET_BACKUP_RCLONE=$REMOTE CRESSLET_BACKUP_KEY_RCLONE=$KEY_REMOTE
+Environment="CRESSLET_BACKUP_DIR=$DIR" "CRESSLET_BACKUP_KEEP=$KEEP" "CRESSLET_BACKUP_RCLONE=$REMOTE"
+Environment="CRESSLET_BACKUP_KEY_RCLONE=$KEY_REMOTE" "CRESSLET_BACKUP_ENV_KEY=$ENV_KEY"
 ExecStart=/usr/local/sbin/cresslet-backup $VOL
 EOF
   cat > /etc/systemd/system/cresslet-backup.timer <<EOF
@@ -67,7 +71,8 @@ TMP=.$STEM.$$  # staging, per run
 trap 'rm -f "$DIR/$TMP.part" "$DIR/$TMP.key"' EXIT
 trap 'exit 1' INT TERM HUP
 # Read-write mount: SQLite needs the -shm file of a WAL database even to read it.
-docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
+# --init: a stopped run (systemctl stop) stops the container too.
+docker run --rm --init -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   apk add -q --no-cache sqlite tar >/dev/null
   mkdir /s
   cd /data
@@ -120,7 +125,7 @@ if [ -f "$DIR/$TMP.key" ]; then
     mv "$DIR/$TMP.key" "$DIR/secrets$FP.key"
   fi
 else
-  echo "cresslet-backup: no secrets.key in $VOL (CRESSLET_SECRETS_KEY?): keep that key off-site yourself"
+  echo "cresslet-backup: no secrets.key in $VOL (CRESSLET_SECRETS_KEY?): keep that key off-site yourself" >&2
 fi
 NAME=$STEM$FP.tgz
 mv "$DIR/$TMP.part" "$DIR/$NAME"
@@ -134,9 +139,19 @@ ls -1t "$DIR"/cresslet-*.tgz | tail -n +"$((KEEP + 1))" | while read -r old; do 
 if [ -n "$KEY_REMOTE" ]; then
   # --immutable: an existing copy that differs is an error, not overwritten (copyto would replace it).
   rclone copy --immutable --checksum --include "/secrets-*.key" "$DIR" "$KEY_REMOTE"
-  [ -z "$FP" ] || echo "cresslet-backup: secrets$FP.key in $KEY_REMOTE"
+  if [ -n "$FP" ]; then
+    # Read back: --checksum falls back to size where the remote has no hash.
+    rclone cat "$KEY_REMOTE/secrets$FP.key" | cmp -s - "$DIR/secrets$FP.key" ||
+      { echo "cresslet-backup: $KEY_REMOTE/secrets$FP.key isn't the volume's key" >&2; exit 1; }
+    echo "cresslet-backup: secrets$FP.key in $KEY_REMOTE"
+  fi
 elif [ -n "$REMOTE" ] && [ -n "$FP" ]; then
   echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE unset: not copying $NAME off-site without secrets$FP.key" >&2
+  exit 1
+fi
+if [ -n "$REMOTE" ] && [ -z "$FP" ] && [ "$ENV_KEY" != true ]; then
+  # A key file deleted under a running server: the databases need a key that's nowhere else.
+  echo "cresslet-backup: not copying $NAME off-site without a secrets.key (CRESSLET_BACKUP_ENV_KEY=true if the server uses CRESSLET_SECRETS_KEY)" >&2
   exit 1
 fi
 if [ -n "$REMOTE" ]; then
