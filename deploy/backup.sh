@@ -34,6 +34,9 @@ if [ -n "$REMOTE" ] && [ "${KEY_REMOTE%%:*}" = "${REMOTE%%:*}" ]; then
 fi
 
 if [ "${2:-}" = --install ]; then
+  case $DIR$KEEP$REMOTE$KEY_REMOTE$ENV_KEY in
+    *[%\\\"]*) echo "cresslet-backup: % \\ and \" can't go into the unit's Environment=" >&2; exit 1 ;;
+  esac
   [ -z "$REMOTE" ] || [ -n "$KEY_REMOTE" ] ||
     echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE unset: runs will fail while the volume has a secrets.key" >&2
   install -m 0755 "$0" /usr/local/sbin/cresslet-backup
@@ -83,8 +86,8 @@ docker run --rm --init -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   for db in ./cresslet.db "./apps/*/data/db.sqlite" "./apps/*/data/files/index.sqlite"; do
     for x in "" -wal -shm -journal; do ex="$ex --exclude=$db$x"; done
   done
-  # secrets.key: not in the snapshot (kept apart, below).
-  ex="$ex --exclude=./secrets.key"
+  # secrets.key: not in the snapshot (kept apart, below). .restore: restore staging (docs).
+  ex="$ex --exclude=./secrets.key --exclude=./.restore"
   [ ! -f secrets.key ] || install -m 600 secrets.key "/out/'"$TMP"'.key"
   set -f  # $ex holds patterns for tar, not the shell
   { tar -cf - --anchored --no-wildcards-match-slash \
