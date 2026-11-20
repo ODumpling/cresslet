@@ -12,6 +12,8 @@ export interface Config {
   port: number;
   /** Root domain apps live under: `<app>.<domain>`. */
   domain: string;
+  /** Host that serves studio previews, isolated from the studio's origin (default `preview.<domain>`). */
+  previewHost: string;
   /** Public base URL scheme for generated app URLs. */
   scheme: "http" | "https";
   /** Port shown in public URLs (omitted when 80/443). */
@@ -50,6 +52,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   const base: Config = {
     port,
     domain: env("CRESSLET_DOMAIN", "localhost"),
+    previewHost: env("CRESSLET_PREVIEW_HOST", `preview.${env("CRESSLET_DOMAIN", "localhost")}`),
     scheme: env("CRESSLET_SCHEME", "http") as "http" | "https",
     publicPort: num("CRESSLET_PUBLIC_PORT", port),
     dataDir,
@@ -85,9 +88,24 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       logLines: num("CRESSLET_LOG_LINES", 1000),
     },
   };
+  const merged = { ...base, ...overrides };
+  if (overrides.domain && !overrides.previewHost && !process.env.CRESSLET_PREVIEW_HOST) merged.previewHost = `preview.${overrides.domain}`;
+  merged.domain = merged.domain.trim().toLowerCase().replace(/\.$/, "");
+  merged.previewHost = merged.previewHost.trim().toLowerCase().replace(/\.$/, "");
+  const label = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+  const parsed = (() => {
+    try {
+      return new URL(`http://${merged.previewHost}`).hostname;
+    } catch {
+      return null;
+    }
+  })();
+  // Must survive URL parsing unchanged (rejects e.g. `preview.123`, `127.1`): routing and the origin use it as is.
+  if (parsed !== merged.previewHost || !merged.previewHost.split(".").every((l) => label.test(l)) || merged.previewHost === merged.domain) {
+    throw new Error("CRESSLET_PREVIEW_HOST must be a bare hostname (no scheme or port), different from CRESSLET_DOMAIN");
+  }
   return {
-    ...base,
-    ...overrides,
+    ...merged,
     sandbox: { ...base.sandbox, ...overrides.sandbox },
     limits: { ...base.limits, ...overrides.limits },
   };
@@ -97,6 +115,19 @@ export function appUrl(cfg: Config, name: string): string {
   const defaultPort = cfg.scheme === "https" ? 443 : 80;
   const port = cfg.publicPort === defaultPort ? "" : `:${cfg.publicPort}`;
   return `${cfg.scheme}://${name}.${cfg.domain}${port}`;
+}
+
+/** The app name the preview host shadows (`preview` for `preview.<domain>`), if it's under the domain. */
+export function previewAppName(cfg: Config): string | null {
+  const suffix = "." + cfg.domain;
+  const sub = cfg.previewHost.endsWith(suffix) ? cfg.previewHost.slice(0, -suffix.length) : "";
+  return sub && !sub.includes(".") ? sub : null;
+}
+
+export function previewOrigin(cfg: Config): string {
+  const defaultPort = cfg.scheme === "https" ? 443 : 80;
+  const port = cfg.publicPort === defaultPort ? "" : `:${cfg.publicPort}`;
+  return `${cfg.scheme}://${cfg.previewHost}${port}`;
 }
 
 export function rootUrl(cfg: Config): string {

@@ -107,6 +107,7 @@ test("websockets reach the app server through the sandbox", async () => {
     srv.store.db.prepare("INSERT INTO domains (domain, app_id, token, verified_at, created_at) VALUES ('ws.example.com', ?, 't', 1, 1)").run(d.app.id);
     assert.equal((await wsRoundTrip(port, "WS.example.com.", "/api/ws", "hi")).reply, "echo:hi:/api/ws:-");
     assert.equal((await wsRoundTrip(port, "test.local", "/api/ws", "hi")).status, 404); // root host
+    assert.equal((await wsRoundTrip(port, "preview.test.local", "/api/ws", "hi")).status, 404); // studio preview host
     const logs = srv.runtime.logs.recent(d.app.id, 100).map((l) => l.msg).join("\n");
     assert.match(logs, /WS \/api\/ws 101/);
   } finally {

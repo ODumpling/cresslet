@@ -59,6 +59,10 @@ data/apps/<appId>/data/files/          app file storage
 
 Root host serves `studio/` with COOP/COEP. It embeds cresslet-container (our in-browser runtime: VFS, shell, npm, esbuild-wasm dev server, service-worker previews) and registers a `cresslet` command so `cresslet dev|build|deploy` work inside the browser. Server code runs in a Web Worker with the same `Env` API (sql.js DB persisted into the VFS).
 
+Previews run on their own origin (`CRESSLET_PREVIEW_HOST`, default `preview.<domain>`), not the studio's: preview code (the user's app and its npm deps) can't read the studio's storage, where the API token lives. That host only serves the container's relay page and service worker (relay framable by the studio only); the SW forwards preview requests through the relay to the container running in the studio tab. The studio refuses to run previews without a separate preview origin, and the preview iframe is sandboxed without top-level navigation or popups (so `target=_blank` links and OAuth popups inside a preview don't open). There's no "open preview in a new tab": a top-level preview document can't be sandboxed (a same-origin wrapper can lift its own frame's sandbox), so deploy to see the app full-window.
+
+Remaining exposure: the app's *server* code (and `node` scripts) still run in Web Workers on the studio origin. They can't read localStorage (the API token, deploy keys) but can read the studio's IndexedDB (every local project's files, including `.env.cresslet`). Moving those workers to the preview origin is a follow-up. (Chromium additionally refuses to load a studio-origin `blob:` URL inside the preview frame, which the e2e checks; Firefox and WebKit aren't verified for that, which is one more reason for the follow-up.)
+
 ## Roadmap
 
 - Hosted instance + wildcard TLS. Named / scoped API tokens (today: one token list per account, regenerate revokes all).
@@ -67,4 +71,3 @@ Root host serves `studio/` with COOP/COEP. It embeds cresslet-container (our in-
 - Custom domains, cron/scheduled handlers, websockets.
 - Source sync (git) so studio and CLI edit the same project.
 - AI builder in the studio driving the same API (deferred from v1).
-- Separate preview origin for studio (preview code is currently same-origin with the studio).

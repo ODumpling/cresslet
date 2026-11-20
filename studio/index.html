@@ -91,10 +91,11 @@
         <div class="pane-head">
           <button class="icon-btn" id="preview-reload" aria-label="Reload preview" title="Reload">↻</button>
           <input id="preview-path" class="mono" value="/" aria-label="Preview path" spellcheck="false" />
-          <a class="icon-btn" id="preview-open" target="_blank" rel="noopener" aria-label="Open preview in new tab" title="Open in new tab">↗</a>
         </div>
         <div class="preview-body">
-          <iframe id="preview" title="App preview"></iframe>
+          <!-- No top navigation or popups: app server code runs in workers on this origin and could mint
+               blob: URLs here; a preview must not be able to open one as a top-level document. -->
+          <iframe id="preview" title="App preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock"></iframe>
           <div class="preview-empty" id="preview-empty">
             <p id="preview-msg">Booting runtime…</p>
           </div>

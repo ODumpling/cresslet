@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { serveDir, serveFile } from "./static.ts";
-import { type Config, loadConfig, rootUrl } from "./config.ts";
+import { type Config, loadConfig, previewAppName, rootUrl } from "./config.ts";
 import { Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
 import { Logs } from "./logs.ts";
@@ -15,6 +15,14 @@ import { removeAppFiles } from "./deploys.ts";
 import { settled as sandboxSettled } from "./sandbox.ts";
 
 const STUDIO = join(import.meta.dirname, "../studio");
+const RETIRE_SW = `self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil((async () => {
+  await self.registration.unregister();
+  for (const c of await self.clients.matchAll({ type: "window" })) c.navigate(c.url);
+})()));
+`;
+/** Files cresslet-container needs at the preview origin's root. */
+const PREVIEW_FILES = new Set(["cresslet-sw.js", "cresslet-relay.html", "cresslet-relay.js"]);
 
 /** Cross-origin isolation is required by cresslet-container (SharedArrayBuffer). */
 const ISOLATION = {
@@ -31,6 +39,10 @@ export function createServer(cfg: Config = loadConfig()) {
   const serveApp = host(cfg, store, runtime);
   const upgradeApp = upgrader(cfg, store, runtime);
   const suffix = "." + cfg.domain;
+  const shadowed = previewAppName(cfg);
+  if ((shadowed && store.appByName(shadowed)) || store.appByDomain(cfg.previewHost)) {
+    console.warn(`cresslet: ${cfg.previewHost} is the studio preview host; the app using that name/domain is no longer reachable`);
+  }
   const scheduler = new Scheduler(store, scheduled(cfg, store, runtime));
   scheduler.start();
 
@@ -43,8 +55,33 @@ export function createServer(cfg: Config = loadConfig()) {
     }
   }, 10 * 60_000);
 
+  /**
+   * The studio's previews run on their own origin (cresslet-container `previewOrigin`), so preview
+   * code can't read the studio's storage (API token). This host serves only the container's relay
+   * page and service worker; the SW serves the previews themselves from the studio tab.
+   */
+  async function servePreviewHost(req: Request): Promise<Response> {
+    const name = new URL(req.url).pathname.slice(1);
+    const h = new Headers({
+      "cross-origin-embedder-policy": "require-corp",
+      "cross-origin-resource-policy": "cross-origin",
+      "cache-control": "no-cache",
+    });
+    if (!PREVIEW_FILES.has(name)) {
+      h.set("content-type", "text/plain");
+      return new Response("Not Found", { status: 404, headers: h });
+    }
+    const res = await serveFile(req, join(STUDIO, "vendor/cresslet-container", name));
+    res.headers.forEach((v, k) => h.has(k) || h.set(k, v));
+    if (name === "cresslet-sw.js") h.set("service-worker-allowed", "/");
+    // Only the studio may frame the relay (it bridges the SW to the studio's container).
+    if (name.endsWith(".html")) h.set("content-security-policy", `frame-ancestors ${rootUrl(cfg)}`);
+    return new Response(res.body, { status: res.status, headers: h });
+  }
+
   async function handler(req: Request): Promise<Response> {
     const hostname = normDomain((req.headers.get("host") ?? "").replace(/:\d+$/, ""));
+    if (hostname === cfg.previewHost) return servePreviewHost(req);
     if (hostname.endsWith(suffix)) {
       const sub = hostname.slice(0, -suffix.length);
       if (sub && !sub.includes(".")) return serveApp(req, sub);
@@ -55,16 +92,26 @@ export function createServer(cfg: Config = loadConfig()) {
     const url = new URL(req.url);
     if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return control.fetch(req);
     if (url.pathname === "/healthz") return new Response("ok");
-    // The container's service worker must be served from the root to control preview URLs.
-    const res = url.pathname === "/cresslet-sw.js"
-      ? await serveFile(req, join(STUDIO, "vendor/cresslet-container/cresslet-sw.js"))
-      : await serveDir(req, STUDIO);
+    // Previews moved to the preview host: browsers that registered the old studio-origin worker get
+    // one that unregisters itself (and reloads the pages it controlled).
+    if (url.pathname === "/cresslet-sw.js") {
+      return new Response(RETIRE_SW, {
+        headers: { "content-type": "text/javascript", "cache-control": "no-cache", "service-worker-allowed": "/", ...ISOLATION },
+      });
+    }
+    // The relay only lets the configured studio origin frame it: serve the studio's pages there.
+    const pub = new URL(rootUrl(cfg));
+    // Exact (lowercased) host: `example.com.` is a different origin from `example.com` for the relay's CSP.
+    const reqHost = (req.headers.get("host") ?? "").toLowerCase().replace(cfg.scheme === "https" ? /:443$/ : /:80$/, "");
+    if (reqHost !== pub.host) {
+      return Response.redirect(pub.origin + url.pathname + url.search, 302);
+    }
+    const res = await serveDir(req, STUDIO);
     const h = new Headers(res.headers);
     for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
     // Studio files aren't content-hashed: always revalidate (ETag), or a CDN/browser can pair new HTML
     // with stale JS.
     h.set("cache-control", "no-cache");
-    if (url.pathname === "/cresslet-sw.js") h.set("service-worker-allowed", "/");
     return new Response(res.body, { status: res.status, headers: h });
   }
 
@@ -73,6 +120,7 @@ export function createServer(cfg: Config = loadConfig()) {
     // Node detaches its own error handler before emitting `upgrade`: install ours first.
     socket.on("error", () => socket.destroy());
     const hostname = normDomain((req.headers.host ?? "").replace(/:\d+$/, ""));
+    if (hostname === cfg.previewHost) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
     let name = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : "";
     if (!name && hostname !== cfg.domain) name = store.appByDomain(hostname)?.name ?? ""; // custom domain
     if (!name || name.includes(".")) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");

@@ -258,3 +258,44 @@ test("closed instance: no anonymous deploys, admin-only accounts", withServer(as
   assert.equal(d.status, 201);
   assert.equal(d.body.app.claimed, true);
 }, { openSignup: false, anonDeploys: false, adminToken: "s3cret-admin" }));
+
+test("preview host serves only the container's relay + service worker, framable by the studio only", withServer(async (t) => {
+  const info = await t.json("/v1");
+  assert.equal(info.body.previewOrigin, "http://preview.test.local");
+  const sw = await t.call("/cresslet-sw.js", { host: "preview.test.local" });
+  await sw.body?.cancel();
+  assert.equal(sw.status, 200);
+  assert.equal(sw.headers.get("service-worker-allowed"), "/");
+  assert.equal(sw.headers.get("cross-origin-resource-policy"), "cross-origin");
+  assert.equal(sw.headers.get("cross-origin-embedder-policy"), "require-corp");
+  const relay = await t.call("/cresslet-relay.html", { host: "preview.test.local" });
+  await relay.body?.cancel();
+  assert.equal(relay.status, 200);
+  assert.equal(relay.headers.get("content-security-policy"), "frame-ancestors http://test.local");
+  for (const p of ["/", "/index.html", "/app.js", "/v1", "/%2e%2e/server/main.ts", "/cresslet-relay.js.map"]) {
+    const r = await t.call(p, { host: "preview.test.local" });
+    await r.body?.cancel();
+    assert.equal(r.status, 404, p);
+  }
+  // "preview" can't be an app name.
+  const d = await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ app: "preview", files: [] }) });
+  assert.equal(d.status, 400);
+  // The old studio-origin worker is replaced by one that unregisters itself.
+  const sw2 = await t.call("/cresslet-sw.js");
+  assert.match(await sw2.text(), /registration\.unregister\(\)/);
+  // Studio pages on another hostname go to the configured origin (the relay only trusts that one).
+  const other = await t.call("/", { host: "127.0.0.1" });
+  await other.body?.cancel();
+  assert.equal(other.status, 302);
+  assert.equal(other.headers.get("location"), "http://test.local/");
+  assert.equal((await t.call("/healthz", { host: "127.0.0.1" })).status, 200);
+}));
+
+test("a configured preview host is normalized and its name reserved", withServer(async (t) => {
+  assert.equal(t.srv.cfg.previewHost, "sandbox.test.local");
+  const d = await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ app: "sandbox", files: [] }) });
+  assert.equal(d.status, 400);
+  const sw = await t.call("/cresslet-sw.js", { host: "SANDBOX.test.local." });
+  await sw.body?.cancel();
+  assert.equal(sw.headers.get("service-worker-allowed"), "/");
+}, { previewHost: "Sandbox.Test.Local." } as never));

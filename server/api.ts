@@ -7,7 +7,7 @@ import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { appUrl, type Config, paths, rootUrl } from "./config.ts";
+import { appUrl, type Config, paths, previewAppName, previewOrigin, rootUrl } from "./config.ts";
 import type { Account, App, Domain, Store } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
 import { github } from "./github.ts";
@@ -107,6 +107,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       version: VERSION,
       url: rootUrl(cfg),
       appUrlTemplate: appUrl(cfg, "{name}"),
+      previewOrigin: previewOrigin(cfg),
       openSignup: cfg.openSignup,
       anonDeploys: cfg.anonDeploys,
       auth: { github: !!cfg.github },
@@ -249,7 +250,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
         throw new HttpError(401, "login required to deploy here (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
       }
       const name = input.app ?? uniqueName();
-      if (!validName(name)) {
+      if (!validName(name, cfg)) {
         throw new HttpError(400, "app name must be 1-40 chars of a-z, 0-9 and single dashes", "invalid_name");
       }
       const expires = acct ? null : Date.now() + cfg.limits.anonTtlMs;
@@ -451,7 +452,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const a = await claimed(c);
     const raw = (await body<{ domain?: unknown } | null>(c))?.domain;
     const domain = typeof raw === "string" ? normDomain(raw) : "";
-    if (!validDomain(domain) || domain === cfg.domain || domain.endsWith("." + cfg.domain)) {
+    if (!validDomain(domain) || domain === cfg.domain || domain.endsWith("." + cfg.domain) || domain === cfg.previewHost) {
       throw new HttpError(400, `invalid domain: ${String(raw)}`);
     }
     const existing = store.domains(a.id).find((d) => d.domain === domain);
@@ -487,7 +488,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   // For a TLS terminator's on-demand certificates (e.g. Caddy `on_demand_tls { ask … }`): 200 only for
   // verified custom domains. The root and app subdomains use the wildcard cert, and approving every app
   // name would let anyone burn the CA's per-domain rate limit by creating apps.
-  app.get("/domains/check", (c) => c.body(null, store.appByDomain(normDomain(c.req.query("domain") ?? "")) ? 200 : 404));
+  app.get("/domains/check", (c) => {
+    const d = normDomain(c.req.query("domain") ?? "");
+    // The preview host needs a certificate too when it isn't covered by the wildcard.
+    return c.body(null, store.appByDomain(d) || (d === cfg.previewHost && !previewAppName(cfg)) ? 200 : 404);
+  });
 
   // ---- database inspection (read-only)
   function openAppDb(a: App) {
