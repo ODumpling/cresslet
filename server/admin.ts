@@ -19,10 +19,13 @@ export const isSiteAdmin = (cfg: Config, a: Account | undefined) =>
 
 /** Permanently removes an app: process, rows (deploys, secrets, domains cascade), logs, files. */
 export async function purgeApp(cfg: Config, store: Store, runtime: Runtime, a: App) {
-  runtime.stop(a.id);
-  store.deleteApp(a.id);
-  runtime.logs.drop(a.id);
-  await removeAppFiles(cfg, a.id);
+  store.deleteApp(a.id); // first: no new request starts its sandbox
+  try {
+    await runtime.stopSettled(a.id);
+  } finally {
+    runtime.logs.drop(a.id);
+    await removeAppFiles(cfg, a.id); // no row is left to retry from
+  }
 }
 
 /** Bytes under a directory (files only, symlinks not followed); 0 if it doesn't exist. */

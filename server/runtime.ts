@@ -1,21 +1,20 @@
 // Process manager: one workerd sandbox process per app with a server, spawned on demand,
 // reaped when idle. Proxies requests over a unix socket. The sandbox reaches its db/files
-// through a per-app bindings socket served here (server/bindings.ts).
+// through a per-app bindings socket served from a worker thread (server/bindings.ts).
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, linkSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import type { Server } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import { type IncomingMessage, request as httpRequest } from "node:http";
 import type { Duplex } from "node:stream";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { getRequestListener } from "@hono/node-server";
 import { Client } from "undici";
 import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
-import { createBindings } from "./bindings.ts";
+import { serveBindings } from "./bindings.ts";
 import { createEgressProxy } from "./egress.ts";
 import { adoptListener, instanceId, jail, prepareHost, sweep } from "./sandbox.ts";
 
@@ -42,7 +41,7 @@ interface Proc {
   sockPath: string;
   child: ChildProcess;
   client: Client;
-  bindings: { server: Server; egress: Server | null; close(): void };
+  bindings: { egress: Server | null; close(): void };
   /** Kills whatever is left in the sandbox's cgroup and removes it (synchronous kill). */
   release(): void;
   ready: Promise<void>;
@@ -323,29 +322,33 @@ export class Runtime {
     const egressSock = spec.net && (spec.egress || gvisor) ? join(run, "e.sock") : null;
 
     // Everything acquired so far is undone by one path if the start fails before the child runs.
-    let bindings: ReturnType<typeof createBindings> | undefined;
-    let server: Server | undefined;
+    let bindings: Awaited<ReturnType<typeof serveBindings>> | undefined;
     let egress: Server | null = null;
     let j: ReturnType<typeof jail> | undefined;
     let listener: NetServer | undefined;
+    /** This spawn's proc once it exists; `lost`: its bindings thread died. */
+    let self: Proc | undefined;
+    let lost = false;
     const abort = () => {
       listener?.close();
       egress?.close();
-      server?.close();
       bindings?.close();
       j?.release();
       rmSync(run, { recursive: true, force: true });
     };
     let child: ChildProcess;
     try {
-      // Bindings socket: the sandbox's only way to its data. One per app, so identity = socket.
-      bindings = createBindings(p.data, {
+      // Bindings socket: the sandbox's only way to its data. One per app, so identity = socket. Served
+      // from the app's own thread: its SQL can't stall the control plane. If that thread dies, so does the sandbox.
+      bindings = await serveBindings(p.data, hostSock, {
         secrets: spec.secrets(),
         maxDbBytes: cfg.limits.appDbBytes,
         maxFilesBytes: cfg.limits.appFilesBytes,
+      }, () => {
+        lost = true;
+        this.logs.push(spec.appId, "system", "bindings thread crashed; sandbox stopped");
+        if (self && this.procs.get(spec.appId) === self) this.stop(spec.appId);
       });
-      const srv = server = createServer(getRequestListener(bindings.fetch));
-      await new Promise<void>((res, rej) => srv.once("error", rej).listen(hostSock, res));
       if (egressSock) {
         const eg = egress = createEgressProxy(spec.egress, (l) => this.logs.push(spec.appId, "system", l));
         await new Promise<void>((res, rej) => eg.once("error", rej).listen(egressSock, res));
@@ -378,8 +381,8 @@ export class Runtime {
     }
     const jl = j;
     const egressServer = egress;
-    const bindingsServer = server;
     const binds = bindings;
+    let bindingsOpen = true;
 
     let fail!: (e: Error) => void;
     const failed = new Promise<never>((_, rej) => (fail = rej));
@@ -391,16 +394,14 @@ export class Runtime {
       child,
       client: new Client("http://app", { socketPath: sock }),
       bindings: {
-        server: bindingsServer,
         egress: egressServer,
         close() {
           if (egressServer?.listening) {
             egressServer.close();
             egressServer.closeAllConnections();
           }
-          if (!bindingsServer.listening) return;
-          bindingsServer.close();
-          bindingsServer.closeAllConnections();
+          if (!bindingsOpen) return;
+          bindingsOpen = false;
           binds.close();
           // gVisor: the sandbox can write to l/, so its run dir goes only once it's reaped (jail release).
           if (!gvisor) rmSync(run, { recursive: true, force: true });
@@ -412,6 +413,8 @@ export class Runtime {
       exited: false,
     };
     this.procs.set(spec.appId, proc);
+    self = proc;
+    if (lost) fail(new Error("bindings thread exited during start"));
 
     const pipe = (stream: NodeJS.ReadableStream, kind: "stdout" | "stderr") => {
       let buf = "";
@@ -479,6 +482,15 @@ export class Runtime {
     proc.bindings.close();
     // Synchronously, so a shutdown that exits right after still kills forked processes.
     proc.release();
+  }
+
+  /** stop(), after a start in flight for the app is done (it would serve, and recreate files of, a purged app). */
+  async stopSettled(appId: string) {
+    for (let s; (s = this.#starting.get(appId));) {
+      await s.p.catch(() => {});
+      await new Promise((r) => setImmediate(r)); // requests waiting on it may retry (another deploy or policy)
+    }
+    this.stop(appId);
   }
 
   reapIdle() {
