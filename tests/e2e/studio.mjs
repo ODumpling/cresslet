@@ -39,8 +39,8 @@ try {
   }
   // No "open in new tab": a top-level preview document wouldn't be sandboxed.
   if (await page.locator("#preview-open").count()) throw new Error("raw new-tab preview link is back");
-  // A studio-origin blob: URL (what an app worker could mint) can't be loaded into the preview frame
-  // with the studio's origin (Chromium partitions blob URLs by storage key).
+  // A studio-origin blob: URL can't be loaded into the preview frame with the studio's origin (Chromium
+  // partitions blob URLs by storage key). App workers run on the preview origin, so they can't mint one anyway.
   const leaked = page.evaluate(() => new Promise((r) => {
     addEventListener("message", (e) => typeof e.data === "string" && e.data.startsWith("token=") && r(e.data));
     setTimeout(() => r(null), 3000);
@@ -69,6 +69,51 @@ try {
   await p2.getByRole("button", { name: "Add" }).click();
   await p2.getByText("on cresslet").waitFor({ timeout: 15000 });
   console.log("deployed app works");
+  // App server code and `node` run on the preview origin too; the server survives its own background errors. neither can open the studio's IndexedDB (every
+  // local project's files, including .env.cresslet). Probe from a node script, then from the app's server route.
+  const term = page.locator(".xterm-rows");
+  const waitTerm = async (re, what) => {
+    for (let i = 0; !re.test(await term.innerText()); i++) {
+      if (i > 150) throw new Error(`terminal never showed ${what}:\n${await term.innerText()}`);
+      await page.waitForTimeout(200);
+    }
+    return re.exec(await term.innerText());
+  };
+  await page.getByRole("tab", { name: "Terminal" }).click();
+  await page.locator(".xterm").click();
+  await page.keyboard.press("Control+C");
+  await page.waitForTimeout(500);
+  await page.keyboard.type(`node -e "indexedDB.databases().then((d) => console.log('studio-db=' + d.some((x) => x.name === 'cresslet-studio') + ' at=' + origin)); setTimeout(() => {}, 1000)"\n`);
+  const [, nodeSees, nodeAt] = await waitTerm(/studio-db=(\w+) at=(\S+)/, "the node probe");
+  if (nodeAt !== previewOrigin) throw new Error(`node ran on ${nodeAt}, not ${previewOrigin}`);
+  if (nodeSees !== "false") throw new Error("a node script could see the studio's IndexedDB");
+  console.log("node runs on", nodeAt);
+  await page.waitForTimeout(1500); // its keep-alive timer, then the prompt is back
+  await page.keyboard.type(`node -e "require('fs').writeFileSync('server/index.ts', 'setTimeout(() => { throw 42 }, 0); export default { fetch: async () => Response.json({ origin: self.origin, dbs: (await indexedDB.databases()).map((d) => d.name) }) }')" && npm run dev\n`);
+  await waitTerm(/server ready[\s\S]*dev server on port/, "the restarted dev server");
+  await waitTerm(/\[server\] 42/, "the server's own background error, logged");
+  const probe = async () => {
+    const f = await (await page.locator("#preview").elementHandle()).contentFrame();
+    return f.evaluate(() => fetch("/api/probe").then((r) => r.json())).catch(() => null);
+  };
+  let served = null;
+  for (let i = 0; !served?.origin && i < 50; i++) (served = await probe()) || (await page.waitForTimeout(300));
+  if (served?.origin !== previewOrigin) throw new Error(`server code ran on ${served?.origin}, not ${previewOrigin}`);
+  if (served.dbs.includes("cresslet-studio")) throw new Error("server code could see the studio's IndexedDB");
+  console.log("server code runs on", served.origin, "and sees databases", JSON.stringify(served.dbs));
+  // A relay reload takes its workers with it: API requests then fail fast (503), they don't hang.
+  await page.evaluate(() => {
+    const relay = document.querySelector('iframe[title="cresslet preview relay"]');
+    relay.src = relay.src;
+  });
+  const stopped = async () => {
+    const f = await (await page.locator("#preview").elementHandle()).contentFrame();
+    return f.evaluate(() => fetch("/api/probe", { signal: AbortSignal.timeout(5000) }).then(async (r) => `${r.status} ${await r.text()}`).catch((e) => e.name)).catch(() => "");
+  };
+  let afterReload = "";
+  for (let i = 0; !afterReload.startsWith("503") && i < 10; i++) (afterReload = await stopped()) || (await page.waitForTimeout(300));
+  if (!/^503 server stopped: preview relay restarted/.test(afterReload)) throw new Error(`after a relay reload: ${afterReload}`);
+  console.log("relay reload: server requests get", afterReload.slice(0, 40));
   await page.screenshot({ path: (process.argv[2] ?? ".") + "/studio.png" });
   await settings();
 } catch (e) {
