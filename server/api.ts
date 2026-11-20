@@ -484,6 +484,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const a = getApp(c.req.param("name"));
     await authorize(c, a, "deploy");
     const { deployId } = await body<{ deployId?: string }>(c);
+    await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
     const d = deployId ? store.deploy(deployId) : store.deploys(a.id, 2)[1];
     if (!d || d.app_id !== a.id) throw new HttpError(404, "deploy not found", "not_found");
     const config = JSON.parse(await readFile(join(paths(cfg, a.id).deploy(d.id), "deploy.json"), "utf8"));
@@ -696,6 +697,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     await authorize(c, a, "admin");
     if (!a.account_id) throw new HttpError(403, "secrets require a claimed app (cresslet claim)", "unclaimed");
     const input = await body<Record<string, string | null>>(c);
+    await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     for (const [k, v] of Object.entries(input)) {
       if (!SECRET_KEY_RE.test(k)) throw new HttpError(400, `invalid secret name: ${k} (use UPPER_SNAKE)`);
       if (v === null) store.deleteSecret(a.id, k);
@@ -726,6 +728,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     await authorize(c, a, "admin");
     if (!a.account_id) throw new HttpError(403, "outbound network requires a claimed app (cresslet claim)", "unclaimed");
     const { allow } = await body<{ allow?: unknown }>(c);
+    await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     let list: string[] | null = null;
     if (allow !== null) {
       try {
@@ -765,6 +768,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   app.post("/apps/:name/domains", async (c) => {
     const a = await claimed(c, "admin");
     const raw = (await body<{ domain?: unknown } | null>(c))?.domain;
+    await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     const domain = typeof raw === "string" ? normDomain(raw) : "";
     if (!validDomain(domain) || domain === cfg.domain || domain.endsWith("." + cfg.domain) || domain === cfg.previewHost) {
       throw new HttpError(400, `invalid domain: ${String(raw)}`);

@@ -289,12 +289,16 @@ test("revoked mid-request: no re-promotion while the body was in flight; follow 
     };
     const promote = slow(`/v1/apps/shop/collaborators/${admId}`, "PUT", '{"role":"admin"}');
     const invite = slow("/v1/apps/shop/collaborators", "POST", '{"email":"alt@b.co","role":"admin"}');
-    await Promise.all([promote.started, invite.started]);
+    const secret = slow("/v1/apps/shop/secrets", "PUT", '{"SNEAKY":"1"}');
+    await Promise.all([promote.started, invite.started, secret.started]);
     assert.equal((await t.send("PUT", `/v1/apps/shop/collaborators/${admId}`, owner, { role: "viewer" })).status, 200);
     promote.send();
     invite.send();
+    secret.send();
     assert.equal((await promote.res).status, 403);
     assert.equal((await invite.res).status, 403);
+    assert.equal((await secret.res).status, 403);
+    assert.deepEqual((await t.send("GET", "/v1/apps/shop/secrets", owner)).body.keys, []);
     const list = (await t.send("GET", "/v1/apps/shop/collaborators", owner)).body;
     assert.equal(list.collaborators.find((x: { id: string }) => x.id === admId).role, "viewer");
     assert.deepEqual(list.invites, []);

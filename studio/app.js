@@ -847,18 +847,22 @@ function setRole(p, select) {
     return;
   }
   const url = `/v1/apps/${encodeURIComponent(shareApp)}/collaborators/${encodeURIComponent(p.id)}`;
+  const version = p.version = (p.version ?? 0) + 1; // only the latest change updates the row
   p.saving = (p.saving ?? Promise.resolve()).then(async () => {
     try {
       p.role = (await api(url, { method: "PUT", body: JSON.stringify({ role }) })).role;
     } catch (e) {
       toast(`Could not change the role: ${e.message}`);
-      select.value = p.role;
+      if (version === p.version) select.value = p.role;
       return;
     }
-    if (select.value !== role) return; // a later change is queued: it reports
+    if (p.id === myAccountId && p.role === "viewer") {
+      location.hash = "#/"; // no longer allowed here, whatever is still queued
+      return;
+    }
+    if (version !== p.version) return;
     select.value = p.role;
     toast(`${personText(p)} is now ${ACCESS_LABEL[p.role].toLowerCase()}`);
-    if (p.id === myAccountId && p.role === "viewer") location.hash = "#/";
   });
 }
 
@@ -901,16 +905,19 @@ $("invite-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   inviteError("");
   $("invite-send").disabled = true;
+  const gen = routeGen; // the form is shared by every app's Share page: don't touch it after navigating
   try {
     const r = await api(`/v1/apps/${encodeURIComponent(shareApp)}/collaborators`, {
       method: "POST",
       body: JSON.stringify({ email: $("invite-email").value, role: $("invite-role").value }),
     });
-    $("invite-form").reset();
     toast(`Invited ${r.invite.email} as ${ACCESS_LABEL[r.invite.role].toLowerCase()}`);
-    await renderPeople();
+    if (gen !== routeGen) return;
+    $("invite-form").reset();
+    await renderPeople(gen);
   } catch (err) {
-    inviteError(`Could not invite: ${err.message}`);
+    if (gen === routeGen) inviteError(`Could not invite: ${err.message}`);
+    else toast(`Could not invite: ${err.message}`);
   } finally {
     $("invite-send").disabled = false;
     if (document.activeElement === document.body) $("invite-send").focus(); // disabling it dropped focus
