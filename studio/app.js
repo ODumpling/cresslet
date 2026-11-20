@@ -37,8 +37,18 @@ function toast(content, ms = 6000) {
   $("toast").dataset.open = "true";
   $("toast-close").hidden = false;
   toast.ms = ms;
+  avoidFocus();
   armToast();
 }
+// Never cover the focused control (WCAG 2.4.11): if it's under the toast, the toast moves to the top edge.
+function avoidFocus() {
+  const t = $("toast"), a = document.activeElement;
+  if (t.dataset.open !== "true" || !a || a === document.body || t.contains(a)) return;
+  t.dataset.top = "false";
+  const r = a.getBoundingClientRect(), q = t.getBoundingClientRect();
+  if (r.bottom > q.top && r.top < q.bottom && r.right > q.left && r.left < q.right) t.dataset.top = "true";
+}
+addEventListener("focusin", avoidFocus);
 function armToast() {
   clearTimeout(toast.timer);
   const t = $("toast");
@@ -77,12 +87,20 @@ function focusView({ scroll = false } = {}) {
   h?.focus({ preventScroll: true });
   if (scroll) h?.scrollIntoView({ block: "nearest" });
 }
-/** After a re-render removed the focused control: focus `target` (or the view's heading), unless the user has
- *  already moved focus somewhere else meanwhile. */
+// The last focused control, as a selector that still finds it after a re-render rebuilds it.
+let lastFocusKey = null;
+addEventListener("focusin", (e) => {
+  const t = e.target, label = t.getAttribute?.("aria-label");
+  lastFocusKey = t.id ? `#${CSS.escape(t.id)}` : label ? `[aria-label="${CSS.escape(label)}"]` : null;
+});
+/** After a re-render removed the focused control: focus its rebuilt twin if there is one, else `target`, else the
+ *  view's heading. Does nothing if focus is still on a control in the page (the user moved it meanwhile). */
 function refocus(target) {
   const a = document.activeElement;
   if (a && a !== document.body && a.isConnected) return;
-  if (target) target.focus();
+  const twin = lastFocusKey && document.querySelector(`main:not([hidden]) ${lastFocusKey}`);
+  if (twin) twin.focus();
+  else if (target) target.focus();
   else focusView();
 }
 $("skip-link").addEventListener("click", (e) => {
@@ -431,7 +449,7 @@ async function renderAdmin(name) {
     if (e.status !== 403) {
       const retry = el("button", { className: "btn", type: "button", onclick: () => renderAdmin(name).then((ok) => ok && refocus(name ? null : $("admin-actions").querySelector("button"))) }, icon("refresh"), "Retry");
       $("admin-actions").replaceChildren(retry);
-      if (document.activeElement === document.body) retry.focus(); // the Refresh/Retry that was clicked is gone
+      refocus(retry); // the Refresh/Retry that was clicked is gone
     }
   }
   return current();

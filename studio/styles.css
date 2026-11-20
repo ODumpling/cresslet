@@ -338,6 +338,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   transition: opacity 160ms, translate 160ms;
 }
 .toast[data-open="false"] { opacity: 0; translate: 0 8px; pointer-events: none; padding: 0; border: 0; box-shadow: none; }
+.toast[data-top="true"] { bottom: auto; top: 20px; }
 .toast-body { padding-top: 4px; overflow-wrap: anywhere; }
 .toast-body a { color: var(--accent-text); }
 

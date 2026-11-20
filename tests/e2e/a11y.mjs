@@ -40,16 +40,34 @@ try {
   await narrow.unroute("**/v1/apps");
   // A new token with the longest allowed name, shown in its callout; a long account email in the sidebar.
   await narrow.getByLabel("All apps (and new ones)").check();
-  await narrow.getByLabel("Name", { exact: true }).fill("y".repeat(64));
+  const yName = `${Date.now()}`.padStart(64, "y"); // unique per run, the longest allowed
+  await narrow.getByLabel("Name", { exact: true }).fill(yName);
   await narrow.getByRole("button", { name: "Create token" }).click();
   await narrow.locator("#token-new").waitFor({ state: "visible" });
   const tw = await narrow.evaluate(() => document.documentElement.scrollWidth);
   assert(tw <= 320, `new token callout is ${tw}px wide at 320px`);
-  const longAcct = await call("/v1/accounts", admin, { email: `${"z".repeat(48)}-${Date.now()}@example.com` });
+  // A toast never covers the focused control (WCAG 2.4.11): focus the last control (bottom of the page), then
+  // revoke the long-named token without moving focus: its wide "Revoked …" toast would sit right over it.
+  narrow.on("dialog", (d) => d.accept());
+  await narrow.getByRole("button", { name: "Log out" }).focus();
+  await narrow.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+  await narrow.getByRole("button", { name: `Revoke ${yName}` }).evaluate((b) => b.click()); // leaves no fixture behind
+  await narrow.getByRole("button", { name: `Revoke ${yName}` }).waitFor({ state: "detached" });
+  await narrow.waitForTimeout(300);
+  const covered = await narrow.evaluate(() => {
+    const a = document.activeElement.getBoundingClientRect(), t = document.getElementById("toast").getBoundingClientRect();
+    return document.getElementById("toast").dataset.open === "true" && a.bottom > t.top && a.top < t.bottom && a.right > t.left && a.left < t.right;
+  });
+  assert(await focused(narrow) === "logout-btn", "revoking another token moved focus");
+  assert(!covered, "the toast covers the focused control");
+  // A long account email (mocked: no account left behind).
   const lp = await browser.newPage({ viewport: { width: 320, height: 640 } });
-  await lp.addInitScript(([t, e]) => { localStorage.setItem("cresslet.token", t); localStorage.setItem("cresslet.email", e); }, [longAcct.token, longAcct.account?.email ?? "z".repeat(60)]);
+  const email = `${"z".repeat(48)}@example.com`;
+  await lp.route("**/v1/me", (r) => r.fulfill({ json: { account: { email, github: null, role: null } } }));
+  await lp.route("**/v1/apps", (r) => r.fulfill({ json: { apps: [] } }));
+  await lp.addInitScript(([e]) => { localStorage.setItem("cresslet.token", "clv_mocked"); localStorage.setItem("cresslet.email", e); }, [email]);
   await lp.goto(base + "/");
-  await lp.waitForTimeout(500);
+  await lp.locator("#account-label").filter({ hasText: "@example.com" }).waitFor();
   const aw = await lp.evaluate(() => document.documentElement.scrollWidth);
   assert(aw <= 320, `home with a long account email is ${aw}px wide at 320px`);
   await lp.close();
