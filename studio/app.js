@@ -13,19 +13,123 @@ const el = (tag, { dataset, ...props } = {}, ...children) => {
   return n;
 };
 
+const SVG = "http://www.w3.org/2000/svg";
+/** A decorative icon from the sprite in index.html; the control around it carries the accessible name. */
+const icon = (name, className = "icon") => {
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("class", className);
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(SVG, "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.append(use);
+  return svg;
+};
+const srOnly = (text) => el("span", { className: "sr-only", textContent: text });
+/** A link that opens in a new tab, and says so to screen readers. */
+const extLink = (href, text, className = "ext") =>
+  el("a", { href, target: "_blank", rel: "noopener", className }, text, srOnly(" (opens in a new tab)"), icon("external"));
+
 // ------------------------------------------------------------------ shared UI
-function toast(content, ms = 5000) {
-  const t = $("toast");
-  t.replaceChildren(content);
-  t.hidden = false;
+// The toast's body is a live region that stays in the page (one that appears with its message may not be
+// announced). It stays open while hovered or focused (WCAG 2.2.1), and Escape or × dismisses it.
+function toast(content, ms = 6000) {
+  $("toast-body").replaceChildren(content);
+  $("toast").dataset.open = "true";
+  $("toast-close").hidden = false;
+  toast.ms = ms;
+  avoidFocus();
+  armToast();
+}
+// Never cover the focused control (WCAG 2.4.11): if it's under the toast, the toast moves to the top edge; if
+// it would be covered there too (tiny viewports), the toast turns transparent (still announced, still reachable by
+// Tab, which brings it back) until focus moves or the page scrolls.
+function avoidFocus() {
+  const t = $("toast"), a = document.activeElement;
+  if (a && t.contains(a)) {
+    if (t.dataset.top === "hide") t.dataset.top = "false"; // Tab into a transparent toast: show it
+    return; // otherwise stay put while it's used (a click focuses × before it lands)
+  }
+  t.dataset.top = "false";
+  if (t.dataset.open !== "true" || !a || a === document.body) return;
+  const r = a.getBoundingClientRect();
+  const covers = () => {
+    const q = t.getBoundingClientRect();
+    if (r.height > q.height * 2 || r.width > q.width) return false; // a large area (log, editor) can't be hidden by it
+    return r.bottom > q.top && r.top < q.bottom && r.right > q.left && r.left < q.right;
+  };
+  if (!covers()) return;
+  t.dataset.top = "true";
+  if (covers()) t.dataset.top = "hide";
+}
+{
+  let frame = 0;
+  const later = () => frame ||= requestAnimationFrame(() => { frame = 0; avoidFocus(); });
+  addEventListener("focusin", avoidFocus);
+  addEventListener("scroll", later, { capture: true, passive: true }); // scrolling can move focus under it
+  addEventListener("resize", later);
+}
+function armToast() {
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (t.hidden = true), ms);
+  const t = $("toast");
+  if (t.dataset.open === "true" && !t.matches(":hover") && !t.contains(document.activeElement)) {
+    toast.timer = setTimeout(closeToast, toast.ms);
+  }
+}
+function closeToast() {
+  clearTimeout(toast.timer);
+  const t = $("toast");
+  const hadFocus = t.contains(document.activeElement);
+  t.dataset.open = "false";
+  $("toast-close").hidden = true;
+  $("toast-body").replaceChildren();
+  if (hadFocus) focusView();
+}
+{
+  const t = $("toast");
+  t.addEventListener("pointerenter", () => clearTimeout(toast.timer));
+  t.addEventListener("pointerleave", armToast);
+  t.addEventListener("focusin", () => clearTimeout(toast.timer));
+  t.addEventListener("focusout", () => setTimeout(armToast));
+  $("toast-close").addEventListener("click", closeToast);
+  // Capture phase: xterm and CodeMirror stop Escape; the event still reaches them.
+  addEventListener("keydown", (e) => e.key === "Escape" && t.dataset.open === "true" && closeToast(), true);
 }
 
 function setStatus(text, state = "busy") {
-  $("status").textContent = text;
+  $("status-text").textContent = text;
   $("status").dataset.state = state;
 }
+
+/** Moves focus to the visible view's heading (after navigation, so screen readers hear where they are). */
+function focusView({ scroll = false } = {}) {
+  const h = document.querySelector("main:not([hidden]) h1");
+  h?.focus({ preventScroll: true });
+  if (scroll) h?.scrollIntoView({ block: "nearest" });
+}
+// The last focused control, as a selector that still finds it after a re-render rebuilds it.
+// (Per-item controls get unique ids, e.g. revoke-<token id>: labels like "Revoke Studio (GitHub login)" repeat.)
+let lastFocusKey = null, lastFocusEl = null;
+addEventListener("focusin", (e) => {
+  const t = e.target, label = t.getAttribute?.("aria-label");
+  lastFocusEl = t;
+  lastFocusKey = t.id ? `#${CSS.escape(t.id)}` : label ? `[aria-label="${CSS.escape(label)}"]` : null;
+});
+/** After a re-render removed the focused control: focus its rebuilt twin if there is one, else `target`, else the
+ *  view's heading. Does nothing if focus is still on a control in the page (the user moved it meanwhile). */
+function refocus(target) {
+  const a = document.activeElement;
+  if (a && a !== document.body && a.isConnected) return;
+  // only when the last focused control was removed (a click in Safari/Firefox doesn't focus buttons, so the
+  // last focusin may be an older control that's still here)
+  const twin = lastFocusEl && !lastFocusEl.isConnected && lastFocusKey && document.querySelector(`main:not([hidden]) ${lastFocusKey}`);
+  if (twin) twin.focus();
+  else if (target) target.focus();
+  else focusView();
+}
+$("skip-link").addEventListener("click", (e) => {
+  e.preventDefault(); // its #content href would be read as a route
+  focusView({ scroll: true });
+});
 
 async function api(path, init = {}) {
   const headers = { "content-type": "application/json", ...init.headers };
@@ -43,8 +147,10 @@ async function api(path, init = {}) {
 }
 
 function renderAccount() {
-  $("account-btn").textContent = auth.token ? (auth.email ?? "Account") : "Log in with GitHub";
-  $("account-btn").title = auth.token ? "Settings" : "";
+  $("account-label").replaceChildren(...(auth.token
+    ? [auth.email ?? "Account", srOnly(": account settings")]
+    : ["Log in with GitHub"]));
+  $("nav-settings-item").hidden = !auth.token;
 }
 
 // Login is GitHub only: the server redirects back to /#cresslet_login=<one-time code>.
@@ -62,14 +168,14 @@ $("account-btn").addEventListener("click", async () => {
 function setAccount(r) {
   auth.token = r.token ?? auth.token;
   auth.email = r.account.github ?? r.account.email;
-  $("admin-link").hidden = r.account.role !== "SiteAdmin";
+  $("admin-item").hidden = r.account.role !== "SiteAdmin";
   renderAccount();
 }
 
 function logOut() {
   auth.token = null;
   auth.email = null;
-  $("admin-link").hidden = true;
+  $("admin-item").hidden = true;
   renderAccount();
 }
 
@@ -90,11 +196,31 @@ function logOut() {
 }
 
 // ------------------------------------------------------------------ settings
+let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
 function showOnly(id) {
   for (const m of ["home", "settings", "admin", "workspace"]) $(m).hidden = m !== id;
+  $("app").dataset.view = id;
+  $("topbar").hidden = id !== "workspace";
   $("project-title").hidden = true;
   $("deploy-btn").hidden = true;
   $("deploy-link").hidden = true;
+  for (const a of document.querySelectorAll("[data-nav]")) {
+    if (a.dataset.nav === id) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  }
+  if (id !== "workspace") renderRecent();
+  if (focusOnShow) {
+    focusOnShow = false;
+    scrollTo(0, 0);
+    focusView();
+  }
+}
+
+async function renderRecent() {
+  const list = (await projects.list().catch(() => [])).slice(0, 6);
+  $("recent-wrap").hidden = !list.length;
+  $("recent").replaceChildren(...list.map((p) =>
+    el("li", {}, el("a", { href: `#/p/${p.id}` }, icon("code"), el("span", { textContent: p.name })))));
 }
 
 function renderSettings() {
@@ -116,9 +242,9 @@ function renderSettings() {
   });
   renderTokens();
   api("/v1/apps").then(({ apps }) => {
-    $("token-apps").replaceChildren(...apps.map((a) =>
-      el("label", { className: "inline" }, el("input", { type: "checkbox", value: a.name }), a.name)
-    ));
+    $("token-apps").replaceChildren(...(apps.length ? apps.map((a) =>
+      el("label", { className: "check" }, el("input", { type: "checkbox", value: a.name }), el("span", { textContent: a.name }))
+    ) : [el("p", { className: "muted small", textContent: "No apps yet." })]));
   }, () => {});
 }
 
@@ -129,19 +255,25 @@ async function renderTokens() {
   try {
     ({ tokens } = await api("/v1/me/tokens"));
   } catch (e) {
-    $("tokens").replaceChildren(el("p", { className: "list-row error", textContent: `Could not load tokens: ${e.message}` }));
+    $("tokens").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load tokens: ${e.message}` }));
+    return;
+  }
+  if (!tokens.length) {
+    $("tokens").replaceChildren(el("li", { className: "list-row muted", textContent: "No tokens yet." }));
     return;
   }
   $("tokens").replaceChildren(...tokens.map((t) =>
-    el("div", { className: "list-row" },
+    el("li", { className: "list-row" },
       el("div", { className: "tok" },
         el("strong", { textContent: t.name }, t.current ? el("span", { className: "badge", textContent: "this browser" }) : null),
         el("span", { className: "meta", textContent: `${t.role} · ${t.apps ? (t.apps.join(", ") || "no apps left") : "all apps"}` })),
       el("span", { className: "meta", textContent: `created ${when(t.createdAt)} · last used ${when(t.lastUsedAt)}` }),
       el("button", {
-        className: "btn",
+        className: "btn sm danger",
+        type: "button",
         textContent: "Revoke",
         ariaLabel: `Revoke ${t.name}`,
+        id: `revoke-${t.id}`,
         onclick: () => revokeToken(t),
       }))
   ));
@@ -165,9 +297,16 @@ async function revokeToken(t) {
     return;
   }
   toast(`Revoked ${t.name}`);
-  renderTokens();
+  await renderTokens();
+  refocus($("tokens-title")); // the Revoke button is gone with its row
 }
 
+// Form errors stay beside the form (not a timed toast) until the user changes it.
+function tokenError(text) {
+  $("token-error").textContent = text;
+  $("token-error").hidden = !text;
+}
+$("token-form").addEventListener("change", () => tokenError(""));
 for (const r of document.querySelectorAll('input[name="token-scope"]')) {
   r.addEventListener("change", () => ($("token-apps").hidden = r.value === "all" ? r.checked : !r.checked));
 }
@@ -177,9 +316,11 @@ $("token-form").addEventListener("submit", async (e) => {
   const some = document.querySelector('input[name="token-scope"]:checked').value === "some";
   const apps = some ? [...$("token-apps").querySelectorAll("input:checked")].map((x) => x.value) : null;
   if (some && !apps.length) {
-    toast("Pick at least one app, or choose All apps.");
+    tokenError("Pick at least one app, or choose All apps.");
+    $("token-apps").querySelector("input")?.focus();
     return;
   }
+  tokenError("");
   $("token-create").disabled = true;
   try {
     const r = await api("/v1/me/tokens", {
@@ -189,13 +330,16 @@ $("token-form").addEventListener("submit", async (e) => {
     $("token-new-name").textContent = r.info.name;
     $("token-new-value").value = r.token;
     $("token-new").hidden = false;
+    $("token-new-value").focus();
+    $("token-new-value").select();
     $("token-form").reset();
     $("token-apps").hidden = true;
     renderTokens();
   } catch (err) {
-    toast(`Could not create token: ${err.message}`);
+    tokenError(`Could not create token: ${err.message}`);
   } finally {
     $("token-create").disabled = false;
+    if (document.activeElement === document.body) $("token-create").focus(); // disabling it dropped focus
   }
 });
 
@@ -232,7 +376,7 @@ const ago = (iso) => {
   return rtf.format(Math.round(s), "second");
 };
 const STATUS = { running: "Running", idle: "Idle", empty: "Not deployed", deleted: "Deleted" };
-const statusPill = (s) => el("span", { className: "pill" }, el("i", { className: "dot", dataset: { s } }), STATUS[s] ?? s);
+const statusPill = (s, text = STATUS[s] ?? s) => el("span", { className: "pill", dataset: { s } }, el("i", { className: "dot", ariaHidden: "true" }), text);
 const ownerText = (o) => (o ? o.github ?? o.email : "Anonymous");
 const stat = (label, value, sub, extra) =>
   el("div", { className: "stat" },
@@ -285,13 +429,22 @@ async function adminAction(site, action) {
 function siteActions(site, after) {
   const btn = (label, action, danger) =>
     el("button", {
-      className: `btn${danger ? " danger" : ""}`,
+      className: `btn sm${danger ? " danger" : ""}`,
+      type: "button",
       textContent: label,
       ariaLabel: `${label} ${site.name}`,
       onclick: async (e) => {
-        e.currentTarget.disabled = true;
-        if (await adminAction(site, action)) after(action);
-        else e.currentTarget.disabled = false;
+        const b = e.currentTarget; // null after the await
+        const gen = routeGen;
+        b.disabled = true;
+        const done = await adminAction(site, action);
+        if (gen !== routeGen) return; // navigated away meanwhile: leave the new view alone
+        // (a Refresh meanwhile may show stale data: after() re-renders; its focus move checks it's still current)
+        if (done) after(action);
+        else {
+          b.disabled = false;
+          refocus(b.isConnected ? b : null);
+        }
       },
     });
   return site.status === "deleted"
@@ -299,31 +452,45 @@ function siteActions(site, after) {
     : [btn("Delete", "delete", true)];
 }
 
+/** Resolves true if this render is still the current view (no later route or admin render), so callers may move focus. */
 async function renderAdmin(name) {
   if (!auth.token) {
     location.hash = "#/";
-    return;
+    return false;
   }
+  $("admin-title").replaceChildren(name || "Sites"); // before showOnly() focuses it
   showOnly("admin");
-  adminView.gen++;
+  const gen = ++adminView.gen, route = routeGen;
+  const current = () => gen === adminView.gen && route === routeGen;
   $("admin-actions").replaceChildren();
   $("admin-body").replaceChildren(el("p", { className: "muted", textContent: "Loading…" }));
   try {
     if (name) await renderAdminSite(name);
     else await renderAdminSites();
   } catch (e) {
+    if (!current()) return false;
     $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 403 ? "Only site admins can see this page." : `Could not load: ${e.message}` }));
+    if (e.status !== 403) {
+      const retry = el("button", { className: "btn", type: "button", onclick: () => renderAdmin(name).then((ok) => ok && refocus(name ? null : $("admin-actions").querySelector("button"))) }, icon("refresh"), "Retry");
+      $("admin-actions").replaceChildren(retry);
+      refocus(retry); // the Refresh/Retry that was clicked is gone
+    }
   }
+  return current();
 }
 
 async function renderAdminSites() {
   document.title = "Sites · Admin · Cresslet Studio";
   $("admin-title").replaceChildren("Sites");
   $("admin-sub").textContent = "Every site on this server";
-  const gen = adminView.gen;
+  const gen = adminView.gen, route = routeGen;
   const { totals, sites, retentionDays } = await api("/v1/admin/sites");
-  if (gen !== adminView.gen) return; // navigated away meanwhile
-  $("admin-actions").replaceChildren(el("button", { className: "btn", textContent: "Refresh", onclick: () => renderAdmin() }));
+  if (gen !== adminView.gen || route !== routeGen) return; // navigated away or re-rendered meanwhile
+  $("admin-actions").replaceChildren(el("button", {
+    className: "btn",
+    type: "button",
+    onclick: () => renderAdmin().then((ok) => ok && refocus($("admin-actions").querySelector("button"))), // it's rebuilt
+  }, icon("refresh"), "Refresh"));
 
   const u = totals.usage;
   const stats = el("div", { className: "stats" },
@@ -337,8 +504,9 @@ async function renderAdminSites() {
   const counts = { live: totals.live, deleted: totals.deleted, all: totals.sites };
   const seg = el("div", { className: "seg", role: "group", ariaLabel: "Show" },
     ...[["live", "Live"], ["deleted", "Deleted"], ["all", "All"]].map(([k, l]) =>
-      el("button", { textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminView.filter = k; draw(); } })));
-  const search = el("input", { type: "search", placeholder: "Search sites, owners, domains", ariaLabel: "Search sites", value: adminView.q, oninput: () => { adminView.q = search.value; draw(); } });
+      el("button", { type: "button", id: `filter-${k}`, textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminView.filter = k; draw(); } })));
+  const search = el("input", { type: "search", className: "input", placeholder: "Search sites, owners, domains", ariaLabel: "Search sites", value: adminView.q, oninput: () => { adminView.q = search.value; draw(); } });
+  const shown = el("p", { className: "sr-only", role: "status" });
 
   function draw() {
     for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === adminView.filter));
@@ -346,28 +514,30 @@ async function renderAdminSites() {
     const rows = sites.filter((s) =>
       (adminView.filter === "all" || (adminView.filter === "deleted") === (s.status === "deleted")) &&
       (!q || [s.name, s.owner?.email, s.owner?.github, ...s.domains].some((v) => v?.toLowerCase().includes(q))));
+    shown.textContent = `${rows.length} site${rows.length === 1 ? "" : "s"} shown`;
     tbody.replaceChildren(...(rows.length ? rows.map((s) =>
       el("tr", { dataset: s.status === "deleted" ? { deleted: "" } : {} },
         el("td", {},
           el("a", { href: `#/admin/${encodeURIComponent(s.name)}`, textContent: s.name }),
-          el("span", { className: "muted small", textContent: s.domains[0] ?? s.url.replace(/^https?:\/\//, "") })),
+          el("span", { className: "sub", textContent: s.domains[0] ?? s.url.replace(/^https?:\/\//, "") })),
         el("td", { textContent: ownerText(s.owner), className: s.owner ? "" : "muted" }),
         el("td", {}, statusPill(s.status),
-          s.status === "deleted" ? el("span", { className: "muted small", textContent: `purged ${ago(s.purgeAt)}` }) : null),
+          s.status === "deleted" ? el("span", { className: "sub", textContent: `purged ${ago(s.purgeAt)}` }) : null),
         el("td", { className: "num", textContent: fmtBytes(s.usage.deploys + s.usage.files) }),
         el("td", { className: "num", textContent: s.usage.database ? fmtBytes(s.usage.database) : "—" }),
-        el("td", { textContent: ago(s.updatedAt), title: new Date(s.updatedAt).toLocaleString() }),
-        el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin()))))
+        el("td", {}, el("time", { dateTime: s.updatedAt, title: new Date(s.updatedAt).toLocaleString(), textContent: ago(s.updatedAt) })),
+        el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin().then((ok) => ok && refocus())))))
       : [el("tr", {}, el("td", { colSpan: 7, className: "empty", textContent: q ? "No sites match." : "No sites here." }))]));
   }
   draw();
 
   $("admin-body").replaceChildren(stats, storage,
-    el("div", { className: "toolbar" }, search, seg),
+    el("div", { className: "toolbar" }, el("div", { className: "search" }, icon("search"), search), seg, shown),
     el("div", { className: "table-wrap" },
       el("table", { className: "table" },
-        el("thead", {}, el("tr", {}, ...["Site", "Owner", "Status", "Site size", "Database", "Updated", ""].map((h, i) =>
-          el("th", { textContent: h, className: i === 3 || i === 4 ? "num" : "" })))),
+        el("caption", { className: "sr-only", textContent: "Sites" }),
+        el("thead", {}, el("tr", {}, ...["Site", "Owner", "Status", "Site size", "Database", "Updated", "Actions"].map((h, i) =>
+          el("th", { scope: "col", className: i === 3 || i === 4 ? "num" : "" }, i === 6 ? srOnly(h) : h)))),
         tbody)),
     el("p", { className: "muted small", textContent: `Deleted sites go offline and can be restored for ${retentionDays} days, then they're purged with their data.` }));
 }
@@ -375,34 +545,34 @@ async function renderAdminSites() {
 async function renderAdminSite(name) {
   document.title = `${name} · Admin · Cresslet Studio`;
   $("admin-title").replaceChildren(el("a", { href: "#/admin", textContent: "Sites" }), " / ", name);
-  const gen = adminView.gen;
+  const gen = adminView.gen, route = routeGen;
   const d = await api(`/v1/admin/sites/${encodeURIComponent(name)}`);
-  if (gen !== adminView.gen) return;
+  if (gen !== adminView.gen || route !== routeGen) return;
   const s = d.site;
   $("admin-sub").textContent = s.owner ? `Owned by ${ownerText(s.owner)}` : "Anonymous site";
-  const visit = el("a", { className: "btn", href: s.url, target: "_blank", rel: "noopener", textContent: "Visit ↗" });
+  const visit = extLink(s.url, "Visit", "btn");
   visit.hidden = s.status === "deleted";
   $("admin-actions").replaceChildren(visit,
-    ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name))));
+    ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name).then((ok) => ok && refocus()))));
 
   const dep = s.currentDeploy;
   const banner = s.status === "deleted"
-    ? el("div", { className: "banner deleted" }, el("strong", { textContent: "Deleted" }),
-      `${ago(s.deletedAt)}. Offline and hidden from its owner; purged with its data ${ago(s.purgeAt)} unless restored.`)
+    ? el("div", { className: "banner deleted" }, statusPill("deleted"),
+      el("span", { textContent: `${ago(s.deletedAt)}. Offline and hidden from its owner; purged with its data ${ago(s.purgeAt)} unless restored.` }))
     : dep
-    ? el("div", { className: "banner" }, el("strong", { textContent: "Live" }),
-      el("span", { className: "mono", textContent: dep.id }), ` deployed ${ago(dep.createdAt)} via ${dep.source}`)
+    ? el("div", { className: "banner" }, statusPill("live", "Live"),
+      el("span", {}, el("span", { className: "mono", textContent: dep.id }), ` deployed ${ago(dep.createdAt)} via ${dep.source}`))
     : el("div", { className: "banner" }, "Nothing deployed yet.");
 
   const rt = d.runtime;
   const stats = el("div", { className: "stats" },
-    stat("Status", [STATUS[s.status]], rt.running ? `pid ${rt.pid}` : s.server ? "Starts on the next request" : "Static site", el("i", { className: "dot", dataset: { s: s.status } })),
+    stat("Status", [STATUS[s.status]], rt.running ? `pid ${rt.pid}` : s.server ? "Starts on the next request" : "Static site", el("i", { className: "dot", ariaHidden: "true", dataset: { s: s.status } })),
     stat("Site size", [fmtBytes(s.usage.deploys)], `${d.deploys.length} deploy${d.deploys.length === 1 ? "" : "s"} kept${dep ? ` · current ${fmtBytes(dep.bytes)}` : ""}`),
     stat("Database", [s.usage.database ? fmtBytes(s.usage.database) : "—"], d.database.error ? "Couldn't read" : !d.database.tables.length ? "No database yet" : `${d.database.tables.length} tables · ${d.database.tables.reduce((n, t) => n + t.rows, 0).toLocaleString()} rows`),
     stat("Files", [fmtBytes(s.usage.files)], `${fmtBytes(s.usage.total)} total on disk`));
 
   const kv = (pairs) => el("dl", { className: "kv" }, ...pairs.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
-  const link = (href, text) => el("a", { href, target: "_blank", rel: "noopener", textContent: text });
+  const link = (href, text) => extLink(href, text);
   const info = el("div", { className: "panel" }, el("h2", { textContent: "Overview" }), kv([
     ["URL", s.status === "deleted" ? s.url : link(s.url, s.url.replace(/^https?:\/\//, ""))],
     ["Domains", d.domains.length ? el("span", {}, ...d.domains.flatMap((x, i) => [i ? ", " : null, x.verified ? link(`https://${x.domain}`, x.domain) : `${x.domain} (unverified)`])) : "—"],
@@ -411,12 +581,13 @@ async function renderAdminSite(name) {
     ["Secrets", String(d.secrets)],
     ["Created", new Date(s.createdAt).toLocaleString()],
     ["App ID", el("span", { className: "mono", textContent: s.id })],
-  ]), el("h2", { textContent: "Storage", style: "margin-top:20px" }), usageBar(s.usage));
+  ]), el("h2", { className: "mt", textContent: "Storage" }), usageBar(s.usage));
 
   const tableOf = (heads, rows, empty) =>
     rows.length
-      ? el("div", { className: "scroll-x" }, el("table", { className: "table" },
-        el("thead", {}, el("tr", {}, ...heads.map((h, i) => el("th", { textContent: h, className: i ? "num" : "" })))),
+      // Focusable, so a keyboard can scroll it when it's wider than the panel.
+      ? el("div", { className: "scroll-x", tabIndex: 0, role: "region", ariaLabel: `${heads[0]}s` }, el("table", { className: "table" },
+        el("thead", {}, el("tr", {}, ...heads.map((h, i) => el("th", { scope: "col", textContent: h, className: i ? "num" : "" })))),
         el("tbody", {}, ...rows.map((r) => el("tr", {}, ...r.map((c, i) => el("td", { className: i ? "num" : "" }, c)))))))
       : el("p", { className: "muted small", textContent: empty });
   const db = el("div", { className: "panel" }, el("h2", { textContent: "Database tables" }),
@@ -424,7 +595,7 @@ async function renderAdminSite(name) {
       : tableOf(["Table", "Rows"], d.database.tables.map((t) => [el("span", { className: "mono", textContent: t.name }), t.rows.toLocaleString()]), "No database yet."));
   const deploys = el("div", { className: "panel" }, el("h2", { textContent: "Deploys" }),
     tableOf(["Deploy", "Size", "When"], d.deploys.map((x) => [
-      el("span", {}, el("span", { className: "mono", textContent: x.id }), x.current ? el("span", { className: "muted small", textContent: "live" }) : null),
+      el("span", {}, el("span", { className: "mono", textContent: x.id }), x.current ? el("span", { className: "badge", textContent: "live" }) : null),
       fmtBytes(x.bytes),
       ago(x.createdAt),
     ]), "No deploys."));
@@ -434,47 +605,97 @@ async function renderAdminSite(name) {
 }
 
 // ------------------------------------------------------------------ home
+const TEMPLATE_ICONS = { react: "atom", vanilla: "zap" };
+const emptyState = (title, text) => el("div", { className: "empty-state" }, el("strong", { textContent: title }), el("span", { textContent: text }));
+const timeAgo = (iso) => el("time", { dateTime: new Date(iso).toISOString(), title: new Date(iso).toLocaleString(), textContent: ago(iso) });
+function dataTable(labelledBy, heads, rows) {
+  const t = el("table", { className: "table" },
+    el("thead", {}, el("tr", {}, ...heads.map(([h, cls, hide]) => el("th", { scope: "col", className: cls ?? "" }, hide ? srOnly(h) : h)))),
+    el("tbody", {}, ...rows));
+  t.setAttribute("aria-labelledby", labelledBy);
+  // Focusable, so a keyboard can scroll it when it's wider than the page.
+  return el("div", { className: "table-wrap", tabIndex: 0, role: "region", ariaLabel: `${$(labelledBy).textContent} table` }, t);
+}
+
+/** Its name is all its visible text (WCAG 2.5.3), with a pause between the template and its description. */
+const templateCard = (t) =>
+  el("button", { className: "card", type: "button", onclick: () => createProject(t.name) },
+    el("span", { className: "card-icon" }, icon(TEMPLATE_ICONS[t.name] ?? "code")),
+    el("strong", { textContent: t.name }),
+    srOnly(": "),
+    el("span", { className: "desc", textContent: t.description ?? "" }),
+    icon("arrow", "icon go"));
+
 async function renderHome() {
   showOnly("home");
   document.title = "Cresslet Studio";
 
   api("/v1/templates").then(({ templates }) => {
     $("templates").replaceChildren(...templates.map((t) =>
-      el("button", { className: "card", onclick: () => createProject(t.name) },
-        el("strong", { textContent: t.name }), el("span", { textContent: t.description ?? "" }))
-    ));
+      templateCard(t)));
   }).catch((e) => $("templates").replaceChildren(el("p", { className: "error", textContent: `Could not load templates: ${e.message}` })));
 
-  const list = await projects.list().catch(() => []);
-  $("projects").replaceChildren(...list.map((p) =>
-    el("div", { className: "list-row" },
-      el("a", { href: `#/p/${p.id}`, textContent: p.name }),
-      el("span", { className: "meta", textContent: `${p.template} · edited ${new Date(p.updatedAt).toLocaleString()}` }),
-      el("button", {
-        className: "icon-btn",
-        title: "Delete project",
-        ariaLabel: `Delete ${p.name}`,
-        textContent: "×",
-        onclick: async () => {
-          if (!confirm(`Delete local project ${p.name}? Deployed apps are not affected.`)) return;
-          await projects.delete(p.id);
-          renderHome();
-        },
-      }))
-  ));
+  await renderProjects();
 
   $("apps-section").hidden = !auth.token;
-  if (auth.token) {
-    api("/v1/apps").then(({ apps }) => {
-      $("apps").replaceChildren(...apps.map((a) =>
-        el("div", { className: "list-row" },
-          el("a", { href: a.url, target: "_blank", rel: "noopener", textContent: a.name }),
-          el("span", { className: "meta", textContent: `updated ${new Date(a.updatedAt).toLocaleString()}` }),
-          el("button", { className: "btn", textContent: "Open source", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) }))
-      ));
-    }).catch(() => {});
-  }
+  if (auth.token) renderApps();
 }
+
+/** Local projects only (after a delete, the rest of the home view stays as it is, focus included). */
+async function renderProjects() {
+  const list = await projects.list().catch(() => []);
+  $("projects").replaceChildren(list.length
+    ? dataTable("projects-title", [["Project"], ["Template"], ["Deployed to"], ["Edited"], ["Actions", "actions", true]], list.map((p) =>
+      el("tr", { className: "list-row" },
+        el("td", {}, el("div", { className: "name-cell" },
+          el("span", { className: "file-ico" }, icon(TEMPLATE_ICONS[p.template] ?? "code")),
+          el("a", { href: `#/p/${p.id}`, textContent: p.name }))),
+        el("td", { className: "muted", textContent: p.template }),
+        el("td", {}, p.deploy?.url ? extLink(p.deploy.url, p.deploy.url.replace(/^https?:\/\//, "")) : el("span", { className: "muted", textContent: "Not deployed" })),
+        el("td", { className: "muted" }, timeAgo(p.updatedAt)),
+        el("td", { className: "actions" }, el("button", {
+          className: "icon-btn danger",
+          type: "button",
+          title: "Delete project",
+          id: `delete-${p.id}`,
+          ariaLabel: `Delete ${p.name}`,
+          onclick: async () => {
+            if (!confirm(`Delete local project ${p.name}? Deployed apps are not affected.`)) return;
+            await projects.delete(p.id);
+            toast(`Deleted ${p.name}`);
+            await Promise.all([renderProjects(), renderRecent()]);
+            refocus();
+          },
+        }, icon("trash"))))))
+    : emptyState("No projects yet", "Pick a template above. Projects are saved in this browser as you edit."));
+}
+
+function renderApps() {
+  api("/v1/apps").then(({ apps }) => {
+    $("apps").replaceChildren(apps.length
+      ? dataTable("apps-title", [["App"], ["Updated"], ["Actions", "actions", true]], apps.map((a) =>
+        el("tr", { className: "list-row" },
+          el("td", {}, el("div", { className: "name-cell" },
+            el("span", { className: "file-ico" }, icon("globe")),
+            el("div", {}, extLink(a.url, a.name), el("span", { className: "sub", textContent: a.url.replace(/^https?:\/\//, "") })))),
+          el("td", { className: "muted" }, timeAgo(a.updatedAt)),
+          el("td", { className: "actions" },
+            el("button", { className: "btn sm", type: "button", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) },
+              icon("download"), "Open source")))))
+      : emptyState("Nothing deployed yet", "Open a project and press Deploy, or run cresslet deploy."));
+  }).catch((e) => $("apps").replaceChildren(el("p", { className: "error", textContent: `Could not load apps: ${e.message}` })));
+}
+
+$("cli-copy").addEventListener("click", async () => {
+  const cmd = $("cli-cmd").lastChild.textContent.trim();
+  try {
+    await navigator.clipboard.writeText(cmd);
+    toast("Command copied");
+  } catch {
+    getSelection().selectAllChildren($("cli-cmd"));
+    toast("Copy failed: the command is selected, copy it manually.");
+  }
+});
 
 /** New local project from the source uploaded with the app's current deploy (CLI or studio). */
 async function openDeployed({ name, url }) {
@@ -509,18 +730,20 @@ async function createProject(template) {
 // ------------------------------------------------------------------ workspace
 let booted = false;
 
-async function openProject(id) {
+async function openProject(id, gen) {
   const project = await projects.get(id);
+  if (gen !== routeGen) return; // navigated elsewhere while it loaded
   if (!project) {
     location.hash = "#/";
     return;
   }
   if (booted) {
     // One runtime per page; switching projects reloads.
-    location.reload();
+    reloadForRoute();
     return;
   }
   booted = true;
+  $("workspace-title").textContent = `${project.name}: editor and preview`;
   showOnly("workspace");
   $("project-title").hidden = false;
   $("deploy-btn").hidden = false;
@@ -531,7 +754,31 @@ async function openProject(id) {
 
   $("project-name").onchange = async (e) => {
     project.name = e.target.value.trim() || project.name;
+    e.target.value = project.name;
+    document.title = `${project.name} · Cresslet Studio`;
+    $("workspace-title").textContent = `${project.name}: editor and preview`;
     await projects.rename(project.id, project.name);
+  };
+
+  // Colors follow the light/dark preference; CSS tokens are the source of truth.
+  const scheme = matchMedia("(prefers-color-scheme: dark)");
+  // ANSI colors too: xterm's defaults are made for black and fail AA on these surfaces (≥ 4.5:1 here).
+  const ANSI = {
+    dark: {
+      black: "#a1a1aa", red: "#ff7a7a", green: "#4ade94", yellow: "#f5b84a", blue: "#7aa2ff", magenta: "#d0a4ff", cyan: "#5ee0e6", white: "#ededf0",
+      brightBlack: "#8e8e98", brightRed: "#ff9b9b", brightGreen: "#7beab0", brightYellow: "#f8cb78", brightBlue: "#a3bfff", brightMagenta: "#e0c2ff", brightCyan: "#8debef", brightWhite: "#ffffff",
+    },
+    light: {
+      black: "#18181b", red: "#c42b2b", green: "#0f7a52", yellow: "#8f5a00", blue: "#1d4ed8", magenta: "#9333ea", cyan: "#0e7490", white: "#55555f",
+      brightBlack: "#63636e", brightRed: "#a61f1f", brightGreen: "#0b6343", brightYellow: "#754a00", brightBlue: "#1e40af", brightMagenta: "#7e22ce", brightCyan: "#155e75", brightWhite: "#18181b",
+    },
+  };
+  const termTheme = () => {
+    const v = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+    return {
+      ...ANSI[scheme.matches ? "dark" : "light"],
+      background: v("--surface"), foreground: v("--text"), cursor: v("--accent-text"), cursorAccent: v("--surface"), selectionBackground: v("--accent-soft"),
+    };
   };
 
   // terminal
@@ -540,11 +787,24 @@ async function openProject(id) {
     cursorBlink: true,
     fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--mono"),
     fontSize: 12.5,
-    theme: { background: "#151a18", foreground: "#e4ebe7", cursor: "#3fb560", selectionBackground: "#3fb56055" },
+    screenReaderMode: true, // output is mirrored into a live region screen readers can read
+    theme: termTheme(),
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open($("terminal"));
+  term.textarea?.setAttribute("aria-describedby", "terminal-help");
+  // xterm sends Tab to the shell; Esc then Tab (or Shift+Tab) moves focus out instead, like the editor.
+  let escaped = false;
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== "keydown") return true;
+    if (e.key === "Tab" && escaped) {
+      escaped = false;
+      return false; // xterm ignores it: the browser moves focus
+    }
+    escaped = e.key === "Escape";
+    return true;
+  });
   fit.fit();
   new ResizeObserver(() => fit.fit()).observe($("terminal"));
 
@@ -581,6 +841,7 @@ async function openProject(id) {
     c = await Container.boot({ previewOrigin: po });
   } catch (e) {
     setStatus("Runtime failed", "error");
+    $("preview-spinner").hidden = true;
     $("preview-msg").textContent = `Could not start the runtime: ${e.message}`;
     term.writeln(`\x1b[31m${e.stack ?? e.message}\x1b[0m`);
     return;
@@ -617,6 +878,7 @@ async function openProject(id) {
 
   // editor
   const lang = new Compartment();
+  const theme = new Compartment();
   let current = null;
   let suppress = false;
   const view = new EditorView({
@@ -626,7 +888,8 @@ async function openProject(id) {
       extensions: [
         basicSetup,
         keymap.of([indentWithTab]),
-        oneDark,
+        theme.of(scheme.matches ? oneDark : []),
+        EditorView.contentAttributes.of({ "aria-label": "Code", "aria-describedby": "editor-help" }),
         lang.of([]),
         EditorView.updateListener.of((u) => {
           if (!u.docChanged || suppress || !current) return;
@@ -659,8 +922,13 @@ async function openProject(id) {
     });
     suppress = false;
     $("open-file").textContent = path;
+    view.contentDOM.setAttribute("aria-label", `Code: ${path}`);
     renderTree();
   }
+  scheme.addEventListener("change", () => {
+    view.dispatch({ effects: theme.reconfigure(scheme.matches ? oneDark : []) });
+    term.options.theme = termTheme();
+  });
 
   async function listFiles(dir = "", depth = 0, out = []) {
     const entries = await c.fs.readdir(`${wd}${dir ? "/" + dir : ""}`, { withFileTypes: true });
@@ -676,18 +944,20 @@ async function openProject(id) {
     return out;
   }
 
+  // Folders are labels, files are buttons named by their full path (the indent alone shows nesting).
   async function renderTree() {
     const items = await listFiles().catch(() => []);
-    $("tree").replaceChildren(...items.map((f) => {
-      const b = el("button", { textContent: f.dir ? `${f.name}/` : f.name, className: f.dir ? "dir" : "" });
-      b.style.setProperty("--depth", f.depth);
-      if (f.dir) b.tabIndex = -1;
-      else {
-        b.onclick = () => openFile(f.path);
-        if (f.path === current) b.setAttribute("aria-current", "true");
-      }
-      return b;
-    }));
+    const focused = document.activeElement?.closest?.("#tree") ? document.activeElement.dataset.path : null;
+    $("tree").replaceChildren(el("ul", {}, ...items.map((f) => {
+      const item = f.dir
+        ? el("span", { className: "dir" }, icon("folder"), el("span", { textContent: f.name }))
+        : el("button", { type: "button", dataset: { path: f.path }, onclick: () => openFile(f.path) },
+          icon("file"), el("span", { textContent: f.name }), f.depth ? srOnly(` in ${f.path.slice(0, -f.name.length - 1)}`) : null);
+      item.style.setProperty("--depth", f.depth);
+      if (!f.dir && f.path === current) item.setAttribute("aria-current", "true");
+      return el("li", {}, item);
+    })));
+    if (focused) $("tree").querySelector(`button[data-path="${CSS.escape(focused)}"]`)?.focus();
   }
 
   $("new-file").onclick = async () => {
@@ -725,13 +995,19 @@ async function openProject(id) {
   c.on("server-ready", (port, url) => {
     if (port !== 3000 && previewBase) return;
     previewBase = url;
+    const hadFocus = $("preview-empty").contains(document.activeElement); // e.g. the message after Run it
     $("preview-empty").hidden = true;
+    $("preview").hidden = false;
+    if (hadFocus) $("preview-path").focus();
+    $("preview-spinner").hidden = false;
     setStatus("Running", "ready");
     loadPreview();
   });
   c.on("error", (e) => term.writeln(`\x1b[31m${e?.message ?? e}\x1b[0m`));
   $("preview-reload").onclick = loadPreview;
-  $("preview-path").onkeydown = (e) => e.key === "Enter" && loadPreview();
+  $("preview-path").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") loadPreview();
+  });
 
   // shell
   const shell = await c.spawn("jsh", [], { cwd: wd, terminal: true });
@@ -745,7 +1021,7 @@ async function openProject(id) {
   });
   const start = () => {
     setStatus("Installing");
-    $("preview-msg").textContent = "Installing dependencies…";
+    $("preview-msg").replaceChildren("Installing dependencies…");
     input.write("npm install && cresslet dev\r");
   };
   // Opened from a deployed app's source: its code (and npm deps, and a deploy's build: PostCSS/Tailwind plugins)
@@ -757,13 +1033,15 @@ async function openProject(id) {
   };
   gate(project.trusted === false);
   if (project.trusted === false) {
-    setStatus("Not running");
-    const btn = el("button", { className: "btn", textContent: "Run it", onclick: async () => {
+    setStatus("Not running", "idle");
+    $("preview-spinner").hidden = true;
+    const btn = el("button", { className: "btn primary", type: "button", textContent: "Run it", onclick: async () => {
       project.trusted = true;
       await projects.put(project);
-      btn.remove();
       gate(false);
-      start();
+      $("preview-spinner").hidden = false;
+      start(); // replaces the message, button included: keep focus on the message
+      $("preview-msg").focus();
     } });
     $("preview-msg").replaceChildren(
       "This project was opened from a deployed app's source. Review it, then ",
@@ -776,19 +1054,20 @@ async function openProject(id) {
   $("deploy-btn").onclick = async () => {
     const btn = $("deploy-btn");
     btn.disabled = true;
-    btn.textContent = "Deploying…";
+    $("deploy-btn-label").textContent = "Deploying…";
     const log = $("deploy-log");
     log.textContent = "";
     selectTab("deploy-log");
+    if (document.activeElement === btn) log.focus(); // the disabled button would drop focus to <body>
     try {
       const r = await cresslet.deploy((line) => (log.textContent += line + "\n"));
-      toast(el("span", {}, "Deployed: ", el("a", { href: r.app.url, target: "_blank", rel: "noopener", textContent: r.app.url })), 8000);
+      toast(el("span", {}, "Deployed: ", extLink(r.app.url, r.app.url)), 10000);
     } catch (e) {
       log.textContent += `\nerror: ${e.message}\n`;
-      toast(`Deploy failed: ${e.message}`);
+      toast(`Deploy failed: ${e.message}`, 10000);
     } finally {
       btn.disabled = false;
-      btn.textContent = "Deploy";
+      $("deploy-btn-label").textContent = "Deploy";
     }
   };
 }
@@ -798,27 +1077,61 @@ function showDeployLink(deploy) {
   a.hidden = !deploy?.url;
   if (deploy?.url) {
     a.href = deploy.url;
-    a.textContent = deploy.url.replace(/^https?:\/\//, "");
+    a.replaceChildren(icon("globe"), el("span", { className: "deploy-url", textContent: deploy.url.replace(/^https?:\/\//, "") }), srOnly(" (live app, opens in a new tab)"));
   }
 }
 
-function selectTab(name) {
-  for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t.dataset.tab === name));
+// Tabs (ARIA tabs pattern): one tab stop, arrows/Home/End move between tabs and select them.
+const tabs = [...document.querySelectorAll(".tab")];
+function selectTab(name, focus = false) {
+  for (const t of tabs) {
+    const on = t.dataset.tab === name;
+    t.setAttribute("aria-selected", String(on));
+    t.tabIndex = on ? 0 : -1;
+    if (on && focus) t.focus();
+  }
   for (const p of document.querySelectorAll("[data-panel]")) p.hidden = p.dataset.panel !== name;
 }
-for (const t of document.querySelectorAll(".tab")) t.addEventListener("click", () => selectTab(t.dataset.tab));
+for (const t of tabs) {
+  t.addEventListener("click", () => selectTab(t.dataset.tab));
+  t.addEventListener("keydown", (e) => {
+    const i = tabs.indexOf(t);
+    const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (j === undefined) return;
+    e.preventDefault();
+    selectTab(tabs[(j + tabs.length) % tabs.length].dataset.tab, true);
+  });
+}
 
 // ------------------------------------------------------------------ routing
+let routeGen = 0;
 function route() {
+  const gen = ++routeGen;
   const m = location.hash.match(/^#\/p\/([\w-]+)/);
-  if (m) openProject(m[1]);
-  else if (booted) location.reload();
+  if (m) openProject(m[1], gen);
+  else if (booted) reloadForRoute();
   else if (location.hash === "#/settings") renderSettings();
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();
 }
-addEventListener("hashchange", route);
+addEventListener("hashchange", () => {
+  focusOnShow = true;
+  route();
+});
 renderAccount();
 // Role can change server-side: refresh it (shows the Admin link to site admins).
 if (auth.token) api("/v1/me").then(setAccount, () => {});
+// Leaving or switching a project reloads the page (one runtime per page): the next view still gets focus.
+function reloadForRoute() {
+  try {
+    sessionStorage.setItem("cresslet.focusView", "1");
+  } catch { /* storage blocked: focus starts at the top, as on any page load */ }
+  location.reload();
+}
+try {
+  if (sessionStorage.getItem("cresslet.focusView")) {
+    sessionStorage.removeItem("cresslet.focusView");
+    focusOnShow = true;
+  }
+} catch { /* storage blocked */ }
 route();

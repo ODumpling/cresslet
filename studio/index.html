@@ -3,145 +3,276 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
     <title>Cresslet Studio</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/vendor/xterm.css" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <header class="topbar">
-      <a class="brand" href="#/" aria-label="Cresslet home">
-        <img src="/favicon.svg" alt="" width="20" height="20" />
-        <span>Cresslet</span>
-      </a>
-      <div class="project-title" id="project-title" hidden>
-        <span class="sep">/</span>
-        <input id="project-name" aria-label="Project name" spellcheck="false" />
-        <span class="status" id="status" data-state="idle">Idle</span>
-      </div>
-      <div class="spacer"></div>
-      <a class="deploy-link" id="deploy-link" target="_blank" rel="noopener" hidden></a>
-      <button class="btn primary" id="deploy-btn" hidden>Deploy</button>
-      <a class="btn ghost" id="admin-link" href="#/admin" hidden>Admin</a>
-      <button class="btn ghost" id="account-btn">Log in</button>
-    </header>
+    <!-- Icons: each <svg class="icon"><use href="#i-…"/></svg> is decorative (aria-hidden); its control carries the name. -->
+    <svg xmlns="http://www.w3.org/2000/svg" hidden aria-hidden="true">
+      <defs>
+        <symbol id="i-logo" viewBox="0 0 32 32"><circle cx="11" cy="11" r="6" fill="currentColor"/><circle cx="21" cy="11" r="6" fill="currentColor" opacity=".72"/><circle cx="11" cy="21" r="6" fill="currentColor" opacity=".72"/><circle cx="21" cy="21" r="6" fill="currentColor" opacity=".45"/></symbol>
+        <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+        <symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></symbol>
+        <symbol id="i-settings" viewBox="0 0 24 24"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></symbol>
+        <symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01M6 18h.01"/></symbol>
+        <symbol id="i-book" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol>
+        <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+        <symbol id="i-github" viewBox="0 0 24 24"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+        <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></symbol>
+        <symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+        <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></symbol>
+        <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+        <symbol id="i-rocket" viewBox="0 0 24 24"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></symbol>
+        <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+        <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+        <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></symbol>
+        <symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></symbol>
+        <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></symbol>
+        <symbol id="i-zap" viewBox="0 0 24 24"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></symbol>
+        <symbol id="i-atom" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><path d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z"/><path d="M15.7 15.7c4.52-4.54 6.54-9.87 4.5-11.9-2.03-2.04-7.36-.02-11.9 4.5-4.52 4.54-6.54 9.87-4.5 11.9 2.03 2.04 7.36.02 11.9-4.5Z"/></symbol>
+        <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></symbol>
+        <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+        <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+        <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+      </defs>
+    </svg>
 
-    <main id="home" class="home" hidden>
-      <section class="hero">
-        <h1>Build a small web app in your browser.</h1>
-        <p>Start from a template, edit with live preview, deploy to its own sandbox in one click. Prefer your terminal or an agent? <code>npx github:ODumpling/cresslet-cli new my-app</code></p>
-      </section>
-      <section>
-        <h2>Start from a template</h2>
-        <div class="grid" id="templates"><p class="muted">Loading templates…</p></div>
-      </section>
-      <section>
-        <h2>Your projects</h2>
-        <p class="muted small">Stored in this browser.</p>
-        <div class="list" id="projects"></div>
-      </section>
-      <section id="apps-section" hidden>
-        <h2>Deployed apps</h2>
-        <div class="list" id="apps"></div>
-      </section>
-    </main>
+    <a class="skip-link" id="skip-link" href="#content">Skip to content</a>
 
-    <main id="settings" class="home settings" hidden>
-      <section>
-        <h1>Settings</h1>
-      </section>
-      <section>
-        <h2>Account</h2>
-        <dl class="panel kv">
-          <dt>GitHub</dt><dd id="set-github">—</dd>
-          <dt>Email</dt><dd id="set-email">—</dd>
-        </dl>
-      </section>
-      <section>
-        <h2>API tokens</h2>
-        <p class="muted small">For the CLI, CI and agents. Give each one its own token, with only the access it needs, so you can revoke it alone.</p>
-        <div class="list" id="tokens" aria-label="API tokens"></div>
-        <div id="token-new" class="panel token-new" hidden>
-          <p><strong id="token-new-name"></strong>: copy it now, you won't see it again.</p>
-          <div class="token-row">
-            <input id="token-new-value" class="mono" readonly aria-label="New API token" spellcheck="false" />
-            <button class="btn" id="token-copy">Copy</button>
+    <div class="app" id="app" data-view="home">
+      <aside class="sidebar" aria-label="Studio">
+        <a class="brand" href="#/">
+          <svg class="brand-mark" aria-hidden="true"><use href="#i-logo" /></svg>
+          <span>Cresslet</span>
+          <span class="brand-tag">Studio</span>
+        </a>
+        <nav class="nav" aria-label="Main">
+          <p class="nav-label" id="nav-workspace">Workspace</p>
+          <ul aria-labelledby="nav-workspace">
+            <li><a href="#/" data-nav="home"><svg class="icon" aria-hidden="true"><use href="#i-folder" /></svg>Projects</a></li>
+            <li id="nav-settings-item" hidden><a href="#/settings" data-nav="settings"><svg class="icon" aria-hidden="true"><use href="#i-settings" /></svg>Settings</a></li>
+            <li id="admin-item" hidden><a href="#/admin" id="admin-link" data-nav="admin"><svg class="icon" aria-hidden="true"><use href="#i-server" /></svg>Sites</a></li>
+          </ul>
+          <div id="recent-wrap" hidden>
+            <p class="nav-label" id="nav-recent">Recent projects</p>
+            <ul id="recent" class="recent" aria-labelledby="nav-recent"></ul>
           </div>
-          <p class="muted small">CLI: <code>cresslet login --token &lt;token&gt;</code> &nbsp;or&nbsp; <code>export CRESSLET_TOKEN=&lt;token&gt;</code></p>
+          <p class="nav-label" id="nav-resources">Resources</p>
+          <ul aria-labelledby="nav-resources">
+            <li><a href="https://github.com/ODumpling/cresslet#docs" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-book" /></svg>Docs<span class="sr-only"> (opens in a new tab)</span><svg class="icon trail" aria-hidden="true"><use href="#i-external" /></svg></a></li>
+            <li><a href="https://github.com/ODumpling/cresslet-cli" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-terminal" /></svg>CLI<span class="sr-only"> (opens in a new tab)</span><svg class="icon trail" aria-hidden="true"><use href="#i-external" /></svg></a></li>
+          </ul>
+        </nav>
+        <div class="sidebar-foot">
+          <button class="account" id="account-btn" type="button">
+            <svg class="icon" aria-hidden="true"><use href="#i-github" /></svg>
+            <span id="account-label">Log in with GitHub</span>
+          </button>
         </div>
-        <form id="token-form" class="panel token-form">
-          <h3>New token</h3>
-          <label>Name <input id="token-name" required maxlength="64" placeholder="GitHub Actions" autocomplete="off" /></label>
-          <label>Access
-            <select id="token-role">
-              <option value="read">Read: view apps, logs, source and data</option>
-              <option value="deploy" selected>Deploy: read, plus deploy and roll back (deployed code can read secrets)</option>
-              <option value="admin">Admin: everything, incl. secrets, domains, new apps, deleting apps</option>
-            </select>
-          </label>
-          <fieldset>
-            <legend>Apps</legend>
-            <label class="inline"><input type="radio" name="token-scope" value="all" checked /> All apps (and new ones)</label>
-            <label class="inline"><input type="radio" name="token-scope" value="some" /> Only these apps</label>
-            <div id="token-apps" class="token-apps" hidden></div>
-          </fieldset>
-          <div class="row start"><button class="btn primary" id="token-create">Create token</button></div>
-        </form>
-      </section>
-      <section>
-        <button class="btn" id="logout-btn">Log out</button>
-      </section>
-    </main>
-
-    <main id="admin" class="home admin" hidden>
-      <section class="admin-head">
-        <div>
-          <h1 id="admin-title">Sites</h1>
-          <p class="muted" id="admin-sub">Every site on this server</p>
-        </div>
-        <div class="row start" id="admin-actions"></div>
-      </section>
-      <section id="admin-body"><p class="muted">Loading…</p></section>
-    </main>
-
-    <main id="workspace" class="workspace" hidden>
-      <aside class="files">
-        <div class="pane-head">
-          <span>Files</span>
-          <button class="icon-btn" id="new-file" aria-label="New file" title="New file">+</button>
-        </div>
-        <nav id="tree" class="tree" aria-label="Project files"></nav>
       </aside>
-      <section class="editor-pane">
-        <div class="pane-head"><span id="open-file" class="mono">No file open</span></div>
-        <div id="editor" class="editor"></div>
-      </section>
-      <section class="preview-pane">
-        <div class="pane-head">
-          <button class="icon-btn" id="preview-reload" aria-label="Reload preview" title="Reload">↻</button>
-          <input id="preview-path" class="mono" value="/" aria-label="Preview path" spellcheck="false" />
-        </div>
-        <div class="preview-body">
-          <!-- No top navigation or popups: app server code runs in workers on this origin and could mint
-               blob: URLs here; a preview must not be able to open one as a top-level document. -->
-          <iframe id="preview" title="App preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock"></iframe>
-          <div class="preview-empty" id="preview-empty">
-            <p id="preview-msg">Booting runtime…</p>
+
+      <div class="content" id="content" tabindex="-1">
+        <header class="topbar" id="topbar" hidden>
+          <a class="topbar-home" href="#/">
+            <svg class="brand-mark" aria-hidden="true"><use href="#i-logo" /></svg>
+            <span class="sr-only">Cresslet: all projects</span>
+          </a>
+          <div class="project-title" id="project-title" hidden>
+            <span class="crumb-sep" aria-hidden="true">/</span>
+            <input id="project-name" aria-label="Project name" spellcheck="false" autocomplete="off" />
+            <span class="status" id="status" data-state="idle" role="status"><span class="status-dot" aria-hidden="true"></span><span id="status-text">Idle</span></span>
           </div>
-        </div>
-      </section>
-      <section class="bottom-pane">
-        <div class="pane-head tabs" role="tablist">
-          <button role="tab" class="tab" aria-selected="true" data-tab="terminal">Terminal</button>
-          <button role="tab" class="tab" aria-selected="false" data-tab="deploy-log">Deploy</button>
-        </div>
-        <div id="terminal" class="terminal" data-panel="terminal"></div>
-        <pre id="deploy-log" class="deploy-log mono" data-panel="deploy-log" hidden></pre>
-      </section>
-    </main>
+          <div class="spacer"></div>
+          <a class="deploy-link" id="deploy-link" target="_blank" rel="noopener" hidden></a>
+          <button class="btn primary" id="deploy-btn" type="button" hidden>
+            <svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg><span id="deploy-btn-label">Deploy</span>
+          </button>
+        </header>
 
+        <main id="home" class="page" hidden aria-labelledby="home-title">
+          <section class="hero">
+            <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>Open source · self-hostable</p>
+            <h1 id="home-title" tabindex="-1">Build it in the browser. <span class="accent-text">Ship it in a second.</span></h1>
+            <p class="lede">Start from a template, edit with a live preview, and deploy to its own sandbox, database and subdomain in one click.</p>
+            <div class="cli">
+              <span class="cli-label" id="cli-label">Prefer your terminal or an agent?</span>
+              <div class="cli-box">
+                <code id="cli-cmd"><span class="cli-prompt" aria-hidden="true">$ </span>npx github:ODumpling/cresslet-cli new my-app</code>
+                <button class="icon-btn" id="cli-copy" type="button" aria-describedby="cli-label">
+                  <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg><span class="sr-only">Copy command</span>
+                </button>
+              </div>
+            </div>
+          </section>
+          <section class="block" aria-labelledby="templates-title">
+            <div class="block-head">
+              <h2 id="templates-title">Start from a template</h2>
+            </div>
+            <div class="grid" id="templates"><p class="muted">Loading templates…</p></div>
+          </section>
+          <section class="block" aria-labelledby="projects-title">
+            <div class="block-head">
+              <h2 id="projects-title">Your projects</h2>
+              <p class="muted small">Stored in this browser</p>
+            </div>
+            <div id="projects"></div>
+          </section>
+          <section class="block" id="apps-section" hidden aria-labelledby="apps-title">
+            <div class="block-head">
+              <h2 id="apps-title">Deployed apps</h2>
+              <p class="muted small">Live on this server</p>
+            </div>
+            <div id="apps"></div>
+          </section>
+        </main>
 
-    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+        <main id="settings" class="page narrow" hidden aria-labelledby="settings-title">
+          <header class="page-head">
+            <div>
+              <h1 id="settings-title" tabindex="-1">Settings</h1>
+              <p class="muted">Your account and the tokens the CLI, CI and agents use.</p>
+            </div>
+          </header>
+          <section class="block" aria-labelledby="account-title">
+            <div class="block-head"><h2 id="account-title">Account</h2></div>
+            <dl class="panel kv">
+              <dt>GitHub</dt><dd id="set-github">—</dd>
+              <dt>Email</dt><dd id="set-email">—</dd>
+            </dl>
+          </section>
+          <section class="block" aria-labelledby="tokens-title">
+            <div class="block-head">
+              <h2 id="tokens-title" tabindex="-1">API tokens</h2>
+              <p class="muted small">Give each tool its own token with only the access it needs, so you can revoke it alone.</p>
+            </div>
+            <ul class="list" id="tokens" aria-labelledby="tokens-title"></ul>
+            <div id="token-new" class="panel callout token-new" hidden role="region" aria-labelledby="token-new-heading">
+              <p id="token-new-heading"><strong id="token-new-name"></strong>: copy it now, you won't see it again.</p>
+              <div class="token-row">
+                <input id="token-new-value" class="input mono" readonly aria-label="New API token" spellcheck="false" />
+                <button class="btn" id="token-copy" type="button"><svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg>Copy</button>
+              </div>
+              <p class="muted small">CLI: <code>cresslet login --token &lt;token&gt;</code> or <code>export CRESSLET_TOKEN=&lt;token&gt;</code></p>
+            </div>
+            <form id="token-form" class="panel form" aria-labelledby="token-form-title">
+              <h3 id="token-form-title">New token</h3>
+              <div class="field">
+                <label for="token-name">Name</label>
+                <input class="input" id="token-name" required maxlength="64" placeholder="GitHub Actions" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="token-role">Access</label>
+                <select class="input" id="token-role">
+                  <option value="read">Read: view apps, logs, source and data</option>
+                  <option value="deploy" selected>Deploy: read, plus deploy and roll back (deployed code can read secrets)</option>
+                  <option value="admin">Admin: everything, incl. secrets, domains, new apps, deleting apps</option>
+                </select>
+              </div>
+              <fieldset class="field" aria-describedby="token-error">
+                <legend>Apps</legend>
+                <label class="check"><input type="radio" name="token-scope" value="all" checked /> All apps (and new ones)</label>
+                <label class="check"><input type="radio" name="token-scope" value="some" /> Only these apps</label>
+                <div id="token-apps" class="token-apps" hidden></div>
+              </fieldset>
+              <p class="error small" id="token-error" role="alert" hidden></p>
+              <div class="row start"><button class="btn primary" id="token-create" type="submit">Create token</button></div>
+            </form>
+          </section>
+          <section class="block" aria-labelledby="session-title">
+            <div class="block-head"><h2 id="session-title">Session</h2></div>
+            <div class="panel split">
+              <p class="muted small">Logs this browser out. Its token stays valid until you revoke it above.</p>
+              <button class="btn" id="logout-btn" type="button"><svg class="icon" aria-hidden="true"><use href="#i-logout" /></svg>Log out</button>
+            </div>
+          </section>
+        </main>
+
+        <main id="admin" class="page wide" hidden aria-labelledby="admin-title">
+          <header class="page-head">
+            <div>
+              <h1 id="admin-title" tabindex="-1">Sites</h1>
+              <p class="muted" id="admin-sub">Every site on this server</p>
+            </div>
+            <div class="row start" id="admin-actions"></div>
+          </header>
+          <section id="admin-body" aria-labelledby="admin-title"><p class="muted">Loading…</p></section>
+        </main>
+
+        <main id="workspace" class="workspace" hidden aria-labelledby="workspace-title">
+          <h1 class="sr-only" id="workspace-title" tabindex="-1">Project</h1>
+          <section class="pane files" aria-labelledby="files-title">
+            <div class="pane-head">
+              <h2 id="files-title" class="pane-title">Files</h2>
+              <button class="icon-btn" id="new-file" type="button" aria-label="New file" title="New file">
+                <svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg>
+              </button>
+            </div>
+            <nav id="tree" class="tree" aria-labelledby="files-title"></nav>
+          </section>
+          <section class="pane editor-pane" aria-labelledby="editor-title">
+            <div class="pane-head">
+              <h2 class="sr-only" id="editor-title">Code editor</h2>
+              <svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>
+              <span id="open-file" class="mono crumb">No file open</span>
+            </div>
+            <div id="editor" class="editor"></div>
+            <p class="pane-foot" id="editor-help">Tab indents. Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the editor.</p>
+          </section>
+          <section class="pane preview-pane" aria-labelledby="preview-title">
+            <div class="pane-head">
+              <h2 class="sr-only" id="preview-title">Preview</h2>
+              <button class="icon-btn" id="preview-reload" type="button" aria-label="Reload preview" title="Reload preview">
+                <svg class="icon" aria-hidden="true"><use href="#i-refresh" /></svg>
+              </button>
+              <div class="urlbar">
+                <svg class="icon" aria-hidden="true"><use href="#i-globe" /></svg>
+                <input id="preview-path" class="mono" value="/" aria-label="Preview path" spellcheck="false" autocomplete="off" />
+              </div>
+            </div>
+            <div class="preview-body">
+              <!-- No top navigation or popups: app server code runs in workers on this origin and could mint
+                   blob: URLs here; a preview must not be able to open one as a top-level document. -->
+              <!-- hidden (out of the tab order) until its dev server is ready -->
+              <iframe id="preview" hidden title="App preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock"></iframe>
+              <div class="preview-empty" id="preview-empty">
+                <div class="preview-empty-inner">
+                  <span class="spinner" id="preview-spinner" aria-hidden="true"></span>
+                  <p id="preview-msg" tabindex="-1">Booting runtime…</p>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="pane bottom-pane" aria-label="Output">
+            <div class="pane-head tabs" role="tablist" aria-label="Output">
+              <button role="tab" class="tab" id="tab-terminal" type="button" aria-selected="true" aria-controls="terminal" data-tab="terminal">
+                <svg class="icon" aria-hidden="true"><use href="#i-terminal" /></svg>Terminal
+              </button>
+              <button role="tab" class="tab" id="tab-deploy-log" type="button" aria-selected="false" aria-controls="deploy-log" data-tab="deploy-log" tabindex="-1">
+                <svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Deploy log
+              </button>
+            </div>
+            <div id="terminal" class="terminal" data-panel="terminal" role="tabpanel" aria-labelledby="tab-terminal" aria-describedby="terminal-help"></div>
+            <pre id="deploy-log" class="deploy-log mono" data-panel="deploy-log" role="tabpanel" aria-labelledby="tab-deploy-log" tabindex="0" hidden></pre>
+            <p class="pane-foot" id="terminal-help" data-panel="terminal">Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the terminal.</p>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <!-- Always in the accessibility tree (a live region that appears with its message may not be announced);
+         closed, it's empty and visually collapsed. -->
+    <div class="toast" id="toast" data-open="false">
+      <div class="toast-body" id="toast-body" role="status" aria-live="polite" aria-atomic="true"></div>
+      <button class="icon-btn" id="toast-close" type="button" aria-label="Dismiss message" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
+      </button>
+    </div>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
