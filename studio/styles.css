@@ -322,7 +322,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .field { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; border: 0; min-width: 0; }
 .field > label, .field > legend { font-size: 13px; font-weight: 500; padding: 0; }
 .field > legend { margin-bottom: 8px; }
-.check { display: flex; align-items: center; gap: 9px; font-size: 13.5px; min-height: 28px; cursor: pointer; }
+.check { display: flex; align-items: center; gap: 9px; font-size: 13.5px; min-height: 28px; min-width: 0; max-width: 100%; cursor: pointer; }
+.check > span { min-width: 0; overflow-wrap: anywhere; }
 .token-row { display: flex; gap: 8px; margin: 12px 0; }
 .token-row .input { flex: 1; min-width: 0; }
 .token-apps { display: flex; flex-wrap: wrap; gap: 2px 18px; margin: 4px 0 0 26px; }
@@ -399,7 +400,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .pane-foot kbd { font: 500 11px var(--mono); padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--text); }
 .editor { flex: 1; min-height: 0; overflow: hidden; }
 /* The editor's ring sits on an overlay: CodeMirror's opaque layers and sticky gutters (z-index 200) cover its box. */
-.editor { position: relative; }
+.editor { position: relative; isolation: isolate; } /* its z-indexes stay below the toast and skip link */
 .editor:focus-within::after { content: ""; position: absolute; inset: 0; z-index: 201; pointer-events: none; outline: 2px solid var(--focus); outline-offset: -2px; }
 .terminal:focus-within { outline: 2px solid var(--focus); outline-offset: -2px; }
 .editor .cm-editor.cm-focused { outline: none; }
@@ -442,6 +443,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .tab[aria-selected="true"] { color: var(--text); background: var(--surface-3); box-shadow: inset 0 -2px 0 var(--accent-text); }
 .terminal { flex: 1; min-height: 0; padding: 6px 0 0 10px; background: var(--surface); }
 .terminal .xterm-viewport { background: var(--surface) !important; }
+/* xterm draws dim (SGR 2) text at 50% of its color, under 4.5:1 here: use the muted text color instead. */
+.terminal .xterm-rows .xterm-dim { color: var(--text-2) !important; }
 .deploy-log { flex: 1; margin: 0; padding: 12px 14px; overflow: auto; white-space: pre-wrap; color: var(--text-2); font-size: 12.5px; line-height: 1.6; }
 
 /* ------------------------------------------------------------------ admin */

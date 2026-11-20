@@ -30,6 +30,12 @@ try {
     const w = await narrow.evaluate(() => document.documentElement.scrollWidth);
     assert(w <= 320, `${r} is ${w}px wide at 320px`);
   }
+  // A 40-character app name in the token form's app picker wraps too.
+  await narrow.route("**/v1/apps", (r) => r.fulfill({ json: { apps: [{ name: "a".repeat(40), url: "http://x.localhost", updatedAt: new Date().toISOString() }] } }));
+  await narrow.goto(base + "/#/settings");
+  await narrow.getByLabel("Only these apps").check();
+  const pw = await narrow.evaluate(() => document.documentElement.scrollWidth);
+  assert(pw <= 320, `settings app picker is ${pw}px wide at 320px`);
   await narrow.close();
   await fetch(`${base}/v1/me/tokens/${encodeURIComponent(long.info.id)}`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } });
   console.log("reflow ok at 320px (incl. a 64-character token name)");
@@ -71,6 +77,12 @@ try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /react/ }).click();
   await page.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
+  // Dim terminal output (request logs) uses the muted text color, not 50% opacity.
+  const dim = await page.evaluate(() => {
+    const d = document.querySelector(".xterm-rows .xterm-dim");
+    return d && [getComputedStyle(d).color, getComputedStyle(document.querySelector(".muted") ?? document.body).color];
+  });
+  if (dim) assert(!/rgba/.test(dim[0]), `dim terminal text is translucent: ${dim[0]}`);
   await page.getByRole("tab", { name: "Terminal" }).focus();
   await page.keyboard.press("ArrowRight");
   assert(await focused(page) === "tab-deploy-log", "ArrowRight didn't move to the Deploy log tab");

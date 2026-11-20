@@ -194,7 +194,7 @@ function renderSettings() {
   renderTokens();
   api("/v1/apps").then(({ apps }) => {
     $("token-apps").replaceChildren(...(apps.length ? apps.map((a) =>
-      el("label", { className: "check" }, el("input", { type: "checkbox", value: a.name }), a.name)
+      el("label", { className: "check" }, el("input", { type: "checkbox", value: a.name }), el("span", { textContent: a.name }))
     ) : [el("p", { className: "muted small", textContent: "No apps yet." })]));
   }, () => {});
 }
@@ -289,6 +289,7 @@ $("token-form").addEventListener("submit", async (e) => {
     tokenError(`Could not create token: ${err.message}`);
   } finally {
     $("token-create").disabled = false;
+    if (document.activeElement === document.body) $("token-create").focus(); // disabling it dropped focus
   }
 });
 
@@ -384,11 +385,11 @@ function siteActions(site, after) {
       ariaLabel: `${label} ${site.name}`,
       onclick: async (e) => {
         const b = e.currentTarget; // null after the await
-        const gen = [routeGen, adminView.gen];
+        const gen = routeGen;
         b.disabled = true;
         const done = await adminAction(site, action);
-        // navigated away or refreshed meanwhile: leave the new view alone
-        if (gen[0] !== routeGen || gen[1] !== adminView.gen) return;
+        if (gen !== routeGen) return; // navigated away meanwhile: leave the new view alone
+        // (a Refresh meanwhile may show stale data: after() re-renders; its focus move checks it's still current)
         if (done) after(action);
         else {
           b.disabled = false;
@@ -419,6 +420,11 @@ async function renderAdmin(name) {
   } catch (e) {
     if (!current()) return false;
     $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 403 ? "Only site admins can see this page." : `Could not load: ${e.message}` }));
+    if (e.status !== 403) {
+      const retry = el("button", { className: "btn", type: "button", onclick: () => renderAdmin(name).then((ok) => ok && $("admin-actions").querySelector("button")?.focus()) }, icon("refresh"), "Retry");
+      $("admin-actions").replaceChildren(retry);
+      if (document.activeElement === document.body) retry.focus(); // the Refresh/Retry that was clicked is gone
+    }
   }
   return current();
 }
@@ -427,9 +433,9 @@ async function renderAdminSites() {
   document.title = "Sites · Admin · Cresslet Studio";
   $("admin-title").replaceChildren("Sites");
   $("admin-sub").textContent = "Every site on this server";
-  const gen = adminView.gen;
+  const gen = adminView.gen, route = routeGen;
   const { totals, sites, retentionDays } = await api("/v1/admin/sites");
-  if (gen !== adminView.gen) return; // navigated away meanwhile
+  if (gen !== adminView.gen || route !== routeGen) return; // navigated away or re-rendered meanwhile
   $("admin-actions").replaceChildren(el("button", {
     className: "btn",
     type: "button",
@@ -489,9 +495,9 @@ async function renderAdminSites() {
 async function renderAdminSite(name) {
   document.title = `${name} · Admin · Cresslet Studio`;
   $("admin-title").replaceChildren(el("a", { href: "#/admin", textContent: "Sites" }), " / ", name);
-  const gen = adminView.gen;
+  const gen = adminView.gen, route = routeGen;
   const d = await api(`/v1/admin/sites/${encodeURIComponent(name)}`);
-  if (gen !== adminView.gen) return;
+  if (gen !== adminView.gen || route !== routeGen) return;
   const s = d.site;
   $("admin-sub").textContent = s.owner ? `Owned by ${ownerText(s.owner)}` : "Anonymous site";
   const visit = extLink(s.url, "Visit", "btn");
