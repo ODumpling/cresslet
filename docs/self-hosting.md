@@ -82,6 +82,25 @@ Notes:
 - This mode doesn't use `CRESSLET_RUNSC` (gVisor per sandbox, which needs a privileged container) or `CRESSLET_CGROUP_DIR`. The uids keep apps out of each other's files and the control plane's. Each sandbox still has its heap cap and request timeout, and the container caps bound them all.
 - Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (it mounts the old `<app uuid>-cresslet-data` volume, without the writes made since; copy back the same way to keep them). Then `systemctl disable --now cresslet-firewall.timer cresslet-firewall-boot.service` and `systemctl stop cresslet-firewall.service` first (or a run puts the rules back), and `firewall.sh <app uuid> --remove`.
 
+## Backups
+
+Everything lives in the data volume: `cresslet.db`, `secrets.key` (without it the server won't start and app secrets can't be read), every app's deploys, database and files. [`deploy/backup.sh`](../deploy/backup.sh) snapshots it on the Docker host (root) while the server runs: each SQLite database through `.backup` (consistent) and an integrity check, the rest copied, as one `.tgz`:
+
+```sh
+deploy/backup.sh <volume>              # one snapshot now, in /var/backups/cresslet
+deploy/backup.sh <volume> --install    # daily at 03:30 (systemd timer)
+```
+
+`CRESSLET_BACKUP_KEEP` (default 14) snapshots stay. `CRESSLET_BACKUP_RCLONE` (e.g. `r2:my-bucket/cresslet`) also copies each one off the host with [rclone](https://rclone.org), which must be set up for root (`rclone config`); a snapshot on the same disk doesn't survive losing that disk. Set both when installing (they're written into the unit). Snapshots contain `secrets.key`: keep them as private as the server.
+
+Each database in a snapshot is consistent, but not with everything else at one instant: a file an app stores, or a deploy, during the snapshot can be in the database and not the copy (or the other way round). For a copy that's consistent as a whole, stop the server first (in Coolify, stop the app), run the script, start it again.
+
+Restore (the server stopped, into an empty volume):
+
+```sh
+docker run --rm -v <volume>:/data -v /var/backups/cresslet/<snapshot>.tgz:/b.tgz:ro alpine tar xzf /b.tgz -C /data
+```
+
 ## Configuration
 
 | Env | Default | |
