@@ -82,6 +82,19 @@ a.btn { text-decoration: none; display: inline-block; }
 .token-row { display: flex; gap: 8px; margin: 12px 0; }
 .token-row input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
 .row.start { justify-content: flex-start; align-items: center; }
+.token-form, .token-new { margin-top: 16px; }
+.token-form h3 { font-size: 13px; margin: 0 0 4px; }
+.token-form label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 0; font-size: 13px; }
+.token-form label.inline { flex-direction: row; align-items: center; gap: 8px; margin: 6px 0 0; }
+.token-form input:not([type]), .token-form select { font: inherit; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
+.token-form fieldset { border: 0; padding: 0; margin: 12px 0 0; font-size: 13px; }
+.token-form legend { padding: 0; }
+.token-apps { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0 24px; }
+.token-apps:empty::before { content: "No apps yet."; color: var(--muted); }
+.token-new p { margin: 0; }
+.list-row .tok { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.list-row .tok .meta { margin-left: 0; text-align: left; }
+.badge { font-size: 11px; color: var(--accent); border: 1px solid currentColor; border-radius: 4px; padding: 0 5px; margin-left: 6px; white-space: nowrap; }
 
 /* workspace */
 .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 220px; }

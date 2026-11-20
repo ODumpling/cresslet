@@ -103,10 +103,8 @@ function renderSettings() {
   }
   showOnly("settings");
   document.title = "Settings · Cresslet Studio";
-  $("token").value = auth.token;
-  $("token").type = "password";
-  $("token-show").textContent = "Show";
-  $("token-show").setAttribute("aria-pressed", "false");
+  $("token-new").hidden = true;
+  $("token-new-value").value = "";
   api("/v1/me").then(({ account }) => {
     $("set-github").textContent = account.github ?? "—";
     $("set-email").textContent = account.email;
@@ -115,34 +113,98 @@ function renderSettings() {
     if (!auth.token) location.hash = "#/";
     else toast(`Could not load account: ${e.message}`);
   });
+  renderTokens();
+  api("/v1/apps").then(({ apps }) => {
+    $("token-apps").replaceChildren(...apps.map((a) =>
+      el("label", { className: "inline" }, el("input", { type: "checkbox", value: a.name }), a.name)
+    ));
+  }, () => {});
 }
 
-$("token-show").addEventListener("click", () => {
-  const show = $("token").type === "password";
-  $("token").type = show ? "text" : "password";
-  $("token-show").textContent = show ? "Hide" : "Show";
-  $("token-show").setAttribute("aria-pressed", String(show));
+const when = (iso) => iso ? new Date(iso).toLocaleString() : "never";
+
+async function renderTokens() {
+  let tokens;
+  try {
+    ({ tokens } = await api("/v1/me/tokens"));
+  } catch (e) {
+    $("tokens").replaceChildren(el("p", { className: "list-row error", textContent: `Could not load tokens: ${e.message}` }));
+    return;
+  }
+  $("tokens").replaceChildren(...tokens.map((t) =>
+    el("div", { className: "list-row" },
+      el("div", { className: "tok" },
+        el("strong", { textContent: t.name }, t.current ? el("span", { className: "badge", textContent: "this browser" }) : null),
+        el("span", { className: "meta", textContent: `${t.role} · ${t.apps ? (t.apps.join(", ") || "no apps left") : "all apps"}` })),
+      el("span", { className: "meta", textContent: `created ${when(t.createdAt)} · last used ${when(t.lastUsedAt)}` }),
+      el("button", {
+        className: "btn",
+        textContent: "Revoke",
+        ariaLabel: `Revoke ${t.name}`,
+        onclick: () => revokeToken(t),
+      }))
+  ));
+}
+
+async function revokeToken(t) {
+  const msg = t.current
+    ? `Revoke "${t.name}"? This browser's session uses it, so you'll be logged out.`
+    : `Revoke "${t.name}"? Anything using it stops working.`;
+  if (!confirm(msg)) return;
+  try {
+    await api(`/v1/me/tokens/${encodeURIComponent(t.id)}`, { method: "DELETE" });
+  } catch (e) {
+    toast(`Could not revoke: ${e.message}`);
+    return;
+  }
+  if (t.current) {
+    logOut();
+    location.hash = "#/";
+    toast("Token revoked. You're logged out.");
+    return;
+  }
+  toast(`Revoked ${t.name}`);
+  renderTokens();
+}
+
+for (const r of document.querySelectorAll('input[name="token-scope"]')) {
+  r.addEventListener("change", () => ($("token-apps").hidden = r.value === "all" ? r.checked : !r.checked));
+}
+
+$("token-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const some = document.querySelector('input[name="token-scope"]:checked').value === "some";
+  const apps = some ? [...$("token-apps").querySelectorAll("input:checked")].map((x) => x.value) : null;
+  if (some && !apps.length) {
+    toast("Pick at least one app, or choose All apps.");
+    return;
+  }
+  $("token-create").disabled = true;
+  try {
+    const r = await api("/v1/me/tokens", {
+      method: "POST",
+      body: JSON.stringify({ name: $("token-name").value, role: $("token-role").value, apps }),
+    });
+    $("token-new-name").textContent = r.info.name;
+    $("token-new-value").value = r.token;
+    $("token-new").hidden = false;
+    $("token-form").reset();
+    $("token-apps").hidden = true;
+    renderTokens();
+  } catch (err) {
+    toast(`Could not create token: ${err.message}`);
+  } finally {
+    $("token-create").disabled = false;
+  }
 });
 
 $("token-copy").addEventListener("click", async () => {
   try {
-    await navigator.clipboard.writeText(auth.token);
+    await navigator.clipboard.writeText($("token-new-value").value);
     toast("Token copied");
   } catch {
-    $("token").type = "text";
-    $("token").select();
+    $("token-new-value").select();
     toast("Copy failed: select the token and copy it manually.");
-  }
-});
-
-$("token-regen").addEventListener("click", async () => {
-  if (!confirm("Regenerate your token? Every existing token stops working, including the CLI and other browsers.")) return;
-  try {
-    setAccount(await api("/v1/me/token", { method: "POST", body: "{}" }));
-    renderSettings();
-    toast("New token generated. Update the CLI and any CI secrets.");
-  } catch (e) {
-    toast(`Could not regenerate: ${e.message}`);
   }
 });
 

@@ -1,5 +1,6 @@
-// Browser e2e: template → in-browser npm install → preview → API → Deploy → live app.
-// Run: start the server (npm run dev), then: cd tests/e2e && npm i && npx playwright install chromium && node studio.mjs
+// Browser e2e: template → in-browser npm install → preview → API → Deploy → live app; Settings → API tokens.
+// Run: start the server (CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev), then:
+//   cd tests/e2e && npm i && npx playwright install chromium && CRESSLET_ADMIN_TOKEN=e2e-admin node studio.mjs
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const browser = await chromium.launch();
@@ -69,6 +70,7 @@ try {
   await p2.getByText("on cresslet").waitFor({ timeout: 15000 });
   console.log("deployed app works");
   await page.screenshot({ path: (process.argv[2] ?? ".") + "/studio.png" });
+  await settings();
 } catch (e) {
   process.exitCode = 1;
   console.log("FAIL", e.message);
@@ -77,4 +79,59 @@ try {
 } finally {
   console.log(logs.slice(-30).join("\n"));
   await browser.close();
+}
+
+// Settings: create a scoped token, it works only within its scope, revoke it, it stops working.
+async function settings() {
+  const admin = process.env.CRESSLET_ADMIN_TOKEN;
+  if (!admin) throw new Error("set CRESSLET_ADMIN_TOKEN (same as the server's) for the Settings check");
+  const call = async (path, token, body) => {
+    const r = await fetch(base + path, {
+      method: body ? "POST" : "GET",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: body && JSON.stringify(body),
+    });
+    return { status: r.status, body: await r.json().catch(() => null) };
+  };
+  const email = `e2e-${Date.now()}@example.com`;
+  const root = (await call("/v1/accounts", admin, { email })).body.token;
+  const files = [{ path: "index.html", data: "tokens e2e" }];
+  const appName = (await call("/v1/deploys", root, { files })).body.app.name;
+
+  const s = await browser.newPage();
+  s.on("dialog", (d) => d.accept());
+  await s.goto(base + "/");
+  await s.evaluate(([t, e]) => (localStorage.setItem("cresslet.token", t), localStorage.setItem("cresslet.email", e)), [root, email]);
+  await s.goto(base + "/#/settings");
+  const tokens = s.locator("#tokens");
+  await tokens.getByText("Operator-issued").waitFor({ timeout: 10000 });
+  await tokens.getByText("this browser").waitFor();
+
+  await s.getByLabel("Name", { exact: true }).fill("e2e ci");
+  await s.getByLabel("Access").selectOption("deploy");
+  await s.getByLabel("Only these apps").check();
+  await s.locator("#token-apps").getByLabel(appName).check();
+  await s.getByRole("button", { name: "Create token" }).click();
+  await s.locator("#token-new").waitFor({ state: "visible" });
+  const secret = await s.locator("#token-new-value").inputValue();
+  if (!secret.startsWith("clv_acct_")) throw new Error(`no token shown after create: ${secret}`);
+  const row = tokens.locator(".list-row", { hasText: "e2e ci" });
+  await row.getByText(`deploy · ${appName}`).waitFor();
+  await s.screenshot({ path: (process.argv[2] ?? ".") + "/settings.png", fullPage: true });
+
+  const st = async (path, body) => (await call(path, secret, body)).status;
+  if (await st("/v1/deploys", { app: appName, files }) !== 201) throw new Error("scoped token can't deploy its app");
+  if (await st("/v1/deploys", { files }) !== 403) throw new Error("app-scoped token created a new app");
+  if (await st("/v1/me/tokens") !== 403) throw new Error("deploy token can list tokens");
+  await s.reload();
+  await row.waitFor();
+  if ((await s.locator("body").innerText()).includes(secret)) throw new Error("secret shown again after reload");
+  await row.getByText(/last used (?!never)/).waitFor();
+
+  await row.getByRole("button", { name: "Revoke e2e ci" }).click();
+  await row.waitFor({ state: "detached" });
+  if (await st("/v1/me") !== 401) throw new Error("revoked token still works");
+  if ((await call("/v1/me", root)).status !== 200) throw new Error("revoking one token broke another");
+  console.log("settings: scoped token created, enforced, revoked");
+  await s.close();
 }

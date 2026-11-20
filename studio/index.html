@@ -58,18 +58,35 @@
         </dl>
       </section>
       <section>
-        <h2>API token</h2>
-        <p class="muted small">For the CLI, CI and agents. Anyone with it can deploy and manage your apps, so treat it like a password.</p>
-        <div class="token-row">
-          <input id="token" class="mono" type="password" readonly aria-label="API token" spellcheck="false" />
-          <button class="btn" id="token-show" aria-pressed="false">Show</button>
-          <button class="btn" id="token-copy">Copy</button>
+        <h2>API tokens</h2>
+        <p class="muted small">For the CLI, CI and agents. Give each one its own token, with only the access it needs, so you can revoke it alone.</p>
+        <div class="list" id="tokens" aria-label="API tokens"></div>
+        <div id="token-new" class="panel token-new" hidden>
+          <p><strong id="token-new-name"></strong>: copy it now, you won't see it again.</p>
+          <div class="token-row">
+            <input id="token-new-value" class="mono" readonly aria-label="New API token" spellcheck="false" />
+            <button class="btn" id="token-copy">Copy</button>
+          </div>
+          <p class="muted small">CLI: <code>cresslet login --token &lt;token&gt;</code> &nbsp;or&nbsp; <code>export CRESSLET_TOKEN=&lt;token&gt;</code></p>
         </div>
-        <p class="muted small">CLI: <code>cresslet login --token &lt;token&gt;</code> &nbsp;or&nbsp; <code>export CRESSLET_TOKEN=&lt;token&gt;</code></p>
-        <div class="row start">
-          <button class="btn" id="token-regen">Regenerate token</button>
-          <span class="muted small">Revokes every existing token, including the CLI and other browsers.</span>
-        </div>
+        <form id="token-form" class="panel token-form">
+          <h3>New token</h3>
+          <label>Name <input id="token-name" required maxlength="64" placeholder="GitHub Actions" autocomplete="off" /></label>
+          <label>Access
+            <select id="token-role">
+              <option value="read">Read: view apps, logs, source and data</option>
+              <option value="deploy">Deploy: read, plus deploy and roll back</option>
+              <option value="admin" selected>Admin: everything, incl. secrets, domains, deleting apps</option>
+            </select>
+          </label>
+          <fieldset>
+            <legend>Apps</legend>
+            <label class="inline"><input type="radio" name="token-scope" value="all" checked /> All apps (and new ones)</label>
+            <label class="inline"><input type="radio" name="token-scope" value="some" /> Only these apps</label>
+            <div id="token-apps" class="token-apps" hidden></div>
+          </fieldset>
+          <div class="row start"><button class="btn primary" id="token-create">Create token</button></div>
+        </form>
       </section>
       <section>
         <button class="btn" id="logout-btn">Log out</button>

@@ -43,6 +43,21 @@ export interface Deploy {
   source: string;
 }
 
+/** read < deploy < admin. Each role includes the ones before it. */
+export const ROLES = ["read", "deploy", "admin"] as const;
+export type Role = (typeof ROLES)[number];
+
+export interface Token {
+  id: string;
+  account_id: string;
+  name: string;
+  role: Role;
+  /** JSON string[] of app ids the token is limited to, or null = every app on the account. */
+  apps: string | null;
+  created_at: number;
+  last_used_at: number | null;
+}
+
 export interface Domain {
   domain: string;
   app_id: string;
@@ -104,6 +119,19 @@ export class Store {
     if (!appCols.includes("deleted_at")) this.db.exec("ALTER TABLE apps ADD COLUMN deleted_at INTEGER");
     if (!cols.includes("role")) this.db.exec("ALTER TABLE accounts ADD COLUMN role TEXT");
     this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)");
+    // Named / scoped tokens. Tokens from before this keep working as full-access ("admin", all apps).
+    const tokCols = (this.db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((c) => c.name);
+    if (!tokCols.includes("id")) {
+      this.db.exec(`
+        ALTER TABLE tokens ADD COLUMN id TEXT;
+        ALTER TABLE tokens ADD COLUMN name TEXT NOT NULL DEFAULT 'Token';
+        ALTER TABLE tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'admin';
+        ALTER TABLE tokens ADD COLUMN apps TEXT;
+        ALTER TABLE tokens ADD COLUMN last_used_at INTEGER;
+        UPDATE tokens SET id = 'tok_' || lower(hex(randomblob(10))), name = 'Token (before named tokens)';
+      `);
+    }
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tokens_id ON tokens (id)");
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
   }
@@ -188,16 +216,50 @@ export class Store {
       | Account
       | undefined;
   }
-  async issueToken(accountId: string): Promise<string> {
+  /** Returns the secret (shown once; only its hash is stored) and the token's metadata. */
+  async issueToken(
+    accountId: string,
+    opts: { name: string; role?: Role; apps?: string[] | null },
+  ): Promise<{ token: string; info: Token }> {
     const token = id("clv_acct", 24);
-    this.db.prepare("INSERT INTO tokens (hash, account_id, created_at) VALUES (?, ?, ?)")
-      .run(await sha256(token), accountId, Date.now());
-    return token;
+    const info: Token = {
+      id: id("tok"),
+      account_id: accountId,
+      name: opts.name,
+      role: opts.role ?? "admin",
+      apps: opts.apps ? JSON.stringify(opts.apps) : null,
+      created_at: Date.now(),
+      last_used_at: null,
+    };
+    this.db.prepare(
+      "INSERT INTO tokens (hash, id, account_id, name, role, apps, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(await sha256(token), info.id, accountId, info.name, info.role, info.apps, info.created_at);
+    return { token, info };
   }
-  async accountByToken(token: string): Promise<Account | undefined> {
+  /** Looks up a token and records its use (at most once a minute, to spare writes). */
+  async useToken(token: string): Promise<{ account: Account; token: Token } | undefined> {
+    const hash = await sha256(token);
+    const t = this.db.prepare(
+      "SELECT id, account_id, name, role, apps, created_at, last_used_at FROM tokens WHERE hash = ?",
+    ).get(hash) as Token | undefined;
+    if (!t) return undefined;
+    const account = this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(t.account_id) as Account | undefined;
+    if (!account) return undefined;
+    const now = Date.now();
+    if (!t.last_used_at || now - t.last_used_at > 60_000) {
+      this.db.prepare("UPDATE tokens SET last_used_at = ? WHERE hash = ?").run(now, hash);
+      t.last_used_at = now;
+    }
+    return { account, token: t };
+  }
+  tokens(accountId: string): Token[] {
     return this.db.prepare(
-      "SELECT a.* FROM tokens t JOIN accounts a ON a.id = t.account_id WHERE t.hash = ?",
-    ).get(await sha256(token)) as Account | undefined;
+      "SELECT id, account_id, name, role, apps, created_at, last_used_at FROM tokens WHERE account_id = ? ORDER BY created_at, rowid",
+    ).all(accountId) as unknown as Token[];
+  }
+  /** False if there's no such token on this account. */
+  revokeToken(accountId: string, tokenId: string): boolean {
+    return this.db.prepare("DELETE FROM tokens WHERE account_id = ? AND id = ?").run(accountId, tokenId).changes > 0;
   }
 
   // ---- apps
