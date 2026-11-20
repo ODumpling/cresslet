@@ -8,9 +8,9 @@ import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
 import { sha256 } from "../server/store.ts";
 
-async function setup(dataDir?: string) {
+async function setup(dataDir?: string, adminToken = "adm") {
   dataDir ??= await mkdtemp(join(tmpdir(), "cresslet-tok-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["boss@b.co"] }));
+  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken, siteAdmins: ["boss@b.co"] }));
   const json = async (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
     headers.set("host", "test.local");
@@ -20,7 +20,7 @@ async function setup(dataDir?: string) {
   };
   const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
   const account = async (email: string) =>
-    (await json("/v1/accounts", { method: "POST", headers: bearer("adm"), body: JSON.stringify({ email }) })).body.token as string;
+    (await json("/v1/accounts", { method: "POST", headers: bearer(adminToken), body: JSON.stringify({ email }) })).body.token as string;
   const deploy = (token: string, app?: string) =>
     json("/v1/deploys", { method: "POST", headers: bearer(token), body: JSON.stringify({ app, files: [{ path: "index.html", data: "hi" }] }) });
   const mint = (token: string, input: unknown) =>
@@ -66,6 +66,24 @@ test("named tokens: create, list (no secrets), last used, revoke one", async () 
     assert.equal((await t.json(`/v1/me/tokens/${rootId}`, { method: "DELETE", headers: t.bearer(other) })).status, 404);
     assert.equal((await t.json("/v1/me", { headers: t.bearer(root) })).status, 200);
     assert.equal((await t.json("/v1/me/tokens", { headers: t.bearer(other) })).body.tokens.length, 1);
+
+    // A token revoked while its create request is still sending the body can't mint one.
+    const doomed = (await t.mint(root, { name: "doomed" })).body;
+    const { readable, writable } = new TransformStream();
+    const slow = t.srv.handler(new Request("http://test.local/v1/me/tokens", {
+      method: "POST",
+      headers: { host: "test.local", "content-type": "application/json", ...t.bearer(doomed.token) },
+      body: readable,
+      duplex: "half",
+    } as RequestInit));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal((await t.json(`/v1/me/tokens/${doomed.info.id}`, { method: "DELETE", headers: t.bearer(root) })).status, 200);
+    const w = writable.getWriter();
+    await w.write(new TextEncoder().encode('{"name":"sneaky"}'));
+    await w.close();
+    assert.equal((await slow).status, 401);
+    const names = (await t.json("/v1/me/tokens", { headers: t.bearer(root) })).body.tokens.map((x: { name: string }) => x.name);
+    assert.ok(!names.includes("sneaky"), names.join());
 
     // Validation.
     assert.equal((await t.mint(root, { name: "" })).status, 400);
@@ -169,6 +187,15 @@ test("site admin routes need a full-access token", async () => {
   } finally {
     t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
+  }
+  // An operator token that happens to look like an account token still works as the operator's.
+  const op = await setup(undefined, "clv_scoped_operator");
+  try {
+    assert.ok(await op.account("x@b.co"));
+    assert.equal((await op.json("/v1/admin/sites", { headers: op.bearer("clv_scoped_operator") })).status, 200);
+  } finally {
+    op.srv.close();
+    await rm(op.dataDir, { recursive: true, force: true });
   }
 });
 

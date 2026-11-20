@@ -45,7 +45,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const bearer = auth?.startsWith("Bearer ") ? auth.slice(7).trim() : undefined;
     if (bearer) {
       c.set("bearer", bearer);
-      if (bearer.startsWith("clv_acct_") || bearer.startsWith("clv_scoped_")) {
+      if ((bearer.startsWith("clv_acct_") || bearer.startsWith("clv_scoped_")) && !isAdmin(bearer)) {
         const found = await store.useToken(bearer);
         if (!found) throw new HttpError(401, "invalid token", "unauthorized");
         c.set("account", found.account);
@@ -208,6 +208,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       }))];
     }
     const { token, info } = await store.issueToken(a.id, { name, role: role as Role, apps });
+    // The issuing token may have been revoked while this request was in flight (e.g. a slow body).
+    if (!store.tokens(a.id).some((t) => t.id === c.get("token")!.id)) {
+      store.revokeToken(a.id, info.id);
+      throw new HttpError(401, "invalid token", "unauthorized");
+    }
     return c.json({ token, info: tokenView(info) }, 201);
   });
 
