@@ -239,6 +239,7 @@ async function openProject(id) {
   showOnly("workspace");
   $("project-title").hidden = false;
   $("deploy-btn").hidden = false;
+  $("deploy-btn").disabled = project.trusted === false; // locked from the start (gate() below takes over)
   $("project-name").value = project.name;
   document.title = `${project.name} · Cresslet Studio`;
   showDeployLink(project.deploy);
@@ -451,25 +452,38 @@ async function openProject(id) {
   const shell = await c.spawn("jsh", [], { cwd: wd, terminal: true });
   shell.output.pipeTo(new WritableStream({ write: (d) => term.write(d) }));
   const input = shell.input.getWriter();
-  term.onData((d) => input.write(d));
+  // an untrusted project's shell takes no input until "Run it" (a command could run its code: npm scripts, a build's
+  // PostCSS/Tailwind plugins)
+  let locked = project.trusted === false;
+  term.onData((d) => {
+    if (!locked) input.write(d);
+  });
   const start = () => {
     setStatus("Installing");
     $("preview-msg").textContent = "Installing dependencies…";
     input.write("npm install && cresslet dev\r");
   };
+  // Opened from a deployed app's source: its code (and npm deps, and a deploy's build: PostCSS/Tailwind plugins)
+  // would run in this browser. Nothing runs, Deploy included, until the user says so.
+  const gate = (on) => {
+    locked = on;
+    $("deploy-btn").disabled = on;
+    $("deploy-btn").title = on ? "Run the project first" : "";
+  };
+  gate(project.trusted === false);
   if (project.trusted === false) {
-    // Opened from a deployed app's source: its code (and npm deps) would run in this browser.
     setStatus("Not running");
     const btn = el("button", { className: "btn", textContent: "Run it", onclick: async () => {
       project.trusted = true;
       await projects.put(project);
       btn.remove();
+      gate(false);
       start();
     } });
     $("preview-msg").replaceChildren(
       "This project was opened from a deployed app's source. Review it, then ",
       btn,
-      " to install its dependencies and start it here.",
+      " to install its dependencies and start it here (the terminal and Deploy unlock then).",
     );
   } else start();
 
