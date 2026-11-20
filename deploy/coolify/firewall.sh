@@ -80,18 +80,22 @@ if [ "$MODE" = --boot ]; then
 else
   ID=$(docker network inspect "$NET" --format '{{.Id}}' 2>/dev/null) || { echo "cresslet-firewall: no network $NET" >&2; exit 1; }
   BR=br-$(echo "$ID" | cut -c1-12)
-  mkdir -p "${STATE%/*}"
-  [ "$(cat "$STATE" 2>/dev/null)" = "$BR" ] || echo "$BR" > "$STATE"
   # Fail closed: if the rules can't be put in place, stop what runs on that network (not Coolify's
   # proxy, which is attached to it too) rather than leave it unfirewalled. Start it again by hand.
   trap 'rc=$?; [ $rc -eq 0 ] || stop_all; exit $rc' EXIT
+  mkdir -p "${STATE%/*}"
+  [ "$(cat "$STATE" 2>/dev/null)" = "$BR" ] || echo "$BR" > "$STATE"
 fi
 
 stop_all() {
   echo "cresslet-firewall: couldn't apply the rules for $NET; stopping its containers" >&2
-  for c in $(docker ps -q --filter "network=$NET"); do
-    [ "$(docker inspect -f '{{index .Config.Labels "coolify.proxy"}}' "$c")" = true ] || docker stop "$c" >/dev/null
-  done
+  failed=""
+  docker ps --filter "network=$NET" --format '{{.ID}} {{.Label "coolify.proxy"}}' | {
+    while read -r c proxy; do
+      [ "$proxy" = true ] || docker stop "$c" >/dev/null || failed="$failed $c"
+    done
+    [ -z "$failed" ] || echo "cresslet-firewall: couldn't stop:$failed" >&2
+  }
 }
 
 # swap <cmd> <parent> <chain> <rule args>...: build <chain>.n, jump to it from the top of <parent>,
