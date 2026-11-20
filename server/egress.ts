@@ -135,7 +135,17 @@ export function createEgressProxy(
   });
   // Raw TCP (cloudflare:sockets connect()) isn't available under an allowlist; without one (gVisor),
   // it's tunnelled to public addresses only, like workerd's own "public" network.
+  // CONNECT sockets leave the HTTP server's connection tracking: closeAllConnections() (sandbox stop)
+  // must close them too.
+  const tunnels = new Set<Socket>();
+  const closeAll = server.closeAllConnections.bind(server);
+  server.closeAllConnections = () => {
+    closeAll();
+    for (const t of tunnels) t.destroy();
+  };
   server.on("connect", (req: IncomingMessage, socket: Socket, head: Buffer) => {
+    tunnels.add(socket);
+    socket.once("close", () => tunnels.delete(socket));
     socket.on("error", () => socket.destroy());
     // Answer, then close both directions (end() alone would leave a socket the sandbox can hold open).
     const reply = (status: string) => {

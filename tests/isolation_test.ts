@@ -154,6 +154,13 @@ test("egress proxy without an allowlist (gVisor): tunnels CONNECT to public host
     assert.match(await tunnel("o.sock", `127.0.0.1:${port}`), /^HTTP\/1.1 403[^]*\[closed\]$/);
     assert.match(await tunnel("l.sock", `up.test:${port}`), /^HTTP\/1.1 403[^]*\[closed\]$/); // raw sockets: never under an allowlist
     assert.ok(logs.some((l) => /egress blocked: raw socket to 127\.0\.0\.1 \(not a public address\)/.test(l)), logs.join("\n"));
+    // Sandbox stop (closeAllConnections) also closes open tunnels, which HTTP connection tracking misses.
+    const held = netConnect({ path: join(dir, "o.sock") });
+    held.write(`CONNECT up.test:${port} HTTP/1.1\r\n\r\n`);
+    await new Promise((r) => held.once("data", r));
+    const closed = new Promise((r) => held.once("close", r));
+    open.closeAllConnections();
+    await closed;
   } finally {
     for (const p of [open, locked]) (p.close(), p.closeAllConnections());
     upstream.close();

@@ -97,7 +97,9 @@ export function prepareHost(cfg: Config) {
     if (process.platform !== "linux" || process.getuid?.() !== 0) {
       throw new Error("CRESSLET_RUNSC needs Linux and the control plane running as root");
     }
-    const v = spawnSync(runsc, ["--version"], { encoding: "utf8" });
+    // Sandboxes start with their run dir as cwd: a relative path must not depend on it.
+    if (runsc.includes("/")) cfg.sandbox.runsc = resolve(runsc);
+    const v = spawnSync(cfg.sandbox.runsc!, ["--version"], { encoding: "utf8" });
     if (v.status !== 0) throw new Error(`CRESSLET_RUNSC: can't run ${runsc} --version: ${v.error?.message ?? v.stderr}`);
   }
   if (uidBase !== null) {
@@ -222,14 +224,21 @@ export function sweep(cfg: Config, instance: string) {
   for (const d of names.filter((n) => n.endsWith(".gv"))) {
     const gv = join(cfg.sockDir, d);
     if (!cfg.sandbox.runsc || !reapGvisor(cfg.sandbox.runsc, gv)) {
-      console.error(`cresslet: can't confirm the gVisor sandbox in ${gv} is gone (CRESSLET_RUNSC unset or runsc failed); left in place`);
+      console.error(
+        `cresslet: can't confirm the gVisor sandbox in ${gv} is gone (CRESSLET_RUNSC unset or runsc failed); left in place. ` +
+          `Clean up by hand: runsc --root ${gv} delete --force a, then remove ${gv} and ${gv.slice(0, -3)}`,
+      );
       keep.add(d).add(d.slice(0, -3));
     }
   }
   for (const d of names) {
     if (keep.has(d)) continue;
-    if (d.endsWith(".gv")) unmountUnder(join(cfg.sockDir, d));
-    rmSync(join(cfg.sockDir, d), { recursive: true, force: true });
+    try {
+      if (d.endsWith(".gv")) unmountUnder(join(cfg.sockDir, d));
+      rmSync(join(cfg.sockDir, d), { recursive: true, force: true });
+    } catch (e) {
+      console.error(`cresslet: can't remove ${join(cfg.sockDir, d)}: ${(e as Error).message}`); // retried next start
+    }
   }
   const dir = cfg.sandbox.cgroupDir;
   for (const d of dir && existsSync(dir) ? readdirSync(dir, { withFileTypes: true }) : []) {
@@ -402,11 +411,28 @@ function track(p: Promise<void>) {
 
 const runscArgs = (gv: string, ...a: string[]) => ["--root", gv, ...a];
 
-/** Startup: `runsc delete --force`, then true if runsc lists no container left in this state dir. */
+/**
+ * Gone = runsc lists no container in this state dir, and no host process (runsc, the Sentry, the gofer
+ * all carry `--root <gv>`) is left: runsc can drop its metadata even when stopping the sandbox failed.
+ */
+function gvisorGone(listOk: boolean, listOut: string, gv: string): boolean {
+  if (!listOk || listOut.trim()) return false;
+  const marks = [`--root=${gv}\0`, `--root\0${gv}\0`];
+  for (const p of readdirSync("/proc")) {
+    if (!/^\d+$/.test(p)) continue;
+    try {
+      const cmd = readFileSync(`/proc/${p}/cmdline`, "utf8");
+      if (marks.some((m) => cmd.includes(m))) return false;
+    } catch { /* exited */ }
+  }
+  return true;
+}
+
+/** Startup: `runsc delete --force`, then whether the sandbox is confirmed gone. */
 function reapGvisor(runsc: string, gv: string): boolean {
   spawnSync(runsc, runscArgs(gv, "delete", "--force", "a"), { stdio: "ignore", timeout: 10_000 });
   const l = spawnSync(runsc, runscArgs(gv, "list", "-quiet"), { encoding: "utf8", timeout: 10_000 });
-  return l.status === 0 && !l.stdout.trim();
+  return gvisorGone(l.status === 0, l.stdout ?? "", gv);
 }
 
 /**
@@ -426,9 +452,14 @@ function deleteGvisor(runsc: string, gv: string, runDir: string): Promise<void> 
       c.once("close", (code) => res({ ok: code === 0, out }));
     });
   const p = (async () => {
-    await run(["delete", "--force", "a"]);
-    const l = await run(["list", "-quiet"]);
-    if (!l.ok || l.out.trim()) return console.error(`cresslet: gVisor sandbox in ${gv} still listed after delete; left for the next start`);
+    // A few tries: runsc, the Sentry and the gofer may still be exiting after a SIGKILL.
+    for (let i = 0; ; i++) {
+      await run(["delete", "--force", "a"]);
+      const l = await run(["list", "-quiet"]);
+      if (gvisorGone(l.ok, l.out, gv)) break;
+      if (i === 4) return console.error(`cresslet: gVisor sandbox in ${gv} not confirmed gone after delete; left for the next start`);
+      await new Promise((r) => setTimeout(r, 100 * 2 ** i));
+    }
     try {
       unmountUnder(gv);
       await rm(gv, { recursive: true, force: true });
