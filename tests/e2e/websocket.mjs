@@ -42,7 +42,10 @@ export default {
       return new Response(res.body, res); // re-wrapped, as Hono middleware does
 
     }
-    if (url.pathname === "/api/spin") for (;;);
+    if (url.pathname === "/api/spin") {
+      console.log("spinning");
+      for (;;);
+    }
     // native Responses (fetch, Response.json) are still \`instanceof Response\` next to the 101 one
     return Response.json({ boot, native: Response.json(null) instanceof Response });
   },
@@ -142,7 +145,7 @@ try {
     ws.onclose = (e) => (window.__closed = { code: e.code, reason: e.reason, wasClean: e.wasClean });
   })), "socket before the restart");
   await f.evaluate(() => void (window.__spin = fetch("/api/spin").then(async (r) => `${r.status} ${await r.text()}`)));
-  await page.waitForTimeout(500);
+  await waitFor(async () => /\[server\] spinning/.test(await term.innerText()), "the old server stuck in its loop");
   await editServer("\n// v2\n", true);
   const closed = await waitFor(() => f.evaluate(() => window.__closed), "the open socket's close");
   await waitFor(async () => (await boot()) !== boot1, "the restarted server");
