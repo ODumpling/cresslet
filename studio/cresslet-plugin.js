@@ -180,6 +180,9 @@ export function createCresslet(c, opts) {
     let worker = null;
     let workerError = null;
     let reqId = 0;
+    let starts = 0; // startWorker calls
+    let readySeq = 0; // the start whose worker serves now
+    let stopped = false; // `cresslet dev` ended
     const waiting = new Map(); // request id → { w, done }
 
     async function fileOp(m) {
@@ -255,6 +258,7 @@ export function createCresslet(c, opts) {
     }
 
     async function startWorker() {
+      const seq = ++starts;
       let code;
       try {
         code = await bundleServer();
@@ -318,6 +322,8 @@ export function createCresslet(c, opts) {
       });
       try {
         await ready;
+        if (stopped || seq < readySeq) return w.terminate(); // dev ended, or a later save's worker got ready first
+        readySeq = seq;
         retire(worker, 1012, "server restarting", "server restarted");
         worker = w;
         workerError = null;
@@ -381,6 +387,8 @@ export function createCresslet(c, opts) {
     const server = await c.createDevServer({ root: wd, port, middleware });
     out(`\x1b[32m✔\x1b[0m dev server on port ${port}`);
     await new Promise((resolve) => ctx.signal.addEventListener("abort", resolve, { once: true }));
+    stopped = true;
+    clearTimeout(timer);
     watcher.close();
     server.close();
     retire(worker, 1001, "server stopped", "server stopped");

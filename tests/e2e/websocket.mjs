@@ -17,17 +17,23 @@ export default {
       if (req.headers.get("upgrade") !== "websocket") return new Response("expected a WebSocket", { status: 426 });
       const [client, server] = Object.values(new WebSocketPair());
       server.accept();
+      console.log("clone sees upgrade " + req.clone().headers.get("upgrade"));
       server.send("welcome " + boot + " " + url.search);
       let queue = Promise.resolve();
       server.onmessage = (e) => (queue = queue.then(async () => {
-        if (e.data === "bye") server.close(4000, "bye yourself");
+        if (e.data === "bye") {
+          server.close(4000, "bye yourself");
+          console.log("after close() readyState " + server.readyState); // CLOSING; the close event comes later
+        }
         // binary messages arrive as Blobs, as on the platform
         else server.send(typeof e.data === "string" ? "echo " + e.data : await e.data.arrayBuffer());
       }));
       server.addEventListener("close", (e) => console.log("server saw close " + e.code + " " + e.reason));
       const offered = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map((s) => s.trim());
       const headers = offered.includes("chat") ? { "sec-websocket-protocol": "chat" } : {};
-      return new Response(null, { status: 101, webSocket: client, headers });
+      const res = new Response(null, { status: 101, webSocket: client, headers });
+      return new Response(res.body, res); // re-wrapped, as Hono middleware does
+
     }
     if (url.pathname === "/api/spin") for (;;);
     // native Responses (fetch, Response.json) are still \`instanceof Response\` next to the 101 one
@@ -91,7 +97,8 @@ try {
     events: [{ open: "chat" }, "welcome ?room=1", "echo hi", [1, 2, 3], [98, 108, 111, 98]],
     code: 4000, reason: "bye yourself", wasClean: true,
   }), `round trip: ${JSON.stringify(roundTrip)}`);
-  await waitFor(async () => /\[server\] server saw close 4000 bye yourself/.test(await term.innerText()), "the server end's own close");
+  await waitFor(async () => /after close\(\) readyState 2[\s\S]*\[server\] server saw close 4000 bye yourself/.test(await term.innerText()), "the server end's own close, after close() returned");
+  assert(/\[server\] clone sees upgrade websocket/.test(await term.innerText()), "req.clone() keeps the handshake headers");
   console.log("round trip:", JSON.stringify(roundTrip));
 
   // Client close reaches the app's server end; HTTP still works alongside.

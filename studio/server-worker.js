@@ -85,11 +85,13 @@ class PairSocket extends EventTarget {
     this.peer.deliver(new MessageEvent("message", { data }));
   }
   close(code, reason = "") {
-    if (this.readyState === 3) return;
-    this.readyState = this.peer.readyState = 3; // CLOSED
+    if (this.readyState !== 1) return;
+    this.readyState = 2; // CLOSING
+    this.peer.readyState = 3; // CLOSED
     const event = () => new CloseEvent("close", { code: code ?? 1005, reason: String(reason), wasClean: true });
     this.peer.deliver(event());
-    this.deliver(event()); // and this end, as when the peer's close frame comes back
+    // and this end, later, as when the peer's close frame comes back
+    setTimeout(() => ((this.readyState = 3), this.deliver(event())));
   }
 }
 globalThis.WebSocketPair = class WebSocketPair {
@@ -110,7 +112,8 @@ globalThis.Response = class Response extends NativeResponse {
   }
   constructor(body, init) {
     if (init?.status !== 101) return super(body, init);
-    super(null, { ...init, status: 200 });
+    // `init` may be a 101 Response being re-wrapped (`new Response(res.body, res)`, as Hono middleware does).
+    super(null, { status: 200, statusText: init.statusText, headers: init.headers });
     Object.defineProperty(this, "status", { value: 101 });
     this.webSocket = init.webSocket;
   }
@@ -128,7 +131,7 @@ function connect(client, port) {
       if (client.readyState === 1) client.send(d.data);
     } else if (d?.type === "close") {
       port.close();
-      if (client.readyState === 3) return; // the app closed it too
+      if (client.readyState !== 1) return; // the app closed it too
       client.readyState = client.peer.readyState = 3;
       const code = Number.isInteger(d.code) ? d.code : 1005;
       client.peer.deliver(new CloseEvent("close", { code, reason: String(d.reason ?? ""), wasClean: true }));
@@ -249,7 +252,11 @@ onmessage = async ({ data: m, ports }) => {
       });
       const upgrade = new Headers(m.headers).get("upgrade")?.toLowerCase() === "websocket";
       // `Request` drops Upgrade, Connection, Sec-WebSocket-*, Origin.
-      if (upgrade) Object.defineProperty(req, "headers", { value: new Headers(m.headers) });
+      const shadow = (r) => {
+        const clone = r.clone.bind(r);
+        return Object.defineProperties(r, { headers: { value: new Headers(m.headers) }, clone: { value: () => shadow(clone()) } });
+      };
+      if (upgrade) shadow(req);
       const res = await handler(req, env, { waitUntil() {} });
       if (!(res instanceof NativeResponse)) throw new Error("fetch handler must return a Response");
       if (res.status === 101) {
