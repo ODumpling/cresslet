@@ -202,8 +202,8 @@ export function isolationWarnings(cfg: Config): string[] {
   const { runsc, outerGvisor, uidBase } = cfg.sandbox;
   const out: string[] = [];
   if (!runsc && !outerGvisor) {
-    out.push("cresslet: strangers can deploy code here (open signup or anonymous deploys) but nothing runs under gVisor; " +
-      "workerd alone isn't a hardened multi-tenant boundary. Set CRESSLET_RUNSC, or run the server under gVisor " +
+    out.push("cresslet: strangers can deploy code here (open signup or anonymous deploys) but neither CRESSLET_RUNSC nor " +
+      "CRESSLET_OUTER_GVISOR is set; workerd alone isn't a hardened multi-tenant boundary. Set CRESSLET_RUNSC, or run the server under gVisor " +
       "(docker --runtime=runsc) and set CRESSLET_OUTER_GVISOR=true (docs/self-hosting.md#docker-and-isolation)");
   }
   if (uidBase === null && !runsc) {

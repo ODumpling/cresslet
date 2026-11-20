@@ -6,7 +6,7 @@ const gh = { clientId: "id", clientSecret: "s", webUrl: "", apiUrl: "" };
 const warnings = (o: Partial<Config>, sandbox: Partial<Config["sandbox"]> = {}) => {
   const base = loadConfig();
   return isolationWarnings(loadConfig({ ...o, sandbox: { ...base.sandbox, runsc: null, outerGvisor: false, uidBase: null, ...sandbox } }))
-    .map((w) => w.includes("share one uid") ? "uid" : "gvisor");
+    .map((w) => w.includes("share one uid") ? "uid" : w.includes("CRESSLET_OUTER_GVISOR is set") ? "gvisor" : w);
 };
 
 test("isolation warnings: only when strangers can deploy, until gVisor (and per-app uids) cover them", () => {
