@@ -9,6 +9,7 @@
 #   firewall.sh <network> --boot     apply to the bridge saved by the last run (no Docker needed)
 #
 # <network>: the container's Docker network (a Coolify compose app's network is its application UUID).
+# One network per host: the chains (CRESSLET-FWD, CRESSLET-IN) have fixed names.
 # Needs root. Docker names a user-defined bridge br-<first 12 chars of the network id>.
 # Every iptables call waits for the xtables lock (-w): Docker and ufw take it too, at boot especially.
 set -eu
@@ -65,7 +66,10 @@ unhook() {
 }
 
 if [ "$MODE" = --remove ]; then
-  for t in iptables ip6tables; do unhook $t DOCKER-USER $FWD; unhook $t INPUT $IN; done
+  for t in iptables ip6tables; do
+    for c in $FWD $FWD.n; do unhook $t DOCKER-USER $c; done
+    for c in $IN $IN.n; do unhook $t INPUT $c; done
+  done
   rm -f "$STATE"
   exit 0
 fi
@@ -78,7 +82,17 @@ else
   BR=br-$(echo "$ID" | cut -c1-12)
   mkdir -p "${STATE%/*}"
   [ "$(cat "$STATE" 2>/dev/null)" = "$BR" ] || echo "$BR" > "$STATE"
+  # Fail closed: if the rules can't be put in place, stop what runs on that network (not Coolify's
+  # proxy, which is attached to it too) rather than leave it unfirewalled. Start it again by hand.
+  trap 'rc=$?; [ $rc -eq 0 ] || stop_all; exit $rc' EXIT
 fi
+
+stop_all() {
+  echo "cresslet-firewall: couldn't apply the rules for $NET; stopping its containers" >&2
+  for c in $(docker ps -q --filter "network=$NET"); do
+    [ "$(docker inspect -f '{{index .Config.Labels "coolify.proxy"}}' "$c")" = true ] || docker stop "$c" >/dev/null
+  done
+}
 
 # swap <cmd> <parent> <chain> <rule args>...: build <chain>.n, jump to it from the top of <parent>,
 # drop the old chain, rename. The parent always jumps to a complete chain, so there's no gap.

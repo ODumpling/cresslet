@@ -75,7 +75,7 @@ Then keep that network off the host and private ranges (another app's database, 
 deploy/coolify/firewall.sh <app uuid> --install     # <app uuid> = the compose app's network
 ```
 
-A network that doesn't exist yet (the first deploy, or one Coolify recreated) is covered within a minute of its creation; a connection opened in that minute stays up. Run the script once right after the first deploy.
+A network that doesn't exist yet (the first deploy, or one Coolify recreated) is covered within a minute of its creation; a connection opened in that minute stays up. Run the script once right after the first deploy. If the rules can't be applied, the script stops the containers on that network (not Coolify's proxy) rather than leave them unfirewalled; start them again once it's fixed. It handles one Cresslet network per host.
 
 Notes:
 - gVisor's network stack can't reach Docker's embedded DNS (127.0.0.11) on a user-defined network ([gVisor FAQ](https://gvisor.dev/docs/user_guide/faq/)), so the entrypoint writes public resolvers (`CRESSLET_RESOLVERS`, default `1.1.1.1 9.9.9.9`) into `/etc/resolv.conf`. The container can't look up other containers by name (it doesn't need to).
