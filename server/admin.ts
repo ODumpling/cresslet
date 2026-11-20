@@ -156,12 +156,16 @@ export function adminRoutes(
     requireSiteAdmin(c);
     owners.clear();
     const a = getSite(c.req.param("name"));
-    let tables: { name: string; rows: number }[] = [];
-    let dbError: string | null = null;
-    try {
-      tables = dbTables(cfg, a.id);
-    } catch (e) {
-      dbError = (e as Error).message;
+    // Site admin powers cover the site, not its data: the tables are only shown to whoever runs the app.
+    // (No collaborators/invites yet; when they land, an invited admin goes here too.)
+    let database: { tables: { name: string; rows: number }[]; error: string | null } | null = null;
+    if (a.account_id && a.account_id === c.get("account")?.id) {
+      database = { tables: [], error: null };
+      try {
+        database.tables = dbTables(cfg, a.id);
+      } catch (e) {
+        database.error = (e as Error).message;
+      }
     }
     return c.json({
       site: await siteView(a),
@@ -176,7 +180,7 @@ export function adminRoutes(
       })),
       domains: store.domains(a.id).map((d) => ({ domain: d.domain, verified: !!d.verified_at })),
       secrets: store.secretKeys(a.id).length,
-      database: { tables, error: dbError },
+      database,
       runtime: runtime.status(a.id),
     });
   });

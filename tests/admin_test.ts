@@ -61,8 +61,17 @@ test("site admins list every site with usage, delete (soft), restore and purge",
     assert.equal(site.usage.total, site.usage.deploys + site.usage.database + site.usage.files);
     assert.equal(list.body.totals.live, 1);
 
+    // a site admin sees the site but not its database tables unless they own it
     const detail = await json("/v1/admin/sites/shop", { headers: bearer(boss) });
-    assert.deepEqual(detail.body.database.tables, [{ name: "c", rows: 1 }]);
+    assert.equal(detail.body.database, null);
+    assert.equal((await json("/v1/admin/sites/shop", { headers: bearer("adm") })).body.database, null);
+    assert.equal((await json("/v1/deploys", {
+      method: "POST",
+      headers: bearer(boss),
+      body: JSON.stringify({ app: "mine", files: [{ path: "index.html", data: "hi" }], server: SERVER, config: { routes: ["/api/*"] } }),
+    })).status, 201);
+    await json("/api/n", { host: "mine.test.local" });
+    assert.deepEqual((await json("/v1/admin/sites/mine", { headers: bearer(boss) })).body.database.tables, [{ name: "c", rows: 1 }]);
     assert.equal(detail.body.deploys.length, 1);
 
     // soft delete: offline, hidden from the owner, name stays taken, data kept
