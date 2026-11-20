@@ -67,9 +67,11 @@ try {
   // A toast that stepped aside (transparent) becomes visible when Tab reaches it.
   await narrow.getByRole("button", { name: "Log out" }).focus();
   await narrow.locator("#token-copy").evaluate((b) => b.click()); // a toast, focus stays on Log out
+  await narrow.locator('#toast[data-open="true"]').waitFor({ state: "attached" }); // copying is async
   await narrow.locator("#toast").evaluate((t) => (t.dataset.top = "hide"));
   await narrow.locator("#toast-close").focus();
-  assert(await narrow.locator("#toast").evaluate((t) => getComputedStyle(t).opacity) !== "0", "focused toast stayed transparent");
+  // (its state, not computed opacity: that fades in over 160ms)
+  assert(await narrow.locator("#toast").getAttribute("data-top") === "false", "focused toast stayed transparent");
   await narrow.keyboard.press("Escape");
   // A long account email (mocked: no account left behind).
   const lp = await browser.newPage({ viewport: { width: 320, height: 640 } });
