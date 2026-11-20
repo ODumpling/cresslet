@@ -99,18 +99,21 @@ export function prepareHost(cfg: Config) {
     if (process.platform !== "linux" || process.getuid?.() !== 0) {
       throw new Error("CRESSLET_RUNSC needs Linux and the control plane running as root");
     }
-    // Sandboxes start with their run dir as cwd and no PATH: resolve it once, here.
-    cfg.sandbox.runsc = runsc.includes("/")
+    // Sandboxes start with their run dir as cwd and no PATH: resolve it to an absolute path once, here
+    // (an empty PATH entry is the current directory).
+    const found = runsc.includes("/")
       ? resolve(runsc)
-      : (process.env.PATH ?? "").split(":").filter(Boolean).map((d) => resolve(d, runsc)).find((f) => {
+      : (process.env.PATH ?? "").split(":").map((d) => resolve(d || ".", runsc)).find((f) => {
         try {
           accessSync(f, constants.X_OK);
           return true;
         } catch {
           return false;
         }
-      }) ?? runsc;
-    const v = spawnSync(cfg.sandbox.runsc!, ["--version"], { encoding: "utf8" });
+      });
+    if (!found) throw new Error(`CRESSLET_RUNSC: ${runsc} not found in PATH`);
+    cfg.sandbox.runsc = found;
+    const v = spawnSync(found, ["--version"], { encoding: "utf8" });
     if (v.status !== 0) throw new Error(`CRESSLET_RUNSC: can't run ${runsc} --version: ${v.error?.message ?? v.stderr}`);
   }
   if (uidBase !== null) {
