@@ -74,6 +74,17 @@ if [ "$MODE" = --remove ]; then
   exit 0
 fi
 
+stop_all() {
+  echo "cresslet-firewall: couldn't apply the rules for $NET; stopping its containers" >&2
+  failed=""
+  docker ps --filter "network=$NET" --format '{{.ID}} {{.Label "coolify.proxy"}}' | {
+    while read -r c proxy; do
+      [ "$proxy" = true ] || docker stop "$c" >/dev/null || failed="$failed $c"
+    done
+    [ -z "$failed" ] || echo "cresslet-firewall: couldn't stop:$failed" >&2
+  }
+}
+
 if [ "$MODE" = --boot ]; then
   [ -f "$STATE" ] || exit 0
   BR=$(cat "$STATE")
@@ -86,17 +97,6 @@ else
   mkdir -p "${STATE%/*}"
   [ "$(cat "$STATE" 2>/dev/null)" = "$BR" ] || echo "$BR" > "$STATE"
 fi
-
-stop_all() {
-  echo "cresslet-firewall: couldn't apply the rules for $NET; stopping its containers" >&2
-  failed=""
-  docker ps --filter "network=$NET" --format '{{.ID}} {{.Label "coolify.proxy"}}' | {
-    while read -r c proxy; do
-      [ "$proxy" = true ] || docker stop "$c" >/dev/null || failed="$failed $c"
-    done
-    [ -z "$failed" ] || echo "cresslet-firewall: couldn't stop:$failed" >&2
-  }
-}
 
 # swap <cmd> <parent> <chain> <rule args>...: build <chain>.n, jump to it from the top of <parent>,
 # drop the old chain, rename. The parent always jumps to a complete chain, so there's no gap.
