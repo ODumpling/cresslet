@@ -1,0 +1,223 @@
+// Site admin API (/v1/admin): every site on the server, its disk and database usage, delete/restore/purge.
+// Allowed for accounts with the SiteAdmin role (or listed in CRESSLET_SITE_ADMINS) and the operator's admin token.
+import type { Context, Hono } from "hono";
+import { DatabaseSync } from "node:sqlite";
+import { existsSync } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { appUrl, type Config, paths } from "./config.ts";
+import { type Account, type App, SITE_ADMIN, type Store } from "./store.ts";
+import type { Runtime } from "./runtime.ts";
+import { confine } from "./bindings.ts";
+import { HttpError, removeAppFiles } from "./deploys.ts";
+
+type Env = { Variables: { account?: Account; bearer?: string } };
+
+export const isSiteAdmin = (cfg: Config, a: Account | undefined) =>
+  !!a && (a.role === SITE_ADMIN || cfg.siteAdmins.includes(a.email) ||
+    (!!a.github_login && cfg.siteAdmins.includes(a.github_login.toLowerCase())));
+
+/** Permanently removes an app: process, rows (deploys, secrets, domains cascade), logs, files. */
+export async function purgeApp(cfg: Config, store: Store, runtime: Runtime, a: App) {
+  runtime.stop(a.id);
+  store.deleteApp(a.id);
+  runtime.logs.drop(a.id);
+  await removeAppFiles(cfg, a.id);
+}
+
+/** Bytes under a directory (files only, symlinks not followed); 0 if it doesn't exist. */
+async function dirBytes(dir: string): Promise<number> {
+  let entries;
+  try {
+    entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    total += await lstat(join(e.parentPath, e.name)).then((s) => s.size, () => 0);
+  }
+  return total;
+}
+
+const fileBytes = (p: string) => lstat(p).then((s) => s.size, () => 0);
+
+export async function usage(cfg: Config, appId: string) {
+  const p = paths(cfg, appId);
+  const [deploys, files, db, wal, shm] = await Promise.all([
+    dirBytes(p.deploys),
+    dirBytes(p.files),
+    fileBytes(p.db),
+    fileBytes(p.db + "-wal"),
+    fileBytes(p.db + "-shm"),
+  ]);
+  const database = db + wal + shm;
+  return { deploys, database, files, total: deploys + database + files };
+}
+
+/** Tables and row counts of an app's database (read-only). */
+function dbTables(cfg: Config, appId: string): { name: string; rows: number }[] {
+  const p = paths(cfg, appId).db;
+  if (!existsSync(p)) return [];
+  const db = confine(new DatabaseSync(p, { readOnly: true }));
+  try {
+    const names = (db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    ).all() as { name: string }[]).map((t) => t.name);
+    return names.map((name) => ({
+      name,
+      rows: Number((db.prepare(`SELECT count(*) n FROM "${name.replace(/"/g, '""')}"`).get() as { n: number }).n),
+    }));
+  } finally {
+    db.close();
+  }
+}
+
+export function adminRoutes(
+  app: Hono<Env>,
+  { cfg, store, runtime, isAdminToken, body }: {
+    cfg: Config;
+    store: Store;
+    runtime: Runtime;
+    isAdminToken: (bearer?: string) => boolean;
+    body: <T>(c: Context<Env>) => Promise<T>;
+  },
+) {
+  /** Who is acting, for log lines; throws unless a site admin. */
+  const requireSiteAdmin = (c: Context<Env>) => {
+    const acct = c.get("account");
+    if (isSiteAdmin(cfg, acct)) return acct!.github_login ?? acct!.email;
+    if (isAdminToken(c.get("bearer"))) return "operator";
+    throw new HttpError(acct ? 403 : 401, "site admin only", acct ? "forbidden" : "unauthorized");
+  };
+
+  const getSite = (name: string) => {
+    const a = store.appByName(name, true);
+    if (!a) throw new HttpError(404, `site not found: ${name}`, "not_found");
+    return a;
+  };
+
+  const owners = new Map<string, Account | undefined>();
+  const owner = (id: string | null) => {
+    if (!id) return null;
+    if (!owners.has(id)) owners.set(id, store.accountById(id));
+    const o = owners.get(id);
+    return o ? { id: o.id, email: o.email, github: o.github_login } : null;
+  };
+
+  const iso = (t: number | null) => (t ? new Date(t).toISOString() : null);
+  const siteView = async (a: App) => {
+    const config = JSON.parse(a.config) as { server?: boolean; crons?: string[] };
+    const rt = runtime.status(a.id);
+    const deploy = a.current_deploy_id ? store.deploy(a.current_deploy_id) : undefined;
+    return {
+      id: a.id,
+      name: a.name,
+      url: appUrl(cfg, a.name),
+      status: a.deleted_at ? "deleted" : rt.running ? "running" : a.current_deploy_id ? "idle" : "empty",
+      owner: owner(a.account_id),
+      server: !!config.server,
+      crons: config.crons?.length ?? 0,
+      domains: store.domains(a.id).filter((d) => d.verified_at).map((d) => d.domain),
+      currentDeploy: deploy
+        ? { id: deploy.id, createdAt: iso(deploy.created_at), bytes: deploy.bytes, files: deploy.file_count, source: deploy.source }
+        : null,
+      usage: await usage(cfg, a.id),
+      expiresAt: iso(a.expires_at),
+      deletedAt: iso(a.deleted_at),
+      purgeAt: a.deleted_at ? iso(a.deleted_at + cfg.limits.deletedRetentionMs) : null,
+      createdAt: iso(a.created_at),
+      updatedAt: iso(a.updated_at),
+    };
+  };
+
+  app.get("/admin/sites", async (c) => {
+    requireSiteAdmin(c);
+    owners.clear();
+    const sites = await Promise.all(store.allApps().map(siteView));
+    const sum = (k: "deploys" | "database" | "files" | "total") => sites.reduce((n, s) => n + s.usage[k], 0);
+    return c.json({
+      totals: {
+        sites: sites.length,
+        live: sites.filter((s) => s.status !== "deleted").length,
+        running: sites.filter((s) => s.status === "running").length,
+        deleted: sites.filter((s) => s.status === "deleted").length,
+        anonymous: sites.filter((s) => !s.owner && s.status !== "deleted").length,
+        usage: { deploys: sum("deploys"), database: sum("database"), files: sum("files"), total: sum("total") },
+      },
+      retentionDays: cfg.limits.deletedRetentionMs / 86_400_000,
+      sites,
+    });
+  });
+
+  app.get("/admin/sites/:name", async (c) => {
+    requireSiteAdmin(c);
+    owners.clear();
+    const a = getSite(c.req.param("name"));
+    let tables: { name: string; rows: number }[] = [];
+    let dbError: string | null = null;
+    try {
+      tables = dbTables(cfg, a.id);
+    } catch (e) {
+      dbError = (e as Error).message;
+    }
+    return c.json({
+      site: await siteView(a),
+      deploys: store.deploys(a.id, 10).map((d) => ({
+        id: d.id,
+        createdAt: iso(d.created_at),
+        bytes: d.bytes,
+        files: d.file_count,
+        server: !!d.has_server,
+        source: d.source,
+        current: d.id === a.current_deploy_id,
+      })),
+      domains: store.domains(a.id).map((d) => ({ domain: d.domain, verified: !!d.verified_at })),
+      secrets: store.secretKeys(a.id).length,
+      database: { tables, error: dbError },
+      runtime: runtime.status(a.id),
+    });
+  });
+
+  // Soft delete: offline right away (not served, no crons, owner sees 404), restorable until purged.
+  // `?purge=1` deletes it permanently now.
+  app.delete("/admin/sites/:name", async (c) => {
+    const who = requireSiteAdmin(c);
+    const a = getSite(c.req.param("name"));
+    if (c.req.query("purge") === "1") {
+      await purgeApp(cfg, store, runtime, a);
+      console.log(`cresslet: site ${a.name} purged by ${who}`);
+      return c.json({ purged: a.name });
+    }
+    if (!a.deleted_at) {
+      runtime.stop(a.id);
+      store.setDeleted(a.id, Date.now());
+      runtime.logs.push(a.id, "system", `site deleted by site admin ${who}`);
+    }
+    return c.json({ site: await siteView(store.appById(a.id, true)!) });
+  });
+
+  app.post("/admin/sites/:name/restore", async (c) => {
+    const who = requireSiteAdmin(c);
+    const a = getSite(c.req.param("name"));
+    if (a.deleted_at) {
+      store.setDeleted(a.id, null);
+      runtime.logs.push(a.id, "system", `site restored by site admin ${who}`);
+    }
+    return c.json({ site: await siteView(store.appById(a.id)!) });
+  });
+
+  // Grant / revoke the SiteAdmin role. Accounts listed in CRESSLET_SITE_ADMINS stay admins regardless.
+  app.put("/admin/accounts/role", async (c) => {
+    const who = requireSiteAdmin(c);
+    const { email, role } = await body<{ email?: string; role?: string | null }>(c);
+    if (role !== SITE_ADMIN && role !== null) throw new HttpError(400, `role must be "${SITE_ADMIN}" or null`);
+    const acct = email ? store.accountByEmail(email) : undefined;
+    if (!acct) throw new HttpError(404, "account not found", "not_found");
+    if (role === null && acct.id === c.get("account")?.id) throw new HttpError(400, "you can't remove your own role");
+    store.setRole(acct.id, role);
+    console.log(`cresslet: ${acct.email} role ${role ?? "(none)"} set by ${who}`);
+    return c.json({ account: { id: acct.id, email: acct.email, github: acct.github_login, role } });
+  });
+}

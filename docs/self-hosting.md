@@ -57,6 +57,8 @@ Other proxies (Traefik, Coolify) need each verified domain added to the proxy by
 | `CRESSLET_ANON_DEPLOYS` | true | allow deploys without an account (expiring apps) |
 | `CRESSLET_SECRETS_KEY` | random, in `<dataDir>/secrets.key` | key for app secrets at rest (any string). Set it to keep the key out of the data volume; existing secrets are re-encrypted on start. Changing it later needs the old `secrets.key` still present. Rolling back to a version without encryption isn't supported (it would hand apps ciphertext). Back up `secrets.key` with `cresslet.db` (without it the server won't start); on the same volume it doesn't protect a leaked volume or backup, the env key does |
 | `CRESSLET_ADMIN_TOKEN` | — | bearer token for `POST /v1/accounts` (pre-create accounts / issue tokens) |
+| `CRESSLET_SITE_ADMINS` | — | comma-separated emails / GitHub logins that always have the `SiteAdmin` role (studio Admin page: every site's disk and database usage, delete/restore/purge). Site admins can grant the role to others (`PUT /v1/admin/accounts/role`) |
+| `CRESSLET_DELETED_RETENTION_DAYS` | 30 | sites a site admin deleted stay restorable this long, then are purged with their data |
 | `CRESSLET_GITHUB_CLIENT_ID` / `_SECRET` | — | GitHub OAuth App: the only user login (studio + CLI). Unset = no login, anonymous deploys only |
 | `CRESSLET_GITHUB_URL` / `CRESSLET_GITHUB_API_URL` | github.com / api.github.com | GitHub Enterprise Server |
 | `CRESSLET_MAX_DEPLOY_MB` / `_FILES` / `CRESSLET_MAX_SERVER_MB` | 25 / 2000 / 5 | |

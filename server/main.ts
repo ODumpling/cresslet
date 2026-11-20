@@ -11,7 +11,7 @@ import { host, scheduled, upgrader } from "./host.ts";
 import { Scheduler } from "./cron.ts";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
-import { removeAppFiles } from "./deploys.ts";
+import { purgeApp } from "./admin.ts";
 import { settled as sandboxSettled } from "./sandbox.ts";
 
 const STUDIO = join(import.meta.dirname, "../studio");
@@ -47,11 +47,9 @@ export function createServer(cfg: Config = loadConfig()) {
   scheduler.start();
 
   const reap = setInterval(async () => {
-    for (const a of store.expiredApps()) {
-      runtime.stop(a.id);
-      store.deleteApp(a.id);
-      logs.drop(a.id);
-      await removeAppFiles(cfg, a.id);
+    // Expired anonymous apps, and sites a site admin deleted longer ago than the retention period.
+    for (const a of [...store.expiredApps(), ...store.deletedBefore(Date.now() - cfg.limits.deletedRetentionMs)]) {
+      await purgeApp(cfg, store, runtime, a);
     }
   }, 10 * 60_000);
 

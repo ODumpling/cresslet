@@ -6,7 +6,7 @@
     <title>Cresslet Studio</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/vendor/xterm.css" />
-    <link rel="stylesheet" href="/styles.css?v=2" />
+    <link rel="stylesheet" href="/styles.css?v=3" />
   </head>
   <body>
     <header class="topbar">
@@ -22,6 +22,7 @@
       <div class="spacer"></div>
       <a class="deploy-link" id="deploy-link" target="_blank" rel="noopener" hidden></a>
       <button class="btn primary" id="deploy-btn" hidden>Deploy</button>
+      <a class="btn ghost" id="admin-link" href="#/admin" hidden>Admin</a>
       <button class="btn ghost" id="account-btn">Log in</button>
     </header>
 
@@ -75,6 +76,17 @@
       </section>
     </main>
 
+    <main id="admin" class="home admin" hidden>
+      <section class="admin-head">
+        <div>
+          <h1 id="admin-title">Sites</h1>
+          <p class="muted" id="admin-sub">Every site on this server</p>
+        </div>
+        <div class="row start" id="admin-actions"></div>
+      </section>
+      <section id="admin-body"><p class="muted">Loading…</p></section>
+    </main>
+
     <main id="workspace" class="workspace" hidden>
       <aside class="files">
         <div class="pane-head">
@@ -113,6 +125,6 @@
 
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-    <script type="module" src="/app.js?v=2"></script>
+    <script type="module" src="/app.js?v=3"></script>
   </body>
 </html>

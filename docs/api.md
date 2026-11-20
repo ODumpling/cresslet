@@ -6,13 +6,15 @@ Auth (either):
 - `Authorization: Bearer clv_acct_…` — account token (GitHub login; shown in the studio under Settings).
 - `X-Cresslet-Deploy-Key: clv_app_…` (or `Authorization: Bearer clv_app_…`) — per-app key, returned once on app creation.
 
+Site admin = an account with the `SiteAdmin` role (or listed in `CRESSLET_SITE_ADMINS`), or the operator's `CRESSLET_ADMIN_TOKEN`. The studio shows them an **Admin** page (`/#/admin`).
+
 Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/v1` | server info, limits, app URL template, `auth: {github}` |
 | POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it) |
-| GET | `/v1/me` | `{account: {id, email, github}}` (`github` = login or null) |
+| GET | `/v1/me` | `{account: {id, email, github, role}}` (`github` = login or null; `role` = `"SiteAdmin"` or null) |
 | POST | `/v1/me/token` | revoke all of this account's tokens → `{account, token}` (new one) |
 | GET | `/v1/auth/github` | browser: GitHub web flow → redirects to `/#cresslet_login=<code>` (or `#cresslet_login_error=…`) |
 | POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` |
@@ -40,6 +42,11 @@ Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 | GET | `/v1/domains/check?domain=` | 200 if it's a verified custom domain, else 404. For on-demand TLS (the root and app subdomains use the wildcard cert) |
 | GET | `/v1/apps/:name/db?limit=100` | tables → `{schema, count, rows}` |
 | POST | `/v1/apps/:name/db/query` | `{sql, params?}` read-only → `{rows}` |
+| GET | `/v1/admin/sites` | **site admin**: every site (deleted too) → `{totals, retentionDays, sites: [{name, url, status: running\|idle\|empty\|deleted, owner, domains, currentDeploy, usage: {deploys, database, files, total} (bytes on disk), deletedAt, purgeAt, …}]}` |
+| GET | `/v1/admin/sites/:name` | **site admin**: `{site, deploys, domains, secrets (count), database: {tables: [{name, rows}]}, runtime}` |
+| DELETE | `/v1/admin/sites/:name` | **site admin**: soft delete. Offline at once (not served, no crons, 404 to its owner, name stays taken) and restorable until purged after `CRESSLET_DELETED_RETENTION_DAYS`. `?purge=1` deletes it and its data permanently now |
+| POST | `/v1/admin/sites/:name/restore` | **site admin**: undo a soft delete |
+| PUT | `/v1/admin/accounts/role` | **site admin**: `{email, role: "SiteAdmin" \| null}` grant/revoke (not your own) |
 
 ## POST /v1/deploys
 

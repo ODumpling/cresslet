@@ -5,8 +5,9 @@ import { auth, fromTree, ignored, migrateDeployKeys, projects, toTree } from "/s
 import { createCresslet } from "/cresslet-plugin.js";
 
 const $ = (id) => document.getElementById(id);
-const el = (tag, props = {}, ...children) => {
+const el = (tag, { dataset, ...props } = {}, ...children) => {
   const n = Object.assign(document.createElement(tag), props);
+  if (dataset) Object.assign(n.dataset, dataset);
   n.append(...children.filter((c) => c != null));
   return n;
 };
@@ -60,12 +61,14 @@ $("account-btn").addEventListener("click", async () => {
 function setAccount(r) {
   auth.token = r.token ?? auth.token;
   auth.email = r.account.github ?? r.account.email;
+  $("admin-link").hidden = r.account.role !== "SiteAdmin";
   renderAccount();
 }
 
 function logOut() {
   auth.token = null;
   auth.email = null;
+  $("admin-link").hidden = true;
   renderAccount();
 }
 
@@ -87,7 +90,7 @@ function logOut() {
 
 // ------------------------------------------------------------------ settings
 function showOnly(id) {
-  for (const m of ["home", "settings", "workspace"]) $(m).hidden = m !== id;
+  for (const m of ["home", "settings", "admin", "workspace"]) $(m).hidden = m !== id;
   $("project-title").hidden = true;
   $("deploy-btn").hidden = true;
   $("deploy-link").hidden = true;
@@ -147,6 +150,225 @@ $("logout-btn").addEventListener("click", () => {
   logOut();
   location.hash = "#/";
 });
+
+// ------------------------------------------------------------------ admin (site admins only)
+const fmtBytes = (n) => {
+  if (n < 1024) return `${n} B`;
+  const u = ["KB", "MB", "GB", "TB"];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)} ${u[i]}`;
+};
+const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+const ago = (iso) => {
+  if (!iso) return "—";
+  const s = (new Date(iso) - Date.now()) / 1000;
+  for (const [unit, sec] of [["year", 31536000], ["month", 2592000], ["day", 86400], ["hour", 3600], ["minute", 60]]) {
+    if (Math.abs(s) >= sec) return rtf.format(Math.round(s / sec), unit);
+  }
+  return rtf.format(Math.round(s), "second");
+};
+const STATUS = { running: "Running", idle: "Idle", empty: "Not deployed", deleted: "Deleted" };
+const statusPill = (s) => el("span", { className: "pill" }, el("i", { className: "dot", dataset: { s } }), STATUS[s] ?? s);
+const ownerText = (o) => (o ? o.github ?? o.email : "Anonymous");
+const stat = (label, value, sub, extra) =>
+  el("div", { className: "stat" },
+    el("div", { className: "label", textContent: label }),
+    el("div", { className: "value" }, extra, ...[].concat(value)),
+    el("div", { className: "sub", textContent: sub }));
+
+function usageBar(u) {
+  const parts = [["deploys", "Site"], ["database", "Database"], ["files", "Files"]];
+  const total = u.total || 1;
+  return el("div", {},
+    el("div", { className: "usage-bar", role: "img", ariaLabel: parts.map(([k, l]) => `${l} ${fmtBytes(u[k])}`).join(", ") },
+      ...parts.filter(([k]) => u[k] > 0).map(([k]) => {
+        const s = el("span", { className: `seg-${k}` });
+        s.style.flex = String(u[k] / total);
+        return s;
+      })),
+    el("div", { className: "legend" },
+      ...parts.map(([k, l]) => el("span", {}, el("i", { className: `seg-${k}` }), `${l} ${fmtBytes(u[k])}`))));
+}
+
+const adminView = { filter: "live", q: "", gen: 0 };
+
+async function adminAction(site, action) {
+  try {
+    if (action === "delete") {
+      if (!confirm(`Delete ${site.name}? It goes offline now and can be restored until it's purged.`)) return false;
+      await api(`/v1/admin/sites/${encodeURIComponent(site.name)}`, { method: "DELETE" });
+      toast(`${site.name} deleted`);
+    } else if (action === "restore") {
+      await api(`/v1/admin/sites/${encodeURIComponent(site.name)}/restore`, { method: "POST", body: "{}" });
+      toast(`${site.name} restored`);
+    } else if (action === "purge") {
+      const typed = prompt(`Permanently delete ${site.name}, its database and files? This can't be undone.\n\nType the site name to confirm:`);
+      if (typed === null) return false;
+      if (typed.trim() !== site.name) {
+        toast("Name didn't match. Nothing was deleted.");
+        return false;
+      }
+      await api(`/v1/admin/sites/${encodeURIComponent(site.name)}?purge=1`, { method: "DELETE" });
+      toast(`${site.name} permanently deleted`);
+    }
+    return true;
+  } catch (e) {
+    toast(`Could not ${action} ${site.name}: ${e.message}`);
+    return false;
+  }
+}
+
+function siteActions(site, after) {
+  const btn = (label, action, danger) =>
+    el("button", {
+      className: `btn${danger ? " danger" : ""}`,
+      textContent: label,
+      ariaLabel: `${label} ${site.name}`,
+      onclick: async (e) => {
+        e.currentTarget.disabled = true;
+        if (await adminAction(site, action)) after(action);
+        else e.currentTarget.disabled = false;
+      },
+    });
+  return site.status === "deleted"
+    ? [btn("Restore", "restore"), btn("Purge", "purge", true)]
+    : [btn("Delete", "delete", true)];
+}
+
+async function renderAdmin(name) {
+  if (!auth.token) {
+    location.hash = "#/";
+    return;
+  }
+  showOnly("admin");
+  adminView.gen++;
+  $("admin-actions").replaceChildren();
+  $("admin-body").replaceChildren(el("p", { className: "muted", textContent: "Loading…" }));
+  try {
+    if (name) await renderAdminSite(name);
+    else await renderAdminSites();
+  } catch (e) {
+    $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 403 ? "Only site admins can see this page." : `Could not load: ${e.message}` }));
+  }
+}
+
+async function renderAdminSites() {
+  document.title = "Sites · Admin · Cresslet Studio";
+  $("admin-title").replaceChildren("Sites");
+  $("admin-sub").textContent = "Every site on this server";
+  const gen = adminView.gen;
+  const { totals, sites, retentionDays } = await api("/v1/admin/sites");
+  if (gen !== adminView.gen) return; // navigated away meanwhile
+  $("admin-actions").replaceChildren(el("button", { className: "btn", textContent: "Refresh", onclick: () => renderAdmin() }));
+
+  const u = totals.usage;
+  const stats = el("div", { className: "stats" },
+    stat("Sites", [String(totals.live)], `${totals.anonymous} anonymous · ${totals.deleted} deleted`),
+    stat("Running", [String(totals.running), el("small", { textContent: `of ${totals.live}` })], "Idle sites stop after a few minutes"),
+    stat("Disk used", [fmtBytes(u.total)], `Site ${fmtBytes(u.deploys)} · files ${fmtBytes(u.files)}`),
+    stat("Databases", [fmtBytes(u.database)], `Across ${sites.filter((s) => s.usage.database > 0).length} sites`));
+  const storage = el("div", { className: "panel" }, el("h2", { textContent: "Storage" }), usageBar(u));
+
+  const tbody = el("tbody");
+  const counts = { live: totals.live, deleted: totals.deleted, all: totals.sites };
+  const seg = el("div", { className: "seg", role: "group", ariaLabel: "Show" },
+    ...[["live", "Live"], ["deleted", "Deleted"], ["all", "All"]].map(([k, l]) =>
+      el("button", { textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminView.filter = k; draw(); } })));
+  const search = el("input", { type: "search", placeholder: "Search sites, owners, domains", ariaLabel: "Search sites", value: adminView.q, oninput: () => { adminView.q = search.value; draw(); } });
+
+  function draw() {
+    for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === adminView.filter));
+    const q = adminView.q.trim().toLowerCase();
+    const rows = sites.filter((s) =>
+      (adminView.filter === "all" || (adminView.filter === "deleted") === (s.status === "deleted")) &&
+      (!q || [s.name, s.owner?.email, s.owner?.github, ...s.domains].some((v) => v?.toLowerCase().includes(q))));
+    tbody.replaceChildren(...(rows.length ? rows.map((s) =>
+      el("tr", { dataset: s.status === "deleted" ? { deleted: "" } : {} },
+        el("td", {},
+          el("a", { href: `#/admin/${encodeURIComponent(s.name)}`, textContent: s.name }),
+          el("span", { className: "muted small", textContent: s.domains[0] ?? s.url.replace(/^https?:\/\//, "") })),
+        el("td", { textContent: ownerText(s.owner), className: s.owner ? "" : "muted" }),
+        el("td", {}, statusPill(s.status),
+          s.status === "deleted" ? el("span", { className: "muted small", textContent: `purged ${ago(s.purgeAt)}` }) : null),
+        el("td", { className: "num", textContent: fmtBytes(s.usage.deploys + s.usage.files) }),
+        el("td", { className: "num", textContent: s.usage.database ? fmtBytes(s.usage.database) : "—" }),
+        el("td", { textContent: ago(s.updatedAt), title: new Date(s.updatedAt).toLocaleString() }),
+        el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin()))))
+      : [el("tr", {}, el("td", { colSpan: 7, className: "empty", textContent: q ? "No sites match." : "No sites here." }))]));
+  }
+  draw();
+
+  $("admin-body").replaceChildren(stats, storage,
+    el("div", { className: "toolbar" }, search, seg),
+    el("div", { className: "table-wrap" },
+      el("table", { className: "table" },
+        el("thead", {}, el("tr", {}, ...["Site", "Owner", "Status", "Site size", "Database", "Updated", ""].map((h, i) =>
+          el("th", { textContent: h, className: i === 3 || i === 4 ? "num" : "" })))),
+        tbody)),
+    el("p", { className: "muted small", textContent: `Deleted sites go offline and can be restored for ${retentionDays} days, then they're purged with their data.` }));
+}
+
+async function renderAdminSite(name) {
+  document.title = `${name} · Admin · Cresslet Studio`;
+  $("admin-title").replaceChildren(el("a", { href: "#/admin", textContent: "Sites" }), " / ", name);
+  const gen = adminView.gen;
+  const d = await api(`/v1/admin/sites/${encodeURIComponent(name)}`);
+  if (gen !== adminView.gen) return;
+  const s = d.site;
+  $("admin-sub").textContent = s.owner ? `Owned by ${ownerText(s.owner)}` : "Anonymous site";
+  const visit = el("a", { className: "btn", href: s.url, target: "_blank", rel: "noopener", textContent: "Visit ↗" });
+  visit.hidden = s.status === "deleted";
+  $("admin-actions").replaceChildren(visit,
+    ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name))));
+
+  const dep = s.currentDeploy;
+  const banner = s.status === "deleted"
+    ? el("div", { className: "banner deleted" }, el("strong", { textContent: "Deleted" }),
+      `${ago(s.deletedAt)}. Offline and hidden from its owner; purged with its data ${ago(s.purgeAt)} unless restored.`)
+    : dep
+    ? el("div", { className: "banner" }, el("strong", { textContent: "Live" }),
+      el("span", { className: "mono", textContent: dep.id }), ` deployed ${ago(dep.createdAt)} via ${dep.source}`)
+    : el("div", { className: "banner" }, "Nothing deployed yet.");
+
+  const rt = d.runtime;
+  const stats = el("div", { className: "stats" },
+    stat("Status", [STATUS[s.status]], rt.running ? `pid ${rt.pid}` : s.server ? "Starts on the next request" : "Static site", el("i", { className: "dot", dataset: { s: s.status } })),
+    stat("Site size", [fmtBytes(s.usage.deploys)], `${d.deploys.length} deploy${d.deploys.length === 1 ? "" : "s"} kept${dep ? ` · current ${fmtBytes(dep.bytes)}` : ""}`),
+    stat("Database", [s.usage.database ? fmtBytes(s.usage.database) : "—"], d.database.error ? "Couldn't read" : !d.database.tables.length ? "No database yet" : `${d.database.tables.length} tables · ${d.database.tables.reduce((n, t) => n + t.rows, 0).toLocaleString()} rows`),
+    stat("Files", [fmtBytes(s.usage.files)], `${fmtBytes(s.usage.total)} total on disk`));
+
+  const kv = (pairs) => el("dl", { className: "kv" }, ...pairs.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
+  const link = (href, text) => el("a", { href, target: "_blank", rel: "noopener", textContent: text });
+  const info = el("div", { className: "panel" }, el("h2", { textContent: "Overview" }), kv([
+    ["URL", s.status === "deleted" ? s.url : link(s.url, s.url.replace(/^https?:\/\//, ""))],
+    ["Domains", d.domains.length ? el("span", {}, ...d.domains.flatMap((x, i) => [i ? ", " : null, x.verified ? link(`https://${x.domain}`, x.domain) : `${x.domain} (unverified)`])) : "—"],
+    ["Owner", s.owner ? `${s.owner.email}${s.owner.github ? ` (@${s.owner.github})` : ""}` : `Anonymous${s.expiresAt ? `, expires ${ago(s.expiresAt)}` : ""}`],
+    ["Server", s.server ? `Yes${s.crons ? ` · ${s.crons} cron${s.crons > 1 ? "s" : ""}` : ""}` : "Static only"],
+    ["Secrets", String(d.secrets)],
+    ["Created", new Date(s.createdAt).toLocaleString()],
+    ["App ID", el("span", { className: "mono", textContent: s.id })],
+  ]), el("h2", { textContent: "Storage", style: "margin-top:20px" }), usageBar(s.usage));
+
+  const tableOf = (heads, rows, empty) =>
+    rows.length
+      ? el("div", { className: "scroll-x" }, el("table", { className: "table" },
+        el("thead", {}, el("tr", {}, ...heads.map((h, i) => el("th", { textContent: h, className: i ? "num" : "" })))),
+        el("tbody", {}, ...rows.map((r) => el("tr", {}, ...r.map((c, i) => el("td", { className: i ? "num" : "" }, c)))))))
+      : el("p", { className: "muted small", textContent: empty });
+  const db = el("div", { className: "panel" }, el("h2", { textContent: "Database tables" }),
+    d.database.error ? el("p", { className: "error small", textContent: d.database.error })
+      : tableOf(["Table", "Rows"], d.database.tables.map((t) => [el("span", { className: "mono", textContent: t.name }), t.rows.toLocaleString()]), "No database yet."));
+  const deploys = el("div", { className: "panel" }, el("h2", { textContent: "Deploys" }),
+    tableOf(["Deploy", "Size", "When"], d.deploys.map((x) => [
+      el("span", {}, el("span", { className: "mono", textContent: x.id }), x.current ? el("span", { className: "muted small", textContent: "live" }) : null),
+      fmtBytes(x.bytes),
+      ago(x.createdAt),
+    ]), "No deploys."));
+
+  $("admin-body").replaceChildren(banner, stats,
+    el("div", { className: "detail-grid" }, info, el("div", { className: "stack" }, db, deploys)));
+}
 
 // ------------------------------------------------------------------ home
 async function renderHome() {
@@ -529,8 +751,11 @@ function route() {
   if (m) openProject(m[1]);
   else if (booted) location.reload();
   else if (location.hash === "#/settings") renderSettings();
+  else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();
 }
 addEventListener("hashchange", route);
 renderAccount();
+// Role can change server-side: refresh it (shows the Admin link to site admins).
+if (auth.token) api("/v1/me").then(setAccount, () => {});
 route();
