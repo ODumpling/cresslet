@@ -12,7 +12,9 @@
 services:
   cresslet:
     build:
-      context: ../..
+      # Coolify runs compose with --project-directory set to the repo root, so this is the repo root
+      # (by hand: docker compose --project-directory . -f deploy/coolify/compose.yaml …).
+      context: .
     runtime: runsc
     user: root
     restart: unless-stopped
