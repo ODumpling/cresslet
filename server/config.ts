@@ -46,6 +46,11 @@ export interface Config {
     pidsMax: number;
     /** gVisor's `runsc` binary: run each sandbox under gVisor (null = off; unset in overrides = from env). */
     runsc?: string | null;
+    /**
+     * The operator's word that the whole server already runs under gVisor (e.g. Docker
+     * `--runtime=runsc`, as deploy/coolify does). Only silences the startup warning; changes nothing else.
+     */
+    outerGvisor?: boolean;
   };
   limits: {
     deployBytes: number;
@@ -107,6 +112,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       cpuPercent: num("CRESSLET_APP_CPU_PERCENT", 100),
       pidsMax: num("CRESSLET_APP_PIDS", 256),
       runsc: process.env.CRESSLET_RUNSC || null,
+      outerGvisor: env("CRESSLET_OUTER_GVISOR", "false") === "true",
     },
     limits: {
       deployBytes: num("CRESSLET_MAX_DEPLOY_MB", 25) * 1024 * 1024,
@@ -185,3 +191,24 @@ export const paths = (cfg: Config, appId: string) => {
     files: join(app, "data", "files"),
   };
 };
+
+/**
+ * Startup warnings for an instance where strangers can deploy code (open signup or anonymous
+ * deploys) without the isolation that needs: gVisor (per sandbox or around the whole server), and
+ * one uid per app unless each sandbox has its own gVisor.
+ */
+export function isolationWarnings(cfg: Config): string[] {
+  if (!(cfg.anonDeploys || (cfg.openSignup && cfg.github))) return [];
+  const { runsc, outerGvisor, uidBase } = cfg.sandbox;
+  const out: string[] = [];
+  if (!runsc && !outerGvisor) {
+    out.push("cresslet: strangers can deploy code here (open signup or anonymous deploys) but nothing runs under gVisor; " +
+      "workerd alone isn't a hardened multi-tenant boundary. Set CRESSLET_RUNSC, or run the server under gVisor " +
+      "(docker --runtime=runsc) and set CRESSLET_OUTER_GVISOR=true (docs/self-hosting.md#docker-and-isolation)");
+  }
+  if (uidBase === null && !runsc) {
+    out.push("cresslet: strangers can deploy code here (open signup or anonymous deploys) but sandboxes share one uid: " +
+      "set CRESSLET_SANDBOX_UID_BASE and/or CRESSLET_RUNSC (docs/self-hosting.md#docker-and-isolation)");
+  }
+  return out;
+}

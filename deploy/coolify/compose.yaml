@@ -38,6 +38,8 @@ services:
       # Behind Cloudflare: cf-connecting-ip, so per-IP limits see clients, not Traefik.
       CRESSLET_CLIENT_IP_HEADER: ${CRESSLET_CLIENT_IP_HEADER:-}
       CRESSLET_SANDBOX_UID_BASE: 100000
+      # `runtime: runsc` above: tells the server so it doesn't warn that nothing runs under gVisor.
+      CRESSLET_OUTER_GVISOR: "true"
       CRESSLET_SOCK_DIR: /run/cresslet
     tmpfs:
       - /run:size=64m,mode=755
