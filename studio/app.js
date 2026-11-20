@@ -61,8 +61,8 @@ function closeToast() {
   t.addEventListener("pointerleave", armToast);
   t.addEventListener("focusin", () => clearTimeout(toast.timer));
   t.addEventListener("focusout", () => setTimeout(armToast));
-  t.addEventListener("keydown", (e) => e.key === "Escape" && closeToast());
   $("toast-close").addEventListener("click", closeToast);
+  addEventListener("keydown", (e) => e.key === "Escape" && t.dataset.open === "true" && closeToast());
 }
 
 function setStatus(text, state = "busy") {
@@ -71,13 +71,14 @@ function setStatus(text, state = "busy") {
 }
 
 /** Moves focus to the visible view's heading (after navigation, so screen readers hear where they are). */
-function focusView() {
+function focusView({ scroll = false } = {}) {
   const h = document.querySelector("main:not([hidden]) h1");
   h?.focus({ preventScroll: true });
+  if (scroll) h?.scrollIntoView({ block: "nearest" });
 }
 $("skip-link").addEventListener("click", (e) => {
   e.preventDefault(); // its #content href would be read as a route
-  focusView();
+  focusView({ scroll: true });
 });
 
 async function api(path, init = {}) {
@@ -245,7 +246,8 @@ async function revokeToken(t) {
     return;
   }
   toast(`Revoked ${t.name}`);
-  renderTokens();
+  await renderTokens();
+  $("tokens-title").focus(); // the Revoke button is gone with its row
 }
 
 for (const r of document.querySelectorAll('input[name="token-scope"]')) {
@@ -269,7 +271,8 @@ $("token-form").addEventListener("submit", async (e) => {
     $("token-new-name").textContent = r.info.name;
     $("token-new-value").value = r.token;
     $("token-new").hidden = false;
-    $("token-new").focus();
+    $("token-new-value").focus();
+    $("token-new-value").select();
     $("token-form").reset();
     $("token-apps").hidden = true;
     renderTokens();
@@ -371,9 +374,10 @@ function siteActions(site, after) {
       textContent: label,
       ariaLabel: `${label} ${site.name}`,
       onclick: async (e) => {
-        e.currentTarget.disabled = true;
+        const b = e.currentTarget; // null after the await
+        b.disabled = true;
         if (await adminAction(site, action)) after(action);
-        else e.currentTarget.disabled = false;
+        else b.disabled = false;
       },
     });
   return site.status === "deleted"
@@ -386,6 +390,7 @@ async function renderAdmin(name) {
     location.hash = "#/";
     return;
   }
+  $("admin-title").replaceChildren(name || "Sites"); // before showOnly() focuses it
   showOnly("admin");
   adminView.gen++;
   $("admin-actions").replaceChildren();
@@ -405,7 +410,11 @@ async function renderAdminSites() {
   const gen = adminView.gen;
   const { totals, sites, retentionDays } = await api("/v1/admin/sites");
   if (gen !== adminView.gen) return; // navigated away meanwhile
-  $("admin-actions").replaceChildren(el("button", { className: "btn", type: "button", onclick: () => renderAdmin() }, icon("refresh"), "Refresh"));
+  $("admin-actions").replaceChildren(el("button", {
+    className: "btn",
+    type: "button",
+    onclick: () => renderAdmin().then(() => $("admin-actions").querySelector("button")?.focus()), // it's rebuilt
+  }, icon("refresh"), "Refresh"));
 
   const u = totals.usage;
   const stats = el("div", { className: "stats" },
@@ -441,7 +450,7 @@ async function renderAdminSites() {
         el("td", { className: "num", textContent: fmtBytes(s.usage.deploys + s.usage.files) }),
         el("td", { className: "num", textContent: s.usage.database ? fmtBytes(s.usage.database) : "—" }),
         el("td", {}, el("time", { dateTime: s.updatedAt, title: new Date(s.updatedAt).toLocaleString(), textContent: ago(s.updatedAt) })),
-        el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin()))))
+        el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin().then(() => focusView())))))
       : [el("tr", {}, el("td", { colSpan: 7, className: "empty", textContent: q ? "No sites match." : "No sites here." }))]));
   }
   draw();
@@ -468,7 +477,7 @@ async function renderAdminSite(name) {
   const visit = extLink(s.url, "Visit", "btn");
   visit.hidden = s.status === "deleted";
   $("admin-actions").replaceChildren(visit,
-    ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name))));
+    ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name).then(() => focusView()))));
 
   const dep = s.currentDeploy;
   const banner = s.status === "deleted"
@@ -528,8 +537,18 @@ function dataTable(labelledBy, heads, rows) {
     el("thead", {}, el("tr", {}, ...heads.map(([h, cls, hide]) => el("th", { scope: "col", className: cls ?? "" }, hide ? srOnly(h) : h)))),
     el("tbody", {}, ...rows));
   t.setAttribute("aria-labelledby", labelledBy);
-  return el("div", { className: "table-wrap" }, t);
+  // Focusable, so a keyboard can scroll it when it's wider than the page.
+  return el("div", { className: "table-wrap", tabIndex: 0, role: "region", ariaLabel: `${$(labelledBy).textContent} table` }, t);
 }
+
+/** Its name is all its visible text (WCAG 2.5.3), with a pause between the template and its description. */
+const templateCard = (t) =>
+  el("button", { className: "card", type: "button", onclick: () => createProject(t.name) },
+    el("span", { className: "card-icon" }, icon(TEMPLATE_ICONS[t.name] ?? "code")),
+    el("strong", { textContent: t.name }),
+    srOnly(": "),
+    el("span", { className: "desc", textContent: t.description ?? "" }),
+    icon("arrow", "icon go"));
 
 async function renderHome() {
   showOnly("home");
@@ -537,12 +556,7 @@ async function renderHome() {
 
   api("/v1/templates").then(({ templates }) => {
     $("templates").replaceChildren(...templates.map((t) =>
-      el("button", { className: "card", type: "button", onclick: () => createProject(t.name) },
-        el("span", { className: "card-icon" }, icon(TEMPLATE_ICONS[t.name] ?? "code")),
-        el("strong", { textContent: t.name }),
-        el("span", { className: "desc", textContent: t.description ?? "" }),
-        icon("arrow", "icon go"))
-    ));
+      templateCard(t)));
   }).catch((e) => $("templates").replaceChildren(el("p", { className: "error", textContent: `Could not load templates: ${e.message}` })));
 
   const list = await projects.list().catch(() => []);
@@ -632,8 +646,9 @@ async function createProject(template) {
 // ------------------------------------------------------------------ workspace
 let booted = false;
 
-async function openProject(id) {
+async function openProject(id, gen) {
   const project = await projects.get(id);
+  if (gen !== routeGen) return; // navigated elsewhere while it loaded
   if (!project) {
     location.hash = "#/";
     return;
@@ -644,8 +659,8 @@ async function openProject(id) {
     return;
   }
   booted = true;
-  showOnly("workspace");
   $("workspace-title").textContent = `${project.name}: editor and preview`;
+  showOnly("workspace");
   $("project-title").hidden = false;
   $("deploy-btn").hidden = false;
   $("deploy-btn").disabled = project.trusted === false; // locked from the start (gate() below takes over)
@@ -663,9 +678,23 @@ async function openProject(id) {
 
   // Colors follow the light/dark preference; CSS tokens are the source of truth.
   const scheme = matchMedia("(prefers-color-scheme: dark)");
+  // ANSI colors too: xterm's defaults are made for black and fail AA on these surfaces (≥ 4.5:1 here).
+  const ANSI = {
+    dark: {
+      black: "#a1a1aa", red: "#ff7a7a", green: "#4ade94", yellow: "#f5b84a", blue: "#7aa2ff", magenta: "#d0a4ff", cyan: "#5ee0e6", white: "#ededf0",
+      brightBlack: "#8e8e98", brightRed: "#ff9b9b", brightGreen: "#7beab0", brightYellow: "#f8cb78", brightBlue: "#a3bfff", brightMagenta: "#e0c2ff", brightCyan: "#8debef", brightWhite: "#ffffff",
+    },
+    light: {
+      black: "#18181b", red: "#c42b2b", green: "#0f7a52", yellow: "#8f5a00", blue: "#1d4ed8", magenta: "#9333ea", cyan: "#0e7490", white: "#55555f",
+      brightBlack: "#63636e", brightRed: "#a61f1f", brightGreen: "#0b6343", brightYellow: "#754a00", brightBlue: "#1e40af", brightMagenta: "#7e22ce", brightCyan: "#155e75", brightWhite: "#18181b",
+    },
+  };
   const termTheme = () => {
     const v = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-    return { background: v("--surface"), foreground: v("--text"), cursor: v("--accent-text"), cursorAccent: v("--surface"), selectionBackground: v("--accent-soft") };
+    return {
+      ...ANSI[scheme.matches ? "dark" : "light"],
+      background: v("--surface"), foreground: v("--text"), cursor: v("--accent-text"), cursorAccent: v("--surface"), selectionBackground: v("--accent-soft"),
+    };
   };
 
   // terminal
@@ -680,6 +709,17 @@ async function openProject(id) {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open($("terminal"));
+  // xterm sends Tab to the shell; Esc then Tab (or Shift+Tab) moves focus out instead, like the editor.
+  let escaped = false;
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== "keydown") return true;
+    if (e.key === "Tab" && escaped) {
+      escaped = false;
+      return false; // xterm ignores it: the browser moves focus
+    }
+    escaped = e.key === "Escape";
+    return true;
+  });
   fit.fit();
   new ResizeObserver(() => fit.fit()).observe($("terminal"));
 
@@ -764,7 +804,7 @@ async function openProject(id) {
         basicSetup,
         keymap.of([indentWithTab]),
         theme.of(scheme.matches ? oneDark : []),
-        EditorView.contentAttributes.of({ "aria-label": "Code" }),
+        EditorView.contentAttributes.of({ "aria-label": "Code", "aria-describedby": "editor-help" }),
         lang.of([]),
         EditorView.updateListener.of((u) => {
           if (!u.docChanged || suppress || !current) return;
@@ -891,7 +931,7 @@ async function openProject(id) {
   });
   const start = () => {
     setStatus("Installing");
-    $("preview-msg").textContent = "Installing dependencies…";
+    $("preview-msg").replaceChildren("Installing dependencies…");
     input.write("npm install && cresslet dev\r");
   };
   // Opened from a deployed app's source: its code (and npm deps, and a deploy's build: PostCSS/Tailwind plugins)
@@ -908,10 +948,10 @@ async function openProject(id) {
     const btn = el("button", { className: "btn primary", type: "button", textContent: "Run it", onclick: async () => {
       project.trusted = true;
       await projects.put(project);
-      btn.remove();
       gate(false);
       $("preview-spinner").hidden = false;
-      start();
+      start(); // replaces the message, button included: keep focus on the message
+      $("preview-msg").focus();
     } });
     $("preview-msg").replaceChildren(
       "This project was opened from a deployed app's source. Review it, then ",
@@ -928,6 +968,7 @@ async function openProject(id) {
     const log = $("deploy-log");
     log.textContent = "";
     selectTab("deploy-log");
+    if (document.activeElement === btn) log.focus(); // the disabled button would drop focus to <body>
     try {
       const r = await cresslet.deploy((line) => (log.textContent += line + "\n"));
       toast(el("span", {}, "Deployed: ", extLink(r.app.url, r.app.url)), 10000);
@@ -973,9 +1014,11 @@ for (const t of tabs) {
 }
 
 // ------------------------------------------------------------------ routing
+let routeGen = 0;
 function route() {
+  const gen = ++routeGen;
   const m = location.hash.match(/^#\/p\/([\w-]+)/);
-  if (m) openProject(m[1]);
+  if (m) openProject(m[1], gen);
   else if (booted) location.reload();
   else if (location.hash === "#/settings") renderSettings();
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));

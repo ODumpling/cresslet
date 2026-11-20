@@ -148,11 +148,11 @@
           </section>
           <section class="block" aria-labelledby="tokens-title">
             <div class="block-head">
-              <h2 id="tokens-title">API tokens</h2>
+              <h2 id="tokens-title" tabindex="-1">API tokens</h2>
               <p class="muted small">Give each tool its own token with only the access it needs, so you can revoke it alone.</p>
             </div>
             <ul class="list" id="tokens" aria-labelledby="tokens-title"></ul>
-            <div id="token-new" class="panel callout token-new" hidden tabindex="-1" aria-labelledby="token-new-heading">
+            <div id="token-new" class="panel callout token-new" hidden role="region" aria-labelledby="token-new-heading">
               <p id="token-new-heading"><strong id="token-new-name"></strong>: copy it now, you won't see it again.</p>
               <div class="token-row">
                 <input id="token-new-value" class="input mono" readonly aria-label="New API token" spellcheck="false" />
@@ -219,6 +219,7 @@
               <h2 class="sr-only" id="editor-title">Code editor</h2>
               <svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>
               <span id="open-file" class="mono crumb">No file open</span>
+              <span class="kbd-hint" id="editor-help">Tab indents. Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the editor.</span>
             </div>
             <div id="editor" class="editor"></div>
           </section>
@@ -240,7 +241,7 @@
               <div class="preview-empty" id="preview-empty">
                 <div class="preview-empty-inner">
                   <span class="spinner" id="preview-spinner" aria-hidden="true"></span>
-                  <p id="preview-msg">Booting runtime…</p>
+                  <p id="preview-msg" tabindex="-1">Booting runtime…</p>
                 </div>
               </div>
             </div>
@@ -251,10 +252,11 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-terminal" /></svg>Terminal
               </button>
               <button role="tab" class="tab" id="tab-deploy-log" type="button" aria-selected="false" aria-controls="deploy-log" data-tab="deploy-log" tabindex="-1">
-                <svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Deploy
+                <svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Deploy log
               </button>
+              <span class="kbd-hint" id="terminal-help">Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the terminal.</span>
             </div>
-            <div id="terminal" class="terminal" data-panel="terminal" role="tabpanel" aria-labelledby="tab-terminal"></div>
+            <div id="terminal" class="terminal" data-panel="terminal" role="tabpanel" aria-labelledby="tab-terminal" aria-describedby="terminal-help"></div>
             <pre id="deploy-log" class="deploy-log mono" data-panel="deploy-log" role="tabpanel" aria-labelledby="tab-deploy-log" tabindex="0" hidden></pre>
           </section>
         </main>
