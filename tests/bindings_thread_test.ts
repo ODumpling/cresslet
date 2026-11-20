@@ -53,16 +53,13 @@ test("bindings thread: serves db and files, exits on close, the app's next threa
 test("bindings thread: a failed start rejects (socket path taken)", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cresslet-bthread-"));
   const run = await mkdtemp("/tmp/cbt-");
+  const open: { close(): void }[] = [];
   try {
-    const a = await serveBindings(dir, join(run, "h.sock"), {});
-    try {
-      await assert.rejects(serveBindings(dir, join(run, "h.sock"), {}), /EADDRINUSE/);
-      await filesSettled(join(dir, "files")); // the failed thread exited too
-    } finally {
-      a.close();
-    }
-    await bindingsSettled();
+    open.push(await serveBindings(dir, join(run, "h.sock"), {}));
+    await assert.rejects(serveBindings(dir, join(run, "h.sock"), {}).then((b) => open.push(b)), /EADDRINUSE/);
   } finally {
+    for (const o of open) o.close();
+    await bindingsSettled(); // the failed thread exited too
     await rm(run, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
   }

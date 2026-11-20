@@ -231,10 +231,15 @@ const THREAD = new URL("./bindings-thread.ts", import.meta.url);
  */
 let spare: Worker | undefined;
 function bootSpare() {
-  const w = spare = new Worker(THREAD);
-  w.unref();
-  w.on("error", () => {}); // a dead spare is dropped below, and the next start boots its own
-  w.once("exit", () => spare === w && (spare = undefined));
+  if (spare) return; // overlapping cold starts: one spare is enough
+  try {
+    const w = spare = new Worker(THREAD);
+    w.unref();
+    w.on("error", () => {}); // a dead spare is dropped below, and the next start boots its own
+    w.once("exit", () => spare === w && (spare = undefined));
+  } catch {
+    // Best effort: the next start boots its own.
+  }
 }
 
 /**

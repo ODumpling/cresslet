@@ -486,7 +486,10 @@ export class Runtime {
 
   /** stop(), after a start in flight for the app is done (it would serve, and recreate files of, a purged app). */
   async stopSettled(appId: string) {
-    await this.#starting.get(appId)?.p.catch(() => {});
+    for (let s; (s = this.#starting.get(appId));) {
+      await s.p.catch(() => {});
+      await new Promise((r) => setImmediate(r)); // requests waiting on it may retry (another deploy or policy)
+    }
     this.stop(appId);
   }
 
