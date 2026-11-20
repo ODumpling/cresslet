@@ -1,0 +1,67 @@
+# Cresslet on Coolify (Docker Compose build pack, compose location /deploy/coolify/compose.yaml),
+# hardened for a host shared with other apps. See docs/self-hosting.md#coolify.
+#
+# - The whole container runs under gVisor (`runtime: runsc`; the host needs `runsc install`), so code
+#   that escapes workerd lands in gVisor's user-space kernel, not the host's.
+# - Each app sandbox runs as its own uid (CRESSLET_SANDBOX_UID_BASE). That needs root in the
+#   container; under gVisor that root is the sandbox's, not the host's.
+# - Coolify gives a compose app its own network (Traefik joins it), so the container isn't on the
+#   shared `coolify` network. deploy/coolify/firewall.sh keeps that network off the host and
+#   private ranges.
+# - CPU, memory and pids caps so app traffic can't starve the other apps on the host.
+services:
+  cresslet:
+    build:
+      # Coolify runs compose with --project-directory set to the repo root, so this is the repo root
+      # (by hand: docker compose --project-directory . -f deploy/coolify/compose.yaml …).
+      context: .
+    runtime: runsc
+    user: root
+    restart: unless-stopped
+    # On a user-defined network Docker points resolv.conf at its embedded DNS (127.0.0.11), which
+    # gVisor's network stack can't reach (gvisor.dev/docs/user_guide/faq), so use public resolvers.
+    entrypoint:
+      - sh
+      - -c
+      - printf 'nameserver %s\n' ${CRESSLET_RESOLVERS:-1.1.1.1 9.9.9.9} > /etc/resolv.conf && exec node server/main.ts
+    environment:
+      CRESSLET_DOMAIN: ${CRESSLET_DOMAIN:?set CRESSLET_DOMAIN}
+      CRESSLET_SCHEME: ${CRESSLET_SCHEME:-https}
+      CRESSLET_PUBLIC_PORT: ${CRESSLET_PUBLIC_PORT:-443}
+      # Safer defaults than the server's for a public host: no signup or anonymous deploys unless set.
+      CRESSLET_OPEN_SIGNUP: ${CRESSLET_OPEN_SIGNUP:-false}
+      CRESSLET_ANON_DEPLOYS: ${CRESSLET_ANON_DEPLOYS:-false}
+      CRESSLET_ADMIN_TOKEN: ${CRESSLET_ADMIN_TOKEN:-}
+      CRESSLET_SITE_ADMINS: ${CRESSLET_SITE_ADMINS:-}
+      CRESSLET_GITHUB_CLIENT_ID: ${CRESSLET_GITHUB_CLIENT_ID:-}
+      CRESSLET_GITHUB_CLIENT_SECRET: ${CRESSLET_GITHUB_CLIENT_SECRET:-}
+      CRESSLET_SANDBOX_UID_BASE: 100000
+      CRESSLET_SOCK_DIR: /run/cresslet
+    tmpfs:
+      - /run:size=64m,mode=755
+    volumes:
+      - data:/data
+    mem_limit: ${CRESSLET_CONTAINER_MEMORY:-3g}
+    cpus: ${CRESSLET_CONTAINER_CPUS:-2}
+    pids_limit: 4096
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      # The studio, every <app>.<domain> and the preview host. Coolify doesn't interpolate variables
+      # in labels (it escapes `$`), so the domain is written out: change `cresslet.dev` (4 places).
+      - traefik.enable=true
+      - traefik.http.middlewares.cresslet-https-redirect.redirectscheme.scheme=https
+      - traefik.http.routers.cresslet-http.entryPoints=http
+      - traefik.http.routers.cresslet-http.middlewares=cresslet-https-redirect
+      - traefik.http.routers.cresslet-http.rule=Host(`cresslet.dev`) || HostRegexp(`^[a-z0-9-]+\.cresslet\.dev$`)
+      - traefik.http.routers.cresslet-http.service=cresslet
+      - traefik.http.routers.cresslet-https.entryPoints=https
+      - traefik.http.routers.cresslet-https.rule=Host(`cresslet.dev`) || HostRegexp(`^[a-z0-9-]+\.cresslet\.dev$`)
+      - traefik.http.routers.cresslet-https.service=cresslet
+      - traefik.http.routers.cresslet-https.tls=true
+      - traefik.http.services.cresslet.loadbalancer.server.port=8787
+
+volumes:
+  # Coolify names it <app uuid>_data (a `name:` here is ignored). Moving from a Dockerfile deploy:
+  # copy the old volume into it first (docs/self-hosting.md#coolify).
+  data:
