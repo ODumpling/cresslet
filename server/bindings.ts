@@ -15,21 +15,29 @@ const num = (v: number | bigint) => (typeof v === "bigint" ? Number(v) : v);
  * temp-dir pragmas, no fts3_tokenizer (native pointers). Plain VACUUM attaches an unnamed temp db: ok.
  */
 const DENIED_PRAGMAS = new Set(["temp_store_directory", "data_store_directory"]);
+/** Settable only by the host: they size the database's quota (max_page_count × page_size). */
+const SIZE_PRAGMAS = new Set(["max_page_count", "page_size"]);
 export function confine(db: DatabaseSync) {
   db.enableDefensive(true); // no writable_schema tricks on its own file either
   db.setAuthorizer((action, arg1, arg2) => {
     const { SQLITE_ATTACH, SQLITE_PRAGMA, SQLITE_FUNCTION, SQLITE_DENY, SQLITE_OK } = constants;
     if (action === SQLITE_ATTACH) return arg1 === "" ? SQLITE_OK : SQLITE_DENY;
     if (action === SQLITE_PRAGMA && DENIED_PRAGMAS.has(String(arg1).toLowerCase())) return SQLITE_DENY;
+    if (action === SQLITE_PRAGMA && arg2 !== null && SIZE_PRAGMAS.has(String(arg1).toLowerCase())) return SQLITE_DENY;
     if (action === SQLITE_FUNCTION && String(arg2).toLowerCase() === "fts3_tokenizer") return SQLITE_DENY;
     return SQLITE_OK;
   });
   return db;
 }
 
-export function createDb(path: string) {
+/** `maxBytes`: size cap (writes past it fail with SQLITE_FULL, "database or disk is full"). */
+export function createDb(path: string, maxBytes?: number) {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+  if (maxBytes) {
+    const { page_size } = db.prepare("PRAGMA page_size").get() as { page_size: number };
+    db.exec(`PRAGMA max_page_count = ${Math.max(1, Math.floor(maxBytes / page_size))}`);
+  }
   confine(db);
   return {
     query(sql: string, ...params: SQLInputValue[]) {
@@ -95,6 +103,10 @@ export function createFiles(dir: string) {
       meta.prepare("DELETE FROM files WHERE key = ?").run(k);
       await rm(blob(k), { force: true });
     },
+    /** Bytes stored, not counting `except` (a key about to be replaced). */
+    usage(except = "") {
+      return (meta.prepare("SELECT coalesce(sum(size), 0) n FROM files WHERE key != ?").get(except ? safeKey(except) : "") as { n: number }).n;
+    },
     list(prefix = "") {
       const rows = meta.prepare(
         "SELECT key, size, content_type, updated_at FROM files WHERE key LIKE ? ESCAPE '\\' ORDER BY key LIMIT 1000",
@@ -134,9 +146,16 @@ const replacer = (_k: string, v: unknown) =>
 /** One app's bindings, served as a fetch handler for its sandbox. */
 export function createBindings(
   dataDir: string,
-  { secrets = {}, maxFileBytes = 25 * 1024 * 1024 }: { secrets?: Record<string, string>; maxFileBytes?: number } = {},
+  { secrets = {}, maxFileBytes = 25 * 1024 * 1024, maxDbBytes, maxFilesBytes }: {
+    secrets?: Record<string, string>;
+    maxFileBytes?: number;
+    /** Size cap of the app's database. */
+    maxDbBytes?: number;
+    /** Total size cap of the app's files. */
+    maxFilesBytes?: number;
+  } = {},
 ) {
-  const db = createDb(join(dataDir, "db.sqlite"));
+  const db = createDb(join(dataDir, "db.sqlite"), maxDbBytes);
   const files = createFiles(join(dataDir, "files"));
   const text = (s: string, status: number) => new Response(s, { status });
 
@@ -168,6 +187,9 @@ export function createBindings(
         if (req.method === "PUT") {
           const bytes = await readCapped(req, maxFileBytes);
           if (!bytes) return text(`file exceeds ${maxFileBytes} bytes`, 413);
+          if (maxFilesBytes && files.usage(key) + bytes.byteLength > maxFilesBytes) {
+            return text(`storage quota exceeded (${maxFilesBytes} bytes of files per app)`, 413);
+          }
           await files.put(key, bytes, req.headers.get("content-type") ?? "");
           return new Response(null, { status: 204 });
         }

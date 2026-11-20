@@ -73,3 +73,7 @@ Runtime: Web-standard APIs (fetch, Request/Response, URL, crypto, streams, TextE
 | Unclaimed apps | expire after 72 h; no outbound network; no secrets |
 | Outbound network | claimed apps: any public host, or only an allowlist (`PUT /v1/apps/:name/egress`) |
 | Deploy history | last 10 (rollback) |
+| Database | 512 MB per app (writes past it fail with "database or disk is full") |
+| Files | 1 GB per app in all, 25 MB per file (`put` past it fails with "storage quota exceeded") |
+| Apps | 50 per account |
+| Deploys | 120 per app per hour (429 past it) |

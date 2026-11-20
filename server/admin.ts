@@ -11,7 +11,7 @@ import type { Runtime } from "./runtime.ts";
 import { confine } from "./bindings.ts";
 import { HttpError, removeAppFiles } from "./deploys.ts";
 
-type Env = { Variables: { account?: Account; token?: Token; bearer?: string } };
+type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
 
 export const isSiteAdmin = (cfg: Config, a: Account | undefined) =>
   !!a && (a.role === SITE_ADMIN || cfg.siteAdmins.includes(a.email) ||

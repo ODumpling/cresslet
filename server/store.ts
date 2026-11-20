@@ -364,6 +364,10 @@ export class Store {
   deleteApp(appId: string) {
     this.db.prepare("DELETE FROM apps WHERE id = ?").run(appId);
   }
+  /** Live unclaimed apps (anonymous deploys) on the instance. */
+  anonAppCount(): number {
+    return (this.db.prepare("SELECT count(*) n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL").get() as { n: number }).n;
+  }
   expiredApps(now = Date.now()): App[] {
     return this.db.prepare("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ? AND deleted_at IS NULL")
       .all(now) as unknown as App[];

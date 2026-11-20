@@ -129,6 +129,11 @@ docker run --rm -v <volume>:/data -v /var/backups/cresslet/<snapshot>.tgz:/b.tgz
 | `CRESSLET_APP_MEMORY_MB` | 256 | V8 heap cap |
 | `CRESSLET_IDLE_MS` | 300000 | stop idle sandboxes |
 | `CRESSLET_ANON_TTL_HOURS` | 72 | unclaimed app lifetime |
+| `CRESSLET_MAX_APPS_PER_ACCOUNT` | 50 | live apps an account may own (new apps and claims past it: 403 `quota`; site admins exempt) |
+| `CRESSLET_MAX_ANON_APPS` / `CRESSLET_ANON_APPS_PER_HOUR` | 200 / 10 | live unclaimed apps on the instance / new ones per client IP per hour (429 `rate_limited`) |
+| `CRESSLET_DEPLOYS_PER_HOUR` | 120 | deploys per app per hour (429) |
+| `CRESSLET_APP_DB_MB` / `CRESSLET_APP_FILES_MB` | 512 / 1024 | per-app database size (SQLite `max_page_count`; apps can't change it) / total size of its files |
+| `CRESSLET_CLIENT_IP_HEADER` | — | header with the real client IP for per-IP limits, e.g. `cf-connecting-ip` behind Cloudflare. Without it the TCP peer is used (behind a proxy that's the proxy, so every client shares one allowance). Set it only if every request comes through that proxy (clients can send the header themselves) |
 
 Closed instance (`CRESSLET_OPEN_SIGNUP=false CRESSLET_ANON_DEPLOYS=false`): pre-create accounts with the admin token; users then log in with GitHub using that (verified) email. Without GitHub configured, hand out the returned token (`CRESSLET_TOKEN` / `cresslet login --token`).
 

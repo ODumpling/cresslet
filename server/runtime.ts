@@ -339,7 +339,11 @@ export class Runtime {
     let child: ChildProcess;
     try {
       // Bindings socket: the sandbox's only way to its data. One per app, so identity = socket.
-      bindings = createBindings(p.data, { secrets: spec.secrets() });
+      bindings = createBindings(p.data, {
+        secrets: spec.secrets(),
+        maxDbBytes: cfg.limits.appDbBytes,
+        maxFilesBytes: cfg.limits.appFilesBytes,
+      });
       const srv = server = createServer(getRequestListener(bindings.fetch));
       await new Promise<void>((res, rej) => srv.once("error", rej).listen(hostSock, res));
       if (egressSock) {
