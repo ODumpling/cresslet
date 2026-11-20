@@ -4,8 +4,7 @@
 //   in:  {type:"request", id, url, method, headers, body}        → out: {type:"response", id, status, headers, body}
 //   out: {type:"log", level, msg}  {type:"db", bytes}  {type:"files", id, op, ...} ← in: {type:"files-result", id, ...}
 //   WebSockets: a 101 response is {type:"response", id, status: 101, headers, body: null, protocol}; then
-//   in:  {type:"socket", id} + the preview socket's MessagePort (no port: the preview gave up)
-//   in:  {type:"stop"} → out: {type:"stopped"}  (before terminating: `close` sent on every socket)
+//   in:  {type:"socket", id} + a MessagePort to the preview's socket (no port: the preview gave up)
 import initSqlJs from "https://esm.sh/sql.js@1.13.0";
 
 const SQL_WASM = "https://cdn.jsdelivr.net/npm/sql.js@1.13.0/dist/sql-wasm.wasm";
@@ -41,21 +40,42 @@ addEventListener("unhandledrejection", (e) => {
 });
 
 // ---- WebSockets: Workers' WebSocketPair and `new Response(null, { status: 101, webSocket })`, which browsers lack
-// (their Response rejects 101). The pair's client end is glued to the preview socket's MessagePort
+// (their Response rejects 101). The pair's client end is glued to a MessagePort to the preview's socket
 // (cresslet-container's upgradeWebSocket): {type:"message", data: string|ArrayBuffer} and {type:"close", code, reason}.
 class PairSocket extends EventTarget {
   peer = null;
   readyState = 1; // OPEN
+  binaryType = "blob"; // binary messages arrive as Blobs unless "arraybuffer", as on the platform (its compat date)
+  protocol = "";
+  extensions = "";
+  url = null;
   #accepted = false;
   #queue = [];
+  #handlers = {};
+  constructor() {
+    super();
+    for (const type of ["message", "close", "error"]) {
+      this.addEventListener(type, (e) => this.#handlers[type]?.call(this, e));
+      Object.defineProperty(this, `on${type}`, {
+        get: () => this.#handlers[type] ?? null,
+        set: (f) => (this.#handlers[type] = typeof f === "function" ? f : null),
+      });
+    }
+  }
   accept() {
     if (this.#accepted) return;
     this.#accepted = true;
-    for (const e of this.#queue.splice(0)) this.dispatchEvent(e);
+    for (const e of this.#queue.splice(0)) this.#emit(e);
   }
   deliver(e) {
-    if (this.#accepted) this.dispatchEvent(e);
+    if (this.#accepted) this.#emit(e);
     else this.#queue.push(e);
+  }
+  #emit(e) {
+    if (e.type === "message" && e.data instanceof ArrayBuffer && this.binaryType !== "arraybuffer") {
+      e = new MessageEvent("message", { data: new Blob([e.data]) });
+    }
+    this.dispatchEvent(e);
   }
   send(data) {
     if (this.readyState !== 1) throw new TypeError("Can't call WebSocket send() after close().");
@@ -67,7 +87,9 @@ class PairSocket extends EventTarget {
   close(code, reason = "") {
     if (this.readyState === 3) return;
     this.readyState = this.peer.readyState = 3; // CLOSED
-    this.peer.deliver(new CloseEvent("close", { code: code ?? 1005, reason: String(reason), wasClean: true }));
+    const event = () => new CloseEvent("close", { code: code ?? 1005, reason: String(reason), wasClean: true });
+    this.peer.deliver(event());
+    this.deliver(event()); // and this end, as when the peer's close frame comes back
   }
 }
 globalThis.WebSocketPair = class WebSocketPair {
@@ -82,6 +104,10 @@ globalThis.WebSocketPair = class WebSocketPair {
 };
 const NativeResponse = Response;
 globalThis.Response = class Response extends NativeResponse {
+  // fetch(), Response.json(), clone()… return native ones: still `instanceof Response` (Hono checks).
+  static [Symbol.hasInstance](v) {
+    return v instanceof NativeResponse;
+  }
   constructor(body, init) {
     if (init?.status !== 101) return super(body, init);
     super(null, { ...init, status: 200 });
@@ -90,21 +116,22 @@ globalThis.Response = class Response extends NativeResponse {
   }
 };
 const accepted = new Map(); // request id → the pair's client end, until its port arrives
-const open = new Set(); // ports of connected sockets
 
+// Whoever sends `close` is done with the port; whoever gets it closes it.
 function connect(client, port) {
-  open.add(port);
-  const done = () => (open.delete(port), port.close());
+  client.binaryType = "arraybuffer";
   client.addEventListener("message", (e) => port.postMessage({ type: "message", data: e.data }));
-  client.addEventListener("close", (e) => (port.postMessage({ type: "close", code: e.code, reason: e.reason }), done()));
+  client.addEventListener("close", (e) => port.postMessage({ type: "close", code: e.code, reason: e.reason }));
   port.onmessage = ({ data: d }) => {
     // From the preview (untrusted, like its requests).
     if (d?.type === "message" && (typeof d.data === "string" || d.data instanceof ArrayBuffer)) {
       if (client.readyState === 1) client.send(d.data);
     } else if (d?.type === "close") {
-      if (client.readyState === 1) client.peer.readyState = client.readyState = 3;
-      client.peer.deliver(new CloseEvent("close", { code: Number.isInteger(d.code) ? d.code : 1005, reason: String(d.reason ?? ""), wasClean: true }));
-      done();
+      port.close();
+      if (client.readyState === 3) return; // the app closed it too
+      client.readyState = client.peer.readyState = 3;
+      const code = Number.isInteger(d.code) ? d.code : 1005;
+      client.peer.deliver(new CloseEvent("close", { code, reason: String(d.reason ?? ""), wasClean: true }));
     }
   };
   client.accept();
@@ -211,13 +238,6 @@ onmessage = async ({ data: m, ports }) => {
     if (!client) return ports[0]?.postMessage({ type: "close", code: 1011, reason: "" });
     if (ports[0]) connect(client, ports[0]);
     else client.close(1001, ""); // the preview gave up: the app's end hears it's gone
-    return;
-  }
-  if (m.type === "stop") {
-    // As a redeploy does: clients see the server go away and can reconnect.
-    for (const port of open) port.postMessage({ type: "close", code: 1012, reason: "server restarting" }), port.close();
-    open.clear();
-    postMessage({ type: "stopped" });
     return;
   }
   if (m.type === "request") {

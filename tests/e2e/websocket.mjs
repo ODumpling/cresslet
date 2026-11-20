@@ -1,5 +1,6 @@
 // Browser e2e: an app's WebSocket server (WebSocketPair) in the studio preview. Text, binary, subprotocol, closes
-// both ways, a refused upgrade; saving a server file closes open sockets (1012) and clients can reconnect.
+// both ways, a refused upgrade; saving a server file closes open sockets (1012), even with the old server stuck in a
+// loop, fails its pending requests (503), and clients can reconnect.
 // Run: start the server (npm run dev), then: cd tests/e2e && node websocket.mjs [screenshot dir]
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
@@ -17,16 +18,20 @@ export default {
       const [client, server] = Object.values(new WebSocketPair());
       server.accept();
       server.send("welcome " + boot + " " + url.search);
-      server.addEventListener("message", (e) => {
+      let queue = Promise.resolve();
+      server.onmessage = (e) => (queue = queue.then(async () => {
         if (e.data === "bye") server.close(4000, "bye yourself");
-        else server.send(typeof e.data === "string" ? "echo " + e.data : e.data);
-      });
+        // binary messages arrive as Blobs, as on the platform
+        else server.send(typeof e.data === "string" ? "echo " + e.data : await e.data.arrayBuffer());
+      }));
       server.addEventListener("close", (e) => console.log("server saw close " + e.code + " " + e.reason));
       const offered = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map((s) => s.trim());
       const headers = offered.includes("chat") ? { "sec-websocket-protocol": "chat" } : {};
       return new Response(null, { status: 101, webSocket: client, headers });
     }
-    return Response.json({ boot });
+    if (url.pathname === "/api/spin") for (;;);
+    // native Responses (fetch, Response.json) are still \`instanceof Response\` next to the 101 one
+    return Response.json({ boot, native: Response.json(null) instanceof Response });
   },
 };
 `;
@@ -86,15 +91,16 @@ try {
     events: [{ open: "chat" }, "welcome ?room=1", "echo hi", [1, 2, 3], [98, 108, 111, 98]],
     code: 4000, reason: "bye yourself", wasClean: true,
   }), `round trip: ${JSON.stringify(roundTrip)}`);
+  await waitFor(async () => /\[server\] server saw close 4000 bye yourself/.test(await term.innerText()), "the server end's own close");
   console.log("round trip:", JSON.stringify(roundTrip));
 
   // Client close reaches the app's server end; HTTP still works alongside.
   const clientClose = await f.evaluate(() => new Promise((resolve) => {
     const ws = new WebSocket("/api/ws");
     ws.onmessage = () => ws.close(1000, "done here");
-    ws.onclose = async (e) => resolve({ code: e.code, api: (await (await fetch("/api/x")).json()).boot.length });
+    ws.onclose = async (e) => resolve({ code: e.code, api: (await (await fetch("/api/x")).json()).native });
   }));
-  assert(same(clientClose, { code: 1000, api: 8 }), `client close: ${JSON.stringify(clientClose)}`);
+  assert(same(clientClose, { code: 1000, api: true }), `client close: ${JSON.stringify(clientClose)}`);
   await waitFor(async () => /\[server\] server saw close 1000 done here/.test(await term.innerText()), "the server end's close");
   console.log("client close reached the server");
 
@@ -109,16 +115,21 @@ try {
   assert(same(refused, { events: ["error"], code: 1006 }), `refused: ${JSON.stringify(refused)}`);
   console.log("refused upgrade:", JSON.stringify(refused));
 
-  // Worker restart: an open socket gets close 1012; reconnecting reaches the new server.
+  // Worker restart, with the old server stuck in a loop: an open socket gets close 1012, the stuck request a 503,
+  // and reconnecting reaches the new server.
   await f.evaluate(() => new Promise((resolve) => {
     const ws = (window.__ws = new WebSocket("/api/ws"));
     window.__closed = null;
     ws.onmessage = (e) => ((window.__welcome = e.data), resolve());
     ws.onclose = (e) => (window.__closed = { code: e.code, reason: e.reason, wasClean: e.wasClean });
   }));
+  await f.evaluate(() => void (window.__spin = fetch("/api/spin").then(async (r) => `${r.status} ${await r.text()}`)));
+  await page.waitForTimeout(500);
   await editServer("\n// v2\n", true);
   const closed = await waitFor(() => f.evaluate(() => window.__closed), "the open socket's close");
   await waitFor(async () => (await boot()) !== boot1, "the restarted server");
+  const spin = await f.evaluate(() => window.__spin);
+  assert(spin === "503 server restarted", `stuck request: ${spin}`);
   assert(same(closed, { code: 1012, reason: "server restarting", wasClean: true }), `restart close: ${JSON.stringify(closed)}`);
   const welcome2 = await f.evaluate(() => new Promise((resolve, reject) => {
     const ws = new WebSocket("/api/ws");
@@ -127,7 +138,7 @@ try {
   }));
   const boot2 = welcome2.split(" ")[1];
   assert(boot2 && boot2 !== boot1, `reconnect reached the old server: ${welcome2}`);
-  console.log("worker restart: close", JSON.stringify(closed), "→ reconnected to boot", boot2, "(was", boot1 + ")");
+  console.log("worker restart (old one stuck): close", JSON.stringify(closed), "; stuck request:", spin, "; reconnected to boot", boot2, "(was", boot1 + ")");
   assert(/GET \/api\/ws 101/.test(await term.innerText()), "dev log shows the 101");
   await page.screenshot({ path: (process.argv[2] ?? ".") + "/websocket.png" });
   console.log("PASS");
