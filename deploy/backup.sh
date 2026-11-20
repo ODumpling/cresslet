@@ -1,20 +1,49 @@
 #!/bin/sh
 # Snapshots a Cresslet data volume: every SQLite database through `.backup` (consistent while the
-# server runs), everything else (secrets.key, deploys, app files) copied, as one .tgz. Keeps the
-# newest $CRESSLET_BACKUP_KEEP (14) and, if $CRESSLET_BACKUP_RCLONE is set (an rclone remote such as
-# `r2:bucket/cresslet`, configured for root), copies each new snapshot there too.
+# server runs), everything else (deploys, app files) copied, as one .tgz. secrets.key is kept apart,
+# as $DIR/secrets-<fingerprint>.key; a snapshot's name ends with the fingerprint of the key it needs.
+# Keeps the newest $CRESSLET_BACKUP_KEEP (14) snapshots, and every key. Off-site (rclone remotes
+# configured for root, `name:path`, e.g. S3-compatible storage):
+#   CRESSLET_BACKUP_RCLONE      each new snapshot is copied there (e.g. `snaps:cresslet-snapshots`)
+#   CRESSLET_BACKUP_KEY_RCLONE  the keys are copied there, never overwritten: another rclone remote
+#                               (another bucket, other credentials), so one leak doesn't hold both.
+#   CRESSLET_BACKUP_ENV_KEY     true: the server uses CRESSLET_SECRETS_KEY, so snapshots without a
+#                               secrets.key go off-site too (otherwise a missing key file fails the run).
 #
 #   backup.sh <volume>             one snapshot now
 #   backup.sh <volume> --install   copy to /usr/local/sbin, snapshot daily (systemd timer)
 #
-# Snapshots hold secrets.key: they're root-only (0600 in a 0700 dir). Restore: docs/self-hosting.md#backups.
+# Root-only (0600 in a 0700 dir). Restore: docs/self-hosting.md#backups.
 set -eu
 VOL=${1:?usage: backup.sh <docker volume> [--install]}
 DIR=${CRESSLET_BACKUP_DIR:-/var/backups/cresslet}
 KEEP=${CRESSLET_BACKUP_KEEP:-14}
 REMOTE=${CRESSLET_BACKUP_RCLONE:-}
+KEY_REMOTE=${CRESSLET_BACKUP_KEY_RCLONE:-}
+ENV_KEY=${CRESSLET_BACKUP_ENV_KEY:-}
+# At --install, and before uploading (after the local snapshot, which a broken rclone setup mustn't stop).
+check_remotes() {
+  for r in "$REMOTE" "$KEY_REMOTE"; do
+    [ -n "$r" ] || continue
+    # name:path, name a configured remote exactly (not a local path, not `name,option:`).
+    case $r in *:?*) rclone listremotes | grep -qxF "${r%%:*}:" && continue ;; esac
+    echo "cresslet-backup: $r isn't name:path with a remote from \`rclone listremotes\` (rclone set up for root?)" >&2
+    exit 1
+  done
+  if [ -n "$REMOTE" ] && [ "${KEY_REMOTE%%:*}" = "${REMOTE%%:*}" ]; then
+    echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE needs its own rclone remote (other credentials), not ${REMOTE%%:*}:" >&2
+    exit 1
+  fi
+}
 
+docker volume inspect "$VOL" >/dev/null
 if [ "${2:-}" = --install ]; then
+  check_remotes
+  case $DIR$KEEP$REMOTE$KEY_REMOTE$ENV_KEY in
+    *[%\\\"]*) echo "cresslet-backup: % \\ and \" can't go into the unit's Environment=" >&2; exit 1 ;;
+  esac
+  [ -z "$REMOTE" ] || [ -n "$KEY_REMOTE" ] ||
+    echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE unset: runs will fail while the volume has a secrets.key" >&2
   install -m 0755 "$0" /usr/local/sbin/cresslet-backup
   cat > /etc/systemd/system/cresslet-backup.service <<EOF
 [Unit]
@@ -22,7 +51,8 @@ Description=Snapshot the Cresslet data volume ($VOL)
 After=docker.service
 [Service]
 Type=oneshot
-Environment=CRESSLET_BACKUP_DIR=$DIR CRESSLET_BACKUP_KEEP=$KEEP CRESSLET_BACKUP_RCLONE=$REMOTE
+Environment="CRESSLET_BACKUP_DIR=$DIR" "CRESSLET_BACKUP_KEEP=$KEEP" "CRESSLET_BACKUP_RCLONE=$REMOTE"
+Environment="CRESSLET_BACKUP_KEY_RCLONE=$KEY_REMOTE" "CRESSLET_BACKUP_ENV_KEY=$ENV_KEY"
 ExecStart=/usr/local/sbin/cresslet-backup $VOL
 EOF
   cat > /etc/systemd/system/cresslet-backup.timer <<EOF
@@ -40,22 +70,29 @@ EOF
   exit 0
 fi
 
-docker volume inspect "$VOL" >/dev/null
 umask 077
 mkdir -p "$DIR"
 chmod 700 "$DIR"
-NAME=cresslet-$(date -u +%Y%m%dT%H%M%SZ).tgz
+STEM=cresslet-$(date -u +%Y%m%dT%H%M%SZ)
+TMP=.$STEM.$$  # staging, per run
+trap 'rm -f "$DIR/$TMP.part" "$DIR/$TMP.key"' EXIT
+trap 'exit 1' INT TERM HUP
 # Read-write mount: SQLite needs the -shm file of a WAL database even to read it.
-docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
+# --init: a stopped run (systemctl stop) stops the container too.
+docker run --rm --init -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   apk add -q --no-cache sqlite tar >/dev/null
   mkdir /s
   cd /data
+  [ -f cresslet.db ] || { echo "no cresslet.db: not a Cresslet data volume?" >&2; exit 1; }
   # Everything except the databases and their sidecars (snapshotted below). A file changing or
   # vanishing mid-copy is tar status 1 (allowed: the server is running); anything worse fails.
   ex=""
   for db in ./cresslet.db "./apps/*/data/db.sqlite" "./apps/*/data/files/index.sqlite"; do
     for x in "" -wal -shm -journal; do ex="$ex --exclude=$db$x"; done
   done
+  # secrets.key: not in the snapshot (kept apart, below). .restore: restore staging (docs).
+  ex="$ex --exclude=./secrets.key --exclude=./.restore"
+  [ ! -f secrets.key ] || install -m 600 secrets.key "/out/'"$TMP"'.key"
   set -f  # $ex holds patterns for tar, not the shell
   { tar -cf - --anchored --no-wildcards-match-slash \
       --warning=no-file-changed --warning=no-file-removed --warning=no-file-shrank $ex . || rc=$?; echo "${rc:-0}" > /tmp/rc; } |
@@ -77,14 +114,54 @@ docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
     chmod "$(stat -c %a "$db")" "/s/$db"
     [ "$(sqlite3 "/s/$db" "PRAGMA integrity_check")" = ok ] || { echo "integrity check failed: $db" >&2; exit 1; }
   done
-  tar czf "/out/'"$NAME"'.part" -C /s .
-  mv "/out/'"$NAME"'.part" "/out/'"$NAME"'"'
+  # The key the databases were sealed with: still the one staged (a server starting up can create it).
+  k="/out/'"$TMP"'.key"
+  if [ -f secrets.key ]; then [ -f "$k" ] && cmp -s secrets.key "$k"; else [ ! -f "$k" ]; fi ||
+    { echo "secrets.key changed during the snapshot (the server starting?): run again" >&2; exit 1; }
+  tar czf "/out/'"$TMP"'.part" -C /s .'
+
+# The key, apart. It never changes, so this is normally one file; a new one (a new volume?) is kept
+# beside the old, which older snapshots need.
+FP=
+if [ -f "$DIR/$TMP.key" ]; then
+  FP=-$(sha256sum "$DIR/$TMP.key" | cut -c1-12)
+  if [ ! -f "$DIR/secrets$FP.key" ]; then
+    mv "$DIR/$TMP.key" "$DIR/secrets$FP.key"
+  elif ! cmp -s "$DIR/$TMP.key" "$DIR/secrets$FP.key"; then
+    echo "cresslet-backup: $DIR/secrets$FP.key was damaged: replaced with the volume's key" >&2
+    mv "$DIR/$TMP.key" "$DIR/secrets$FP.key"
+  fi
+else
+  echo "cresslet-backup: no secrets.key in $VOL (CRESSLET_SECRETS_KEY?): keep that key off-site yourself" >&2
+fi
+NAME=$STEM$FP.tgz
+mv "$DIR/$TMP.part" "$DIR/$NAME"
 chmod 600 "$DIR/$NAME"
 echo "cresslet-backup: $DIR/$NAME ($(du -h "$DIR/$NAME" | cut -f1))"
 
 # Newest $KEEP stay.
 ls -1t "$DIR"/cresslet-*.tgz | tail -n +"$((KEEP + 1))" | while read -r old; do rm -f "$old"; done
 
+# Off-site: the keys first. A snapshot doesn't go without its key (it couldn't be restored).
+check_remotes
+if [ -n "$KEY_REMOTE" ]; then
+  # --immutable: an existing copy that differs is an error, not overwritten (copyto would replace it).
+  rclone copy --immutable --checksum --include "/secrets-*.key" "$DIR" "$KEY_REMOTE"
+  if [ -n "$FP" ]; then
+    # Read back: --checksum falls back to size where the remote has no hash.
+    rclone cat "$KEY_REMOTE/secrets$FP.key" | cmp -s - "$DIR/secrets$FP.key" ||
+      { echo "cresslet-backup: $KEY_REMOTE/secrets$FP.key isn't the volume's key" >&2; exit 1; }
+    echo "cresslet-backup: secrets$FP.key in $KEY_REMOTE"
+  fi
+elif [ -n "$REMOTE" ] && [ -n "$FP" ]; then
+  echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE unset: not copying $NAME off-site without secrets$FP.key" >&2
+  exit 1
+fi
+if [ -n "$REMOTE" ] && [ -z "$FP" ] && [ "$ENV_KEY" != true ]; then
+  # A key file deleted under a running server: the databases need a key that's nowhere else.
+  echo "cresslet-backup: not copying $NAME off-site without a secrets.key (CRESSLET_BACKUP_ENV_KEY=true if the server uses CRESSLET_SECRETS_KEY)" >&2
+  exit 1
+fi
 if [ -n "$REMOTE" ]; then
   rclone copyto "$DIR/$NAME" "$REMOTE/$NAME"
   echo "cresslet-backup: copied to $REMOTE/$NAME"
