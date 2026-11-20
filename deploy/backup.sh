@@ -33,6 +33,7 @@ if [ -n "$REMOTE" ] && [ "${KEY_REMOTE%%:*}" = "${REMOTE%%:*}" ]; then
   exit 1
 fi
 
+docker volume inspect "$VOL" >/dev/null
 if [ "${2:-}" = --install ]; then
   case $DIR$KEEP$REMOTE$KEY_REMOTE$ENV_KEY in
     *[%\\\"]*) echo "cresslet-backup: % \\ and \" can't go into the unit's Environment=" >&2; exit 1 ;;
@@ -65,7 +66,6 @@ EOF
   exit 0
 fi
 
-docker volume inspect "$VOL" >/dev/null
 umask 077
 mkdir -p "$DIR"
 chmod 700 "$DIR"
