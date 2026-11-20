@@ -51,7 +51,7 @@ test("per-app uid and cgroup limits", { skip: !usable && "needs linux + root + c
     domain: "test.local",
     publicPort: 80,
     sockDir: sockDir + "/", // trailing slash: normalized once by prepareHost
-    sandbox: { uidBase: 200000, cgroupDir, cpuPercent: 20, pidsMax: 128 },
+    sandbox: { uidBase: 200000, cgroupDir, cpuPercent: 20, pidsMax: 128, runsc: null }, // the default (non-gVisor) mode
     limits: { memoryMb: 64, requestMs: 10_000 } as never,
   }));
   const call = (path: string, host = "test.local", init: RequestInit = {}) =>

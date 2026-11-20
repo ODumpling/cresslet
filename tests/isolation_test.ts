@@ -10,7 +10,7 @@ import { loadConfig } from "../server/config.ts";
 import { Store } from "../server/store.ts";
 import { createEgressProxy, egressAllows, isPublicIp, normalizeEgress, publicLookup } from "../server/egress.ts";
 import { createServer as createHttp, request as httpRequest } from "node:http";
-import type { LookupFunction } from "node:net";
+import { connect as netConnect, createServer as createNetServer, type LookupFunction } from "node:net";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 const SERVER = `
@@ -113,6 +113,58 @@ test("egress proxy: survives upstream resets and client aborts mid-body; strips 
     proxy.closeAllConnections();
     upstream.close();
     upstream.closeAllConnections();
+  }
+});
+
+test("egress proxy without an allowlist (gVisor): tunnels CONNECT to public hosts; refusals close the socket", async () => {
+  const upstream = createNetServer((s) => s.on("data", (d) => s.write("echo " + d)));
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const port = (upstream.address() as { port: number }).port;
+  // up.test "resolves" to the local upstream; IP literals never go through the lookup.
+  const toLocal: LookupFunction = (_h, o, cb) =>
+    (o as { all?: boolean }).all ? (cb as never as (e: null, a: unknown[]) => void)(null, [{ address: "127.0.0.1", family: 4 }]) : cb(null, "127.0.0.1", 4);
+  const logs: string[] = [];
+  const open = createEgressProxy(null, (l) => logs.push(l), toLocal);
+  const locked = createEgressProxy(["up.test"], (l) => logs.push(l), toLocal);
+  const dir = await tmp();
+  await new Promise<void>((r) => open.listen(join(dir, "o.sock"), r));
+  await new Promise<void>((r) => locked.listen(join(dir, "l.sock"), r));
+  // Raw CONNECT; the client never ends its side, so only the proxy can close a refused tunnel.
+  const tunnel = (sock: string, target: string) =>
+    new Promise<string>((resolve) => {
+      const c = netConnect({ path: join(dir, sock), allowHalfOpen: true });
+      let got = "";
+      const t = setTimeout(() => (c.destroy(), resolve(got + " [still open]")), 2000);
+      c.on("data", (d) => {
+        got += d;
+        if (got.includes("echo ping")) (clearTimeout(t), c.destroy(), resolve(got));
+      });
+      // After the proxy's FIN, keep writing: a socket the proxy still holds open swallows it, a closed one errors.
+      c.on("end", () => {
+        const w = setInterval(() => c.write("more"), 50);
+        c.once("close", () => clearInterval(w));
+      });
+      c.on("error", () => {});
+      c.on("close", () => (clearTimeout(t), resolve(got + " [closed]")));
+      c.write(`CONNECT ${target} HTTP/1.1\r\nhost: ${target}\r\n\r\n`);
+      c.once("data", (d) => String(d).startsWith("HTTP/1.1 200") && c.write("ping"));
+    });
+  try {
+    assert.match(await tunnel("o.sock", `up.test:${port}`), /^HTTP\/1.1 200[^]*echo ping$/);
+    assert.match(await tunnel("o.sock", `127.0.0.1:${port}`), /^HTTP\/1.1 403[^]*\[closed\]$/);
+    assert.match(await tunnel("l.sock", `up.test:${port}`), /^HTTP\/1.1 403[^]*\[closed\]$/); // raw sockets: never under an allowlist
+    assert.ok(logs.some((l) => /egress blocked: raw socket to 127\.0\.0\.1 \(not a public address\)/.test(l)), logs.join("\n"));
+    // Sandbox stop (closeAllConnections) also closes open tunnels, which HTTP connection tracking misses.
+    const held = netConnect({ path: join(dir, "o.sock") });
+    held.write(`CONNECT up.test:${port} HTTP/1.1\r\n\r\n`);
+    await new Promise((r) => held.once("data", r));
+    const closed = new Promise((r) => held.once("close", r));
+    open.closeAllConnections();
+    await closed;
+  } finally {
+    for (const p of [open, locked]) (p.close(), p.closeAllConnections());
+    upstream.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

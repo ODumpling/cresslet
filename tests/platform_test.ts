@@ -16,7 +16,9 @@ export default {
       return Response.json(await env.db.first("SELECT count(*) n FROM c"));
     }
     if (u.pathname === "/api/probe") {
-      const tryFetch = (url) => fetch(url, { signal: AbortSignal.timeout(5000) }).then(() => "ok", (e) => e.name);
+      // A denial is an error from workerd's network, or a 403 from the egress proxy (gVisor).
+      const tryFetch = (url) => fetch(url, { signal: AbortSignal.timeout(5000) }).then(
+        async (r) => (r.status === 403 && (await r.text()).startsWith("Cresslet egress blocked") ? "blocked" : "ok"), (e) => e.name);
       let fs = "leak";
       try { (await import("node:fs")).readFileSync("/etc/hosts"); } catch (e) { fs = "blocked"; }
       return Response.json({
@@ -72,7 +74,12 @@ const withServer = (fn: (t: T) => Promise<void>, overrides: Partial<Config> = {}
     await t.dispose();
   }
 };
-const denied = (logs: string, target: string) => logs.includes(`connecting to ${target} is not allowed`);
+// Under gVisor (CRESSLET_RUNSC) the sandbox has no network at all: no DNS for unclaimed apps, and
+// claimed apps' outbound goes through the control plane's egress proxy.
+const gvisor = !!process.env.CRESSLET_RUNSC;
+const denied = (logs: string, target: string) =>
+  logs.includes(`connecting to ${target} is not allowed`) ||
+  (gvisor && (logs.includes(`egress blocked: ${target.replace(/:\d+$/, "")} (not a public`) || logs.includes("failure in name resolution")));
 
 const deployBody = (extra: Record<string, unknown> = {}) =>
   JSON.stringify({

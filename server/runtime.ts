@@ -17,7 +17,7 @@ import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
 import { createBindings } from "./bindings.ts";
 import { createEgressProxy } from "./egress.ts";
-import { instanceId, jail, prepareHost, sweep } from "./sandbox.ts";
+import { adoptListener, instanceId, jail, prepareHost, sweep } from "./sandbox.ts";
 
 const WORKER = join(import.meta.dirname, "../runtime/worker.js");
 /** Pinned so a workerd upgrade doesn't silently change app semantics. */
@@ -65,6 +65,8 @@ function workerdConfig(
   hostSock: string,
   egressSock: string | null,
   memoryMb: number,
+  /** gVisor: workerd binds this path itself; otherwise its listener is fd 3. */
+  listenSock: string | null,
 ) {
   const outbound = !spec.net
     ? `(name = "outbound", network = (allow = []))`
@@ -91,8 +93,8 @@ const config :Workerd.Config = (
     (name = "host", external = (address = ${capStr("unix:" + hostSock)}, http = ())),
     ${outbound},
   ],
-  # Listener created by the control plane, passed as fd 3 (--socket-fd http=3).
-  sockets = [(name = "http", http = (), service = "app")],
+  # Listener created by the control plane, passed as fd 3 (--socket-fd http=3); gVisor: bound by workerd.
+  sockets = [(name = "http", ${listenSock ? `address = ${capStr("unix:" + listenSock)}, ` : ""}http = (), service = "app")],
   v8Flags = ["--max-old-space-size=${memoryMb}"],
 );
 `;
@@ -316,7 +318,9 @@ export class Runtime {
     // h = host bindings, e = egress proxy, b = bind name (unlinked once workerd has the fd).
     const sock = join(run, "a.sock");
     const hostSock = join(run, "h.sock");
-    const egressSock = spec.net && spec.egress ? join(run, "e.sock") : null;
+    // gVisor sandboxes have no network at all: their outbound always goes through the egress proxy.
+    const gvisor = !!cfg.sandbox.runsc;
+    const egressSock = spec.net && (spec.egress || gvisor) ? join(run, "e.sock") : null;
 
     // Everything acquired so far is undone by one path if the start fails before the child runs.
     let bindings: ReturnType<typeof createBindings> | undefined;
@@ -339,7 +343,7 @@ export class Runtime {
       const srv = server = createServer(getRequestListener(bindings.fetch));
       await new Promise<void>((res, rej) => srv.once("error", rej).listen(hostSock, res));
       if (egressSock) {
-        const eg = egress = createEgressProxy(spec.egress!, (l) => this.logs.push(spec.appId, "system", l));
+        const eg = egress = createEgressProxy(spec.egress, (l) => this.logs.push(spec.appId, "system", l));
         await new Promise<void>((res, rej) => eg.once("error", rej).listen(egressSock, res));
       }
       await copyFile(WORKER, join(run, "worker.js"));
@@ -348,18 +352,22 @@ export class Runtime {
         join(run, "app.json"),
         JSON.stringify({ id: spec.appId, name: spec.appName, url: spec.appUrl, deployId: spec.deployId }),
       );
-      await writeFile(join(run, "config.capnp"), workerdConfig(spec, hostSock, egressSock, cfg.limits.memoryMb));
-      const lst = listener = createNetServer();
-      await new Promise<void>((res, rej) => lst.once("error", rej).listen(join(run, "b.sock"), res));
-      // Closing our copy below unlinks b.sock (libuv); a.sock is a second name for the same socket.
-      linkSync(join(run, "b.sock"), sock);
-      const fd = (lst as unknown as { _handle?: { fd?: number } })._handle?.fd;
-      if (typeof fd !== "number" || fd < 0) throw new Error("can't get the listening socket's fd");
+      const listen = gvisor ? join(run, "l", "a.sock") : null;
+      await writeFile(join(run, "config.capnp"), workerdConfig(spec, hostSock, egressSock, cfg.limits.memoryMb, listen));
+      let fd: number | undefined;
+      if (!gvisor) {
+        const lst = listener = createNetServer();
+        await new Promise<void>((res, rej) => lst.once("error", rej).listen(join(run, "b.sock"), res));
+        // Closing our copy below unlinks b.sock (libuv); a.sock is a second name for the same socket.
+        linkSync(join(run, "b.sock"), sock);
+        fd = (lst as unknown as { _handle?: { fd?: number } })._handle?.fd;
+        if (typeof fd !== "number" || fd < 0) throw new Error("can't get the listening socket's fd");
+      }
       if (this.#closed) throw new Error("shutting down");
       j = jail(cfg, tag, spec.seq, run);
-      const cmd = j.command(cfg.workerdPath, ["serve", join(run, "config.capnp"), "--socket-fd", "http=3"]);
-      child = spawn(cmd.file, cmd.args, { cwd: run, stdio: ["ignore", "pipe", "pipe", fd], env: { HOME: run } });
-      lst.close();
+      const cmd = j.command(cfg.workerdPath, ["serve", join(run, "config.capnp"), ...(gvisor ? [] : ["--socket-fd", "http=3"])]);
+      child = spawn(cmd.file, cmd.args, { cwd: run, stdio: ["ignore", "pipe", "pipe", ...(fd === undefined ? [] : [fd])], env: { HOME: run } });
+      listener?.close();
     } catch (e) {
       abort();
       throw e;
@@ -390,7 +398,8 @@ export class Runtime {
           bindingsServer.close();
           bindingsServer.closeAllConnections();
           binds.close();
-          rmSync(run, { recursive: true, force: true });
+          // gVisor: the sandbox can write to l/, so its run dir goes only once it's reaped (jail release).
+          if (!gvisor) rmSync(run, { recursive: true, force: true });
         },
       },
       ready: Promise.resolve(),
@@ -443,7 +452,7 @@ export class Runtime {
 
     proc.ready = (async () => {
       const deadline = Date.now() + 10_000;
-      while (!(await probe(sock))) {
+      while (!((!gvisor || adoptListener(run)) && (await probe(sock)))) {
         if (proc.exited) throw new Error("sandbox exited during start");
         if (Date.now() > deadline) throw new Error("start timeout");
         await new Promise((r) => setTimeout(r, 25));

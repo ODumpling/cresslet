@@ -20,6 +20,7 @@
                           │  runtime/worker.js wraps server.js, builds env     │
                           │  no fs, no env, no subprocess; heap cap            │
                           │  network: none (unclaimed) | public only (claimed) │
+                          │  optional: inside gVisor (runsc), no network ns    │
                           └────────────────────────────────────────────────────┘
 ```
 
@@ -34,6 +35,8 @@ data/apps/<appId>/data/files/          app file storage
                                          config.capnp, worker.js, app.js (copy of server.js), app.json,
                                          a.sock (workerd's listener, created by the control plane), h.sock (bindings: one app per socket = identity),
                                          e.sock (egress proxy, apps with an allowlist). No secrets: fetched over HOST
+                                         gVisor mode: l/ (the one dir the sandbox can write: workerd binds l/a.sock, adopted as a.sock)
+/tmp/cresslet-sock/<run dir>.gv/        gVisor mode: runsc state + OCI bundle (never visible inside the sandbox)
 ```
 
 ## Isolation
@@ -46,7 +49,15 @@ data/apps/<appId>/data/files/          app file storage
 - OS limits (Linux, opt-in, `server/sandbox.ts`):
   - `CRESSLET_SANDBOX_UID_BASE`: each sandbox runs as its own uid/gid (`base` + a per-app number that is never reused; control plane must be root). `dataDir` is 0700. The run dir and everything in it is root-owned and only group-readable by that app, the sockets are root:app 0660, and workerd's listening socket is created by the control plane and passed as fd 3 (`--socket-fd`), so a sandbox that escaped workerd can't read metadata, other apps' data or run dirs, or bind/swap anything the control plane connects to. Readiness is an internal probe the sandbox entry answers (not "socket accepts").
   - `CRESSLET_CGROUP_DIR`: each sandbox starts inside its own cgroup v2 child (joined before exec): `cpu.max` (`CRESSLET_APP_CPU_PERCENT`), `memory.max` (heap cap + 128 MB, no swap; OOM kill is logged), `pids.max`. Stop/exit kills the whole cgroup (`cgroup.kill`, Linux ≥ 5.14), so forked processes don't outlive it. Leftovers from a crash are swept at start.
-  - Residual: an escaped uid still has the host's network (bypassing the egress allowlist; add an owner-match firewall rule if that matters), and shares world-writable `/tmp` and `/dev/shm`. Without cgroups, processes it forks aren't reaped.
+  - Residual: an escaped uid still has the host's network (bypassing the egress allowlist; add an owner-match firewall rule if that matters), and shares world-writable `/tmp` and `/dev/shm`. Without cgroups, processes it forks aren't reaped. gVisor mode closes these.
+  - `CRESSLET_RUNSC` (gVisor mode): each sandbox is `runsc run` of a generated OCI bundle, so workerd's syscalls go to gVisor's user-space kernel (the Sentry), not the host's. Code that escapes workerd lands in the Sentry and sees:
+    - Filesystem: a read-only root of only mount points: its run dir (read-only, except `l/`), the workerd binary, system library dirs and CA certificates. No `/etc`, no data dir, no other run dirs. `/tmp` and `/dev/shm` are the Sentry's own tmpfs (private, charged to its memory).
+    - Network: `--network=none`, so loopback only, in a fresh network namespace; the host's interfaces (and the control plane's ports) are unreachable. The only way out is its unix sockets (`--host-uds`): `h.sock`, and `e.sock` for outbound. Claimed apps' outbound therefore always goes through the egress proxy; without an allowlist the proxy allows any public host (IP literals and DNS answers checked like the allowlist path, raw sockets tunnelled via `CONNECT` to public addresses only). Unclaimed apps still have no outbound at all (not even DNS). Through the proxy, outbound WebSockets and TLS raw sockets (`secureTransport: "on"` / `"starttls"`) aren't available, as with an allowlist today; plain HTTP(S) and plain TCP are.
+    - Processes: its own pid namespace; no capabilities, `no_new_privs`. With `CRESSLET_SANDBOX_UID_BASE` the process inside runs as the app's uid (the host processes are runsc's, as root); with `CRESSLET_CGROUP_DIR` runsc, the Sentry and the gofer all start in the app's cgroup (`memory.max` gets +64 MB for them; an idle sandbox uses ~40 MB in all).
+    - Listener: the Sentry can't accept on a host listening socket passed in as an fd, so in this mode workerd binds `l/a.sock` itself. Once it exists the control plane hard-links it into the root-owned run dir as `a.sock` (`link()` doesn't follow symlinks) and keeps it only if it's a socket, so what it connects to can't be swapped later.
+    - Teardown: the run dir (with `l/`) is removed only after `runsc delete` and `runsc list` confirm the sandbox is gone, off the event loop; the startup sweep reaps leftover sandboxes before it removes their run dirs, and leaves both in place (logged) if it can't confirm.
+    - Residual: `l/` is a host directory the sandbox can write to (it could fill the disk under `CRESSLET_SOCK_DIR`; put that on a size-limited tmpfs such as `/run` to bound it). runsc itself and its gofer run as root on the host (gVisor's own seccomp/namespace confinement applies). A crashed control plane leaves runsc running when there are no cgroups; the next start `runsc delete`s it (with `CRESSLET_RUNSC` still set).
+  - Why gVisor, not Firecracker: Firecracker needs KVM (`/dev/kvm`, often missing on VPSes and in nested setups), a guest kernel and rootfs image per sandbox, and talks to the host over vsock, so the unix-socket model (`a.sock`/`h.sock`/`e.sock`) would need a vsock bridge. gVisor is two static binaries, runs without KVM (systrap platform), starts a sandbox in ~100 ms, and passes host unix sockets through, so it's a configuration of the same model rather than a new runtime.
 
 ## Deploy lifecycle
 
@@ -66,6 +77,6 @@ Remaining exposure: the app's *server* code (and `node` scripts) still run in We
 ## Roadmap
 
 - Run a public hosted instance (recipe, wildcard TLS included: [self-hosting.md](self-hosting.md#production)).
-- Stronger isolation: microVMs (Firecracker) or gVisor. workerd + uid + cgroups is not a hardened multi-tenant boundary (Cloudflare adds more layers in production).
+- Stronger isolation: gVisor mode (`CRESSLET_RUNSC`) is the opt-in hardened boundary; consider making it the default for multi-tenant instances. MicroVMs (Firecracker) remain an option where KVM is available and a separate guest kernel per app is wanted. Without gVisor, workerd + uid + cgroups is not a hardened multi-tenant boundary (Cloudflare adds more layers in production).
 - Move db/file bindings off the control-plane thread (worker thread or per-app helper) if sync SQLite becomes a bottleneck.
 - AI builder in the studio driving the same API (deferred from v1).
