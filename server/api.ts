@@ -789,6 +789,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       if (!records.some((r) => r.join("") === d.token)) {
         throw new HttpError(400, `TXT _cresslet.${d.domain} = ${d.token} not found (DNS can take a few minutes)`, "unverified");
       }
+      await authorize(c, a, "admin"); // again: access may have changed during the lookup (a collaborator removed)
       const v = store.verifyDomain(a.id, d.domain, d.token);
       if (v === "taken") throw new HttpError(409, `${d.domain} is already in use`, "conflict");
       if (v === "gone") throw new HttpError(404, "domain was removed", "not_found");

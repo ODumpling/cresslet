@@ -780,6 +780,7 @@ async function renderShare(name) {
   $("share-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", `Share ${name}`);
   $("invite-form").reset();
   $("invite-form").hidden = true; // until the list loads: only the owner and admins may share
+  $("invite-send").disabled = false; // an invite still in flight from another app's page doesn't hold this one
   inviteError("");
   $("people").replaceChildren(el("li", { className: "list-row muted", textContent: "Loading…" }));
   const gen = routeGen;
@@ -848,7 +849,9 @@ function setRole(p, select) {
   }
   const url = `/v1/apps/${encodeURIComponent(shareApp)}/collaborators/${encodeURIComponent(p.id)}`;
   const version = p.version = (p.version ?? 0) + 1; // only the latest change updates the row
+  const gen = routeGen;
   p.saving = (p.saving ?? Promise.resolve()).then(async () => {
+    if (p.demoted) return; // you made yourself a viewer: later changes would only be refused
     try {
       p.role = (await api(url, { method: "PUT", body: JSON.stringify({ role }) })).role;
     } catch (e) {
@@ -857,7 +860,8 @@ function setRole(p, select) {
       return;
     }
     if (p.id === myAccountId && p.role === "viewer") {
-      location.hash = "#/"; // no longer allowed here, whatever is still queued
+      p.demoted = true;
+      if (gen === routeGen) location.hash = "#/"; // no longer allowed here (unless you already left the page)
       return;
     }
     if (version !== p.version) return;
@@ -867,7 +871,7 @@ function setRole(p, select) {
 }
 
 async function removePerson(p, me) {
-  const name = shareApp;
+  const name = shareApp, gen = routeGen;
   if (!confirm(me ? `Leave ${name}? You lose access to it until someone invites you again.` : `Remove ${personText(p)} from ${name}?`)) return;
   try {
     await api(`/v1/apps/${encodeURIComponent(name)}/collaborators/${encodeURIComponent(p.id)}`, { method: "DELETE" });
@@ -876,11 +880,12 @@ async function removePerson(p, me) {
     return;
   }
   toast(me ? `You left ${name}` : `Removed ${personText(p)}`);
+  if (gen !== routeGen) return; // navigated away meanwhile
   if (me) {
     location.hash = "#/";
     return;
   }
-  await renderPeople();
+  await renderPeople(gen);
   refocus($("people-title"));
 }
 
@@ -919,8 +924,10 @@ $("invite-form").addEventListener("submit", async (e) => {
     if (gen === routeGen) inviteError(`Could not invite: ${err.message}`);
     else toast(`Could not invite: ${err.message}`);
   } finally {
-    $("invite-send").disabled = false;
-    if (document.activeElement === document.body) $("invite-send").focus(); // disabling it dropped focus
+    if (gen === routeGen) {
+      $("invite-send").disabled = false;
+      if (document.activeElement === document.body) $("invite-send").focus(); // disabling it dropped focus
+    }
   }
 });
 
