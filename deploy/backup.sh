@@ -48,14 +48,22 @@ NAME=cresslet-$(date -u +%Y%m%dT%H%M%SZ).tgz
 # Read-write mount: SQLite needs the -shm file of a WAL database even to read it.
 docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   apk add -q --no-cache sqlite tar >/dev/null
-  mkdir /s && cp -a /data/. /s/
-  # The databases (not app-stored files, whatever they are named), each a consistent copy.
+  mkdir /s
   cd /data
+  # Everything except the databases and their -wal/-shm (snapshotted below). Files that change or
+  # vanish mid-copy (a sandbox going idle removes its -shm) are skipped, not errors.
+  tar -cf - --anchored --no-wildcards-match-slash --ignore-failed-read \
+    --warning=no-file-changed --warning=no-file-removed --warning=no-file-shrank \
+    --exclude="./cresslet.db*" --exclude="./apps/*/data/db.sqlite*" --exclude="./apps/*/data/files/index.sqlite*" . |
+    tar -xpf - -C /s
+  # The databases (not app-stored files, whatever they are named), each a consistent copy with the
+  # original owner and mode (the server may run as a non-root user).
   for db in cresslet.db apps/*/data/db.sqlite apps/*/data/files/index.sqlite; do
     [ -f "$db" ] || continue
     mkdir -p "$(dirname "/s/$db")"  # an app that set up its files after the copy
-    rm -f "/s/$db" "/s/$db-wal" "/s/$db-shm"
     sqlite3 "$db" ".backup /s/$db"
+    chown "$(stat -c %u:%g "$db")" "/s/$db"
+    chmod "$(stat -c %a "$db")" "/s/$db"
     [ "$(sqlite3 "/s/$db" "PRAGMA integrity_check")" = ok ] || { echo "integrity check failed: $db" >&2; exit 1; }
   done
   tar czf "/out/'"$NAME"'.part" -C /s .

@@ -93,6 +93,8 @@ deploy/backup.sh <volume> --install    # daily at 03:30 (systemd timer)
 
 `CRESSLET_BACKUP_KEEP` (default 14) snapshots stay. `CRESSLET_BACKUP_RCLONE` (e.g. `r2:my-bucket/cresslet`) also copies each one off the host with [rclone](https://rclone.org), which must be set up for root (`rclone config`); a snapshot on the same disk doesn't survive losing that disk. Set both when installing (they're written into the unit). Snapshots contain `secrets.key`: keep them as private as the server.
 
+Each database in a snapshot is consistent, but not with everything else at one instant: a file an app stores, or a deploy, during the snapshot can be in the database and not the copy (or the other way round). For a copy that's consistent as a whole, stop the server first (in Coolify, stop the app), run the script, start it again.
+
 Restore (the server stopped, into an empty volume):
 
 ```sh
