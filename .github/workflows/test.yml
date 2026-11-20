@@ -30,7 +30,8 @@ jobs:
       - name: per-app uids + cgroups
         run: |
           docker run --rm --privileged --cgroupns=private -v "$PWD":/src -v /src/node_modules -w /src node:24-bookworm-slim \
-            sh -c 'npm ci --omit=dev && exec node --test --test-isolation=none tests/sandbox_test.ts'
+            sh -c 'apt-get update -qq && apt-get install -qq -y ca-certificates >/dev/null &&
+              npm ci --omit=dev && exec node --test --test-isolation=none tests/sandbox_test.ts'
       - name: gVisor sandboxes
         run: |
           docker run --rm --privileged --cgroupns=private -v "$PWD":/src -v /src/node_modules -w /src node:24-bookworm-slim sh -c '

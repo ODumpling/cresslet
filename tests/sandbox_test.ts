@@ -1,6 +1,8 @@
 // Per-app uid + cgroup v2 limits. Needs Linux, root and a writable cgroup2 mount, e.g.:
 //   docker run --rm --privileged --cgroupns=private -v "$PWD":/src -w /src node:24-bookworm-slim \
-//     sh -c 'npm ci --omit=dev && exec node --test --test-isolation=none tests/sandbox_test.ts'
+//     sh -c 'apt-get update -qq && apt-get install -qq -y ca-certificates >/dev/null &&
+//       npm ci --omit=dev && exec node --test --test-isolation=none tests/sandbox_test.ts'
+// (workerd needs the system CA certificates, which the slim image lacks)
 // (one process in the container's root cgroup, so the server can delegate controllers)
 import { test } from "node:test";
 import assert from "node:assert/strict";
