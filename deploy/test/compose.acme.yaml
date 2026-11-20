@@ -1,0 +1,49 @@
+# Overlay for deploy/test/acme.sh: the production compose against a local ACME CA (Pebble) and an
+# authoritative DNS server (bind9) that takes RFC 2136 updates, so DNS-01 runs for real. Test only.
+services:
+  cresslet:
+    dns: [10.77.0.53] # custom-domain TXT verification reads the test zones
+    environment:
+      CRESSLET_ADMIN_TOKEN: test-admin
+    networks:
+      default: { ipv4_address: 10.77.0.20 }
+
+  caddy:
+    build:
+      args:
+        DNS_MODULE: github.com/caddy-dns/rfc2136@v1.0.0
+    depends_on: [bind, pebble]
+    ports: !reset []
+    volumes:
+      - ./test/dns.caddy:/etc/caddy/dns.caddy:ro
+      - ./test/options.caddy:/etc/caddy/options.caddy:ro
+      - ${PEBBLE_MINICA:?}:/etc/caddy/pebble.minica.pem:ro
+    networks:
+      default: { ipv4_address: 10.77.0.10 }
+
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:2.10.3
+    command: -config /pebble-config.json -dnsserver 10.77.0.53:53
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+    volumes:
+      - ./test/pebble-config.json:/pebble-config.json:ro
+    networks:
+      default: { ipv4_address: 10.77.0.30 }
+
+  bind:
+    image: internetsystemsconsortium/bind9:9.20
+    platform: linux/amd64
+    entrypoint: ["sh", "-c", "cp /zones/*.zone /var/cache/bind/ && chown bind /var/cache/bind/*.zone && exec named -u bind -g -c /etc/bind/named.conf"]
+    volumes:
+      - ./test/named.conf:/etc/bind/named.conf:ro
+      - ./test/zones:/zones:ro
+    networks:
+      default: { ipv4_address: 10.77.0.53 }
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24

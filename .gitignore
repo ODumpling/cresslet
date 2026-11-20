@@ -1,3 +1,5 @@
 data/
 .DS_Store
 node_modules/
+deploy/.env
+deploy/cresslet.env

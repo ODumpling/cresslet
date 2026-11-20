@@ -1,0 +1,23 @@
+# Caddy in front of cresslet (see docs/self-hosting.md#production).
+# Root + `*.<domain>` (apps, preview host): one wildcard cert via ACME DNS-01.
+# Custom domains: on-demand certs, only for names the control plane approves.
+{
+	import options.caddy
+	on_demand_tls {
+		ask http://cresslet:8787/v1/domains/check
+	}
+}
+
+{$CRESSLET_DOMAIN}, *.{$CRESSLET_DOMAIN} {
+	tls {
+		import dns.caddy
+	}
+	reverse_proxy cresslet:8787
+}
+
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy cresslet:8787
+}

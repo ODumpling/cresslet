@@ -1,0 +1,46 @@
+# Production recipe: cresslet behind Caddy (TLS). See docs/self-hosting.md#production.
+#   cp .env.example .env   # set CRESSLET_DOMAIN + DNS token
+#   docker compose up -d --build
+name: cresslet
+services:
+  cresslet:
+    build: ..
+    restart: unless-stopped
+    env_file:
+      - path: cresslet.env # other CRESSLET_* settings (GitHub login, admin token, limits …)
+        required: false
+    environment:
+      CRESSLET_DOMAIN: ${CRESSLET_DOMAIN:?set CRESSLET_DOMAIN in .env}
+      CRESSLET_SCHEME: https
+      CRESSLET_PUBLIC_PORT: 443
+    volumes:
+      - cresslet_data:/data
+    expose: ["8787"] # only Caddy reaches it
+
+  caddy:
+    build:
+      context: caddy
+      args:
+        DNS_MODULE: ${CADDY_DNS_MODULE:-github.com/caddy-dns/cloudflare@v0.2.4}
+    restart: unless-stopped
+    depends_on:
+      cresslet:
+        condition: service_healthy
+    environment:
+      CRESSLET_DOMAIN: ${CRESSLET_DOMAIN}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/dns.caddy:/etc/caddy/dns.caddy:ro
+      - ./caddy/options.caddy:/etc/caddy/options.caddy:ro
+      - caddy_data:/data # certificates + ACME account: keep it, or you re-issue (and hit rate limits)
+      - caddy_config:/config
+
+volumes:
+  cresslet_data:
+  caddy_data:
+  caddy_config:

@@ -78,6 +78,12 @@ test("custom domains: DNS-verified, first verifier wins, routed, TLS ask endpoin
     assert.equal((await call(`/v1/domains/check?domain=${a.name}.test.local`)).status, 404); // wildcard cert covers it
     assert.equal((await call("/v1/domains/check?domain=nope.test.local")).status, 404);
     assert.equal((await call("/v1/domains/check?domain=evil.com")).status, 404);
+    // As Caddy asks it (deploy/caddy/Caddyfile): over the internal service name, not the public host.
+    assert.equal((await call("/v1/domains/check?domain=shop.example.com", { host: "cresslet:8787" })).status, 200);
+    assert.equal((await call("/v1/domains/check?domain=evil.com", { host: "cresslet:8787" })).status, 404);
+    for (const covered of ["test.local", "preview.test.local", ""]) {
+      assert.equal((await call(`/v1/domains/check?domain=${covered}`)).status, 404, covered);
+    }
 
     // Mallory's pending entry can't be verified: her token isn't in DNS, and even if it were, it's taken.
     assert.equal((await json(`/v1/apps/${m.name}/domains/shop.example.com/verify`, { method: "POST", headers: mallory })).status, 400);
@@ -102,6 +108,20 @@ test("custom domains: DNS-verified, first verifier wins, routed, TLS ask endpoin
     await json(`/v1/apps/${a.name}/domains/Shop.Example.com.`, { method: "DELETE", headers: alice });
     assert.ok(!(await (await call("/", { host: "shop.example.com" })).text()).includes("alice"));
     assert.equal((await call("/v1/domains/check?domain=shop.example.com")).status, 404);
+  } finally {
+    srv.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("TLS ask endpoint: a preview host outside the wildcard needs its own certificate", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "cresslet-dom-"));
+  const srv = createServer(loadConfig({ dataDir, domain: "test.local", previewHost: "preview.other.example" }));
+  const check = (d: string) => srv.handler(new Request(`http://cresslet:8787/v1/domains/check?domain=${d}`, { headers: { host: "cresslet:8787" } }));
+  try {
+    assert.equal((await check("preview.other.example")).status, 200);
+    assert.equal((await check("other.example")).status, 404);
+    assert.equal((await check("preview.test.local")).status, 404);
   } finally {
     srv.close();
     await rm(dataDir, { recursive: true, force: true });
