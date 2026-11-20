@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bindingsSettled, filesSettled, serveBindings } from "../server/bindings.ts";
+import { bindingsSettled, createBindings, serveBindings } from "../server/bindings.ts";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
 
@@ -33,19 +33,37 @@ test("bindings thread: serves db and files, exits on close, the app's next threa
     assert.equal((await call(join(run, "a.sock"), "/files?key=g", "PUT", "x".repeat(996))).status, 413, "quota still applies");
 
     a.close();
-    let settled = false;
-    const done = filesSettled(join(dir, "files")).then(() => (settled = true));
+    // Started while `a` may still be exiting: its file writes wait for that ("go"), the rest doesn't.
     const b = await serveBindings(dir, join(run, "b.sock"), { maxFilesBytes: 1000 });
     open.push(b);
-    assert.ok(settled, "the next thread started only after the closed one exited");
-    await done;
-    await assert.rejects(call(join(run, "a.sock"), "/secrets"), "closed thread no longer listens");
     assert.deepEqual(JSON.parse((await call(join(run, "b.sock"), "/db/query", "POST", JSON.stringify({ sql: "SELECT x FROM t" }))).text), [{ x: 7 }]);
     assert.equal((await call(join(run, "b.sock"), "/files?key=f")).text, "hello");
+    assert.equal((await call(join(run, "b.sock"), "/files?key=h", "PUT", "x".repeat(996))).status, 413, "quota counts a's files");
+    assert.equal((await call(join(run, "b.sock"), "/files?key=h", "PUT", "world")).status, 204);
+    await assert.rejects(call(join(run, "a.sock"), "/secrets"), "closed thread no longer listens");
   } finally {
     for (const o of open) o.close(); // a failed assertion must not leave a thread holding the test open
     await bindingsSettled();
     await rm(run, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("bindings after a restart hold file writes until the previous thread is gone; the rest doesn't wait", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-bgate-"));
+  try {
+    let release!: () => void;
+    const b = createBindings(dir, {}, new Promise<void>((r) => (release = r)));
+    let landed = false;
+    const put = b.fetch(new Request("http://h/files?key=k", { method: "PUT", body: "x" })).then((r) => ((landed = true), r));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(landed, false, "write waits");
+    assert.deepEqual(await (await b.fetch(new Request("http://h/files/list"))).json(), [], "reads don't");
+    assert.equal((await b.fetch(new Request("http://h/db/first", { method: "POST", body: JSON.stringify({ sql: "SELECT 1 x" }) }))).status, 200);
+    release();
+    assert.equal((await put).status, 204);
+    await b.close();
+  } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });

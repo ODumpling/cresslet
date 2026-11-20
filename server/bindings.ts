@@ -200,8 +200,8 @@ function serialized<T>(dir: string, fn: () => Promise<T>): Promise<T> {
 
 /**
  * Bindings threads that were closed but haven't exited yet (their accepted file writes are still
- * landing), by files dir. The app's next thread starts only after them, so its writes and quota checks
- * still come after every earlier one.
+ * landing), by files dir. The app's next thread serves at once but holds its file writes until they're
+ * gone, so its writes and quota checks still come after every earlier one.
  */
 const exiting = new Map<string, Promise<void>>();
 
@@ -248,11 +248,12 @@ function bootSpare() {
  */
 export async function serveBindings(dataDir: string, sockPath: string, opts: BindingsOptions, onExit?: () => void) {
   const filesDir = resolve(dataDir, "files");
-  await exiting.get(filesDir);
+  const before = exiting.get(filesDir);
   const worker = spare ?? new Worker(THREAD);
   spare = undefined;
   worker.ref();
-  worker.postMessage({ dataDir, sockPath, opts });
+  worker.postMessage({ dataDir, sockPath, opts, gated: !!before });
+  void before?.then(() => worker.postMessage("go")); // its file writes may start
   let closing = false;
   const exited = new Promise<void>((res) => worker.once("exit", () => res()));
   const close = () => {
@@ -289,10 +290,13 @@ export async function serveBindings(dataDir: string, sockPath: string, opts: Bin
 export function createBindings(
   dataDir: string,
   { secrets = {}, maxFileBytes = 25 * 1024 * 1024, maxDbBytes, maxFilesBytes }: BindingsOptions = {},
+  /** File writes and deletes wait for this (the app's previous bindings thread exiting). */
+  after?: Promise<unknown>,
 ) {
   const db = createDb(join(dataDir, "db.sqlite"), maxDbBytes);
   // File writes and deletes run one at a time, so the quota check sees every earlier write.
   const filesDir = resolve(dataDir, "files");
+  if (after) void serialized(filesDir, () => after);
   let closed = false;
   /** Queues a file mutation, or refuses it once these bindings are closing (a redeploy or delete). */
   const serial = <T>(fn: () => Promise<T>): Promise<T | Response> =>
