@@ -53,6 +53,7 @@ docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   cd /data
   for db in cresslet.db apps/*/data/db.sqlite apps/*/data/files/index.sqlite; do
     [ -f "$db" ] || continue
+    mkdir -p "$(dirname "/s/$db")"  # an app that set up its files after the copy
     rm -f "/s/$db" "/s/$db-wal" "/s/$db-shm"
     sqlite3 "$db" ".backup /s/$db"
     [ "$(sqlite3 "/s/$db" "PRAGMA integrity_check")" = ok ] || { echo "integrity check failed: $db" >&2; exit 1; }
