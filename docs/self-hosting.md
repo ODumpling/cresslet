@@ -63,7 +63,7 @@ docker volume create ${U}_data
 docker run --rm -v $U-cresslet-data:/old -v ${U}_data:/new alpine sh -ec '
   apk add -q sqlite; cp -a /old/. /new/; cd /old
   for db in cresslet.db apps/*/data/db.sqlite apps/*/data/files/index.sqlite; do
-    [ -f "$db" ] || continue; rm -f "/new/$db" "/new/$db-wal" "/new/$db-shm"; sqlite3 "$db" ".backup /new/$db"
+    [ -f "$db" ] || continue; mkdir -p "$(dirname "/new/$db")"; rm -f "/new/$db" "/new/$db-wal" "/new/$db-shm"; sqlite3 "$db" ".backup /new/$db"
   done'
 ```
 
@@ -80,7 +80,7 @@ A network that doesn't exist yet (the first deploy, or one Coolify recreated) is
 Notes:
 - gVisor's network stack can't reach Docker's embedded DNS (127.0.0.11) on a user-defined network ([gVisor FAQ](https://gvisor.dev/docs/user_guide/faq/)), so the entrypoint writes public resolvers (`CRESSLET_RESOLVERS`, default `1.1.1.1 9.9.9.9`) into `/etc/resolv.conf`. The container can't look up other containers by name (it doesn't need to).
 - This mode doesn't use `CRESSLET_RUNSC` (gVisor per sandbox, which needs a privileged container) or `CRESSLET_CGROUP_DIR`. The uids keep apps out of each other's files and the control plane's. Each sandbox still has its heap cap and request timeout, and the container caps bound them all.
-- Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (it mounts the old `<app uuid>-cresslet-data` volume, without the writes made since; copy back the same way to keep them). Then `systemctl disable --now cresslet-firewall.timer cresslet-firewall-boot.service` first (or the timer puts the rules back), and `firewall.sh <app uuid> --remove`.
+- Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (it mounts the old `<app uuid>-cresslet-data` volume, without the writes made since; copy back the same way to keep them). Then `systemctl disable --now cresslet-firewall.timer cresslet-firewall-boot.service` and `systemctl stop cresslet-firewall.service` first (or a run puts the rules back), and `firewall.sh <app uuid> --remove`.
 
 ## Configuration
 

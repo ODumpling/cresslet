@@ -10,6 +10,7 @@
 #
 # <network>: the container's Docker network (a Coolify compose app's network is its application UUID).
 # Needs root. Docker names a user-defined bridge br-<first 12 chars of the network id>.
+# Every iptables call waits for the xtables lock (-w): Docker and ufw take it too, at boot especially.
 set -eu
 NET=${1:?usage: firewall.sh <docker network> [--remove|--install]}
 MODE=${2:-apply}
@@ -58,9 +59,9 @@ fi
 
 # unhook <cmd> <parent> <chain>: remove every jump to <chain> from <parent>, then the chain itself.
 unhook() {
-  while "$1" -D "$2" -j "$3" 2>/dev/null; do :; done
-  "$1" -F "$3" 2>/dev/null || true
-  "$1" -X "$3" 2>/dev/null || true
+  while "$1" -w -D "$2" -j "$3" 2>/dev/null; do :; done
+  "$1" -w -F "$3" 2>/dev/null || true
+  "$1" -w -X "$3" 2>/dev/null || true
 }
 
 if [ "$MODE" = --remove ]; then
@@ -85,13 +86,13 @@ swap() {
   t=$1 parent=$2 c=$3; shift 3
   n=$c.n
   # Before Docker (at boot) DOCKER-USER may not exist yet; Docker keeps one it finds.
-  [ "$parent" = INPUT ] || "$t" -N "$parent" 2>/dev/null || true
+  [ "$parent" = INPUT ] || "$t" -w -N "$parent" 2>/dev/null || true
   unhook "$t" "$parent" "$n"
-  "$t" -N "$n"
-  for r in "$@"; do eval "\"\$t\" -A \"\$n\" $r"; done
-  "$t" -I "$parent" 1 -j "$n"
+  "$t" -w -N "$n"
+  for r in "$@"; do eval "\"\$t\" -w -A \"\$n\" $r"; done
+  "$t" -w -I "$parent" 1 -j "$n"
   unhook "$t" "$parent" "$c"
-  "$t" -E "$n" "$c"
+  "$t" -w -E "$n" "$c"
 }
 
 for t in iptables ip6tables; do
