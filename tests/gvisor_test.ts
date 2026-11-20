@@ -220,7 +220,9 @@ test("gVisor: a crashed control plane's still-running sandbox is reaped before i
     process: { user: { uid: 0, gid: 0 }, args: ["/node", "-e", writer], cwd: "/" },
     mounts: [{ destination: "/node", source: process.execPath, type: "bind", options: ["bind", "ro"] },
       { destination: "/l", source: join(stale, "l"), type: "bind", options: ["rbind", "rw"] },
-      ...["/lib", "/usr/lib"].map((d) => ({ destination: d, source: d, type: "bind", options: ["rbind", "ro"] }))],
+      // /lib64: the x86_64 dynamic loader lives there.
+      ...["/lib", "/lib64", "/usr/lib"].filter((d) => existsSync(d))
+        .map((d) => ({ destination: d, source: d, type: "bind", options: ["rbind", "ro"] }))],
   }));
   const orphan = spawn(runsc!, ["--root", stale + ".gv", "--network=none", "--ignore-cgroups", "run", "--detach", "--bundle", stale + ".gv", "a"], { stdio: "ignore" });
   await new Promise((r) => orphan.once("exit", r));
