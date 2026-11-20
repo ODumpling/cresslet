@@ -40,15 +40,29 @@ function toast(content, ms = 6000) {
   avoidFocus();
   armToast();
 }
-// Never cover the focused control (WCAG 2.4.11): if it's under the toast, the toast moves to the top edge.
+// Never cover the focused control (WCAG 2.4.11): if it's under the toast, the toast moves to the top edge; if
+// it would be covered there too (tiny viewports), the toast steps aside (it was already announced) until focus moves.
 function avoidFocus() {
   const t = $("toast"), a = document.activeElement;
-  if (t.dataset.open !== "true" || !a || a === document.body || t.contains(a)) return;
   t.dataset.top = "false";
-  const r = a.getBoundingClientRect(), q = t.getBoundingClientRect();
-  if (r.bottom > q.top && r.top < q.bottom && r.right > q.left && r.left < q.right) t.dataset.top = "true";
+  if (t.dataset.open !== "true" || !a || a === document.body || t.contains(a)) return;
+  const r = a.getBoundingClientRect();
+  const covers = () => {
+    const q = t.getBoundingClientRect();
+    if (r.height > q.height * 2 || r.width > q.width) return false; // a large area (log, editor) can't be hidden by it
+    return r.bottom > q.top && r.top < q.bottom && r.right > q.left && r.left < q.right;
+  };
+  if (!covers()) return;
+  t.dataset.top = "true";
+  if (covers()) t.dataset.top = "hide";
 }
-addEventListener("focusin", avoidFocus);
+{
+  let frame = 0;
+  const later = () => frame ||= requestAnimationFrame(() => { frame = 0; avoidFocus(); });
+  addEventListener("focusin", avoidFocus);
+  addEventListener("scroll", later, { capture: true, passive: true }); // scrolling can move focus under it
+  addEventListener("resize", later);
+}
 function armToast() {
   clearTimeout(toast.timer);
   const t = $("toast");
@@ -88,9 +102,11 @@ function focusView({ scroll = false } = {}) {
   if (scroll) h?.scrollIntoView({ block: "nearest" });
 }
 // The last focused control, as a selector that still finds it after a re-render rebuilds it.
-let lastFocusKey = null;
+// (Per-item controls get unique ids, e.g. revoke-<token id>: labels like "Revoke Studio (GitHub login)" repeat.)
+let lastFocusKey = null, lastFocusEl = null;
 addEventListener("focusin", (e) => {
   const t = e.target, label = t.getAttribute?.("aria-label");
+  lastFocusEl = t;
   lastFocusKey = t.id ? `#${CSS.escape(t.id)}` : label ? `[aria-label="${CSS.escape(label)}"]` : null;
 });
 /** After a re-render removed the focused control: focus its rebuilt twin if there is one, else `target`, else the
@@ -98,7 +114,9 @@ addEventListener("focusin", (e) => {
 function refocus(target) {
   const a = document.activeElement;
   if (a && a !== document.body && a.isConnected) return;
-  const twin = lastFocusKey && document.querySelector(`main:not([hidden]) ${lastFocusKey}`);
+  // only when the last focused control was removed (a click in Safari/Firefox doesn't focus buttons, so the
+  // last focusin may be an older control that's still here)
+  const twin = lastFocusEl && !lastFocusEl.isConnected && lastFocusKey && document.querySelector(`main:not([hidden]) ${lastFocusKey}`);
   if (twin) twin.focus();
   else if (target) target.focus();
   else focusView();
@@ -250,6 +268,7 @@ async function renderTokens() {
         type: "button",
         textContent: "Revoke",
         ariaLabel: `Revoke ${t.name}`,
+        id: `revoke-${t.id}`,
         onclick: () => revokeToken(t),
       }))
   ));
@@ -480,7 +499,7 @@ async function renderAdminSites() {
   const counts = { live: totals.live, deleted: totals.deleted, all: totals.sites };
   const seg = el("div", { className: "seg", role: "group", ariaLabel: "Show" },
     ...[["live", "Live"], ["deleted", "Deleted"], ["all", "All"]].map(([k, l]) =>
-      el("button", { type: "button", textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminView.filter = k; draw(); } })));
+      el("button", { type: "button", id: `filter-${k}`, textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminView.filter = k; draw(); } })));
   const search = el("input", { type: "search", className: "input", placeholder: "Search sites, owners, domains", ariaLabel: "Search sites", value: adminView.q, oninput: () => { adminView.q = search.value; draw(); } });
   const shown = el("p", { className: "sr-only", role: "status" });
 
@@ -625,6 +644,7 @@ async function renderHome() {
           className: "icon-btn danger",
           type: "button",
           title: "Delete project",
+          id: `delete-${p.id}`,
           ariaLabel: `Delete ${p.name}`,
           onclick: async () => {
             if (!confirm(`Delete local project ${p.name}? Deployed apps are not affected.`)) return;

@@ -106,6 +106,22 @@ try {
   assert(await focused(page) === "token-new-value", "new token value not focused");
   await page.getByRole("button", { name: "Revoke a11y temp" }).click();
   await page.waitForFunction(() => document.activeElement?.id === "tokens-title");
+  // Two tokens with the same name (every GitHub login makes one): revoking one must not land on the other's
+  // identically labelled button (mocked: nothing changes on the server).
+  const dup = await browser.newPage();
+  dup.on("dialog", (d) => d.accept());
+  let toks = ["t1", "t2"].map((id) => ({ id, name: "Studio (GitHub login)", role: "admin", apps: null, createdAt: new Date().toISOString(), lastUsedAt: null }));
+  await dup.route("**/v1/me", (r) => r.fulfill({ json: { account: { email: "dup@example.com", github: null, role: null } } }));
+  await dup.route("**/v1/apps", (r) => r.fulfill({ json: { apps: [] } }));
+  await dup.route("**/v1/me/tokens", (r) => r.fulfill({ json: { tokens: toks } }));
+  await dup.route("**/v1/me/tokens/*", (r) => (toks = toks.filter((t) => !r.request().url().endsWith(`/${t.id}`)), r.fulfill({ json: {} })));
+  await dup.addInitScript(() => localStorage.setItem("cresslet.token", "clv_mocked"));
+  await dup.goto(base + "/#/settings");
+  await dup.locator("#revoke-t1").focus();
+  await dup.keyboard.press("Enter");
+  await dup.locator("#revoke-t1").waitFor({ state: "detached" });
+  await dup.waitForFunction(() => document.activeElement?.id === "tokens-title");
+  await dup.close();
   console.log("settings focus ok");
 
   // Workspace: tabs, terminal and editor exits, Deploy focus.
