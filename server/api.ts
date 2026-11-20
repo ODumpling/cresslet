@@ -8,11 +8,12 @@ import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { appUrl, type Config, paths, previewAppName, previewOrigin, rootUrl } from "./config.ts";
-import type { Account, App, Domain, Store } from "./store.ts";
+import { type Account, type App, type Domain, SITE_ADMIN, type Store } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
 import { github } from "./github.ts";
 import { confine } from "./bindings.ts";
 import { normalizeEgress } from "./egress.ts";
+import { adminRoutes, isSiteAdmin, purgeApp } from "./admin.ts";
 import {
   type DeployInput,
   HttpError,
@@ -77,7 +78,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     return a;
   }
 
-  const accountView = (a: Account) => ({ id: a.id, email: a.email, github: a.github_login });
+  const accountView = (a: Account) => ({
+    id: a.id,
+    email: a.email,
+    github: a.github_login,
+    role: isSiteAdmin(cfg, a) ? SITE_ADMIN : null,
+  });
 
   const view = (a: App) => ({
     id: a.id,
@@ -250,6 +256,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
         throw new HttpError(401, "login required to deploy here (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
       }
       const name = input.app ?? uniqueName();
+      if (store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict");
       if (!validName(name, cfg)) {
         throw new HttpError(400, "app name must be 1-40 chars of a-z, 0-9 and single dashes", "invalid_name");
       }
@@ -280,7 +287,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   function uniqueName() {
     for (let i = 0; i < 20; i++) {
       const n = randomName();
-      if (!store.appByName(n)) return n;
+      if (!store.appByName(n, true)) return n;
     }
     throw new HttpError(500, "could not allocate name");
   }
@@ -314,10 +321,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   app.delete("/apps/:name", async (c) => {
     const a = getApp(c.req.param("name"));
     await authorize(c, a);
-    runtime.stop(a.id);
-    store.deleteApp(a.id);
-    runtime.logs.drop(a.id);
-    await removeAppFiles(cfg, a.id);
+    await purgeApp(cfg, store, runtime, a);
     return c.json({ deleted: a.name });
   });
 
@@ -568,6 +572,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       db.close();
     }
   });
+
+  adminRoutes(app, { cfg, store, runtime, isAdminToken: isAdmin, body });
 
   app.notFound((c) => c.json({ error: "not_found", message: "no such endpoint" }, 404));
   return app;

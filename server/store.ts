@@ -11,7 +11,11 @@ export interface Account {
   created_at: number;
   github_id: number | null;
   github_login: string | null;
+  /** "SiteAdmin" or null. */
+  role: string | null;
 }
+
+export const SITE_ADMIN = "SiteAdmin";
 
 export interface App {
   id: string;
@@ -23,6 +27,8 @@ export interface App {
   /** JSON string[] of allowed outbound hosts, or null = any public host. */
   egress: string | null;
   expires_at: number | null;
+  /** Set when a site admin deleted it: offline but restorable until purged. */
+  deleted_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -95,6 +101,8 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS domains_verified ON domains (domain) WHERE verified_at IS NOT NULL;
     `);
     if (!appCols.includes("uid_seq")) this.db.exec("ALTER TABLE apps ADD COLUMN uid_seq INTEGER");
+    if (!appCols.includes("deleted_at")) this.db.exec("ALTER TABLE apps ADD COLUMN deleted_at INTEGER");
+    if (!cols.includes("role")) this.db.exec("ALTER TABLE accounts ADD COLUMN role TEXT");
     this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)");
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
@@ -153,6 +161,7 @@ export class Store {
       created_at: Date.now(),
       github_id: github?.id ?? null,
       github_login: github?.login ?? null,
+      role: null,
     };
     this.db.prepare("INSERT INTO accounts (id, email, created_at, github_id, github_login) VALUES (?, ?, ?, ?, ?)")
       .run(a.id, a.email, a.created_at, a.github_id, a.github_login);
@@ -164,6 +173,12 @@ export class Store {
   linkGithub(accountId: string, github: { id: number; login: string }) {
     this.db.prepare("UPDATE accounts SET github_id = ?, github_login = ? WHERE id = ?")
       .run(github.id, github.login, accountId);
+  }
+  accountById(accountId: string): Account | undefined {
+    return this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId) as Account | undefined;
+  }
+  setRole(accountId: string, role: string | null) {
+    this.db.prepare("UPDATE accounts SET role = ? WHERE id = ?").run(role, accountId);
   }
   revokeTokens(accountId: string) {
     this.db.prepare("DELETE FROM tokens WHERE account_id = ?").run(accountId);
@@ -197,6 +212,7 @@ export class Store {
       config: "{}",
       egress: null,
       expires_at: expiresAt,
+      deleted_at: null,
       created_at: now,
       updated_at: now,
     };
@@ -206,16 +222,31 @@ export class Store {
     ).run(app.id, name, accountId, await sha256(deployKey), "{}", expiresAt, now, now);
     return { app, deployKey };
   }
-  appByName(name: string): App | undefined {
-    return this.db.prepare("SELECT * FROM apps WHERE name = ?").get(name) as App | undefined;
+  /** Live apps only; `includeDeleted` also finds ones a site admin deleted (their name stays taken until purged). */
+  appByName(name: string, includeDeleted = false): App | undefined {
+    return this.db.prepare(`SELECT * FROM apps WHERE name = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`)
+      .get(name) as App | undefined;
   }
-  appById(appId: string): App | undefined {
-    return this.db.prepare("SELECT * FROM apps WHERE id = ?").get(appId) as App | undefined;
+  appById(appId: string, includeDeleted = false): App | undefined {
+    return this.db.prepare(`SELECT * FROM apps WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`)
+      .get(appId) as App | undefined;
+  }
+  /** Every app, deleted ones included (site admin view). */
+  allApps(): App[] {
+    return this.db.prepare("SELECT * FROM apps ORDER BY updated_at DESC").all() as unknown as App[];
+  }
+  setDeleted(appId: string, deletedAt: number | null) {
+    this.db.prepare("UPDATE apps SET deleted_at = ? WHERE id = ?").run(deletedAt, appId);
+  }
+  /** Deleted by a site admin before `before`: due to be purged. */
+  deletedBefore(before: number): App[] {
+    return this.db.prepare("SELECT * FROM apps WHERE deleted_at IS NOT NULL AND deleted_at < ?")
+      .all(before) as unknown as App[];
   }
   /** Claimed apps whose current deploy declares crons. */
   appsWithCrons(): App[] {
     return this.db.prepare(
-      "SELECT * FROM apps WHERE account_id IS NOT NULL AND json_array_length(config, '$.crons') > 0",
+      "SELECT * FROM apps WHERE account_id IS NOT NULL AND deleted_at IS NULL AND json_array_length(config, '$.crons') > 0",
     ).all() as unknown as App[];
   }
   /**
@@ -239,7 +270,7 @@ export class Store {
     }
   }
   appsByAccount(accountId: string): App[] {
-    return this.db.prepare("SELECT * FROM apps WHERE account_id = ? ORDER BY updated_at DESC")
+    return this.db.prepare("SELECT * FROM apps WHERE account_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC")
       .all(accountId) as unknown as App[];
   }
   async checkDeployKey(appId: string, key: string): Promise<boolean> {
@@ -265,7 +296,7 @@ export class Store {
     this.db.prepare("DELETE FROM apps WHERE id = ?").run(appId);
   }
   expiredApps(now = Date.now()): App[] {
-    return this.db.prepare("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ?")
+    return this.db.prepare("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ? AND deleted_at IS NULL")
       .all(now) as unknown as App[];
   }
 
@@ -295,7 +326,7 @@ export class Store {
   }
   appByDomain(domain: string): App | undefined {
     return this.db.prepare(
-      "SELECT a.* FROM domains d JOIN apps a ON a.id = d.app_id WHERE d.domain = ? AND d.verified_at IS NOT NULL",
+      "SELECT a.* FROM domains d JOIN apps a ON a.id = d.app_id WHERE d.domain = ? AND d.verified_at IS NOT NULL AND a.deleted_at IS NULL",
     ).get(domain) as App | undefined;
   }
 

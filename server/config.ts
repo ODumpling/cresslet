@@ -27,6 +27,8 @@ export interface Config {
   anonDeploys: boolean;
   /** Bearer token that may pre-create accounts / issue tokens (`POST /v1/accounts`). */
   adminToken: string | null;
+  /** Emails / GitHub logins (lowercase) that are always SiteAdmin (`CRESSLET_SITE_ADMINS`, comma-separated). */
+  siteAdmins: string[];
   /** GitHub OAuth App (web flow for the studio, device flow for the CLI). Null = disabled. */
   github: { clientId: string; clientSecret: string; webUrl: string; apiUrl: string } | null;
   /** TXT lookup for custom-domain verification (tests stub it). */
@@ -42,6 +44,8 @@ export interface Config {
     idleMs: number;
     anonTtlMs: number;
     logLines: number;
+    /** How long a site deleted by a site admin stays restorable before it's purged. */
+    deletedRetentionMs: number;
   };
 }
 
@@ -62,6 +66,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     openSignup: env("CRESSLET_OPEN_SIGNUP", "true") === "true",
     anonDeploys: env("CRESSLET_ANON_DEPLOYS", "true") === "true",
     adminToken: process.env.CRESSLET_ADMIN_TOKEN || null,
+    siteAdmins: env("CRESSLET_SITE_ADMINS", "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
     github: githubId && githubSecret
       ? {
         clientId: githubId,
@@ -86,6 +91,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       idleMs: num("CRESSLET_IDLE_MS", 5 * 60_000),
       anonTtlMs: num("CRESSLET_ANON_TTL_HOURS", 72) * 3600_000,
       logLines: num("CRESSLET_LOG_LINES", 1000),
+      deletedRetentionMs: num("CRESSLET_DELETED_RETENTION_DAYS", 30) * 86_400_000,
     },
   };
   const merged = { ...base, ...overrides };
