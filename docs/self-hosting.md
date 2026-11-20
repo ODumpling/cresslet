@@ -154,7 +154,7 @@ Accounts are keyed by GitHub user id. First GitHub login links to an existing (o
 
 ## Docker and isolation
 
-Where strangers can deploy code (`CRESSLET_ANON_DEPLOYS`, or `CRESSLET_OPEN_SIGNUP` with GitHub login; both default on), run it under gVisor: either each sandbox (`CRESSLET_RUNSC`, below) or the whole server (as on [Coolify](#coolify), with `CRESSLET_OUTER_GVISOR=true` and per-app uids). Without gVisor, the server warns at startup: workerd, uids and cgroups alone aren't a hardened multi-tenant boundary ([architecture.md](architecture.md#isolation)). It also warns when sandboxes share one uid without `CRESSLET_RUNSC`. A closed instance (both off) gets no warning.
+Where strangers can deploy code (`CRESSLET_ANON_DEPLOYS`, or `CRESSLET_OPEN_SIGNUP` with GitHub login; both settings default on), run it under gVisor: either each sandbox (`CRESSLET_RUNSC`, below) or the whole server (as on [Coolify](#coolify), with `CRESSLET_OUTER_GVISOR=true` and per-app uids). Without gVisor, the server warns at startup: workerd, uids and cgroups alone aren't a hardened multi-tenant boundary ([architecture.md](architecture.md#isolation)). It also warns when sandboxes share one uid without `CRESSLET_RUNSC`. A closed instance (both off) gets no warning.
 
 Docker: the repo `Dockerfile` runs the server on port 8787 with data in `/data` (mount a volume). Sandboxes are plain child processes, so no extra privileges are needed.
 
