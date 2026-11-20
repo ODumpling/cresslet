@@ -4,7 +4,7 @@
 // Apps without an allowlist use workerd's own `allow = ["public"]` network instead, except under gVisor
 // (no network in the sandbox): there this proxy runs with `allow = null`, any public host, raw sockets too.
 import { lookup } from "node:dns";
-import { BlockList, connect, isIP, type LookupFunction } from "node:net";
+import { BlockList, connect, isIP, type LookupFunction, type Socket } from "node:net";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { pipeline } from "node:stream/promises";
 import { Agent, request } from "undici";
@@ -135,20 +135,26 @@ export function createEgressProxy(
   });
   // Raw TCP (cloudflare:sockets connect()) isn't available under an allowlist; without one (gVisor),
   // it's tunnelled to public addresses only, like workerd's own "public" network.
-  server.on("connect", (req: IncomingMessage, socket: import("node:stream").Duplex, head: Buffer) => {
+  server.on("connect", (req: IncomingMessage, socket: Socket, head: Buffer) => {
+    socket.on("error", () => socket.destroy());
+    // Answer, then close both directions (end() alone would leave a socket the sandbox can hold open).
+    const reply = (status: string) => {
+      socket.end(`HTTP/1.1 ${status}\r\ncontent-length: 0\r\n\r\n`);
+      socket.destroySoon();
+    };
     const forbid = (msg: string) => {
       log(`egress blocked: ${msg}`);
-      socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
+      reply("403 Forbidden");
     };
     if (allow) return forbid(`raw socket to ${req.url}`);
     const m = /^\[?([^\[\]]+?)\]?:(\d{1,5})$/.exec(req.url ?? "");
     const port = Number(m?.[2]);
     if (!m || port < 1 || port > 65535) return forbid(`bad CONNECT target ${req.url}`);
     if (isIP(m[1]) && !isPublicIp(m[1])) return forbid(`raw socket to ${m[1]} (not a public address)`);
-    if (inflight >= MAX_INFLIGHT) return void socket.end("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+    if (inflight >= MAX_INFLIGHT) return reply("503 Service Unavailable");
     inflight++;
     let open = false;
-    const up = connect({ host: m[1], port, lookup: connectLookup });
+    const up = connect({ host: m[1], port, lookup: connectLookup, allowHalfOpen: true });
     const done = () => {
       up.destroy();
       socket.destroy();
@@ -166,9 +172,9 @@ export function createEgressProxy(
       const code = (e as { code?: string }).code;
       if (code === "EACCES" || /non-public/.test(e.message)) return forbid(e.message);
       log(`egress error: ${m[1]}: ${e.message}`);
-      socket.end("HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n");
+      reply("502 Bad Gateway");
     });
-    socket.on("error", done).on("close", done);
+    socket.on("close", done);
   });
   server.on("close", () => void agent.close());
   return server;

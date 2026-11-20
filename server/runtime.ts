@@ -398,7 +398,8 @@ export class Runtime {
           bindingsServer.close();
           bindingsServer.closeAllConnections();
           binds.close();
-          rmSync(run, { recursive: true, force: true });
+          // gVisor: the sandbox can write to l/, so its run dir goes only once it's reaped (jail release).
+          if (!gvisor) rmSync(run, { recursive: true, force: true });
         },
       },
       ready: Promise.resolve(),

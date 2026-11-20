@@ -108,7 +108,7 @@ docker run --user root --privileged --cgroupns=private \
   -e CRESSLET_RUNSC=/usr/local/bin/runsc -e CRESSLET_CGROUP_DIR=/sys/fs/cgroup/cresslet -e CRESSLET_SOCK_DIR=/run/cresslet …
 ```
 
-Claimed apps' outbound goes through the control plane's egress proxy in this mode (any public host without an allowlist, raw sockets included). The one host dir a sandbox can write is its listener dir under `CRESSLET_SOCK_DIR`; keeping that on a tmpfs (`/run`) bounds it. `CRESSLET_SOCK_DIR` must be at most 50 bytes. `tests/gvisor_test.ts` shows how to verify a host, and the whole suite runs under gVisor with `CRESSLET_RUNSC` set.
+Claimed apps' outbound goes through the control plane's egress proxy in this mode (any public host without an allowlist; plain HTTP(S) and plain TCP sockets, not outbound WebSockets or TLS sockets). `CRESSLET_APP_PIDS` also counts gVisor's own threads; raise it if sandboxes fail to start on many-core hosts. The one host dir a sandbox can write is its listener dir under `CRESSLET_SOCK_DIR`; keeping that on a tmpfs (`/run`) bounds it. `CRESSLET_SOCK_DIR` must be at most 50 bytes. `tests/gvisor_test.ts` shows how to verify a host, and the whole suite runs under gVisor with `CRESSLET_RUNSC` set.
 
 `*.localhost` resolves to 127.0.0.1 in browsers and curl, so local dev needs no DNS setup.
 

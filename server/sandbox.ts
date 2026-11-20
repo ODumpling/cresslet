@@ -27,6 +27,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
+import { rm } from "node:fs/promises";
 import type { Config } from "./config.ts";
 
 const CONTROLLERS = ["cpu", "memory", "pids"];
@@ -214,13 +215,20 @@ function trustedPath(dir: string): string {
  */
 export function sweep(cfg: Config, instance: string) {
   const ours = (name: string) => RUN_DIR_RE.exec(name.replace(/\.gv$/, ""))?.[1] === instance;
-  for (const d of existsSync(cfg.sockDir) ? readdirSync(cfg.sockDir) : []) {
-    if (!ours(d)) continue;
-    // A gVisor sandbox whose control plane crashed may still run (without cgroups nothing reaps it).
-    if (d.endsWith(".gv") && cfg.sandbox.runsc) {
-      spawnSync(cfg.sandbox.runsc, ["--root", join(cfg.sockDir, d), "delete", "--force", "a"], { stdio: "ignore", timeout: 10_000 });
+  const names = existsSync(cfg.sockDir) ? readdirSync(cfg.sockDir).filter(ours) : [];
+  // gVisor first: a sandbox whose control plane crashed may still run (without cgroups nothing reaps
+  // it) and write to its run dir's l/. Its run dir goes only once runsc confirms it's gone.
+  const keep = new Set<string>();
+  for (const d of names.filter((n) => n.endsWith(".gv"))) {
+    const gv = join(cfg.sockDir, d);
+    if (!cfg.sandbox.runsc || !reapGvisor(cfg.sandbox.runsc, gv)) {
+      console.error(`cresslet: can't confirm the gVisor sandbox in ${gv} is gone (CRESSLET_RUNSC unset or runsc failed); left in place`);
+      keep.add(d).add(d.slice(0, -3));
     }
-    if (d.endsWith(".gv") && process.platform === "linux") unmountUnder(join(cfg.sockDir, d));
+  }
+  for (const d of names) {
+    if (keep.has(d)) continue;
+    if (d.endsWith(".gv")) unmountUnder(join(cfg.sockDir, d));
     rmSync(join(cfg.sockDir, d), { recursive: true, force: true });
   }
   const dir = cfg.sandbox.cgroupDir;
@@ -313,7 +321,7 @@ export function jail(cfg: Config, name: string, seq: () => number, runDir: strin
     oomKilled: () => !!cg && oomCount(cg) > oomBase,
     release() {
       if (cg) void killCgroup(cg);
-      if (gv && !released) void deleteGvisor(cfg.sandbox.runsc!, gv);
+      if (gv && !released) void deleteGvisor(cfg.sandbox.runsc!, gv, runDir);
       released = true;
     },
   };
@@ -392,32 +400,53 @@ function track(p: Promise<void>) {
   void p.then(() => removals.delete(p));
 }
 
+const runscArgs = (gv: string, ...a: string[]) => ["--root", gv, ...a];
+
+/** Startup: `runsc delete --force`, then true if runsc lists no container left in this state dir. */
+function reapGvisor(runsc: string, gv: string): boolean {
+  spawnSync(runsc, runscArgs(gv, "delete", "--force", "a"), { stdio: "ignore", timeout: 10_000 });
+  const l = spawnSync(runsc, runscArgs(gv, "list", "-quiet"), { encoding: "utf8", timeout: 10_000 });
+  return l.status === 0 && !l.stdout.trim();
+}
+
 /**
- * `runsc delete --force` kills the sandbox if it still runs. runsc leaves the sandbox's (empty) netns
- * bind-mounted in its state dir, so unmount whatever is under it before removing it with the bundle.
+ * Stop/exit: `runsc delete --force` (kills the sandbox if it still runs), and only once runsc lists it
+ * as gone, remove its state dir and run dir: the sandbox can write to `l/`, so that tree is never
+ * removed while it's alive, and never synchronously. runsc leaves the sandbox's (empty) netns
+ * bind-mounted in the state dir, so that's unmounted first. If it can't be confirmed, both stay for
+ * the next start's sweep.
  */
-function deleteGvisor(runsc: string, gv: string): Promise<void> {
-  const p = new Promise<void>((done) => {
-    let once = false;
-    const fin = () => {
-      if (once) return;
-      once = true;
-      try {
-        unmountUnder(gv);
-        rmSync(gv, { recursive: true, force: true });
-      } catch { /* still busy: swept at the next start */ }
-      done();
-    };
-    const c = spawn(runsc, ["--root", gv, "delete", "--force", "a"], { stdio: "ignore" });
-    c.once("error", fin).once("exit", fin);
-  });
+function deleteGvisor(runsc: string, gv: string, runDir: string): Promise<void> {
+  const run = (a: string[]) =>
+    new Promise<{ ok: boolean; out: string }>((res) => {
+      let out = "";
+      const c = spawn(runsc, runscArgs(gv, ...a), { stdio: ["ignore", "pipe", "ignore"] });
+      c.stdout.on("data", (d) => (out += d));
+      c.once("error", () => res({ ok: false, out }));
+      c.once("close", (code) => res({ ok: code === 0, out }));
+    });
+  const p = (async () => {
+    await run(["delete", "--force", "a"]);
+    const l = await run(["list", "-quiet"]);
+    if (!l.ok || l.out.trim()) return console.error(`cresslet: gVisor sandbox in ${gv} still listed after delete; left for the next start`);
+    try {
+      unmountUnder(gv);
+      await rm(gv, { recursive: true, force: true });
+      await rm(runDir, { recursive: true, force: true });
+    } catch (e) {
+      console.error(`cresslet: removing ${runDir}: ${(e as Error).message}`);
+    }
+  })();
   track(p);
   return p;
 }
 
 function unmountUnder(dir: string) {
-  const mounts = readFileSync("/proc/self/mountinfo", "utf8").split("\n").map((l) => l.split(" ")[4]);
-  for (const m of mounts) if (m?.startsWith(dir + "/")) spawnSync("umount", ["-l", m], { stdio: "ignore" });
+  if (process.platform !== "linux") return;
+  // mountinfo escapes space, tab, newline and backslash as octal.
+  const unescape = (m: string) => m.replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
+  const mounts = readFileSync("/proc/self/mountinfo", "utf8").split("\n").map((l) => l.split(" ")[4]).filter(Boolean).map(unescape);
+  for (const m of mounts) if (m.startsWith(dir + "/")) spawnSync("umount", ["-l", m], { stdio: "ignore" });
 }
 
 /** SIGKILL everything in the cgroup, then remove it once empty (the kill is asynchronous). */

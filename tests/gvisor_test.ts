@@ -206,26 +206,37 @@ test("gVisor + per-app uid + cgroups: apps run, are capped and reaped", { skip }
   }
 });
 
-test("gVisor: a crashed control plane's still-running sandbox is swept at start", { skip }, async () => {
+test("gVisor: a crashed control plane's still-running sandbox is reaped before its run dir is removed", { skip }, async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-gv-"));
   const sockDir = "/tmp/cresslet-gv-sock";
   writeFileSync(join(dataDir, "instance"), "gvgvgvgv\n");
   const stale = join(sockDir, "gvgvgvgv-app_dead-00beef");
   mkdirSync(join(stale + ".gv", "rootfs"), { recursive: true });
-  mkdirSync(stale, { recursive: true });
+  mkdirSync(join(stale, "l"), { recursive: true });
+  // It keeps writing into its l/ (a run dir removed while it's alive would race it, or fail ENOTEMPTY).
+  const writer = `const fs = require("fs"); let i = 0; setInterval(() => { for (let k = 0; k < 20; k++) fs.mkdirSync("/l/d" + i++ + "/x/y", { recursive: true }); }, 1);`;
   writeFileSync(join(stale + ".gv", "config.json"), JSON.stringify({
     ociVersion: "1.0.2", root: { path: "rootfs", readonly: true },
-    process: { user: { uid: 0, gid: 0 }, args: ["/node", "-e", "setInterval(() => {}, 1000)"], cwd: "/" },
+    process: { user: { uid: 0, gid: 0 }, args: ["/node", "-e", writer], cwd: "/" },
     mounts: [{ destination: "/node", source: process.execPath, type: "bind", options: ["bind", "ro"] },
+      { destination: "/l", source: join(stale, "l"), type: "bind", options: ["rbind", "rw"] },
       ...["/lib", "/usr/lib"].map((d) => ({ destination: d, source: d, type: "bind", options: ["rbind", "ro"] }))],
   }));
   const orphan = spawn(runsc!, ["--root", stale + ".gv", "--network=none", "--ignore-cgroups", "run", "--detach", "--bundle", stale + ".gv", "a"], { stdio: "ignore" });
   await new Promise((r) => orphan.once("exit", r));
   const state = () => spawnSync(runsc!, ["--root", stale + ".gv", "state", "a"], { encoding: "utf8" }).stdout;
   assert.match(state(), /"status": "running"/);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok(readdirSync(join(stale, "l")).length > 50, "orphan is writing");
 
   const other = join(sockDir, "hhhhhhhh-app_dead-00beef.gv"); // another instance's: left alone
   mkdirSync(other, { recursive: true });
+  // A runsc that can't confirm the sandbox is gone: its run dir and state stay for a later sweep.
+  const fake = join(dataDir, "fake-runsc");
+  writeFileSync(fake, '#!/bin/sh\n[ "$1" = --version ] && exit 0\nexit 1\n', { mode: 0o755 });
+  createServer(loadConfig({ dataDir, domain: "t", publicPort: 80, sockDir, sandbox: { uidBase: null, cgroupDir: null, cpuPercent: 100, pidsMax: 128, runsc: fake } })).close();
+  assert.ok(existsSync(join(stale, "l")) && existsSync(stale + ".gv"), "kept when the reap can't be confirmed");
+  assert.match(state(), /"status": "running"/);
   const srv = createServer(loadConfig({ dataDir, domain: "t", publicPort: 80, sockDir, sandbox: { uidBase: null, cgroupDir: null, cpuPercent: 100, pidsMax: 128, runsc } }));
   try {
     assert.ok(!existsSync(stale) && !existsSync(stale + ".gv"), "leftovers swept");
