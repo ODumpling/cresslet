@@ -240,10 +240,18 @@ export function createCresslet(c, opts) {
         return;
       }
       const ready = new Promise((resolve, reject) => {
+        // Errors in request handling are caught in the worker: one that gets here means it's gone (e.g. the
+        // preview relay restarted). Fail its requests and the next ones until `cresslet dev` is rerun.
         w.onerror = (e) => {
           reject(new Error(e.message));
-          // e.g. "preview relay restarted": the worker is gone, rerun `cresslet dev`
-          if (worker === w) out(`\x1b[31m[server] ${e.message}\x1b[0m`);
+          if (worker !== w) return;
+          worker = null;
+          w.terminate();
+          workerError = `server stopped: ${e.message} (rerun \`cresslet dev\`)`;
+          out(`\x1b[31m${workerError}\x1b[0m`);
+          const body = new TextEncoder().encode(workerError).buffer;
+          for (const done of waiting.values()) done({ status: 503, headers: [["content-type", "text/plain"]], body });
+          waiting.clear();
         };
         w.onmessage = async ({ data: m }) => {
           if (m.type === "ready") resolve();

@@ -100,6 +100,19 @@ try {
   if (served?.origin !== previewOrigin) throw new Error(`server code ran on ${served?.origin}, not ${previewOrigin}`);
   if (served.dbs.includes("cresslet-studio")) throw new Error("server code could see the studio's IndexedDB");
   console.log("server code runs on", served.origin, "and sees databases", JSON.stringify(served.dbs));
+  // A relay reload takes its workers with it: API requests then fail fast (503), they don't hang.
+  await page.evaluate(() => {
+    const relay = document.querySelector('iframe[title="cresslet preview relay"]');
+    relay.src = relay.src;
+  });
+  const stopped = async () => {
+    const f = await (await page.locator("#preview").elementHandle()).contentFrame();
+    return f.evaluate(() => fetch("/api/probe", { signal: AbortSignal.timeout(5000) }).then(async (r) => `${r.status} ${await r.text()}`).catch((e) => e.name)).catch(() => "");
+  };
+  let afterReload = "";
+  for (let i = 0; !afterReload.startsWith("503") && i < 10; i++) (afterReload = await stopped()) || (await page.waitForTimeout(300));
+  if (!/^503 server stopped: preview relay restarted/.test(afterReload)) throw new Error(`after a relay reload: ${afterReload}`);
+  console.log("relay reload: server requests get", afterReload.slice(0, 40));
   await page.screenshot({ path: (process.argv[2] ?? ".") + "/studio.png" });
   await settings();
 } catch (e) {
