@@ -180,6 +180,7 @@
                 <label class="check"><input type="radio" name="token-scope" value="some" /> Only these apps</label>
                 <div id="token-apps" class="token-apps" hidden></div>
               </fieldset>
+              <p class="error small" id="token-error" role="alert" hidden></p>
               <div class="row start"><button class="btn primary" id="token-create" type="submit">Create token</button></div>
             </form>
           </section>
@@ -219,9 +220,9 @@
               <h2 class="sr-only" id="editor-title">Code editor</h2>
               <svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>
               <span id="open-file" class="mono crumb">No file open</span>
-              <span class="kbd-hint" id="editor-help">Tab indents. Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the editor.</span>
             </div>
             <div id="editor" class="editor"></div>
+            <p class="pane-foot" id="editor-help">Tab indents. Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the editor.</p>
           </section>
           <section class="pane preview-pane" aria-labelledby="preview-title">
             <div class="pane-head">
@@ -254,10 +255,10 @@
               <button role="tab" class="tab" id="tab-deploy-log" type="button" aria-selected="false" aria-controls="deploy-log" data-tab="deploy-log" tabindex="-1">
                 <svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Deploy log
               </button>
-              <span class="kbd-hint" id="terminal-help">Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the terminal.</span>
             </div>
             <div id="terminal" class="terminal" data-panel="terminal" role="tabpanel" aria-labelledby="tab-terminal" aria-describedby="terminal-help"></div>
             <pre id="deploy-log" class="deploy-log mono" data-panel="deploy-log" role="tabpanel" aria-labelledby="tab-deploy-log" tabindex="0" hidden></pre>
+            <p class="pane-foot" id="terminal-help" data-panel="terminal">Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the terminal.</p>
           </section>
         </main>
       </div>

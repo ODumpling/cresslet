@@ -251,6 +251,12 @@ async function revokeToken(t) {
   $("tokens-title").focus(); // the Revoke button is gone with its row
 }
 
+// Form errors stay beside the form (not a timed toast) until the user changes it.
+function tokenError(text) {
+  $("token-error").textContent = text;
+  $("token-error").hidden = !text;
+}
+$("token-form").addEventListener("change", () => tokenError(""));
 for (const r of document.querySelectorAll('input[name="token-scope"]')) {
   r.addEventListener("change", () => ($("token-apps").hidden = r.value === "all" ? r.checked : !r.checked));
 }
@@ -260,9 +266,11 @@ $("token-form").addEventListener("submit", async (e) => {
   const some = document.querySelector('input[name="token-scope"]:checked').value === "some";
   const apps = some ? [...$("token-apps").querySelectorAll("input:checked")].map((x) => x.value) : null;
   if (some && !apps.length) {
-    toast("Pick at least one app, or choose All apps.");
+    tokenError("Pick at least one app, or choose All apps.");
+    $("token-apps").querySelector("input")?.focus();
     return;
   }
+  tokenError("");
   $("token-create").disabled = true;
   try {
     const r = await api("/v1/me/tokens", {
@@ -278,7 +286,7 @@ $("token-form").addEventListener("submit", async (e) => {
     $("token-apps").hidden = true;
     renderTokens();
   } catch (err) {
-    toast(`Could not create token: ${err.message}`);
+    tokenError(`Could not create token: ${err.message}`);
   } finally {
     $("token-create").disabled = false;
   }
@@ -393,22 +401,26 @@ function siteActions(site, after) {
     : [btn("Delete", "delete", true)];
 }
 
+/** Resolves true if this render is still the current view (no later route or admin render), so callers may move focus. */
 async function renderAdmin(name) {
   if (!auth.token) {
     location.hash = "#/";
-    return;
+    return false;
   }
   $("admin-title").replaceChildren(name || "Sites"); // before showOnly() focuses it
   showOnly("admin");
-  adminView.gen++;
+  const gen = ++adminView.gen, route = routeGen;
+  const current = () => gen === adminView.gen && route === routeGen;
   $("admin-actions").replaceChildren();
   $("admin-body").replaceChildren(el("p", { className: "muted", textContent: "Loading…" }));
   try {
     if (name) await renderAdminSite(name);
     else await renderAdminSites();
   } catch (e) {
+    if (!current()) return false;
     $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 403 ? "Only site admins can see this page." : `Could not load: ${e.message}` }));
   }
+  return current();
 }
 
 async function renderAdminSites() {
@@ -421,10 +433,7 @@ async function renderAdminSites() {
   $("admin-actions").replaceChildren(el("button", {
     className: "btn",
     type: "button",
-    onclick: () => {
-      const gen = routeGen;
-      renderAdmin().then(() => gen === routeGen && $("admin-actions").querySelector("button")?.focus()); // it's rebuilt
-    },
+    onclick: () => renderAdmin().then((ok) => ok && $("admin-actions").querySelector("button")?.focus()), // it's rebuilt
   }, icon("refresh"), "Refresh"));
 
   const u = totals.usage;
@@ -461,7 +470,7 @@ async function renderAdminSites() {
         el("td", { className: "num", textContent: fmtBytes(s.usage.deploys + s.usage.files) }),
         el("td", { className: "num", textContent: s.usage.database ? fmtBytes(s.usage.database) : "—" }),
         el("td", {}, el("time", { dateTime: s.updatedAt, title: new Date(s.updatedAt).toLocaleString(), textContent: ago(s.updatedAt) })),
-        el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin().then(() => focusView())))))
+        el("td", { className: "actions" }, ...siteActions(s, () => renderAdmin().then((ok) => ok && focusView())))))
       : [el("tr", {}, el("td", { colSpan: 7, className: "empty", textContent: q ? "No sites match." : "No sites here." }))]));
   }
   draw();
@@ -488,7 +497,7 @@ async function renderAdminSite(name) {
   const visit = extLink(s.url, "Visit", "btn");
   visit.hidden = s.status === "deleted";
   $("admin-actions").replaceChildren(visit,
-    ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name).then(() => focusView()))));
+    ...siteActions(s, (action) => (action === "purge" ? (location.hash = "#/admin") : renderAdmin(name).then((ok) => ok && focusView()))));
 
   const dep = s.currentDeploy;
   const banner = s.status === "deleted"

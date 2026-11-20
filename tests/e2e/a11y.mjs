@@ -54,6 +54,12 @@ try {
   // Settings: after Revoke, focus lands on the list heading.
   await page.goto(base + "/#/settings");
   await page.getByLabel("Name", { exact: true }).fill("a11y temp");
+  // A validation error stays beside the form (not a toast that times out) until the form changes.
+  await page.getByLabel("Only these apps").check();
+  await page.getByRole("button", { name: "Create token" }).click();
+  assert(/Pick at least one app/.test(await page.locator("#token-error").innerText()), "no inline error for an empty app scope");
+  await page.getByLabel("All apps (and new ones)").check();
+  assert(await page.locator("#token-error").isHidden(), "inline error stayed after fixing the form");
   await page.getByRole("button", { name: "Create token" }).click();
   await page.locator("#token-new").waitFor({ state: "visible" });
   assert(await focused(page) === "token-new-value", "new token value not focused");
