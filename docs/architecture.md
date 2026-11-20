@@ -65,9 +65,7 @@ Remaining exposure: the app's *server* code (and `node` scripts) still run in We
 
 ## Roadmap
 
-- Run a public hosted instance (recipe, wildcard TLS included: [self-hosting.md](self-hosting.md#production)). Named / scoped API tokens (today: one token list per account, regenerate revokes all).
+- Run a public hosted instance (recipe, wildcard TLS included: [self-hosting.md](self-hosting.md#production)).
 - Stronger isolation: microVMs (Firecracker) or gVisor. workerd + uid + cgroups is not a hardened multi-tenant boundary (Cloudflare adds more layers in production).
 - Move db/file bindings off the control-plane thread (worker thread or per-app helper) if sync SQLite becomes a bottleneck.
-- Custom domains, cron/scheduled handlers, websockets.
-- Source sync (git) so studio and CLI edit the same project.
 - AI builder in the studio driving the same API (deferred from v1).

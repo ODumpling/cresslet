@@ -81,7 +81,7 @@ curl -X POST https://cresslet.example.com/v1/accounts -H "authorization: Bearer 
 2. Tick **Enable Device Flow** (the CLI uses it; the server proxies it, so the secret never leaves the server).
 3. Set `CRESSLET_GITHUB_CLIENT_ID` and `CRESSLET_GITHUB_CLIENT_SECRET`.
 
-Accounts are keyed by GitHub user id. First GitHub login links to an existing (operator-created) account with the same **verified** GitHub email and revokes its older tokens; otherwise it creates one, if `CRESSLET_OPEN_SIGNUP` allows. Users find their API token in the studio under **Settings** (show, copy, regenerate) or run `cresslet login`.
+Accounts are keyed by GitHub user id. First GitHub login links to an existing (operator-created) account with the same **verified** GitHub email and revokes its older tokens; otherwise it creates one, if `CRESSLET_OPEN_SIGNUP` allows. Users create named API tokens in the studio under **Settings** (read / deploy / admin, optionally limited to some apps; revoke each one alone) or run `cresslet login`.
 
 Docker: the repo `Dockerfile` runs the server on port 8787 with data in `/data` (mount a volume). Sandboxes are plain child processes, so no extra privileges are needed.
 

@@ -47,7 +47,7 @@ export function github(cfg: Config, store: Store) {
   }
 
   /** Map a GitHub access token to a Cresslet account (find, link by verified email, or create) + new token. */
-  async function login(accessToken: string): Promise<Login> {
+  async function login(accessToken: string, tokenName: string): Promise<Login> {
     const u = await ghApi<GithubUser>("/user", accessToken);
     if (!u.ok || !u.body?.id) throw new HttpError(502, "could not read GitHub user", "github_error");
     const user = u.body;
@@ -78,7 +78,7 @@ export function github(cfg: Config, store: Store) {
         account = store.createAccount(existing ? `${user.id}+${user.login}@users.noreply.github.com` : email, ident);
       }
     }
-    return { account, token: await store.issueToken(account.id) };
+    return { account, token: (await store.issueToken(account.id, { name: tokenName })).token };
   }
 
   return {
@@ -105,7 +105,7 @@ export function github(cfg: Config, store: Store) {
         redirect_uri: redirectUri,
       });
       if (!t.access_token) throw new HttpError(400, t.error_description ?? t.error ?? "GitHub login failed", "github_error");
-      const l = await login(t.access_token);
+      const l = await login(t.access_token, "Studio (GitHub login)");
       sweep(codes, (v) => v.exp);
       const once = id("lc", 16);
       codes.set(once, { ...l, exp: Date.now() + CODE_TTL });
@@ -142,7 +142,7 @@ export function github(cfg: Config, store: Store) {
         device_code: deviceCode,
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
       });
-      if (t.access_token) return login(t.access_token);
+      if (t.access_token) return login(t.access_token, "CLI (GitHub device login)");
       if (t.error === "authorization_pending") return { status: "pending" };
       if (t.error === "slow_down") return { status: "slow_down", interval: Number(t.interval) || undefined };
       const msg = t.error === "expired_token" ? "code expired, run login again"

@@ -6,12 +6,12 @@ import { existsSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { appUrl, type Config, paths } from "./config.ts";
-import { type Account, type App, SITE_ADMIN, type Store } from "./store.ts";
+import { type Account, type App, SITE_ADMIN, type Store, type Token } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
 import { confine } from "./bindings.ts";
 import { HttpError, removeAppFiles } from "./deploys.ts";
 
-type Env = { Variables: { account?: Account; bearer?: string } };
+type Env = { Variables: { account?: Account; token?: Token; bearer?: string } };
 
 export const isSiteAdmin = (cfg: Config, a: Account | undefined) =>
   !!a && (a.role === SITE_ADMIN || cfg.siteAdmins.includes(a.email) ||
@@ -86,8 +86,9 @@ export function adminRoutes(
 ) {
   /** Who is acting, for log lines; throws unless a site admin. */
   const requireSiteAdmin = (c: Context<Env>) => {
-    const acct = c.get("account");
-    if (isSiteAdmin(cfg, acct)) return acct!.github_login ?? acct!.email;
+    const acct = c.get("account"), t = c.get("token");
+    // Only with a full-access token: a site admin's scoped token (read, deploy, some apps) doesn't count.
+    if (isSiteAdmin(cfg, acct) && t?.role === "admin" && !t.apps) return acct!.github_login ?? acct!.email;
     if (isAdminToken(c.get("bearer"))) return "operator";
     throw new HttpError(acct ? 403 : 401, "site admin only", acct ? "forbidden" : "unauthorized");
   };
