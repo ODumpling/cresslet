@@ -65,6 +65,7 @@ chmod 700 "$DIR"
 STEM=cresslet-$(date -u +%Y%m%dT%H%M%SZ)
 TMP=.$STEM.$$  # staging, per run
 trap 'rm -f "$DIR/$TMP.part" "$DIR/$TMP.key"' EXIT
+trap 'exit 1' INT TERM HUP
 # Read-write mount: SQLite needs the -shm file of a WAL database even to read it.
 docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   apk add -q --no-cache sqlite tar >/dev/null

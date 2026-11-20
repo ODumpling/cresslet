@@ -119,7 +119,7 @@ systemctl start cresslet-backup; journalctl -u cresslet-backup -n 20   # one run
 
 - A run fails (`systemctl status cresslet-backup`) when an upload fails (the keys go first: a failed key upload stops the snapshot's), or when `CRESSLET_BACKUP_RCLONE` is set without `CRESSLET_BACKUP_KEY_RCLONE` while the volume has a `secrets.key` (the snapshot is uploaded, its key isn't).
 - One snapshot path per volume: a restore takes the newest snapshot there.
-- The script doesn't delete off-site snapshots: give the snapshot bucket a lifecycle rule (e.g. delete after 30 days). Not the key bucket; turn on its versioning or object lock if your storage has them.
+- The script doesn't delete off-site snapshots: give the snapshot bucket a lifecycle rule (e.g. delete after 30 days), and watch for failed runs (`OnFailure=`, monitoring), or a month of them leaves none. Not the key bucket; turn on its versioning or object lock if your storage has them.
 - Snapshots made before the key was kept apart hold `secrets.key` themselves: delete them from the snapshot bucket once a newer snapshot and its key are both off-site (`rclone lsf` each bucket).
 - Keep both tokens (and `CRESSLET_SECRETS_KEY`, if you set it: then there may be no `secrets.key` to copy) somewhere other than the server, such as a password manager: a restore after losing the host needs them.
 - Snapshots hold every app's database and files (app secrets encrypted with the key): keep the snapshot bucket private.
