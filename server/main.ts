@@ -4,7 +4,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Http2Bindings, type HttpBindings, serve } from "@hono/node-server";
 import { serveDir, serveFile } from "./static.ts";
-import { type Config, loadConfig, previewAppName, rootUrl } from "./config.ts";
+import { type Config, isolationWarnings, loadConfig, previewAppName, rootUrl } from "./config.ts";
 import { Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
 import { Logs } from "./logs.ts";
@@ -177,11 +177,7 @@ export function createServer(cfg: Config = loadConfig()) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const srv = createServer();
-  const { cfg } = srv;
-  if ((cfg.anonDeploys || (cfg.openSignup && cfg.github)) && cfg.sandbox.uidBase === null && !cfg.sandbox.runsc) {
-    console.warn("cresslet: strangers can deploy code here (open signup or anonymous deploys) but sandboxes share one uid: " +
-      "set CRESSLET_SANDBOX_UID_BASE and/or CRESSLET_RUNSC (docs/self-hosting.md)");
-  }
+  for (const w of isolationWarnings(srv.cfg)) console.warn(w);
   const http = serve({ fetch: srv.handler, port: srv.cfg.port }, () =>
     console.log(`cresslet listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`));
   http.on("upgrade", srv.upgrade);

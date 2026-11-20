@@ -20,7 +20,8 @@
                           │  runtime/worker.js wraps server.js, builds env     │
                           │  no fs, no env, no subprocess; heap cap            │
                           │  network: none (unclaimed) | public only (claimed) │
-                          │  optional: inside gVisor (runsc), no network ns    │
+                          │  multi-tenant: under gVisor (per sandbox or whole  │
+                          │  server; startup warning without)                  │
                           └────────────────────────────────────────────────────┘
 ```
 
@@ -57,6 +58,8 @@ data/apps/<appId>/data/files/          app file storage
     - Listener: the Sentry can't accept on a host listening socket passed in as an fd, so in this mode workerd binds `l/a.sock` itself. Once it exists the control plane hard-links it into the root-owned run dir as `a.sock` (`link()` doesn't follow symlinks) and keeps it only if it's a socket, so what it connects to can't be swapped later.
     - Teardown: the run dir (with `l/`) is removed only after `runsc delete` and `runsc list` confirm the sandbox is gone, off the event loop; the startup sweep reaps leftover sandboxes before it removes their run dirs, and leaves both in place (logged) if it can't confirm.
     - Residual: `l/` is a host directory the sandbox can write to (it could fill the disk under `CRESSLET_SOCK_DIR`; put that on a size-limited tmpfs such as `/run` to bound it). runsc itself and its gofer run as root on the host (gVisor's own seccomp/namespace confinement applies). A crashed control plane leaves runsc running when there are no cgroups; the next start `runsc delete`s it (with `CRESSLET_RUNSC` still set).
+  - gVisor around the whole server (Docker `runtime: runsc`, as `deploy/coolify` and the public instance run): code that escapes workerd, and the control plane itself, land in the Sentry, not the host kernel. (On Coolify, `deploy/coolify/firewall.sh`, installed separately, keeps the container's network off the host and private ranges; traffic between it and other containers on the same bridge, such as Coolify's Traefik, stays allowed both ways.) Apps share that one Sentry with each other and the control plane, so per-app uids (`CRESSLET_SANDBOX_UID_BASE`) are what keep them out of each other's files; the residuals of the uid mode above apply inside the container. `CRESSLET_OUTER_GVISOR=true` tells the server it runs this way (it can't check).
+  - Multi-tenant instances (anonymous deploys, or open signup with GitHub login) should run one of the two gVisor modes: without `CRESSLET_RUNSC` or `CRESSLET_OUTER_GVISOR`, the server warns at startup (`isolationWarnings` in `server/config.ts`), and, without `CRESSLET_RUNSC`, also warns if sandboxes share one uid. It warns rather than refuses, since `CRESSLET_ANON_DEPLOYS` and `CRESSLET_OPEN_SIGNUP` default on for local dev.
   - Why gVisor, not Firecracker: Firecracker needs KVM (`/dev/kvm`, often missing on VPSes and in nested setups), a guest kernel and rootfs image per sandbox, and talks to the host over vsock, so the unix-socket model (`a.sock`/`h.sock`/`e.sock`) would need a vsock bridge. gVisor is two static binaries, runs without KVM (systrap platform), starts a sandbox in ~100 ms, and passes host unix sockets through, so it's a configuration of the same model rather than a new runtime.
 
 ## Deploy lifecycle
@@ -76,7 +79,6 @@ Project code in workers runs there too: the app's *server* code in `cresslet dev
 
 ## Roadmap
 
-- Run a public hosted instance (recipe, wildcard TLS included: [self-hosting.md](self-hosting.md#production)).
-- Stronger isolation: gVisor mode (`CRESSLET_RUNSC`) is the opt-in hardened boundary; consider making it the default for multi-tenant instances. MicroVMs (Firecracker) remain an option where KVM is available and a separate guest kernel per app is wanted. Without gVisor, workerd + uid + cgroups is not a hardened multi-tenant boundary (Cloudflare adds more layers in production).
+- Stronger isolation: the public instance runs the whole server under gVisor, and any other multi-tenant instance without a gVisor mode gets a startup warning (see [Isolation](#isolation)). Next, where KVM is available: Firecracker microVMs, a guest kernel per app (needs a vsock bridge for the unix sockets, and a kernel and rootfs per sandbox).
 - Move db/file bindings off the control-plane thread (worker thread or per-app helper) if sync SQLite becomes a bottleneck.
 - AI builder in the studio driving the same API (deferred from v1).

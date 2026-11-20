@@ -79,6 +79,7 @@ A network that doesn't exist yet (the first deploy, or one Coolify recreated) is
 
 Notes:
 - gVisor's network stack can't reach Docker's embedded DNS (127.0.0.11) on a user-defined network ([gVisor FAQ](https://gvisor.dev/docs/user_guide/faq/)), so the entrypoint writes public resolvers (`CRESSLET_RESOLVERS`, default `1.1.1.1 9.9.9.9`) into `/etc/resolv.conf`. The container can't look up other containers by name (it doesn't need to).
+- The compose file sets `CRESSLET_OUTER_GVISOR=true` (the container runs under `runtime: runsc`), so the server doesn't warn about missing gVisor.
 - This mode doesn't use `CRESSLET_RUNSC` (gVisor per sandbox, which needs a privileged container) or `CRESSLET_CGROUP_DIR`. The uids keep apps out of each other's files and the control plane's. Each sandbox still has its heap cap and request timeout, and the container caps bound them all.
 - Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (it mounts the old `<app uuid>-cresslet-data` volume, without the writes made since; copy back the same way to keep them). Then `systemctl disable --now cresslet-firewall.timer cresslet-firewall-boot.service` and `systemctl stop cresslet-firewall.service` first (or a run puts the rules back), and `firewall.sh <app uuid> --remove`.
 
@@ -125,6 +126,7 @@ docker run --rm -v <volume>:/data -v /var/backups/cresslet/<snapshot>.tgz:/b.tgz
 | `CRESSLET_SANDBOX_UID_BASE` | — | Linux: run each sandbox as uid/gid `base + n` (e.g. `100000`; reserve that range, ≥ 1000). Needs the server to run as root, `CRESSLET_SOCK_DIR` (and its parents) root-owned, and the workerd binary executable by those uids |
 | `CRESSLET_CGROUP_DIR` | — | Linux: cgroup v2 dir for per-sandbox cgroups (e.g. `/sys/fs/cgroup/cresslet`); needs a writable cgroupfs |
 | `CRESSLET_RUNSC` | — | Linux: run each sandbox under gVisor; the path to `runsc` (e.g. `/usr/local/bin/runsc`). Needs the server to run as root and `CRESSLET_SOCK_DIR` (and its parents) root-owned. See below |
+| `CRESSLET_OUTER_GVISOR` | false | `true`: the whole server already runs under gVisor (Docker `--runtime=runsc`, as on [Coolify](#coolify)). It only silences the startup warning ([Docker and isolation](#docker-and-isolation)); the server can't check it |
 | `CRESSLET_APP_CPU_PERCENT` / `CRESSLET_APP_PIDS` | 100 / 256 | per-sandbox `cpu.max` (100 = one core) / `pids.max` (threads count), with `CRESSLET_CGROUP_DIR` |
 | `CRESSLET_APP_MEMORY_MB` | 256 | V8 heap cap |
 | `CRESSLET_IDLE_MS` | 300000 | stop idle sandboxes |
@@ -149,6 +151,10 @@ curl -X POST https://cresslet.example.com/v1/accounts -H "authorization: Bearer 
 3. Set `CRESSLET_GITHUB_CLIENT_ID` and `CRESSLET_GITHUB_CLIENT_SECRET`.
 
 Accounts are keyed by GitHub user id. First GitHub login links to an existing (operator-created) account with the same **verified** GitHub email and revokes its older tokens; otherwise it creates one, if `CRESSLET_OPEN_SIGNUP` allows. Users create named API tokens in the studio under **Settings** (read / deploy / admin, optionally limited to some apps; revoke each one alone) or run `cresslet login`.
+
+## Docker and isolation
+
+Where strangers can deploy code (`CRESSLET_ANON_DEPLOYS`, or `CRESSLET_OPEN_SIGNUP` with GitHub login; both settings default on), run it under gVisor: either each sandbox (`CRESSLET_RUNSC`, below) or the whole server (as on [Coolify](#coolify), with `CRESSLET_OUTER_GVISOR=true` and per-app uids). Without gVisor, the server warns at startup: workerd, uids and cgroups alone aren't a hardened multi-tenant boundary ([architecture.md](architecture.md#isolation)). It also warns when sandboxes share one uid without `CRESSLET_RUNSC`. A closed instance (both off) gets no warning.
 
 Docker: the repo `Dockerfile` runs the server on port 8787 with data in `/data` (mount a volume). Sandboxes are plain child processes, so no extra privileges are needed.
 
