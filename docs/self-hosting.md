@@ -85,22 +85,59 @@ Notes:
 
 ## Backups
 
-Everything lives in the data volume: `cresslet.db`, `secrets.key` (without it the server won't start and app secrets can't be read), every app's deploys, database and files. [`deploy/backup.sh`](../deploy/backup.sh) snapshots it on the Docker host (root) while the server runs: each SQLite database through `.backup` (consistent) and an integrity check, the rest copied, as one `.tgz`:
+Everything lives in the data volume: `cresslet.db`, `secrets.key` (without it the server won't start and app secrets can't be read), every app's deploys, database and files. [`deploy/backup.sh`](../deploy/backup.sh) snapshots it on the Docker host (root) while the server runs: each SQLite database through `.backup` (consistent) and an integrity check, the rest copied, as one `.tgz`. `secrets.key` isn't in the snapshot: it's kept apart, in `/var/backups/cresslet/secrets.key`.
 
 ```sh
 deploy/backup.sh <volume>              # one snapshot now, in /var/backups/cresslet
 deploy/backup.sh <volume> --install    # daily at 03:30 (systemd timer)
 ```
 
-`CRESSLET_BACKUP_KEEP` (default 14) snapshots stay. `CRESSLET_BACKUP_RCLONE` (e.g. `r2:my-bucket/cresslet`) also copies each one off the host with [rclone](https://rclone.org), which must be set up for root (`rclone config`); a snapshot on the same disk doesn't survive losing that disk. Set both when installing (they're written into the unit). Snapshots contain `secrets.key`: keep them as private as the server.
+`CRESSLET_BACKUP_KEEP` (default 14) snapshots stay. Each database in a snapshot is consistent, but not with everything else at one instant: a file an app stores, or a deploy, during the snapshot can be in the database and not the copy (or the other way round). For a copy that's consistent as a whole, stop the server first (in Coolify, stop the app), run the script, start it again.
 
-Each database in a snapshot is consistent, but not with everything else at one instant: a file an app stores, or a deploy, during the snapshot can be in the database and not the copy (or the other way round). For a copy that's consistent as a whole, stop the server first (in Coolify, stop the app), run the script, start it again.
+### Off-site
 
-Restore (the server stopped, into an empty volume):
+A snapshot on the same disk doesn't survive losing that disk. With [rclone](https://rclone.org) installed and set up for root, `CRESSLET_BACKUP_RCLONE` gets a copy of each snapshot and `CRESSLET_BACKUP_KEY_RCLONE` gets `secrets.key`. Make them two remotes with their own credentials, on two buckets, so a leaked bucket or token holds the data or the key, never both. Any S3-compatible storage works (Cloudflare R2, Backblaze B2, AWS S3, …); for R2, two buckets and two API tokens (Object Read & Write, each limited to its bucket):
 
 ```sh
-docker run --rm -v <volume>:/data -v /var/backups/cresslet/<snapshot>.tgz:/b.tgz:ro alpine tar xzf /b.tgz -C /data
+rclone config create snaps s3 provider=Cloudflare endpoint=https://<account id>.r2.cloudflarestorage.com \
+  access_key_id=<token 1 id> secret_access_key=<token 1 secret> no_check_bucket=true
+rclone config create keys s3 provider=Cloudflare endpoint=https://<account id>.r2.cloudflarestorage.com \
+  access_key_id=<token 2 id> secret_access_key=<token 2 secret> no_check_bucket=true
+CRESSLET_BACKUP_RCLONE=snaps:cresslet-snapshots CRESSLET_BACKUP_KEY_RCLONE=keys:cresslet-keys \
+  deploy/backup.sh <volume> --install   # the variables are written into the unit
+systemctl start cresslet-backup && journalctl -u cresslet-backup -n 20   # one run now
 ```
+
+- A run fails (`systemctl status cresslet-backup`) when an upload fails, when `CRESSLET_BACKUP_RCLONE` is set without `CRESSLET_BACKUP_KEY_RCLONE` (the copies couldn't be restored), or when the volume's `secrets.key` isn't the one already kept (a new volume?): neither copy of the old key is replaced, since older snapshots need it. Move `/var/backups/cresslet/secrets.key` and the off-site one aside once you have them safe.
+- The script doesn't delete off-site snapshots: give the snapshot bucket a lifecycle rule (e.g. delete after 30 days). Not the key bucket.
+- Keep both tokens (and `CRESSLET_SECRETS_KEY`, if you set it: then there may be no `secrets.key` to copy) somewhere other than the server, such as a password manager: a restore after losing the host needs them.
+- Snapshots hold every app's database and files (app secrets encrypted with `secrets.key`): keep the snapshot bucket private.
+
+### Restore
+
+On a clean host (or the same one), as root, with Docker and rclone installed:
+
+1. The remotes: the same `rclone config create` commands as above, with the tokens you kept.
+2. The newest snapshot and the key (or skip this and use `/var/backups/cresslet` below, if the host still has it):
+
+   ```sh
+   mkdir -m 700 /root/restore && cd /root/restore
+   snap=$(rclone lsf snaps:cresslet-snapshots | grep '^cresslet-.*\.tgz$' | sort | tail -n 1)
+   rclone copyto "snaps:cresslet-snapshots/$snap" "$snap"
+   rclone copyto keys:cresslet-keys/secrets.key secrets.key
+   ```
+
+3. The server stopped, its volume created: deploy once and stop it (Coolify: the volume is `<app uuid>_data`), or `docker volume create <volume>`.
+4. Into the volume, emptied first (a first start writes its own `cresslet.db` and `secrets.key`). The key gets the owner of `cresslet.db`, the user the server runs as. Snapshots made before the key was kept apart hold it already.
+
+   ```sh
+   docker run --rm -e SNAP="$snap" -v <volume>:/data -v /root/restore:/r:ro alpine:3.24 sh -ec '
+     find /data -mindepth 1 -delete
+     tar xzf "/r/$SNAP" -C /data
+     [ -f /data/secrets.key ] || install -m 600 -o "$(stat -c %u /data/cresslet.db)" -g "$(stat -c %g /data/cresslet.db)" /r/secrets.key /data/secrets.key'
+   ```
+
+5. Start the server (with the same `CRESSLET_SECRETS_KEY`, if you set one). The studio lists the apps, and an app that reads a secret gets it back. Then turn backups on for this host (as above).
 
 ## Configuration
 
@@ -115,7 +152,7 @@ docker run --rm -v <volume>:/data -v /var/backups/cresslet/<snapshot>.tgz:/b.tgz
 | `CRESSLET_WORKERD` | bundled `workerd` npm binary | binary used for sandboxes |
 | `CRESSLET_OPEN_SIGNUP` | true | any GitHub user can create an account (false: only operator-created accounts) |
 | `CRESSLET_ANON_DEPLOYS` | true | allow deploys without an account (expiring apps) |
-| `CRESSLET_SECRETS_KEY` | random, in `<dataDir>/secrets.key` | key for app secrets at rest (any string). Set it to keep the key out of the data volume; existing secrets are re-encrypted on start. Changing it later needs the old `secrets.key` still present. Rolling back to a version without encryption isn't supported (it would hand apps ciphertext). Back up `secrets.key` with `cresslet.db` (without it the server won't start); on the same volume it doesn't protect a leaked volume or backup, the env key does |
+| `CRESSLET_SECRETS_KEY` | random, in `<dataDir>/secrets.key` | key for app secrets at rest (any string). Set it to keep the key out of the data volume; existing secrets are re-encrypted on start. Changing it later needs the old `secrets.key` still present. Rolling back to a version without encryption isn't supported (it would hand apps ciphertext). Back up `secrets.key` (without it the server won't start; [Backups](#backups) keeps it apart from the snapshots); on the same volume it doesn't protect a leaked volume or backup, the env key does |
 | `CRESSLET_ADMIN_TOKEN` | — | bearer token for `POST /v1/accounts` (pre-create accounts / issue tokens) |
 | `CRESSLET_SITE_ADMINS` | — | comma-separated emails / GitHub logins that always have the `SiteAdmin` role (studio Admin page: every site's disk and database usage, delete/restore/purge). Site admins can grant the role to others (`PUT /v1/admin/accounts/role`) |
 | `CRESSLET_DELETED_RETENTION_DAYS` | 30 | sites a site admin deleted stay restorable this long, then are purged with their data |
