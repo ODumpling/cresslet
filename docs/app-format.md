@@ -30,7 +30,7 @@ export default {
 }
 ```
 
-WebSockets: requests with `Upgrade: websocket` on a server route reach `fetch`; answer with a `WebSocketPair` (Workers API). Open sockets keep the sandbox running; a redeploy closes them (clients should reconnect). Works on the platform and in `cresslet dev`; not yet in the studio preview.
+WebSockets: requests with `Upgrade: websocket` on a server route reach `fetch`; answer with a `WebSocketPair` (Workers API). Open sockets keep the sandbox running; a redeploy closes them (clients should reconnect). Works on the platform, in `cresslet dev` and in the studio preview (there, saving a server file restarts the server and closes its sockets with 1012).
 
 ```ts
 if (req.headers.get("upgrade") === "websocket") {
