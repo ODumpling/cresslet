@@ -19,10 +19,11 @@ KEEP=${CRESSLET_BACKUP_KEEP:-14}
 REMOTE=${CRESSLET_BACKUP_RCLONE:-}
 KEY_REMOTE=${CRESSLET_BACKUP_KEY_RCLONE:-}
 for r in "$REMOTE" "$KEY_REMOTE"; do
-  case $r in
-    "" | [!:]*:*) ;;
-    *) echo "cresslet-backup: $r isn't a configured rclone remote (name:path)" >&2; exit 1 ;;
-  esac
+  [ -n "$r" ] || continue
+  # name:path, name a configured remote exactly (not a local path, not `name,option:`).
+  case $r in *:*) rclone listremotes | grep -qxF "${r%%:*}:" && continue ;; esac
+  echo "cresslet-backup: $r isn't name:path with a remote from \`rclone listremotes\`" >&2
+  exit 1
 done
 if [ -n "$REMOTE" ] && [ "${KEY_REMOTE%%:*}" = "${REMOTE%%:*}" ]; then
   echo "cresslet-backup: CRESSLET_BACKUP_KEY_RCLONE needs its own rclone remote (other credentials), not ${REMOTE%%:*}:" >&2
@@ -63,6 +64,7 @@ mkdir -p "$DIR"
 chmod 700 "$DIR"
 STEM=cresslet-$(date -u +%Y%m%dT%H%M%SZ)
 TMP=.$STEM.$$  # staging, per run
+trap 'rm -f "$DIR/$TMP.part" "$DIR/$TMP.key"' EXIT
 # Read-write mount: SQLite needs the -shm file of a WAL database even to read it.
 docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   apk add -q --no-cache sqlite tar >/dev/null
@@ -105,7 +107,12 @@ docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
 FP=
 if [ -f "$DIR/$TMP.key" ]; then
   FP=-$(sha256sum "$DIR/$TMP.key" | cut -c1-12)
-  if [ -f "$DIR/secrets$FP.key" ]; then rm "$DIR/$TMP.key"; else mv "$DIR/$TMP.key" "$DIR/secrets$FP.key"; fi
+  if [ ! -f "$DIR/secrets$FP.key" ]; then
+    mv "$DIR/$TMP.key" "$DIR/secrets$FP.key"
+  elif ! cmp -s "$DIR/$TMP.key" "$DIR/secrets$FP.key"; then
+    echo "cresslet-backup: $DIR/secrets$FP.key was damaged: replaced with the volume's key" >&2
+    mv "$DIR/$TMP.key" "$DIR/secrets$FP.key"
+  fi
 else
   echo "cresslet-backup: no secrets.key in $VOL (CRESSLET_SECRETS_KEY?): keep that key off-site yourself"
 fi

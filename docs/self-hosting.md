@@ -114,12 +114,13 @@ no_check_bucket = true
 ```sh
 CRESSLET_BACKUP_RCLONE=snaps:cresslet-snapshots CRESSLET_BACKUP_KEY_RCLONE=keys:cresslet-keys \
   deploy/backup.sh <volume> --install   # the variables are written into the unit
-systemctl start cresslet-backup && journalctl -u cresslet-backup -n 20   # one run now
+systemctl start cresslet-backup; journalctl -u cresslet-backup -n 20   # one run now
 ```
 
-- A run fails (`systemctl status cresslet-backup`) when an upload fails (the key goes first: a snapshot isn't uploaded without it), or when `CRESSLET_BACKUP_RCLONE` is set without `CRESSLET_BACKUP_KEY_RCLONE` while the volume has a `secrets.key`.
+- A run fails (`systemctl status cresslet-backup`) when an upload fails (the keys go first: a failed key upload stops the snapshot's), or when `CRESSLET_BACKUP_RCLONE` is set without `CRESSLET_BACKUP_KEY_RCLONE` while the volume has a `secrets.key` (the snapshot is uploaded, its key isn't).
+- One snapshot path per volume: a restore takes the newest snapshot there.
 - The script doesn't delete off-site snapshots: give the snapshot bucket a lifecycle rule (e.g. delete after 30 days). Not the key bucket; turn on its versioning or object lock if your storage has them.
-- Snapshots made before the key was kept apart hold `secrets.key` themselves: delete them from the snapshot bucket once the key bucket has the key.
+- Snapshots made before the key was kept apart hold `secrets.key` themselves: delete them from the snapshot bucket once a newer snapshot and its key are both off-site (`rclone lsf` each bucket).
 - Keep both tokens (and `CRESSLET_SECRETS_KEY`, if you set it: then there may be no `secrets.key` to copy) somewhere other than the server, such as a password manager: a restore after losing the host needs them.
 - Snapshots hold every app's database and files (app secrets encrypted with the key): keep the snapshot bucket private.
 
@@ -133,21 +134,22 @@ On a clean host (or the same one), as root, with Docker and rclone installed:
    ```sh
    umask 077; src=/root/restore; mkdir -p "$src"
    snap=$(rclone lsf snaps:cresslet-snapshots | grep '^cresslet-.*\.tgz$' | sort | tail -n 1)
-   key=secrets-$(echo "$snap" | sed -n 's/^cresslet-[0-9TZ]*-\([0-9a-f]*\)\.tgz$/\1/p').key
+   fp=$(echo "$snap" | sed -n 's/^cresslet-[0-9TZ]*-\([0-9a-f]*\)\.tgz$/\1/p')
    rclone copyto "snaps:cresslet-snapshots/$snap" "$src/$snap"
-   [ "$key" = secrets-.key ] || rclone copyto "keys:cresslet-keys/$key" "$src/$key"
+   [ -z "$fp" ] || rclone copyto "keys:cresslet-keys/secrets-$fp.key" "$src/secrets-$fp.key"
    ```
 
-   No fingerprint in the name: the snapshot holds the key itself (made before it was kept apart), or there was no `secrets.key` (`CRESSLET_SECRETS_KEY`). If the host still has its local copies, use those instead: `src=/var/backups/cresslet`, the same `snap` and `key` lines with `ls "$src"` for `rclone lsf …`, no copies.
+   No fingerprint in the name: the snapshot holds the key itself (made before it was kept apart), or there was no `secrets.key` (`CRESSLET_SECRETS_KEY`). If the host still has its local copies, the same with `ls /var/backups/cresslet` for `rclone lsf …` and `cp /var/backups/cresslet/<file> "$src/"` for each `rclone copyto` (copies, so a snapshot taken in step 3 can't prune them).
 3. The server stopped, its volume created: deploy once and stop it (Coolify: the volume is `<app uuid>_data`), or `docker volume create <volume>`. Restoring over a volume with data you may want: snapshot it first.
-4. Into the volume, emptied first (a first start writes its own `cresslet.db` and `secrets.key`), once the archive reads. The key gets the owner of `cresslet.db`, the user the server runs as.
+4. Into the volume, emptied first (a first start writes its own `cresslet.db` and `secrets.key`), once the archive reads and the key matches the snapshot's fingerprint. The key gets the owner of `cresslet.db`, the user the server runs as.
 
    ```sh
-   docker run --rm -e SNAP="$snap" -e KEY="$key" -v <volume>:/data -v "$src":/r:ro alpine:3.24 sh -ec '
+   docker run --rm -e SNAP="$snap" -e FP="$fp" -v <volume>:/data -v "$src":/r:ro alpine:3.24 sh -ec '
      tar tzf "/r/$SNAP" >/dev/null
+     [ -z "$FP" ] || [ "$(sha256sum "/r/secrets-$FP.key" | cut -c1-12)" = "$FP" ]
      find /data -mindepth 1 -delete
      tar xzf "/r/$SNAP" -C /data
-     [ ! -f "/r/$KEY" ] || install -m 600 -o "$(stat -c %u /data/cresslet.db)" -g "$(stat -c %g /data/cresslet.db)" "/r/$KEY" /data/secrets.key'
+     [ -z "$FP" ] || install -m 600 -o "$(stat -c %u /data/cresslet.db)" -g "$(stat -c %g /data/cresslet.db)" "/r/secrets-$FP.key" /data/secrets.key'
    ```
 
 5. Start the server (with the same `CRESSLET_SECRETS_KEY`, if you set one). The studio lists the apps, and an app that reads a secret gets it back (a wrong or missing key stops the server: `cannot decrypt secret …`). Then turn backups on for this host (as above).
