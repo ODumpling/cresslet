@@ -9,16 +9,17 @@ Needs wildcard DNS (`*.cresslet.example.com` + `cresslet.example.com` → server
 
 ## Production
 
-[`deploy/`](../deploy) runs the server behind Caddy with Docker Compose:
+[`deploy/`](../deploy) runs the server behind Caddy with Docker Compose (≥ 2.24):
 
 ```sh
 cd deploy
-cp .env.example .env             # CRESSLET_DOMAIN, CLOUDFLARE_API_TOKEN (Compose ≥ 2.24)
+cp .env.example .env             # CRESSLET_DOMAIN
+cp caddy.env.example caddy.env   # CLOUDFLARE_API_TOKEN
 $EDITOR cresslet.env             # optional: other CRESSLET_* settings (GitHub login, admin token, limits)
 docker compose up -d --build
 ```
 
-DNS: `A`/`AAAA` for `cresslet.example.com` and `*.cresslet.example.com` → the server, DNS only (on Cloudflare: not proxied, or Cloudflare's edge certificate, which doesn't cover `*.cresslet.example.com`, answers instead of Caddy). Ports 80 and 443 (TCP, plus UDP for HTTP/3) open. Data lives in the `cresslet_data` volume (back it up, with `secrets.key`); Caddy's certificates and ACME account in `caddy_data` (losing it means re-issuing everything, against the CA rate limits).
+DNS: `A`/`AAAA` for `cresslet.example.com` and `*.cresslet.example.com` → the server, DNS only (on Cloudflare: not proxied, or Cloudflare's edge certificate, which doesn't cover `*.cresslet.example.com`, answers instead of Caddy). The same goes for custom domains' CNAMEs and an off-domain preview host: a TLS-terminating proxy in front answers with its own certificate and can block the ACME challenges, so the on-demand cert never issues. Ports 80 and 443 (TCP, plus UDP for HTTP/3) open. Data lives in the `cresslet_data` volume (back it up, with `secrets.key`); Caddy's certificates and ACME account in `caddy_data` (losing it means re-issuing everything, against the CA rate limits).
 
 Certificates ([`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile)):
 

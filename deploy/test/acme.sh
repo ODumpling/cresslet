@@ -30,8 +30,10 @@ https() { c --cacert /w/root.pem "$@"; }
 json() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(eval("JSON.parse(s)."+process.argv[1])))' "$1"; }
 
 # Root and wildcard are separate orders: wait for both.
-for _ in $(seq 60); do
-  https -o /dev/null https://cresslet.test/healthz 2>/dev/null && https -o /dev/null https://preview.cresslet.test/cresslet-relay.html 2>/dev/null && break
+ready() { https -m 10 -o /dev/null "$1" 2>/dev/null; }
+for i in $(seq 61); do
+  ready https://cresslet.test/healthz && ready https://preview.cresslet.test/cresslet-relay.html && break
+  [ "$i" -lt 61 ] || fail "timed out waiting for the root and wildcard certificates"
   sleep 2
 done
 [ "$(https https://cresslet.test/healthz)" = ok ] || fail "studio root over TLS"

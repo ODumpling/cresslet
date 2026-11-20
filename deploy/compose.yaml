@@ -1,5 +1,5 @@
 # Production recipe: cresslet behind Caddy (TLS). See docs/self-hosting.md#production.
-#   cp .env.example .env   # set CRESSLET_DOMAIN + DNS token
+#   cp .env.example .env; cp caddy.env.example caddy.env   # domain; DNS token
 #   docker compose up -d --build
 name: cresslet
 services:
@@ -26,12 +26,9 @@ services:
     depends_on:
       cresslet:
         condition: service_healthy
-    env_file:
-      - path: caddy.env # credentials for a DNS provider other than Cloudflare
-        required: false
+    env_file: caddy.env # DNS provider credentials (caddy.env.example)
     environment:
       CRESSLET_DOMAIN: ${CRESSLET_DOMAIN}
-      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
     ports:
       - "80:80"
       - "443:443"
