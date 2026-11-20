@@ -53,7 +53,20 @@ runsc install && systemctl reload docker
 docker run --rm --runtime=runsc alpine uname -r     # 4.19.0-gvisor (or newer)
 ```
 
-In Coolify: build pack Docker Compose, compose location as above, and the `CRESSLET_*` variables the compose file reads (`CRESSLET_DOMAIN` is required; `CRESSLET_OPEN_SIGNUP` and `CRESSLET_ANON_DEPLOYS` default to `false` here). `CRESSLET_DATA_VOLUME` names the data volume, so switching an existing Dockerfile deploy keeps its data (`<app uuid>-cresslet-data` there). `CRESSLET_CONTAINER_MEMORY` / `CRESSLET_CONTAINER_CPUS` (default `3g` / `2`) cap the whole container. No domain is set in Coolify: the compose file's Traefik labels route `<domain>` and `*.<domain>`.
+In Coolify: build pack Docker Compose, compose location as above, and the `CRESSLET_*` variables the compose file reads (`CRESSLET_DOMAIN` is required; `CRESSLET_OPEN_SIGNUP` and `CRESSLET_ANON_DEPLOYS` default to `false` here). `CRESSLET_CONTAINER_MEMORY` / `CRESSLET_CONTAINER_CPUS` (default `3g` / `2`) cap the whole container. No domain is set in Coolify: the compose file's Traefik labels route `<domain>` and `*.<domain>`. Coolify doesn't expand variables in labels, so edit the domain in them.
+
+Coolify names the data volume `<app uuid>_data`. Switching an existing Dockerfile deploy (volume `<app uuid>-cresslet-data`) means copying its data across once, just before the first compose deploy. SQLite's `.backup` makes the copy safe while the old container is still running:
+
+```sh
+U=<app uuid>
+docker volume create ${U}_data
+docker run --rm -v $U-cresslet-data:/old -v ${U}_data:/new alpine sh -ec '
+  apk add -q sqlite; cp -a /old/. /new/; rm -f /new/cresslet.db* /new/apps/*/data/db.sqlite-*
+  sqlite3 /old/cresslet.db ".backup /new/cresslet.db"
+  for f in /old/apps/*/data/db.sqlite; do [ -f "$f" ] && sqlite3 "$f" ".backup /new${f#/old}"; done'
+```
+
+Writes that reach the old container between the copy and the switch aren't carried over, so copy right before deploying.
 
 Then keep that network off the host and private ranges (another app's database, the host's SSH and Coolify's own port, cloud metadata), re-applied every minute in case the network is recreated:
 
@@ -64,7 +77,7 @@ deploy/coolify/firewall.sh <app uuid> --install     # <app uuid> = the compose a
 Notes:
 - gVisor's network stack can't reach Docker's embedded DNS (127.0.0.11) on a user-defined network ([gVisor FAQ](https://gvisor.dev/docs/user_guide/faq/)), so the entrypoint writes public resolvers (`CRESSLET_RESOLVERS`, default `1.1.1.1 9.9.9.9`) into `/etc/resolv.conf`. The container can't look up other containers by name (it doesn't need to).
 - This mode doesn't use `CRESSLET_RUNSC` (gVisor per sandbox, which needs a privileged container) or `CRESSLET_CGROUP_DIR`. The uids keep apps out of each other's files and the control plane's. Each sandbox still has its heap cap and request timeout, and the container caps bound them all.
-- Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (the volume is the same), then `firewall.sh <app uuid> --remove` and `systemctl disable --now cresslet-firewall.timer`.
+- Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (it mounts the old `<app uuid>-cresslet-data` volume, without the writes made since; copy back the same way to keep them), then `firewall.sh <app uuid> --remove` and `systemctl disable --now cresslet-firewall.timer`.
 
 ## Configuration
 

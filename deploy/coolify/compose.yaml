@@ -47,21 +47,21 @@ services:
     security_opt:
       - no-new-privileges:true
     labels:
-      # The studio, every <app>.<domain> and the preview host. Dots in CRESSLET_DOMAIN aren't escaped
-      # in the regex; the server 404s any host that isn't really under its domain.
+      # The studio, every <app>.<domain> and the preview host. Coolify doesn't interpolate variables
+      # in labels (it escapes `$`), so the domain is written out: change `cresslet.dev` (4 places).
       - traefik.enable=true
       - traefik.http.middlewares.cresslet-https-redirect.redirectscheme.scheme=https
       - traefik.http.routers.cresslet-http.entryPoints=http
       - traefik.http.routers.cresslet-http.middlewares=cresslet-https-redirect
-      - traefik.http.routers.cresslet-http.rule=Host(`${CRESSLET_DOMAIN}`) || HostRegexp(`^[a-z0-9-]+\.${CRESSLET_DOMAIN}$$`)
+      - traefik.http.routers.cresslet-http.rule=Host(`cresslet.dev`) || HostRegexp(`^[a-z0-9-]+\.cresslet\.dev$`)
       - traefik.http.routers.cresslet-http.service=cresslet
       - traefik.http.routers.cresslet-https.entryPoints=https
-      - traefik.http.routers.cresslet-https.rule=Host(`${CRESSLET_DOMAIN}`) || HostRegexp(`^[a-z0-9-]+\.${CRESSLET_DOMAIN}$$`)
+      - traefik.http.routers.cresslet-https.rule=Host(`cresslet.dev`) || HostRegexp(`^[a-z0-9-]+\.cresslet\.dev$`)
       - traefik.http.routers.cresslet-https.service=cresslet
       - traefik.http.routers.cresslet-https.tls=true
       - traefik.http.services.cresslet.loadbalancer.server.port=8787
 
 volumes:
+  # Coolify names it <app uuid>_data (a `name:` here is ignored). Moving from a Dockerfile deploy:
+  # copy the old volume into it first (docs/self-hosting.md#coolify).
   data:
-    # An existing volume to keep (e.g. the one Coolify made for a Dockerfile deploy), else created.
-    name: ${CRESSLET_DATA_VOLUME:-cresslet_data}
