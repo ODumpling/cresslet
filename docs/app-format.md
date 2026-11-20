@@ -52,7 +52,7 @@ export default {
 
 | Binding | API |
 |---|---|
-| `env.db` | `query(sql, ...params) → rows[]`, `first(...) → row \| null`, `run(...) → {changes, lastInsertRowid}`, `exec(sql)` — per-app SQLite (`ATTACH`/`VACUUM INTO`, `temp_store_directory` and `fts3_tokenizer` are refused) |
+| `env.db` | `query(sql, ...params) → rows[]`, `first(...) → row \| null`, `run(...) → {changes, lastInsertRowid}`, `exec(sql)` — per-app SQLite (`ATTACH`/`VACUUM INTO`, temp tables, `temp_store_directory`, `fts3_tokenizer` and the size/journal pragmas are refused; plain `VACUUM` works) |
 | `env.files` | `put(key, body, {contentType})`, `get(key) → Response \| null`, `delete(key)`, `list(prefix) → {key,size,contentType,updatedAt}[]` |
 | `env.secrets` | `Record<string,string>`, set via `cresslet secrets set` (claimed apps) |
 | `env.app` | `{ id, name, url, deployId }` |

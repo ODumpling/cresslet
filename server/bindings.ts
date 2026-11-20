@@ -12,7 +12,9 @@ const num = (v: number | bigint) => (typeof v === "bigint" ? Number(v) : v);
 /**
  * App SQL runs in the control plane with its file access, so it must stay inside its own database:
  * no ATTACH of a file (other apps' databases, cresslet.db; also covers VACUUM INTO), no process-wide
- * temp-dir pragmas, no fts3_tokenizer (native pointers). Plain VACUUM attaches an unnamed temp db: ok.
+ * temp-dir pragmas, no fts3_tokenizer (native pointers). No temp tables or `ATTACH ''` either: temp
+ * databases sit outside the size cap. Plain VACUUM attaches an unnamed temp db (as big as the main
+ * one), so `vacuum()` says when the statement running is exactly that.
  */
 const DENIED_PRAGMAS = new Set(["temp_store_directory", "data_store_directory"]);
 /**
@@ -20,11 +22,19 @@ const DENIED_PRAGMAS = new Set(["temp_store_directory", "data_store_directory"])
  * growing past it (WAL mode, automatic checkpoints, journal_size_limit).
  */
 const SIZE_PRAGMAS = new Set(["max_page_count", "page_size", "journal_mode", "wal_autocheckpoint", "journal_size_limit"]);
-export function confine(db: DatabaseSync) {
+const TEMP_CREATE = new Set([
+  constants.SQLITE_CREATE_TEMP_TABLE,
+  constants.SQLITE_CREATE_TEMP_INDEX,
+  constants.SQLITE_CREATE_TEMP_TRIGGER,
+  constants.SQLITE_CREATE_TEMP_VIEW,
+]);
+const VACUUM = /^\s*vacuum(\s+main)?\s*;?\s*$/i;
+export function confine(db: DatabaseSync, vacuum: () => boolean = () => false) {
   db.enableDefensive(true); // no writable_schema tricks on its own file either
   db.setAuthorizer((action, arg1, arg2) => {
     const { SQLITE_ATTACH, SQLITE_PRAGMA, SQLITE_FUNCTION, SQLITE_DENY, SQLITE_OK } = constants;
-    if (action === SQLITE_ATTACH) return arg1 === "" ? SQLITE_OK : SQLITE_DENY;
+    if (action === SQLITE_ATTACH) return arg1 === "" && vacuum() ? SQLITE_OK : SQLITE_DENY;
+    if (TEMP_CREATE.has(action)) return SQLITE_DENY;
     if (action === SQLITE_PRAGMA && DENIED_PRAGMAS.has(String(arg1).toLowerCase())) return SQLITE_DENY;
     if (action === SQLITE_PRAGMA && arg2 !== null && SIZE_PRAGMAS.has(String(arg1).toLowerCase())) return SQLITE_DENY;
     if (action === SQLITE_FUNCTION && String(arg2).toLowerCase() === "fts3_tokenizer") return SQLITE_DENY;
@@ -41,20 +51,30 @@ export function createDb(path: string, maxBytes?: number) {
     const { page_size } = db.prepare("PRAGMA page_size").get() as { page_size: number };
     db.exec(`PRAGMA max_page_count = ${Math.max(1, Math.floor(maxBytes / page_size))}`);
   }
-  confine(db);
+  let vacuuming = false;
+  confine(db, () => vacuuming);
+  /** Runs `fn` for `sql`, letting VACUUM's own temp attach through only when `sql` is just VACUUM. */
+  const guard = <T>(sql: string, fn: () => T): T => {
+    vacuuming = VACUUM.test(sql);
+    try {
+      return fn();
+    } finally {
+      vacuuming = false;
+    }
+  };
   return {
     query(sql: string, ...params: SQLInputValue[]) {
-      return db.prepare(sql).all(...params);
+      return guard(sql, () => db.prepare(sql).all(...params));
     },
     first(sql: string, ...params: SQLInputValue[]) {
-      return db.prepare(sql).get(...params) ?? null;
+      return guard(sql, () => db.prepare(sql).get(...params) ?? null);
     },
     run(sql: string, ...params: SQLInputValue[]) {
-      const r = db.prepare(sql).run(...params);
+      const r = guard(sql, () => db.prepare(sql).run(...params));
       return { changes: num(r.changes), lastInsertRowid: num(r.lastInsertRowid) };
     },
     exec(sql: string) {
-      db.exec(sql);
+      guard(sql, () => db.exec(sql));
       return null;
     },
     close: () => db.close(),
@@ -83,12 +103,14 @@ export function createFiles(dir: string) {
   return {
     async put(key: string, bytes: Uint8Array, contentType: string) {
       const k = safeKey(key);
-      await mkdir(dirname(blob(k)), { recursive: true });
-      await writeFile(blob(k), bytes);
+      // Index first: its size counts against the quota from now on, even if this write is cut off
+      // (a redeploy closes these bindings) and another instance checks the quota meanwhile.
       meta.prepare(
         `INSERT INTO files (key, size, content_type, updated_at) VALUES (?, ?, ?, ?)
          ON CONFLICT (key) DO UPDATE SET size = excluded.size, content_type = excluded.content_type, updated_at = excluded.updated_at`,
       ).run(k, bytes.byteLength, contentType || "application/octet-stream", Date.now());
+      await mkdir(dirname(blob(k)), { recursive: true });
+      await writeFile(blob(k), bytes);
     },
     async get(key: string): Promise<Response | null> {
       const k = safeKey(key);

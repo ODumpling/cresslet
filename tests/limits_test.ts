@@ -207,3 +207,38 @@ test("apps can't turn off WAL checkpoints or change the journal mode", async () 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("app SQL can't grow temporary databases past the cap (temp tables, ATTACH ''); VACUUM still works", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-temp-"));
+  try {
+    const db = createDb(join(dir, "db.sqlite"), 256 * 1024);
+    assert.throws(() => db.exec("CREATE TEMP TABLE t (b BLOB)"), /not authorized/);
+    assert.throws(() => db.exec("ATTACH '' AS scratch"), /not authorized|authorization denied/);
+    assert.throws(() => db.exec("VACUUM; ATTACH '' AS scratch"), /not authorized|authorization denied/);
+    db.exec("CREATE TABLE k (v)");
+    db.run("INSERT INTO k VALUES (1)");
+    db.exec("VACUUM");
+    assert.equal((db.first("SELECT count(*) n FROM k") as { n: number }).n, 1);
+    db.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("files cap counts a write cut off by a redeploy (another bindings instance sees it)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-filecap3-"));
+  try {
+    const put = (b: ReturnType<typeof createBindings>, key: string, n: number) =>
+      b.fetch(new Request(`http://h/files?key=${key}`, { method: "PUT", body: new Uint8Array(n) }));
+    const old = createBindings(dir, { maxFilesBytes: 100 });
+    const inflight = put(old, "a", 60);
+    await new Promise((r) => setImmediate(r)); // the check has run; the blob write is pending
+    old.close();
+    await inflight.catch(() => {});
+    const next = createBindings(dir, { maxFilesBytes: 100 });
+    assert.equal((await put(next, "b", 60)).status, 413);
+    next.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
