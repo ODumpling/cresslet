@@ -50,17 +50,28 @@ docker run --rm -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   apk add -q --no-cache sqlite tar >/dev/null
   mkdir /s
   cd /data
-  # Everything except the databases and their -wal/-shm (snapshotted below). Files that change or
-  # vanish mid-copy (a sandbox going idle removes its -shm) are skipped, not errors.
-  tar -cf - --anchored --no-wildcards-match-slash --ignore-failed-read \
-    --warning=no-file-changed --warning=no-file-removed --warning=no-file-shrank \
-    --exclude="./cresslet.db*" --exclude="./apps/*/data/db.sqlite*" --exclude="./apps/*/data/files/index.sqlite*" . |
+  # Everything except the databases and their sidecars (snapshotted below). A file changing or
+  # vanishing mid-copy is tar status 1 (allowed: the server is running); anything worse fails.
+  ex=""
+  for db in ./cresslet.db "./apps/*/data/db.sqlite" "./apps/*/data/files/index.sqlite"; do
+    for x in "" -wal -shm -journal; do ex="$ex --exclude=$db$x"; done
+  done
+  set -f  # $ex holds patterns for tar, not the shell
+  { tar -cf - --anchored --no-wildcards-match-slash \
+      --warning=no-file-changed --warning=no-file-removed --warning=no-file-shrank $ex . ; echo $? > /tmp/rc; } |
     tar -xpf - -C /s
+  set +f
+  [ "$(cat /tmp/rc)" -le 1 ] || { echo "copying the volume failed (tar status $(cat /tmp/rc))" >&2; exit 1; }
   # The databases (not app-stored files, whatever they are named), each a consistent copy with the
   # original owner and mode (the server may run as a non-root user).
   for db in cresslet.db apps/*/data/db.sqlite apps/*/data/files/index.sqlite; do
     [ -f "$db" ] || continue
-    mkdir -p "$(dirname "/s/$db")"  # an app that set up its files after the copy
+    # An app that set up its files after the copy: its dirs (top down), with their owners and modes.
+    set --; d=$(dirname "$db")
+    while [ "$d" != . ]; do set -- "$d" "$@"; d=$(dirname "$d"); done
+    for d in "$@"; do
+      [ -d "/s/$d" ] || { mkdir "/s/$d"; chown "$(stat -c %u:%g "$d")" "/s/$d"; chmod "$(stat -c %a "$d")" "/s/$d"; }
+    done
     sqlite3 "$db" ".backup /s/$db"
     chown "$(stat -c %u:%g "$db")" "/s/$db"
     chmod "$(stat -c %a "$db")" "/s/$db"
