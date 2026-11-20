@@ -307,8 +307,10 @@ test("deleting an app waits for its queued file writes; writes after close are r
     b.close();
     release();
     assert.equal((await late).status, 503, "body finished after close");
+    const del = await b.fetch(new Request("http://h/files?key=f0", { method: "DELETE" }));
+    assert.equal(del.status, 503, "deletes after close are refused too");
     await removeAppFiles(cfg, "app_x");
-    await Promise.all(queued);
+    assert.deepEqual([...new Set((await Promise.all(queued)).map((r) => r.status))], [204], "accepted writes all land");
     assert.ok(!existsSync(p.app), "nothing left behind");
   } finally {
     await rm(dataDir, { recursive: true, force: true });

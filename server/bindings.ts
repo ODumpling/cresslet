@@ -258,8 +258,10 @@ export function createBindings(
           });
         }
         if (req.method === "DELETE") {
-          await serial(() => files.delete(key));
-          return new Response(null, { status: 204 });
+          return await serial(async () => {
+            await files.delete(key);
+            return new Response(null, { status: 204 });
+          });
         }
       }
       return text("not found", 404);
