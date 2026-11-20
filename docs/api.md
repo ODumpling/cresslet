@@ -22,7 +22,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 |---|---|---|
 | GET | `/v1` | server info, limits, app URL template, `auth: {github}` |
 | POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it) |
-| GET | `/v1/me` | `{account: {id, email, github, role}, token}` (`github` = login or null; `role` = `"SiteAdmin"` or null); `token: {id, name, role, apps, createdAt, lastUsedAt}` for the calling token (any scope) |
+| GET | `/v1/me` | `{account: {id, email, github, role}, tokenInfo}` (`github` = login or null; `role` = `"SiteAdmin"` or null); `tokenInfo: {id, name, role, apps, createdAt, lastUsedAt}` for the calling token (any scope) |
 | GET | `/v1/me/tokens` | `{tokens: [{id, name, role, apps, createdAt, lastUsedAt, current}]}`; never the secret |
 | POST | `/v1/me/tokens` | `{name, role?: read\|deploy\|admin (default admin), apps?: ["name", …] \| null}` → `{token, info}` (201). The secret is only in this response. Scoped tokens start `clv_scoped_` |
 | DELETE | `/v1/me/tokens/:id` | revoke one token |

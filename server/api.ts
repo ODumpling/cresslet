@@ -172,7 +172,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   app.get("/me", (c) => {
     const a = c.get("account"), t = c.get("token");
     if (!a || !t) throw new HttpError(401, "login required", "unauthorized");
-    return c.json({ account: accountView(a), token: tokenView(t) });
+    return c.json({ account: accountView(a), tokenInfo: tokenView(t) });
   });
 
   // Revoke every token for this account (studio, CLI, CI) and issue a fresh full-access one.

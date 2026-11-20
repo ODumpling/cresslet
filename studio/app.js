@@ -209,10 +209,12 @@ $("token-copy").addEventListener("click", async () => {
 });
 
 $("logout-btn").addEventListener("click", async () => {
-  // Revoke this browser's token too (best effort), so logins don't pile up in the token list.
+  // Revoke this browser's login token too (best effort), so logins don't pile up in the token list.
+  // Only one the studio's GitHub login issued: an older token may also be in use by the CLI or CI
+  // (Settings used to show it for copying).
   try {
-    const { token } = await api("/v1/me");
-    await api(`/v1/me/tokens/${encodeURIComponent(token.id)}`, { method: "DELETE" });
+    const { tokenInfo: token } = await api("/v1/me");
+    if (token.name === "Studio (GitHub login)") await api(`/v1/me/tokens/${encodeURIComponent(token.id)}`, { method: "DELETE" });
   } catch { /* offline or already revoked */ }
   logOut();
   location.hash = "#/";

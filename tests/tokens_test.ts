@@ -10,7 +10,7 @@ import { sha256 } from "../server/store.ts";
 
 async function setup(dataDir?: string) {
   dataDir ??= await mkdtemp(join(tmpdir(), "cresslet-tok-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }));
+  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["boss@b.co"] }));
   const json = async (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
     headers.set("host", "test.local");
@@ -40,7 +40,9 @@ test("named tokens: create, list (no secrets), last used, revoke one", async () 
       { id: undefined, name: "CI", role: "admin", apps: null, createdAt: undefined, lastUsedAt: null },
     );
     const ci = made.body.token;
-    assert.equal((await t.json("/v1/me", { headers: t.bearer(ci) })).body.token.name, "CI");
+    const me = (await t.json("/v1/me", { headers: t.bearer(ci) })).body;
+    assert.equal(me.tokenInfo.name, "CI");
+    assert.equal(me.token, undefined); // clients (studio setAccount) read `token` as a secret string
 
     const list = await t.json("/v1/me/tokens", { headers: t.bearer(root) });
     assert.equal(list.status, 200);
@@ -153,6 +155,23 @@ test("scoped tokens: roles and app limits are enforced", async () => {
   }
 });
 
+test("site admin routes need a full-access token", async () => {
+  const t = await setup();
+  try {
+    const boss = await t.account("boss@b.co");
+    const app = (await t.deploy(boss)).body.app.name;
+    assert.equal((await t.json("/v1/admin/sites", { headers: t.bearer(boss) })).status, 200);
+    for (const input of [{ name: "r", role: "read" }, { name: "d", role: "deploy" }, { name: "a1", role: "admin", apps: [app] }]) {
+      const tok = (await t.mint(boss, input)).body.token;
+      assert.equal((await t.json("/v1/admin/sites", { headers: t.bearer(tok) })).status, 403, input.name);
+      assert.equal((await t.json(`/v1/admin/sites/${app}`, { method: "DELETE", headers: t.bearer(tok) })).status, 403, input.name);
+    }
+  } finally {
+    t.srv.close();
+    await rm(t.dataDir, { recursive: true, force: true });
+  }
+});
+
 test("tokens from before named tokens keep full access", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-tok-mig-"));
   try {
@@ -174,8 +193,8 @@ test("tokens from before named tokens keep full access", async () => {
       const me = await t.json("/v1/me", { headers: t.bearer(legacy) });
       assert.equal(me.status, 200);
       assert.equal(me.body.account.email, "old@b.co");
-      assert.equal(me.body.token.role, "admin");
-      assert.equal(me.body.token.apps, null);
+      assert.equal(me.body.tokenInfo.role, "admin");
+      assert.equal(me.body.tokenInfo.apps, null);
       const list = (await t.json("/v1/me/tokens", { headers: t.bearer(legacy) })).body.tokens;
       assert.equal(list.length, 2);
       assert.notEqual(list[0].id, list[1].id);
