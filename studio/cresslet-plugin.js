@@ -330,6 +330,7 @@ export function createCresslet(c, opts) {
         out("\x1b[32m✔\x1b[0m server ready");
       } catch (e) {
         w.terminate();
+        if (seq < readySeq) return; // a later save's worker serves already
         workerError = `server failed to start:\n${e.message}`;
         out(`\x1b[31m${workerError}\x1b[0m`);
       }
