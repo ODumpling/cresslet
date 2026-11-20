@@ -451,7 +451,12 @@ async function openProject(id) {
   const shell = await c.spawn("jsh", [], { cwd: wd, terminal: true });
   shell.output.pipeTo(new WritableStream({ write: (d) => term.write(d) }));
   const input = shell.input.getWriter();
-  term.onData((d) => input.write(d));
+  // an untrusted project's shell takes no input until "Run it" (a command could run its code: npm scripts, a build's
+  // PostCSS/Tailwind plugins)
+  let locked = project.trusted === false;
+  term.onData((d) => {
+    if (!locked) input.write(d);
+  });
   const start = () => {
     setStatus("Installing");
     $("preview-msg").textContent = "Installing dependencies…";
@@ -459,9 +464,10 @@ async function openProject(id) {
   };
   // Opened from a deployed app's source: its code (and npm deps, and a deploy's build: PostCSS/Tailwind plugins)
   // would run in this browser. Nothing runs, Deploy included, until the user says so.
-  const gate = (locked) => {
-    $("deploy-btn").disabled = locked;
-    $("deploy-btn").title = locked ? "Run the project first" : "";
+  const gate = (on) => {
+    locked = on;
+    $("deploy-btn").disabled = on;
+    $("deploy-btn").title = on ? "Run the project first" : "";
   };
   gate(project.trusted === false);
   if (project.trusted === false) {
@@ -476,7 +482,7 @@ async function openProject(id) {
     $("preview-msg").replaceChildren(
       "This project was opened from a deployed app's source. Review it, then ",
       btn,
-      " to install its dependencies and start it here.",
+      " to install its dependencies and start it here (the terminal and Deploy unlock then).",
     );
   } else start();
 

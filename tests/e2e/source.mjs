@@ -40,6 +40,11 @@ try {
     throw new Error("imported source started before Run it");
   }
   if (!(await home.locator("#deploy-btn").isDisabled())) throw new Error("Deploy enabled before Run it (a build runs project CSS plugins)");
+  // the terminal takes no input either
+  await home.locator(".xterm").click();
+  await home.keyboard.type("echo typed-before-consent\n");
+  await home.waitForTimeout(1000);
+  if (/typed-before-consent/.test(await home.locator(".xterm-rows").innerText())) throw new Error("terminal accepted input before Run it");
   await home.getByRole("button", { name: "Run it" }).click();
   await home.locator("#deploy-btn:not([disabled])").waitFor({ timeout: 5000 });
   await home.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
