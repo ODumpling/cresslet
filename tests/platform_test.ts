@@ -235,6 +235,15 @@ test("studio is cross-origin isolated", withServer(async (t) => {
   const js = await t.call("/app.js");
   await js.body?.cancel();
   assert.equal(js.headers.get("cache-control"), "no-cache");
+  // Assets load from a per-release path, so a CDN-cached copy from an older release can't be used.
+  const html = await (await t.call("/")).text();
+  const src = html.match(/<script type="module" src="(\/_v\/[0-9a-f]{12}\/app\.js)"/)?.[1];
+  assert.ok(src, "versioned app.js");
+  assert.match(html, /href="\/_v\/[0-9a-f]{12}\/styles\.css"/);
+  const versioned = await t.call(src);
+  assert.equal(versioned.status, 200);
+  assert.equal(await versioned.text(), await (await t.call("/app.js")).text());
+  assert.equal((await t.call(src.replace("app.js", "vendor/editor.js"))).status, 200);
   const llms = await t.call("/llms.txt");
   assert.match(await llms.text(), /POST \/v1\/deploys/);
 }));

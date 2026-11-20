@@ -1,4 +1,6 @@
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { serveDir, serveFile } from "./static.ts";
@@ -24,6 +26,29 @@ self.addEventListener("activate", (e) => e.waitUntil((async () => {
 /** Files cresslet-container needs at the preview origin's root. */
 const PREVIEW_FILES = new Set(["cresslet-sw.js", "cresslet-relay.html", "cresslet-relay.js"]);
 
+/**
+ * Studio files aren't content-hashed, and a CDN can cache them past the origin's `no-cache`
+ * (Cloudflare's Browser Cache TTL rewrites it to `max-age=14400`): new HTML then runs stale JS.
+ * So index.html loads them from `/_v/<hash of the studio>/` and app.js imports relatively: each
+ * release's modules (and workers, via import.meta.url) have URLs no earlier release used.
+ */
+async function studioRelease(): Promise<string> {
+  const hash = createHash("sha256");
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) await walk(p);
+      else if (e.isFile()) hash.update(relative(STUDIO, p)).update("\0").update(await readFile(p)).update("\0");
+    }
+  };
+  await walk(STUDIO);
+  const version = hash.digest("hex").slice(0, 12);
+  return (await readFile(join(STUDIO, "index.html"), "utf8"))
+    .replace(/\b(src|href)="\/([^"?#]+\.(?:js|css|svg))(?:\?[^"]*)?"/g, `$1="/_v/${version}/$2"`);
+}
+const VERSIONED = /^\/_v\/[0-9a-f]+(?=\/)/;
+
 /** Cross-origin isolation is required by cresslet-container (SharedArrayBuffer). */
 const ISOLATION = {
   "cross-origin-opener-policy": "same-origin",
@@ -43,6 +68,7 @@ export function createServer(cfg: Config = loadConfig()) {
   if ((shadowed && store.appByName(shadowed)) || store.appByDomain(cfg.previewHost)) {
     console.warn(`cresslet: ${cfg.previewHost} is the studio preview host; the app using that name/domain is no longer reachable`);
   }
+  let studioHtml: Promise<string> | undefined;
   const scheduler = new Scheduler(store, scheduled(cfg, store, runtime));
   scheduler.start();
 
@@ -104,7 +130,14 @@ export function createServer(cfg: Config = loadConfig()) {
     if (reqHost !== pub.host) {
       return Response.redirect(pub.origin + url.pathname + url.search, 302);
     }
-    const res = await serveDir(req, STUDIO);
+    if (url.pathname === "/" || url.pathname === "/index.html") {
+      const html = await (studioHtml ??= studioRelease());
+      return new Response(req.method === "HEAD" ? null : html, {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", ...ISOLATION },
+      });
+    }
+    const path = url.pathname.replace(VERSIONED, "");
+    const res = await serveDir(path === url.pathname ? req : new Request(new URL(path + url.search, url), req), STUDIO);
     const h = new Headers(res.headers);
     for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
     // Studio files aren't content-hashed: always revalidate (ETag), or a CDN/browser can pair new HTML
