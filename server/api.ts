@@ -512,6 +512,15 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     await authorize(c, a, "admin", { account: true });
     return a;
   };
+  /**
+   * Checks again after reading the body, right before granting access: the caller may have been demoted or
+   * removed, or its token revoked, while the request was in flight (else a demoted admin could re-promote).
+   */
+  const stillManages = async (c: Context<Env>, a: App) => {
+    const acct = c.get("account")!;
+    if (!store.tokens(acct.id).some((t) => t.id === c.get("token")!.id)) throw new HttpError(401, "invalid token", "unauthorized");
+    await authorize(c, a, "admin", { account: true });
+  };
 
   app.get("/apps/:name/collaborators", async (c) => {
     const a = await manage(c);
@@ -532,6 +541,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
     if (!EMAIL_RE.test(email) || email.length > 254) throw new HttpError(400, "valid email required");
     const role = accessRole(input.role ?? "viewer");
+    await stillManages(c, a);
     const invitee = store.accountByEmail(email);
     if (invitee && invitee.id === a.account_id) throw new HttpError(400, `${email} owns ${a.name}`);
     if (invitee && store.access(a, invitee.id)) {
@@ -548,6 +558,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   app.put("/apps/:name/collaborators/:account", async (c) => {
     const a = await manage(c);
     const role = accessRole((await body<{ role?: unknown } | null>(c))?.role);
+    await stillManages(c, a);
     if (!store.setCollaboratorRole(a.id, c.req.param("account"), role)) {
       throw new HttpError(404, "collaborator not found", "not_found");
     }
@@ -639,8 +650,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
   // ---- logs (NDJSON; ?follow=1 streams)
   app.get("/apps/:name/logs", async (c) => {
     const a = getApp(c.req.param("name"));
-    await authorize(c, a, "read");
+    const access = await authorize(c, a, "read");
     const n = Math.min(Number(c.req.query("n") ?? 200), cfg.limits.logLines);
+    // A collaborator's stream ends when they lose access (removed, or left).
+    const acct = c.get("account");
+    const revoked = access === "admin" || access === "viewer" ? () => !store.access(a, acct!.id) : () => false;
     const follow = c.req.query("follow") === "1";
     const enc = new TextEncoder();
     const line = (l: unknown) => enc.encode(JSON.stringify(l) + "\n");
@@ -649,7 +663,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
       start(ctrl) {
         for (const l of runtime.logs.recent(a.id, n)) ctrl.enqueue(line(l));
         if (!follow) return ctrl.close();
-        unsub = runtime.logs.subscribe(a.id, (l) => ctrl.enqueue(line(l)));
+        unsub = runtime.logs.subscribe(a.id, (l) => {
+          if (!revoked()) return ctrl.enqueue(line(l));
+          unsub();
+          ctrl.close();
+        });
       },
       cancel() {
         unsub();

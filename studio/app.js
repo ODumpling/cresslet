@@ -752,8 +752,8 @@ async function answerInvite(i, accept) {
 async function leaveApp(a) {
   if (!confirm(`Leave ${a.name}? You lose access to it until someone invites you again.`)) return;
   try {
-    const { account } = await api("/v1/me");
-    await api(`/v1/apps/${encodeURIComponent(a.name)}/collaborators/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+    const id = myAccountId ?? (await api("/v1/me")).account.id;
+    await api(`/v1/apps/${encodeURIComponent(a.name)}/collaborators/${encodeURIComponent(id)}`, { method: "DELETE" });
   } catch (e) {
     toast(`Could not leave ${a.name}: ${e.message}`);
     return;
@@ -775,6 +775,7 @@ async function renderShare(name) {
   document.title = `Share ${name} · Cresslet Studio`;
   $("share-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", `Share ${name}`);
   $("invite-form").reset();
+  $("invite-form").hidden = true; // until the list loads: only the owner and admins may share
   inviteError("");
   $("people").replaceChildren(el("li", { className: "list-row muted", textContent: "Loading…" }));
   if (!myAccountId) await api("/v1/me").then(setAccount, () => {});
@@ -791,6 +792,7 @@ async function renderPeople() {
     return;
   }
   if (gen !== routeGen) return;
+  $("invite-form").hidden = false;
   const who = (text, meta, badge) =>
     el("div", { className: "tok" },
       el("strong", { textContent: text }, badge ? el("span", { className: "badge", textContent: badge }) : null),
@@ -833,6 +835,11 @@ async function renderPeople() {
 
 async function setRole(p, select) {
   const app = encodeURIComponent(shareApp);
+  // Demoting yourself ends your access to this page: only after a confirmation (a select can fire change per arrow key).
+  if (p.id === myAccountId && select.value === "viewer" && !confirm(`Make yourself a viewer of ${shareApp}? You won't be able to change it or share it any more.`)) {
+    select.value = p.role;
+    return;
+  }
   try {
     await api(`/v1/apps/${app}/collaborators/${encodeURIComponent(p.id)}`, { method: "PUT", body: JSON.stringify({ role: select.value }) });
   } catch (e) {
@@ -842,7 +849,6 @@ async function setRole(p, select) {
   }
   p.role = select.value;
   toast(`${personText(p)} is now ${ACCESS_LABEL[p.role].toLowerCase()}`);
-  // Demoting yourself ends your access to this page.
   if (p.id === myAccountId && p.role === "viewer") location.hash = "#/";
 }
 
@@ -1307,6 +1313,12 @@ async function openProject(id, gen) {
     selectTab("deploy-log");
     if (document.activeElement === btn) log.focus(); // the disabled button would drop focus to <body>
     try {
+      // A shared app you only view: say so before building (the API would refuse the upload).
+      const target = project.deploy?.name;
+      if (target && auth.token && !project.deploy.deployKey) {
+        const info = await api(`/v1/apps/${encodeURIComponent(target)}`).catch(() => null);
+        if (info?.app.access === "viewer") throw new Error(`you're a viewer of ${target}: only its owner and admins can deploy it`);
+      }
       const r = await cresslet.deploy((line) => (log.textContent += line + "\n"));
       toast(el("span", {}, "Deployed: ", extLink(r.app.url, r.app.url)), 10000);
     } catch (e) {

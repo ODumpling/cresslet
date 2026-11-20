@@ -70,6 +70,7 @@ try {
   assert((await i.locator("#apps tr", { hasText: app }).locator("td").nth(1).textContent()) === "Viewer", "viewer access");
   await i.goto(`${base}/#/share/${app}`);
   await i.locator("#people").getByText(/can't do that/).waitFor();
+  assert(await i.locator("#invite-form").isHidden(), "no invite form for viewers");
   await i.goto(base + "/");
   await i.getByRole("button", { name: `Leave ${app}` }).click();
   await i.getByText(`You left ${app}`).waitFor();

@@ -71,7 +71,7 @@ export interface Collaborator {
   created_at: number;
 }
 
-/** Pending until an account with this (verified) email accepts it. */
+/** Pending until the account with this email (from GitHub, or set by the operator) accepts it. */
 export interface Invite {
   id: string;
   app_id: string;
@@ -448,13 +448,13 @@ export class Store {
   invites(appId: string): Invite[] {
     return this.db.prepare("SELECT * FROM invites WHERE app_id = ? ORDER BY created_at, rowid").all(appId) as unknown as Invite[];
   }
-  /** Creates the invite, or changes the role of a pending one for the same email. */
+  /** Creates the invite, or changes the role (and inviter) of a pending one for the same email. */
   invite(appId: string, email: string, role: Access, invitedBy: string): { invite: Invite; created: boolean } {
     email = email.toLowerCase();
     const existing = this.db.prepare("SELECT * FROM invites WHERE app_id = ? AND email = ?").get(appId, email) as Invite | undefined;
     if (existing) {
-      this.db.prepare("UPDATE invites SET role = ? WHERE id = ?").run(role, existing.id);
-      return { invite: { ...existing, role }, created: false };
+      this.db.prepare("UPDATE invites SET role = ?, invited_by = ? WHERE id = ?").run(role, invitedBy, existing.id);
+      return { invite: { ...existing, role, invited_by: invitedBy }, created: false };
     }
     const inv: Invite = { id: id("inv"), app_id: appId, email, role, invited_by: invitedBy, created_at: Date.now() };
     this.db.prepare("INSERT INTO invites (id, app_id, email, role, invited_by, created_at) VALUES (?, ?, ?, ?, ?, ?)")

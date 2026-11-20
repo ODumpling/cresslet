@@ -245,3 +245,80 @@ test("site admin view: an invited admin sees the app's database tables, a viewer
     await rm(t.dataDir, { recursive: true, force: true });
   }
 });
+
+test("revoked mid-request: no re-promotion while the body was in flight; follow logs stop at removal", async () => {
+  const t = await setup();
+  try {
+    const owner = await t.account("own@b.co");
+    const adm = await t.account("adm@b.co");
+    assert.equal((await t.deploy(owner, "shop")).status, 201);
+    for (const [email, role] of [["adm@b.co", "admin"], ["v@b.co", "viewer"]]) {
+      await t.send("POST", "/v1/apps/shop/collaborators", owner, { email, role });
+    }
+    const v = await t.account("v@b.co");
+    for (const tok of [adm, v]) {
+      const [inv] = (await t.send("GET", "/v1/me/invites", tok)).body.invites;
+      await t.send("POST", `/v1/me/invites/${inv.id}/accept`, tok);
+    }
+    const admId = (await t.send("GET", "/v1/me", adm)).body.account.id;
+    const vId = (await t.send("GET", "/v1/me", v)).body.account.id;
+
+    // The admin sends "make me admin" slowly; the owner demotes them to viewer meanwhile.
+    const slow = (path: string, method: string, json: string) => {
+      let reading!: () => void, send!: () => void;
+      const started = new Promise<void>((r) => (reading = r)), go = new Promise<void>((r) => (send = r));
+      const res = t.srv.handler(new Request(`http://test.local${path}`, {
+        method,
+        headers: { host: "test.local", "content-type": "application/json", ...t.bearer(adm) },
+        body: new ReadableStream({
+          async pull(ctrl) {
+            reading();
+            await go;
+            ctrl.enqueue(new TextEncoder().encode(json));
+            ctrl.close();
+          },
+        }, { highWaterMark: 0 }),
+        duplex: "half",
+      } as RequestInit));
+      return { started, send, res };
+    };
+    const promote = slow(`/v1/apps/shop/collaborators/${admId}`, "PUT", '{"role":"admin"}');
+    const invite = slow("/v1/apps/shop/collaborators", "POST", '{"email":"alt@b.co","role":"admin"}');
+    await Promise.all([promote.started, invite.started]);
+    assert.equal((await t.send("PUT", `/v1/apps/shop/collaborators/${admId}`, owner, { role: "viewer" })).status, 200);
+    promote.send();
+    invite.send();
+    assert.equal((await promote.res).status, 403);
+    assert.equal((await invite.res).status, 403);
+    const list = (await t.send("GET", "/v1/apps/shop/collaborators", owner)).body;
+    assert.equal(list.collaborators.find((x: { id: string }) => x.id === admId).role, "viewer");
+    assert.deepEqual(list.invites, []);
+
+    // A viewer's open log stream ends when they're removed; the owner's keeps going.
+    const follow = async (tok: string) => {
+      const r = await t.srv.handler(new Request("http://test.local/v1/apps/shop/logs?follow=1", { headers: { host: "test.local", ...t.bearer(tok) } }));
+      assert.equal(r.status, 200);
+      return r.body!.getReader();
+    };
+    const viewerLogs = await follow(v), ownerLogs = await follow(owner);
+    const dec = new TextDecoder();
+    const until = async (r: ReadableStreamDefaultReader<Uint8Array>, re: RegExp) => {
+      for (let seen = ""; !re.test(seen);) {
+        const { value, done } = await r.read();
+        assert.ok(!done, `stream ended before ${re}`);
+        seen += dec.decode(value);
+      }
+    };
+    t.srv.runtime.logs.push((await t.send("GET", "/v1/apps/shop", owner)).body.app.id, "system", "before");
+    await until(viewerLogs, /before/);
+    await until(ownerLogs, /before/);
+    assert.equal((await t.send("DELETE", `/v1/apps/shop/collaborators/${vId}`, owner)).status, 200);
+    t.srv.runtime.logs.push((await t.send("GET", "/v1/apps/shop", owner)).body.app.id, "system", "after");
+    assert.deepEqual(await viewerLogs.read(), { done: true, value: undefined });
+    await until(ownerLogs, /after/);
+    await ownerLogs.cancel();
+  } finally {
+    t.srv.close();
+    await rm(t.dataDir, { recursive: true, force: true });
+  }
+});

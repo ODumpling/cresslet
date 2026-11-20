@@ -47,7 +47,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | PUT | `/v1/apps/:name/collaborators/:accountId` | **owner or admin**: `{role}` |
 | DELETE | `/v1/apps/:name/collaborators/:accountId` | **owner or admin**: remove one. Your own id: leave the app (any role; needs an `admin` token covering the app) |
 | DELETE | `/v1/apps/:name/invites/:id` | **owner or admin**: cancel a pending invite |
-| GET | `/v1/me/invites` | invites to this account's email (live apps) → `{invites: [{id, app, email, role, invitedBy, createdAt}]}` |
+| GET | `/v1/me/invites` | token with `read` or more over the whole account (not limited to some apps): invites to this account's email (live apps) → `{invites: [{id, app, email, role, invitedBy, createdAt}]}` |
 | POST | `/v1/me/invites/:id/accept` | full-access token: become a collaborator → `{app}` (with `access`) |
 | DELETE | `/v1/me/invites/:id` | full-access token: decline |
 | POST | `/v1/apps/:name/claim` | account auth + `{deployKey}` → no expiry, net + secrets |

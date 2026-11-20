@@ -159,6 +159,7 @@ export function adminRoutes(
     // Site admin powers cover the site, not its data: the tables are only shown to whoever runs the app
     // (its owner, or an admin it invited).
     let database: { tables: { name: string; rows: number }[]; error: string | null } | null = null;
+    // requireSiteAdmin already demands a full-access token (admin role, every app).
     const acct = c.get("account"), access = acct ? store.access(a, acct.id) : undefined;
     if (access === "owner" || access === "admin") {
       database = { tables: [], error: null };
