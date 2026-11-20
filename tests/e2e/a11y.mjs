@@ -60,6 +60,10 @@ try {
   });
   assert(await focused(narrow) === "logout-btn", "revoking another token moved focus");
   assert(!covered, "the toast covers the focused control");
+  // A toast that moved to the top still takes a mouse click on its × (focusing × mustn't move it back down).
+  if ((await narrow.locator("#toast").getAttribute("data-top")) !== "true") throw new Error("toast didn't move to the top");
+  await narrow.locator("#toast-close").click();
+  assert((await narrow.locator("#toast").getAttribute("data-open")) === "false", "clicking × on a top toast didn't close it");
   // A long account email (mocked: no account left behind).
   const lp = await browser.newPage({ viewport: { width: 320, height: 640 } });
   const email = `${"z".repeat(48)}@example.com`;
@@ -175,6 +179,13 @@ try {
   const h = await page.evaluate(() => ["editor", "preview"].map((id) => document.getElementById(id).getBoundingClientRect().height));
   assert(h.every((x) => x > 100), `panes collapsed at 300px tall: ${h}`);
   console.log("short viewport ok", h);
+
+  // Leaving the workspace reloads the page; focus still lands on the next view's heading.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator(".topbar-home").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.activeElement?.id === "home-title", null, { timeout: 15000 });
+  console.log("focus after leaving the workspace ok");
 } catch (e) {
   process.exitCode = 1;
   console.log("FAIL", e.message);

@@ -41,11 +41,13 @@ function toast(content, ms = 6000) {
   armToast();
 }
 // Never cover the focused control (WCAG 2.4.11): if it's under the toast, the toast moves to the top edge; if
-// it would be covered there too (tiny viewports), the toast steps aside (it was already announced) until focus moves.
+// it would be covered there too (tiny viewports), the toast turns transparent (still announced, still reachable by
+// Tab, which brings it back) until focus moves or the page scrolls.
 function avoidFocus() {
   const t = $("toast"), a = document.activeElement;
+  if (a && t.contains(a)) return; // stay put while it's used (a click focuses × before it lands)
   t.dataset.top = "false";
-  if (t.dataset.open !== "true" || !a || a === document.body || t.contains(a)) return;
+  if (t.dataset.open !== "true" || !a || a === document.body) return;
   const r = a.getBoundingClientRect();
   const covers = () => {
     const q = t.getBoundingClientRect();
@@ -727,7 +729,7 @@ async function openProject(id, gen) {
   }
   if (booted) {
     // One runtime per page; switching projects reloads.
-    location.reload();
+    reloadForRoute();
     return;
   }
   booted = true;
@@ -1097,7 +1099,7 @@ function route() {
   const gen = ++routeGen;
   const m = location.hash.match(/^#\/p\/([\w-]+)/);
   if (m) openProject(m[1], gen);
-  else if (booted) location.reload();
+  else if (booted) reloadForRoute();
   else if (location.hash === "#/settings") renderSettings();
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();
@@ -1109,4 +1111,17 @@ addEventListener("hashchange", () => {
 renderAccount();
 // Role can change server-side: refresh it (shows the Admin link to site admins).
 if (auth.token) api("/v1/me").then(setAccount, () => {});
+// Leaving or switching a project reloads the page (one runtime per page): the next view still gets focus.
+function reloadForRoute() {
+  try {
+    sessionStorage.setItem("cresslet.focusView", "1");
+  } catch { /* storage blocked: focus starts at the top, as on any page load */ }
+  location.reload();
+}
+try {
+  if (sessionStorage.getItem("cresslet.focusView")) {
+    sessionStorage.removeItem("cresslet.focusView");
+    focusOnShow = true;
+  }
+} catch { /* storage blocked */ }
 route();
