@@ -16,6 +16,11 @@ Account tokens have a **role** and optionally a list of **apps** (403 `forbidden
 - `admin`: everything on the apps (secrets, egress, domains, delete).
 - `apps`: limit the token to these apps (by id: a deleted app doesn't come back into scope if its name is reused). Without it, the token covers every app, including new ones.
 
+**Collaborators.** An app has one owner (the account that created or claimed it). The owner and the app's admins invite other accounts by email, as `admin` or `viewer`. An invite is pending until the account with that email (shown in its Settings; matched case-insensitively) accepts it with `POST /v1/me/invites/:id/accept`; no email is sent, and inviting an address with no account yet works the same, so it doesn't tell you whether one exists. Access is the collaborator's role, capped by the calling token's role and apps:
+- `viewer`: what a `read` token can do (app, logs, source, secret names, egress, domains, db, `db/query`).
+- `admin`: everything on the app, including deploys, secrets, egress, domains and managing collaborators, but not deleting it (owner only).
+- Managing collaborators needs an account (a deploy key isn't one). Shared apps are listed in `GET /v1/apps` with `access: owner|admin|viewer`, can be named in a token's `apps`, and don't count toward the invitee's app limit. At most 50 collaborators and pending invites per app. Deleting the app removes them.
+
 Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin` over all apps. Tokens issued before named tokens, and login tokens, are `admin` over all apps. `GET /v1/me` works with any token. Deploy keys (`clv_app_…`) are unchanged: full access to their one app.
 
 | Method | Path | Notes |
@@ -34,9 +39,17 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/templates` | `{templates: [{name, description}]}` |
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |
-| GET | `/v1/apps` | account's apps |
-| GET | `/v1/apps/:name` | app, last 10 deploys, runtime status, secret names |
-| DELETE | `/v1/apps/:name` | delete app + data |
+| GET | `/v1/apps` | apps the account owns or collaborates on; each has `access: owner\|admin\|viewer` |
+| GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 10 deploys, runtime status, secret names |
+| DELETE | `/v1/apps/:name` | delete app + data (owner or deploy key; not an invited admin) |
+| GET | `/v1/apps/:name/collaborators` | **owner or admin**: `{owner: {id, email, github}, collaborators: [{id, email, github, role, createdAt}], invites: [{id, email, role, invitedBy, createdAt}]}` |
+| POST | `/v1/apps/:name/collaborators` | **owner or admin**: `{email, role?: viewer\|admin (default viewer)}` → `{invite}` (201; 200 if that email had a pending invite, now with this role). 409 if that account already has access |
+| PUT | `/v1/apps/:name/collaborators/:accountId` | **owner or admin**: `{role}` |
+| DELETE | `/v1/apps/:name/collaborators/:accountId` | **owner or admin**: remove one. Your own id: leave the app (any role; needs an `admin` token covering the app) |
+| DELETE | `/v1/apps/:name/invites/:id` | **owner or admin**: cancel a pending invite |
+| GET | `/v1/me/invites` | token with `read` or more over the whole account (not limited to some apps): invites to this account's email (live apps) → `{invites: [{id, app, email, role, invitedBy, createdAt}]}` |
+| POST | `/v1/me/invites/:id/accept` | full-access token: become a collaborator → `{app}` (with `access`) |
+| DELETE | `/v1/me/invites/:id` | full-access token: decline |
 | POST | `/v1/apps/:name/claim` | account auth + `{deployKey}` → no expiry, net + secrets |
 | POST | `/v1/apps/:name/rollback` | `{deployId?}` (default: previous) |
 | GET | `/v1/apps/:name/source?deploy=` | `{app, deployId, files: [{path, data, encoding}]}` source uploaded with the current (or given) deploy; 404 `no_source` if none |
@@ -54,7 +67,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/apps/:name/db?limit=100` | tables → `{schema, count, rows}` |
 | POST | `/v1/apps/:name/db/query` | `{sql, params?}` read-only → `{rows}` |
 | GET | `/v1/admin/sites` | **site admin**: every site (deleted too) → `{totals, retentionDays, sites: [{name, url, status: running\|idle\|empty\|deleted, owner, domains, currentDeploy, usage: {deploys, database, files, total} (bytes on disk), deletedAt, purgeAt, …}]}` |
-| GET | `/v1/admin/sites/:name` | **site admin**: `{site, deploys, domains, secrets (count), database: {tables: [{name, rows}]}, runtime}` |
+| GET | `/v1/admin/sites/:name` | **site admin**: `{site, deploys, domains, secrets (count), database: {tables: [{name, rows}]}, runtime}`. `database` is null unless the caller owns the site or is one of its admins |
 | DELETE | `/v1/admin/sites/:name` | **site admin**: soft delete. Offline at once (not served, no crons, 404 to its owner, name stays taken) and restorable until purged after `CRESSLET_DELETED_RETENTION_DAYS`. `?purge=1` deletes it and its data permanently now |
 | POST | `/v1/admin/sites/:name/restore` | **site admin**: undo a soft delete |
 | PUT | `/v1/admin/accounts/role` | **site admin**: `{email, role: "SiteAdmin" \| null}` grant/revoke (not your own) |

@@ -78,6 +78,7 @@ try {
   const email = `${"z".repeat(48)}@example.com`;
   await lp.route("**/v1/me", (r) => r.fulfill({ json: { account: { email, github: null, role: null } } }));
   await lp.route("**/v1/apps", (r) => r.fulfill({ json: { apps: [] } }));
+  await lp.route("**/v1/me/invites", (r) => r.fulfill({ json: { invites: [] } }));
   await lp.addInitScript(([e]) => { localStorage.setItem("cresslet.token", "clv_mocked"); localStorage.setItem("cresslet.email", e); }, [email]);
   await lp.goto(base + "/");
   await lp.locator("#account-label").filter({ hasText: "@example.com" }).waitFor();
