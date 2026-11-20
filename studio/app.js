@@ -849,7 +849,7 @@ function setRole(p, select) {
   }
   const url = `/v1/apps/${encodeURIComponent(shareApp)}/collaborators/${encodeURIComponent(p.id)}`;
   const version = p.version = (p.version ?? 0) + 1; // only the latest change updates the row
-  const gen = routeGen;
+  const gen = routeGen, app = shareApp;
   p.saving = (p.saving ?? Promise.resolve()).then(async () => {
     if (p.demoted) return; // you made yourself a viewer: later changes would only be refused
     try {
@@ -862,6 +862,7 @@ function setRole(p, select) {
     if (p.id === myAccountId && p.role === "viewer") {
       p.demoted = true;
       if (gen === routeGen) location.hash = "#/"; // no longer allowed here (unless you already left the page)
+      toast(`You're now a viewer of ${app}`);
       return;
     }
     if (version !== p.version) return;
@@ -886,10 +887,11 @@ async function removePerson(p, me) {
     return;
   }
   await renderPeople(gen);
-  refocus($("people-title"));
+  if (gen === routeGen) refocus($("people-title"));
 }
 
 async function cancelInvite(i) {
+  const gen = routeGen;
   try {
     await api(`/v1/apps/${encodeURIComponent(shareApp)}/invites/${encodeURIComponent(i.id)}`, { method: "DELETE" });
   } catch (e) {
@@ -897,8 +899,9 @@ async function cancelInvite(i) {
     return;
   }
   toast(`Cancelled the invite for ${i.email}`);
-  await renderPeople();
-  refocus($("people-title"));
+  if (gen !== routeGen) return;
+  await renderPeople(gen);
+  if (gen === routeGen) refocus($("people-title"));
 }
 
 function inviteError(text) {
