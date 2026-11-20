@@ -120,10 +120,10 @@ systemctl start cresslet-backup; journalctl -u cresslet-backup -n 20   # one run
 - A run fails (`systemctl status cresslet-backup`) when an upload fails (the keys go first: a failed key upload stops the snapshot's), or when `CRESSLET_BACKUP_RCLONE` is set without `CRESSLET_BACKUP_KEY_RCLONE` while the volume has a `secrets.key` (the snapshot stays local: off-site it couldn't be restored).
 - One snapshot path per volume: a restore takes the newest snapshot there.
 - The script doesn't delete off-site snapshots: give the snapshot bucket a lifecycle rule (e.g. delete after 30 days), and watch for failed runs (`OnFailure=`, monitoring), or a month of them leaves none. Not the key bucket; turn on its versioning or object lock if your storage has them.
-- Snapshots made before the key was kept apart hold `secrets.key` themselves: delete them from the snapshot bucket only once a newer snapshot restored with its key (below) gets an app's secret back.
+- Snapshots made before the key was kept apart hold `secrets.key` themselves: delete them from the snapshot bucket (every version, if it keeps versions) only once a newer snapshot restored with its key (below) gets an app's secret back.
 - With `CRESSLET_SECRETS_KEY` set there may be no `secrets.key` to copy: set `CRESSLET_BACKUP_ENV_KEY=true` too (at `--install`), or snapshots without a key file stay local and the run fails (a key file deleted under a running server looks the same, and those snapshots couldn't be restored).
 - Keep both tokens (and `CRESSLET_SECRETS_KEY`, if you set it) somewhere other than the server, such as a password manager: a restore after losing the host needs them.
-- Snapshots hold every app's database and files (app secrets encrypted with the key): keep the snapshot bucket private. Apart, the key is safe from whoever reads that bucket, not from whoever writes it: a planted app gets the secrets once restored. After a suspected token leak, restore a snapshot from before it (versioning on the snapshot bucket keeps one).
+- Snapshots hold every app's database and files (app secrets encrypted with the key): keep the snapshot bucket private. Apart, the key is safe from whoever reads that bucket, not from whoever writes it: a planted app gets the secrets once restored. After a suspected token leak, restore a snapshot from before it that the token couldn't have replaced (a bucket lock on R2, object lock or versioning elsewhere, keeps one).
 
 ### Restore
 
@@ -141,7 +141,7 @@ On a clean host (or the same one), as root, with Docker and rclone installed:
    ```
 
    No fingerprint in the name: the snapshot holds the key itself (made before it was kept apart), or there was no `secrets.key` (`CRESSLET_SECRETS_KEY`). If the host still has its local copies, the same with `ls /var/backups/cresslet` for `rclone lsf …` and `cp /var/backups/cresslet/<file> "$src/"` for each `rclone copyto` (copies, so a snapshot taken in step 3 can't prune them).
-3. If backups are installed on this host: `systemctl stop cresslet-backup.timer`, and wait until `systemctl is-active cresslet-backup` says `inactive`, so no snapshot of the volume mid-restore goes off-site (start the timer again after step 5). Then the server stopped, its volume created: deploy once and stop it (Coolify: the volume is `<app uuid>_data`), or `docker volume create <volume>`. Restoring over a volume with data you may want: snapshot it first.
+3. If backups are installed on this host: `systemctl stop cresslet-backup.timer cresslet-backup` (it waits for a running snapshot to stop), so no snapshot of the volume mid-restore goes off-site (`systemctl start cresslet-backup.timer` after step 5). Then the server stopped, its volume created: deploy once and stop it (Coolify: the volume is `<app uuid>_data`), or `docker volume create <volume>`. Restoring over a volume with data you may want: snapshot it first.
 4. Into the volume, once the archive reads and holds `cresslet.db`, and the key matches the snapshot's fingerprint. It's extracted beside what's there (a first start writes its own `cresslet.db` and `secrets.key`), with the key (owned by the owner of `cresslet.db`, the user the server runs as), and replaces it only once that worked: the volume needs room for both.
 
    ```sh
