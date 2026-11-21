@@ -16,7 +16,8 @@
 #                                  container's of its memory limit
 # Restarts of a Cresslet container alert whatever the thresholds.
 #   CRESSLET_ALERT_PATHS     (/var/lib/docker /var/backups/cresslet)
-# --install writes them, with CRESSLET_ALERT_URL, to /etc/cresslet-alerts.env (0600): rerun with them all.
+# --install writes them, with CRESSLET_ALERT_URL, to /etc/cresslet-alerts.env (0600); one not given
+# keeps its value from the last --install.
 set -eu
 NET=${1:?usage: alerts.sh <docker network> [--install|--test]}
 MODE=${2:-check}
@@ -28,12 +29,18 @@ MEMINFO=${CRESSLET_ALERT_MEMINFO:-/proc/meminfo}
 if [ "$MODE" = --install ]; then
   docker network inspect "$NET" >/dev/null
   install -m 0755 "$0" /usr/local/sbin/cresslet-alerts
-  q() { printf "%s='%s'\n" "$1" "$(printf %s "$2" | sed "s/'/'\\\\''/g")"; }
+  # q <name> <default>: the setting from the environment if set there (even empty), else what the
+  # last --install wrote, else <default>; as a line of the env file.
+  q() {
+    v=$(eval "[ -n \"\${$1+x}\" ] && printf %s \"\$$1\"" ||
+      { [ -r "$CONF" ] && (. "$CONF" && eval "[ -n \"\${$1+x}\" ] && printf %s \"\$$1\""); } || printf %s "$2")
+    printf "%s='%s'\n" "$1" "$(printf %s "$v" | sed "s/'/'\\\\''/g")"
+  }
   (umask 077
-   { q CRESSLET_ALERT_URL "${CRESSLET_ALERT_URL:-}"; q CRESSLET_ALERT_JSON_KEY "${CRESSLET_ALERT_JSON_KEY:-}"
-     q CRESSLET_ALERT_DISK_PCT "${CRESSLET_ALERT_DISK_PCT:-80}"; q CRESSLET_ALERT_MEM_PCT "${CRESSLET_ALERT_MEM_PCT:-90}"
-     q CRESSLET_ALERT_PATHS "${CRESSLET_ALERT_PATHS:-/var/lib/docker /var/backups/cresslet}"; } > "$CONF.new"
+   { q CRESSLET_ALERT_URL ""; q CRESSLET_ALERT_JSON_KEY ""; q CRESSLET_ALERT_DISK_PCT 80; q CRESSLET_ALERT_MEM_PCT 90
+     q CRESSLET_ALERT_PATHS "/var/lib/docker /var/backups/cresslet"; } > "$CONF.new"
    mv "$CONF.new" "$CONF")
+  . "$CONF"
   [ -n "${CRESSLET_ALERT_URL:-}" ] || echo "cresslet-alerts: CRESSLET_ALERT_URL unset: alerts only go to the journal" >&2
   cat > /etc/systemd/system/cresslet-alerts.service <<EOF
 [Unit]
