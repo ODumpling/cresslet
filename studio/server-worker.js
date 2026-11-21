@@ -195,7 +195,7 @@ function createDb(SQL, bytes) {
   // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).
   // Same as server/bindings.ts isTxControl: a batch is one transaction, so no BEGIN/COMMIT/SAVEPOINT/... inside it.
   const isTxControl = (sql) =>
-    /^(?:begin|commit|end|rollback|savepoint|release)\b/i.test(sql.replace(/^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, ""));
+    /^(?:begin|commit|end|rollback|savepoint|release)\b/i.test(sql.replace(/^(?:[\s;]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, ""));
   const batch = (statements) => {
     if (!Array.isArray(statements)) throw new TypeError("batch takes an array of { sql, params }");
     statements.forEach(({ sql, params } = {}, i) => {

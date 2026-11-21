@@ -48,11 +48,11 @@ function isVacuum(sql: string): boolean {
   return /^\s*vacuum(\s+main)?\s*;?\s*$/i.test(out);
 }
 /**
- * True if `sql` starts with transaction control, after comments. A batch refuses those: one could commit or drop the
+ * True if `sql` starts with transaction control, after comments and empty statements (SQLite skips a leading `;`). A batch refuses those: one could commit or drop the
  * batch's savepoint and leave a failing batch half applied. Same as cresslet-cli lib/bindings.js isTxControl.
  */
 export function isTxControl(sql: string): boolean {
-  const rest = sql.replace(/^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
+  const rest = sql.replace(/^(?:[\s;]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
   return /^(?:begin|commit|end|rollback|savepoint|release)\b/i.test(rest);
 }
 
