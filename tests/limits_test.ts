@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { serve } from "@hono/node-server";
 import { createServer } from "../server/main.ts";
 import { type Config, loadConfig } from "../server/config.ts";
 import { createBindings, createDb } from "../server/bindings.ts";
@@ -33,7 +35,7 @@ async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> =
     srv.close();
     await rm(dataDir, { recursive: true, force: true });
   };
-  return { json, bearer, account, deploy, done };
+  return { srv, json, bearer, account, deploy, done };
 }
 
 test("app quota per account: new apps and claims stop at the limit; site admins are exempt", async () => {
@@ -314,5 +316,263 @@ test("deleting an app waits for its queued file writes; writes after close are r
     assert.ok(!existsSync(p.app), "nothing left behind");
   } finally {
     await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+/** A ReadableStream that yields `count` chunks of `chunkSize` bytes and records pulls + cancellation. */
+function trackedStream(chunkSize: number, count: number) {
+  let pulled = 0;
+  let cancelled = false;
+  const chunk = new Uint8Array(chunkSize).fill(0x61); // 'a'
+  const stream = new ReadableStream<Uint8Array>({
+    pull(ctrl) {
+      if (pulled >= count) return ctrl.close();
+      pulled++;
+      ctrl.enqueue(chunk);
+    },
+    cancel() {
+      cancelled = true;
+    },
+  }, { highWaterMark: 0 });
+  return { stream, stats: () => ({ pulled, cancelled }) };
+}
+
+test("JSON request body caps: config validation, default tiers, Content-Length pre-check, chunked abort, and boundaries", async () => {
+  const defaults = loadConfig().limits;
+  assert.equal(defaults.jsonBodyBytes, 1024 * 1024);
+  assert.ok(defaults.deployBodyBytes >= 40 * 1024 * 1024 && defaults.deployBodyBytes <= 45 * 1024 * 1024);
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
+    assert.throws(() => loadConfig({ limits: { ...defaults, jsonBodyBytes: bad } }), /jsonBodyBytes/);
+    assert.throws(() => loadConfig({ limits: { ...defaults, deployBodyBytes: bad } }), /deployBodyBytes/);
+  }
+  const scaled = loadConfig({ limits: { deployBytes: 50 * 1024 * 1024 } as never }).limits;
+  assert.ok(scaled.deployBodyBytes > 70 * 1024 * 1024, "deployBodyBytes rescales with deployBytes override");
+  const fractional = loadConfig({ limits: { serverBytes: 0.1 * 1024 * 1024 } as never }).limits;
+  assert.ok(Number.isSafeInteger(fractional.deployBodyBytes) && fractional.deployBodyBytes > 0, "fractional serverBytes rounds cleanly");
+
+  const jsonCap = 256;
+  const deployCap = 2048;
+  const t = await setup({ jsonBodyBytes: jsonCap, deployBodyBytes: deployCap }, {
+    github: { clientId: "id", clientSecret: "sec", webUrl: "https://github.com", apiUrl: "https://api.github.com" },
+  });
+  const send = (path: string, init: RequestInit) => {
+    const headers = new Headers(init.headers);
+    headers.set("host", "test.local");
+    return t.srv.handler(new Request(`http://test.local${path}`, { ...init, headers, duplex: "half" } as RequestInit));
+  };
+  try {
+    const token = await t.account("a@b.co");
+    const auth = t.bearer(token);
+    const created = await t.deploy(auth, "demo");
+    assert.equal(created.status, 201);
+
+    // 1. Oversized Content-Length on metadata endpoint: rejected immediately without reading stream.
+    const unread = trackedStream(1024, 10);
+    const clRes = await send("/v1/auth/cli/token", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": String(jsonCap + 1) },
+      body: unread.stream,
+    });
+    assert.equal(clRes.status, 413);
+    assert.equal((await clRes.json()).error, "body_too_large");
+    assert.equal(unread.stats().pulled, 0, "Content-Length pre-check must not read body");
+    assert.equal(unread.stats().cancelled, true, "Content-Length pre-check must cancel body");
+
+    // 2. Chunked / no Content-Length on metadata endpoint: aborts mid-stream past cap.
+    const chunked = trackedStream(100, 20);
+    const chRes = await send("/v1/auth/cli/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: chunked.stream,
+    });
+    assert.equal(chRes.status, 413);
+    assert.equal((await chRes.json()).error, "body_too_large");
+    assert.ok(chunked.stats().pulled <= 4, `expected early abort, pulled ${chunked.stats().pulled} chunks`);
+    assert.equal(chunked.stats().cancelled, true, "oversized stream must be cancelled");
+
+    // 3. Lying Content-Length (claims small, streams past cap): still aborted mid-stream.
+    const lying = trackedStream(100, 20);
+    const lieRes = await send("/v1/auth/cli/token", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": "10" },
+      body: lying.stream,
+    });
+    assert.equal(lieRes.status, 413);
+    assert.equal((await lieRes.json()).error, "body_too_large");
+    assert.equal(lying.stats().cancelled, true);
+
+    // 4. Exact boundary on metadata tier (including explicit Content-Length === cap and 1-byte chunks).
+    const prefix = '{"K":"';
+    const suffix = '"}';
+    const exactSecret = prefix + "x".repeat(jsonCap - prefix.length - suffix.length) + suffix;
+    assert.equal(Buffer.byteLength(exactSecret), jsonCap);
+    assert.equal((await t.json("/v1/apps/demo/secrets", {
+      method: "PUT", headers: { ...auth, "content-length": String(jsonCap) }, body: exactSecret,
+    })).status, 200);
+    const exactBytes = new TextEncoder().encode(exactSecret);
+    let idx = 0;
+    const fragmented = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        if (idx >= exactBytes.length) return ctrl.close();
+        ctrl.enqueue(new Uint8Array(0)); // empty chunk ignored
+        ctrl.enqueue(exactBytes.subarray(idx, ++idx));
+      },
+    }, { highWaterMark: 0 });
+    assert.equal((await send("/v1/apps/demo/secrets", {
+      method: "PUT", headers: { ...auth, "content-type": "application/json" }, body: fragmented,
+    })).status, 200, "fragmented 1-byte chunks at exact cap succeed");
+    const overSecret = prefix + "x".repeat(jsonCap - prefix.length - suffix.length + 1) + suffix;
+    assert.equal(Buffer.byteLength(overSecret), jsonCap + 1);
+    const overSecretRes = await t.json("/v1/apps/demo/secrets", { method: "PUT", headers: auth, body: overSecret });
+    assert.equal(overSecretRes.status, 413);
+    assert.equal(overSecretRes.body.error, "body_too_large");
+
+    // 5. Optional-body metadata endpoints (/claim and /pages/:name/view) must not swallow 413.
+    const anon = await t.deploy({}, "unclaimed");
+    assert.equal(anon.status, 201);
+    const bigClaim = await t.json("/v1/apps/unclaimed/claim", {
+      method: "POST",
+      headers: { ...auth, "x-cresslet-deploy-key": anon.body.deployKey },
+      body: JSON.stringify({ deployKey: "x".repeat(jsonCap) }),
+    });
+    assert.equal(bigClaim.status, 413);
+    assert.equal(bigClaim.body.error, "body_too_large");
+    // Empty body on /claim still succeeds using header key.
+    assert.equal((await t.json("/v1/apps/unclaimed/claim", {
+      method: "POST",
+      headers: { ...auth, "x-cresslet-deploy-key": anon.body.deployKey },
+    })).status, 200);
+
+    // 6. Deploy/page tier: exact deployCap passes, deployCap + 1 returns 413.
+    const dPrefix = '{"app":"demo","files":[{"path":"index.html","data":"';
+    const dSuffix = '"}]}';
+    const exactDeploy = dPrefix + "a".repeat(deployCap - dPrefix.length - dSuffix.length) + dSuffix;
+    assert.equal(Buffer.byteLength(exactDeploy), deployCap);
+    assert.equal((await t.json("/v1/deploys", {
+      method: "POST", headers: { ...auth, "content-length": String(deployCap) }, body: exactDeploy,
+    })).status, 201, "deploy at exact deployCap succeeds");
+
+    const overDeploy = dPrefix + "a".repeat(deployCap - dPrefix.length - dSuffix.length + 1) + dSuffix;
+    assert.equal(Buffer.byteLength(overDeploy), deployCap + 1);
+    const hugeDeploy = await t.json("/v1/deploys", { method: "POST", headers: auth, body: overDeploy });
+    assert.equal(hugeDeploy.status, 413);
+    assert.equal(hugeDeploy.body.error, "body_too_large");
+
+    // Chunked deploy past deployCap aborts stream.
+    const bigDeployStream = trackedStream(512, 20);
+    const bigDeployRes = await send("/v1/deploys", {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: bigDeployStream.stream,
+    });
+    assert.equal(bigDeployRes.status, 413);
+    assert.equal(bigDeployStream.stats().cancelled, true);
+
+    // POST /v1/pages and PUT /v1/pages/:name use deploy tier; PATCH /v1/pages/:name and POST /view use metadata tier.
+    const mediumHtml = "a".repeat(jsonCap + 200);
+    const pageCreate = await t.json("/v1/pages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ html: mediumHtml }),
+    });
+    assert.equal(pageCreate.status, 201, "POST /v1/pages > jsonCap and <= deployCap succeeds");
+    const pageName = pageCreate.body.page.name as string;
+
+    const pageOver = await t.json("/v1/pages", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ html: "a".repeat(deployCap) }),
+    });
+    assert.equal(pageOver.status, 413);
+    assert.equal(pageOver.body.error, "body_too_large");
+
+    const pagePutOk = await t.json(`/v1/pages/${pageName}`, {
+      method: "PUT",
+      headers: auth,
+      body: JSON.stringify({ html: mediumHtml + "!" }),
+    });
+    assert.equal(pagePutOk.status, 200, "PUT /v1/pages/:name > jsonCap and <= deployCap succeeds");
+
+    const pagePutOver = await t.json(`/v1/pages/${pageName}`, {
+      method: "PUT",
+      headers: auth,
+      body: JSON.stringify({ html: "a".repeat(deployCap) }),
+    });
+    assert.equal(pagePutOver.status, 413);
+    assert.equal(pagePutOver.body.error, "body_too_large");
+
+    const pagePatchOver = await t.json(`/v1/pages/${pageName}`, {
+      method: "PATCH",
+      headers: auth,
+      body: JSON.stringify({ title: "t".repeat(jsonCap) }),
+    });
+    assert.equal(pagePatchOver.status, 413, "PATCH /v1/pages/:name uses metadata cap");
+    assert.equal(pagePatchOver.body.error, "body_too_large");
+
+    const pageViewOver = await t.json(`/v1/pages/${pageName}/view`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ path: "/" + "x".repeat(jsonCap) }),
+    });
+    assert.equal(pageViewOver.status, 413, "POST /v1/pages/:name/view does not swallow 413");
+    assert.equal(pageViewOver.body.error, "body_too_large");
+    assert.equal((await t.json(`/v1/pages/${pageName}/view`, { method: "POST", headers: auth })).status, 200);
+  } finally {
+    await t.done();
+  }
+});
+
+test("closed instance rejects unauthenticated POST /v1/deploys before reading body", async () => {
+  const t = await setup({ deployBodyBytes: 2048 }, { anonDeploys: false });
+  try {
+    const unread = trackedStream(512, 10);
+    const res = await t.srv.handler(new Request("http://test.local/v1/deploys", {
+      method: "POST",
+      headers: { host: "test.local", "content-type": "application/json" },
+      body: unread.stream,
+      duplex: "half",
+    } as RequestInit));
+    assert.equal(res.status, 401);
+    assert.equal(unread.stats().pulled, 0, "must not read body before 401 on closed instance");
+  } finally {
+    await t.done();
+  }
+});
+
+test("JSON request body cap over real HTTP/1.1 chunked transfer encoding rejects before upload ends", { timeout: 5000 }, async () => {
+  const t = await setup({ jsonBodyBytes: 256, deployBodyBytes: 1024 });
+  const http = serve({ fetch: t.srv.handler, port: 0 });
+  await new Promise((r) => http.once("listening", r));
+  const port = (http.address() as { port: number }).port;
+  try {
+    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      let responded = false;
+      const req = httpRequest({
+        host: "127.0.0.1",
+        port,
+        path: "/v1/accounts",
+        method: "POST",
+        headers: { host: "test.local", authorization: "Bearer adm", "content-type": "application/json", "transfer-encoding": "chunked" },
+      }, (r) => {
+        responded = true;
+        const parts: Buffer[] = [];
+        r.on("data", (d) => parts.push(d));
+        r.on("end", () => {
+          req.destroy();
+          resolve({ status: r.statusCode!, body: Buffer.concat(parts).toString() });
+        });
+      });
+      req.on("error", (err) => {
+        if (!responded) reject(err);
+      });
+      // Send more than jsonBodyBytes WITHOUT calling req.end(): proves early streaming 413.
+      req.write('{"email":"' + "a".repeat(200));
+      req.write("b".repeat(200));
+    });
+    assert.equal(res.status, 413);
+    assert.equal(JSON.parse(res.body).error, "body_too_large");
+  } finally {
+    http.close();
+    await t.done();
   }
 });

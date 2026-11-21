@@ -194,3 +194,122 @@ test("a single node rejects a bad token on a deploy without reading its body", a
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("cluster forwarding caps oversized payloads (Content-Length and chunked) before forwarding", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "cresslet-cluster-cap-"));
+  const fake = fakeCluster();
+  const base = loadConfig();
+  const jsonCap = 128;
+  const deployCap = 512;
+  const srv = createServer(loadConfig({
+    dataDir, domain: "test.local", publicPort: 80, adminToken: "adm",
+    limits: { ...base.limits, jsonBodyBytes: jsonCap, deployBodyBytes: deployCap },
+  }), fake.cluster);
+  try {
+    // 1. Oversized Content-Length on /v1/deploys: rejected with 413 without reading stream or forwarding.
+    let pulledCl = 0;
+    let cancelledCl = false;
+    const clStream = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        pulledCl++;
+        ctrl.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        cancelledCl = true;
+      },
+    }, { highWaterMark: 0 });
+    const clRes = await srv.handler(new Request("http://test.local/v1/deploys", {
+      method: "POST",
+      headers: { host: "test.local", "content-type": "application/json", "content-length": String(deployCap + 1) },
+      body: clStream,
+      duplex: "half",
+    } as RequestInit));
+    assert.equal(clRes.status, 413);
+    assert.equal((await clRes.json()).error, "body_too_large");
+    assert.equal(pulledCl, 0, "must reject on Content-Length without pulling body");
+    assert.equal(cancelledCl, true);
+    assert.equal(fake.forwards.length, 0);
+
+    // 2. Oversized chunked stream (no Content-Length) on /v1/deploys: aborted mid-stream, cancelled, not forwarded.
+    let pulled = 0;
+    let cancelled = false;
+    const chunked = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        if (pulled >= 20) return ctrl.close();
+        pulled++;
+        ctrl.enqueue(new Uint8Array(200).fill(0x78));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }, { highWaterMark: 0 });
+    const chRes = await srv.handler(new Request("http://test.local/v1/deploys", {
+      method: "POST",
+      headers: { host: "test.local", "content-type": "application/json" },
+      body: chunked,
+      duplex: "half",
+    } as RequestInit));
+    assert.equal(chRes.status, 413);
+    assert.equal((await chRes.json()).error, "body_too_large");
+    assert.equal(pulled, 3, "aborts on the exact chunk that crosses deployCap");
+    assert.equal(cancelled, true);
+    assert.equal(fake.forwards.length, 0);
+
+    // 3. Invalid JSON within cap still answers 400 cleanly.
+    const badRes = await srv.handler(new Request("http://test.local/v1/deploys", {
+      method: "POST",
+      headers: { host: "test.local", "content-type": "application/json" },
+      body: "{not-json",
+    }));
+    assert.equal(badRes.status, 400);
+    assert.equal((await badRes.json()).error, "bad_request");
+
+    // 4. Remote app/page routes (toOwner) enforce tier caps before forwarding can buffer.
+    const { app: remoteApp } = await srv.store.createApp("remote-app", null, null);
+    const remotePage = await srv.store.createPage("pg-remote", (await srv.store.createAccount("p@b.co")).id, { title: null, visibility: "private", retentionDays: 30 });
+    fake.remote.add(remoteApp.id);
+    fake.remote.add(remotePage.id);
+
+    // Remote metadata route rejects > jsonCap (chunked).
+    let rbPulled = 0;
+    let rbCancelled = false;
+    const rbStream = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        if (rbPulled >= 10) return ctrl.close();
+        rbPulled++;
+        ctrl.enqueue(new Uint8Array(100).fill(0x61));
+      },
+      cancel() {
+        rbCancelled = true;
+      },
+    }, { highWaterMark: 0 });
+    const rbRes = await srv.handler(new Request("http://test.local/v1/apps/remote-app/rollback", {
+      method: "POST",
+      headers: { host: "test.local", "content-type": "application/json" },
+      body: rbStream,
+      duplex: "half",
+    } as RequestInit));
+    assert.equal(rbRes.status, 413);
+    assert.equal((await rbRes.json()).error, "body_too_large");
+    assert.equal(rbPulled, 2);
+    assert.equal(rbCancelled, true);
+
+    // Remote PUT /v1/pages/:name allows > jsonCap and <= deployCap, rejects > deployCap.
+    const okPagePut = await srv.handler(new Request("http://test.local/v1/pages/pg-remote", {
+      method: "PUT",
+      headers: { host: "test.local", "content-type": "application/json" },
+      body: JSON.stringify({ html: "x".repeat(jsonCap + 50) }),
+    }));
+    assert.equal(okPagePut.status, 203);
+    const overPagePut = await srv.handler(new Request("http://test.local/v1/pages/pg-remote", {
+      method: "PUT",
+      headers: { host: "test.local", "content-type": "application/json" },
+      body: JSON.stringify({ html: "x".repeat(deployCap) }),
+    }));
+    assert.equal(overPagePut.status, 413);
+    assert.equal((await overPagePut.json()).error, "body_too_large");
+  } finally {
+    srv.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
