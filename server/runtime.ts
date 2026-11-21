@@ -10,7 +10,7 @@ import { createServer as createNetServer, type Server as NetServer } from "node:
 import { type IncomingMessage, request as httpRequest } from "node:http";
 import type { Duplex } from "node:stream";
 import { join } from "node:path";
-import { Readable } from "node:stream";
+import { finished, Readable } from "node:stream";
 import { Client } from "undici";
 import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
@@ -171,9 +171,10 @@ export class Runtime {
       proc.inflight--;
       proc.lastUsed = Date.now();
     };
-    const timeout = AbortSignal.timeout(this.#cfg.limits.requestMs);
-    const signal = AbortSignal.any([timeout, req.signal]);
+    let timeout: AbortSignal | undefined;
     try {
+      timeout = AbortSignal.timeout(this.#cfg.limits.requestMs);
+      const signal = AbortSignal.any([timeout, req.signal]);
       const headers: Record<string, string> = {};
       req.headers.forEach((v, k) => {
         // Clients can't forge control-plane headers (x-cresslet-url, -probe, -scheduled, …).
@@ -198,11 +199,12 @@ export class Runtime {
         return new Response(null, { status: res.statusCode, headers: h });
       }
       // Still in flight while the body streams (ended, failed, cancelled or timed out: `close`), so it isn't evicted mid-response.
+      const out = new Response(Readable.toWeb(res.body) as ReadableStream, { status: res.statusCode, headers: h });
       streaming = true;
-      res.body.once("close", release);
-      return new Response(Readable.toWeb(res.body) as ReadableStream, { status: res.statusCode, headers: h });
+      finished(res.body, release);
+      return out;
     } catch (e) {
-      if (timeout.aborted) {
+      if (timeout?.aborted) {
         // Likely a runaway handler; restart the sandbox.
         this.logs.push(spec.appId, "system", `request timed out after ${this.#cfg.limits.requestMs}ms; restarting`);
         this.stop(spec.appId);
@@ -241,6 +243,8 @@ export class Runtime {
       if (n > 0) this.#ws.set(spec.appId, n);
       else this.#ws.delete(spec.appId);
     };
+    // A client gone during a cold start frees its slot right away.
+    client.once("close", uncount);
     let proc: Proc;
     try {
       proc = await this.#get(spec);

@@ -226,12 +226,11 @@ test("websocket caps: an upgrade answered with a normal response frees its slot 
   const t = await setup({ maxWebSocketsPerApp: 1 }, ["a9"]);
   try {
     // A 400 with a body that streams for 700 ms: not a WebSocket, so it doesn't hold the app's one slot.
-    const slow = t.ws("a9", "/api/stream");
-    for (let i = 0; i < 300 && !t.srv.runtime.procs.get(t.ids.a9)?.inflight; i++) await sleep(10);
-    await sleep(100);
+    // ws() resolves on the response headers; the body streams on for 700 ms.
+    assert.equal((await t.ws("a9", "/api/stream")).status, 400);
+    assert.equal(t.srv.runtime.procs.get(t.ids.a9)?.inflight, 1, "its body is still streaming");
     const open = await t.ws("a9");
     assert.equal(open.status, 101);
-    assert.equal((await slow).status, 400);
     open.socket!.destroy();
   } finally {
     await t.done();
