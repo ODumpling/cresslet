@@ -32,7 +32,8 @@ async function setup() {
     WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 1500) INSERT INTO small SELECT x FROM r;
     CREATE TABLE wide (b TEXT);
     WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 10) INSERT INTO wide SELECT printf('%.*c', 1000000, 'a') FROM r;
-    CREATE TABLE blob (b BLOB); INSERT INTO blob VALUES (zeroblob(6000000));`);
+    CREATE TABLE blob (b BLOB); INSERT INTO blob VALUES (zeroblob(6000000));
+    CREATE TABLE long (t TEXT); INSERT INTO long VALUES (replace(hex(zeroblob(50000000)), '0', char(1)));`);
   db.close();
   const done = async () => {
     srv.close();
@@ -120,13 +121,14 @@ test("db inspection: normal queries, row and byte caps, sql errors, busy", async
     assert.equal(tables.small.rows.length, 1000);
     assert.equal(tables.wide.count, 10);
     assert.equal(tables.wide.truncated, true);
-    // A stored value bigger than the reply cap doesn't break the listing.
+    // A stored value bigger than the reply cap doesn't break the listing (100 MB of \u0001, 600 MB escaped: too long for a string).
     assert.deepEqual([tables.blob.count, tables.blob.rows.length, tables.blob.truncated], [1, 0, true]);
+    assert.deepEqual([tables.long.count, tables.long.rows.length, tables.long.truncated], [1, 0, true]);
     assert.equal((await t.json("GET", "/v1/apps/shop/db?limit=-1", t.owner)).body.tables.small.rows.length, 0);
     assert.equal((await t.json("GET", "/v1/apps/shop/db?limit=abc", t.owner)).body.tables.small.rows.length, 100);
 
     // Site admin view: table counts.
-    assert.deepEqual((await t.json("GET", "/v1/admin/sites/shop", t.owner)).body.database.tables, [{ name: "blob", rows: 1 }, { name: "small", rows: 1500 }, { name: "wide", rows: 10 }]);
+    assert.deepEqual((await t.json("GET", "/v1/admin/sites/shop", t.owner)).body.database.tables, [{ name: "blob", rows: 1 }, { name: "long", rows: 1 }, { name: "small", rows: 1500 }, { name: "wide", rows: 10 }]);
 
     // Table names and schemas count against the budget too (here a tiny one): the listing stops.
     const maxBytes = INSPECT_LIMITS.maxBytes;
