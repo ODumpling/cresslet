@@ -198,8 +198,9 @@ function createDb(SQL, bytes) {
     /^(?:begin|commit|end|rollback|savepoint|release)\b/i.test(sql.replace(/^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, ""));
   const batch = (statements) => {
     if (!Array.isArray(statements)) throw new TypeError("batch takes an array of { sql, params }");
-    statements.forEach(({ sql } = {}, i) => {
+    statements.forEach(({ sql, params } = {}, i) => {
       if (typeof sql !== "string") throw new TypeError(`batch statement ${i + 1}: sql required`);
+      if (params !== undefined && !Array.isArray(params)) throw new TypeError(`batch statement ${i + 1}: params must be an array`);
       if (isTxControl(sql)) throw new TypeError(`batch statement ${i + 1}: transaction control isn't allowed in a batch (it is one transaction)`);
     });
     db.exec("SAVEPOINT cresslet_batch");

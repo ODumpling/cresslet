@@ -36,7 +36,10 @@ export default {
 ```
 
 The bindings come from the `cresslet` package's imports, or from the `env` argument (the same bindings; `env` keeps working
-for apps deployed before the SDK). Types (`Env`, `ScheduledEvent`, `WebSocketPair`, …) ship in the package.
+for apps deployed before the SDK). Types (`Env`, `ScheduledEvent`, `WebSocketPair`, …) ship in the package: a project
+made before 0.2.0 deletes its `server/cresslet.d.ts` when it starts importing from `"cresslet"` (its globals would be
+declared twice). `lastInsertRowid` is SQLite's; `INSERT … RETURNING id` works on any provider. Awaiting a ``db.sql`…` ``
+runs it, so return one from an `async` function only to run it.
 
 WebSockets: requests with `Upgrade: websocket` on a server route reach `fetch`; answer with a `WebSocketPair` (Workers API). Open sockets keep the sandbox running; a redeploy closes them, and so does the server after 10 minutes without traffic or an hour in all by default (`CRESSLET_WS_IDLE_MS` / `CRESSLET_WS_MAX_MS`; clients should reconnect). Each app has a cap on open sockets (`CRESSLET_MAX_WEBSOCKETS_PER_APP`); past it, upgrades get 503. Works on the platform, in `cresslet dev` and in the studio preview (there, saving a server file restarts the server and closes its sockets with 1012).
 

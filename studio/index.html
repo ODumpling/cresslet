@@ -169,11 +169,10 @@
                   <span>package.json</span>
                 </div>
 <pre class="mock-code"><span class="c">// server/index.ts: handles /api/*</span>
+<span class="k">import</span> { db } <span class="k">from</span> <span class="s">"cresslet"</span>;
 <span class="k">export default</span> {
-  <span class="k">async</span> <span class="f">fetch</span>(req, env) {
-    <span class="k">const</span> todos = <span class="k">await</span> env.db.<span class="f">query</span>(
-      <span class="s">"SELECT * FROM todos"</span>,
-    );
+  <span class="k">async</span> <span class="f">fetch</span>(req) {
+    <span class="k">const</span> todos = <span class="k">await</span> db.<span class="f">sql</span><span class="s">`SELECT * FROM todos`</span>;
     <span class="k">return</span> Response.<span class="f">json</span>(todos);
   },
 };</pre>
