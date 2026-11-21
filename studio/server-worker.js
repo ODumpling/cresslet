@@ -161,6 +161,18 @@ function files(op, payload, transfer = []) {
   });
 }
 
+/**
+ * PRAGMAs that only report, with or without an argument (`table_info(t)`). Any other PRAGMA, or one with `=`, may change
+ * the database (incremental_vacuum, optimize, wal_checkpoint, user_version = …): the preview saves after it.
+ */
+const READ_PRAGMAS = new Set([
+  "application_id", "auto_vacuum", "cache_size", "collation_list", "compile_options", "data_version", "database_list",
+  "encoding", "foreign_key_check", "foreign_key_list", "foreign_keys", "freelist_count", "function_list", "index_info",
+  "index_list", "index_xinfo", "integrity_check", "journal_mode", "module_list", "page_count", "page_size",
+  "pragma_list", "quick_check", "recursive_triggers", "schema_version", "table_info", "table_list", "table_xinfo",
+  "user_version",
+]);
+
 function createDb(SQL, bytes) {
   const db = bytes ? new SQL.Database(bytes) : new SQL.Database();
   let timer;
@@ -224,7 +236,8 @@ function createDb(SQL, bytes) {
     const s = sql.replace(/^(?:[\s;(]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
     if (/^(?:select|values|explain)\b/i.test(s)) return false;
     if (/^with\b/i.test(s)) return /\b(?:insert|update|delete|replace)\b/i.test(s);
-    if (/^pragma\b/i.test(s)) return /[=(]/.test(s);
+    const pragma = /^pragma\s+(?:\w+\s*\.\s*)?(\w+)\s*(=)?/i.exec(s);
+    if (pragma) return !!pragma[2] || !READ_PRAGMAS.has(pragma[1].toLowerCase()); // unsure: save
     return true;
   };
   // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).

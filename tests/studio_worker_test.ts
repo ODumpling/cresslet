@@ -153,6 +153,9 @@ export default { async fetch(req) {
   if (p === "/poll") return json(await db.query("WITH x AS (SELECT 1 AS n) SELECT n FROM x"));
   if (p === "/fk-off") return db.query("PRAGMA foreign_keys = OFF").then(() => json("off"));
   if (p === "/fk") return json(await db.first("PRAGMA foreign_keys"));
+  if (p === "/table-info") return json((await db.query("PRAGMA table_info(t)")).length);
+  if (p === "/vacuum-inc") return json(await db.query("PRAGMA incremental_vacuum"));
+  if (p === "/version") return json(await db.query("PRAGMA main.user_version = 7"));
   if (p === "/mk-u") return db.exec("CREATE TABLE u (k INTEGER PRIMARY KEY)").then(() => json("ok"));
   if (p === "/partial") {
     return db.query("INSERT OR FAIL INTO u VALUES (1), (2), (1) RETURNING k").then(() => json("no error"), (e) => json(e.message));
@@ -198,6 +201,14 @@ export default { async fetch(req) {
     await w.get("/fk-off");
     await w.saved();
     assert.deepEqual((await w.get("/fk")).json, { foreign_keys: 0 });
+    // PRAGMAs by name: reads don't save (a save reopens the connection), others do
+    assert.equal((await w.get("/table-info")).json, 1);
+    await new Promise((r) => setTimeout(r, 700));
+    assert.ok(!w.saving(), "a PRAGMA read doesn't save");
+    await w.get("/vacuum-inc");
+    await w.saved();
+    await w.get("/version");
+    assert.deepEqual((await w.saved()).exec("PRAGMA user_version")[0].values, [[7]]);
     assert.match((await w.get("/big")).json, /can't store the integer 9007199254740993 exactly/);
     assert.deepEqual((await w.get("/safe")).json, { x: 5 });
   } finally {
