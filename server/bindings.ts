@@ -47,6 +47,15 @@ function isVacuum(sql: string): boolean {
   }
   return /^\s*vacuum(\s+main)?\s*;?\s*$/i.test(out);
 }
+/**
+ * True if `sql` starts with transaction control, after comments. A batch refuses those: one could commit or drop the
+ * batch's savepoint and leave a failing batch half applied. Same as cresslet-cli lib/bindings.js isTxControl.
+ */
+export function isTxControl(sql: string): boolean {
+  const rest = sql.replace(/^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
+  return /^(?:begin|commit|end|rollback|savepoint|release)\b/i.test(rest);
+}
+
 export function confine(db: DatabaseSync, vacuum: () => boolean = () => false) {
   db.enableDefensive(true); // no writable_schema tricks on its own file either
   db.setAuthorizer((action, arg1, arg2) => {
@@ -115,9 +124,8 @@ export function createDb(path: string, maxBytes?: number) {
         const out = statements.map(({ sql, params = [] }, i) => {
           try {
             return guard(sql, () => {
-              const stmt = db.prepare(sql);
               const before = (total.get() as { n: number }).n;
-              const rows = stmt.columns().length ? stmt.all(...params) : (stmt.run(...params), []);
+              const rows = db.prepare(sql).all(...params); // runs any statement; [] when it returns no rows
               const c = counts.get() as { changes: number; id: number | bigint };
               return { rows, changes: (total.get() as { n: number }).n === before ? 0 : num(c.changes), lastInsertRowid: num(c.id) };
             });
@@ -129,7 +137,9 @@ export function createDb(path: string, maxBytes?: number) {
         db.exec("RELEASE cresslet_batch");
         return out;
       } catch (e) {
-        db.exec("ROLLBACK TO cresslet_batch; RELEASE cresslet_batch");
+        try {
+          db.exec("ROLLBACK TO cresslet_batch; RELEASE cresslet_batch");
+        } catch { /* SQLite already rolled back (e.g. SQLITE_FULL): report the statement's error */ }
         throw e;
       }
     },
@@ -361,6 +371,9 @@ export function createBindings(
           for (const [i, s] of list.entries()) {
             if (typeof s?.sql !== "string") return text(`batch statement ${i + 1}: sql required`, 400);
             if (s.params !== undefined && !Array.isArray(s.params)) return text(`batch statement ${i + 1}: params must be an array`, 400);
+            if (isTxControl(s.sql)) {
+              return text(`batch statement ${i + 1}: transaction control isn't allowed in a batch (it is one transaction)`, 400);
+            }
           }
           result = db.batch(list);
         } else if (typeof sql !== "string") return text("sql required", 400);

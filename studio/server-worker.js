@@ -167,7 +167,15 @@ function createDb(SQL, bytes) {
   const persist = () => {
     clearTimeout(timer);
     timer = setTimeout(() => {
+      // export() closes and reopens the database: not while the app holds a transaction open (exec("BEGIN") across
+      // awaits) or its writes would be lost; and connection settings (foreign_keys) need setting again after.
+      try {
+        db.exec("BEGIN; COMMIT;");
+      } catch {
+        return persist(); // in a transaction: try again later
+      }
       const out = db.export();
+      db.exec("PRAGMA foreign_keys = ON;");
       postMessage({ type: "db", bytes: out }, [out.buffer]);
     }, 300);
   };
@@ -185,13 +193,19 @@ function createDb(SQL, bytes) {
   };
   const one = (sql) => db.exec(sql)[0]?.values[0][0] ?? 0;
   // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).
+  // Same as server/bindings.ts isTxControl: a batch is one transaction, so no BEGIN/COMMIT/SAVEPOINT/... inside it.
+  const isTxControl = (sql) =>
+    /^(?:begin|commit|end|rollback|savepoint|release)\b/i.test(sql.replace(/^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, ""));
   const batch = (statements) => {
     if (!Array.isArray(statements)) throw new TypeError("batch takes an array of { sql, params }");
+    statements.forEach(({ sql } = {}, i) => {
+      if (typeof sql !== "string") throw new TypeError(`batch statement ${i + 1}: sql required`);
+      if (isTxControl(sql)) throw new TypeError(`batch statement ${i + 1}: transaction control isn't allowed in a batch (it is one transaction)`);
+    });
     db.exec("SAVEPOINT cresslet_batch");
     try {
       const out = statements.map(({ sql, params = [] } = {}, i) => {
         try {
-          if (typeof sql !== "string") throw new TypeError("sql required");
           const before = one("SELECT total_changes()");
           const rows = all(sql, params);
           const changed = one("SELECT total_changes()") !== before;
@@ -203,7 +217,9 @@ function createDb(SQL, bytes) {
       db.exec("RELEASE cresslet_batch");
       return out;
     } catch (e) {
-      db.exec("ROLLBACK TO cresslet_batch; RELEASE cresslet_batch");
+      try {
+        db.exec("ROLLBACK TO cresslet_batch; RELEASE cresslet_batch");
+      } catch { /* SQLite already rolled back: report the statement's error */ }
       throw e;
     } finally {
       persist();

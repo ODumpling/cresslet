@@ -105,6 +105,13 @@ test("host /db/batch: atomic, nests in an app transaction, validates its input",
       status: 400,
       body: "batch statement 1: params must be an array",
     });
+    // no transaction control inside a batch (a COMMIT would leave a failing batch half applied)
+    const commit = await db("batch", { statements: [{ sql: "DELETE FROM t" }, { sql: "-- c\n COMMIT" }, { sql: "INSERT INTO t (v) VALUES (NULL)" }] });
+    assert.deepEqual(commit, { status: 400, body: "batch statement 2: transaction control isn't allowed in a batch (it is one transaction)" });
+    for (const sql of ["begin", "END", "ROLLBACK", "SAVEPOINT s", "/* x */ RELEASE s"]) {
+      assert.equal((await db("batch", { statements: [{ sql }] })).status, 400, sql);
+    }
+    assert.deepEqual((await db("first", { sql: "SELECT count(*) n FROM t" })).body, { n: 2 });
     // the confinement holds inside a batch too
     const attach = await db("batch", { statements: [{ sql: "ATTACH 'x.db' AS x" }] });
     assert.equal(attach.status, 400);

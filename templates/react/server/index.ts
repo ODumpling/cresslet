@@ -28,8 +28,10 @@ export default {
       if (req.method === "POST") {
         const { text } = await req.json<{ text?: string }>();
         if (!text?.trim()) return Response.json({ error: "text required" }, { status: 400 });
-        const r = await db.run(db.sql`INSERT INTO todos (text, created_at) VALUES (${text.trim().slice(0, 500)}, ${Date.now()})`);
-        return Response.json({ id: r.lastInsertRowid }, { status: 201 });
+        const row = await db.first<{ id: number }>(
+          db.sql`INSERT INTO todos (text, created_at) VALUES (${text.trim().slice(0, 500)}, ${Date.now()}) RETURNING id`,
+        );
+        return Response.json({ id: row!.id }, { status: 201 });
       }
     }
 
