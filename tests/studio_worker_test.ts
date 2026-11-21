@@ -112,6 +112,8 @@ async function startWorker(code: string) {
       lastSeen = snapshot;
       return new SQL.Database(snapshot!);
     },
+    /** Whether a save has been posted since the last saved() call (no waiting). */
+    saving: () => !!snapshot && snapshot !== lastSeen,
     async close() {
       await w.terminate();
       await rm(dir, { recursive: true, force: true });
@@ -148,6 +150,9 @@ export default { async fetch(req) {
   if (p === "/touch") return json(await db.run("UPDATE t SET v = v"));
   if (p === "/partial-run") return db.run("INSERT OR FAIL INTO u VALUES (3), (4), (3)").then(() => json("no error"), (e) => json(e.message));
   if (p === "/partial-exec") return db.exec("INSERT INTO u VALUES (5); INSERT INTO u VALUES (5);").then(() => json("no error"), (e) => json(e.message));
+  if (p === "/poll") return json(await db.query("WITH x AS (SELECT 1 AS n) SELECT n FROM x"));
+  if (p === "/fk-off") return db.query("PRAGMA foreign_keys = OFF").then(() => json("off"));
+  if (p === "/fk") return json(await db.first("PRAGMA foreign_keys"));
   if (p === "/mk-u") return db.exec("CREATE TABLE u (k INTEGER PRIMARY KEY)").then(() => json("ok"));
   if (p === "/partial") {
     return db.query("INSERT OR FAIL INTO u VALUES (1), (2), (1) RETURNING k").then(() => json("no error"), (e) => json(e.message));
@@ -181,6 +186,18 @@ export default { async fetch(req) {
     assert.deepEqual((await w.saved()).exec("SELECT k FROM u ORDER BY k")[0].values, [[1], [2], [3], [4], [5]]);
     await w.get("/ddl");
     assert.equal((await w.saved()).exec("SELECT name FROM sqlite_master WHERE name = 'ddl_only'").length, 1);
+    // reads every 100 ms don't push a pending save back
+    await w.get("/touch");
+    for (let i = 0; i < 8 && !w.saving(); i++) {
+      await w.get("/poll");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(w.saving(), "saved while reads kept coming");
+    await w.saved();
+    // a save keeps foreign_keys as the app set it
+    await w.get("/fk-off");
+    await w.saved();
+    assert.deepEqual((await w.get("/fk")).json, { foreign_keys: 0 });
     assert.match((await w.get("/big")).json, /can't store the integer 9007199254740993 exactly/);
     assert.deepEqual((await w.get("/safe")).json, { x: 5 });
   } finally {

@@ -166,9 +166,12 @@ function createDb(SQL, bytes) {
   let timer;
   let savedRowid = 0;
   let reopened = false;
+  // One save at a time, 300 ms after the first change that asked for it: later changes don't push it back (steady
+  // traffic would otherwise keep a write from ever being saved).
   const persist = () => {
-    clearTimeout(timer);
+    if (timer) return;
     timer = setTimeout(() => {
+      timer = undefined;
       // export() closes and reopens the database: not while the app holds a transaction open (exec("BEGIN") across
       // awaits) or its writes would be lost; and connection settings (foreign_keys) need setting again after.
       try {
@@ -177,9 +180,10 @@ function createDb(SQL, bytes) {
         return persist(); // in a transaction: try again later
       }
       savedRowid = rowid(); // the live value, or the one kept from before an earlier save
+      const foreignKeys = one("PRAGMA foreign_keys");
       const out = db.export();
       reopened = true; // last_insert_rowid() is 0 on the new connection until its next insert
-      db.exec("PRAGMA foreign_keys = ON;");
+      db.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"};`); // as the app left it
       postMessage({ type: "db", bytes: out }, [out.buffer]);
     }, 300);
   };
@@ -215,7 +219,14 @@ function createDb(SQL, bytes) {
     return savedRowid;
   };
   // Statements that may change the database without changing total_changes() (DDL, PRAGMA, …): not a plain read.
-  const mayWrite = (sql) => !/^(?:select|values|explain)\b/i.test(sql.replace(/^(?:[\s;(]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, ""));
+  // (A save reopens the connection, so plain reads, PRAGMA reads included, don't ask for one.)
+  const mayWrite = (sql) => {
+    const s = sql.replace(/^(?:[\s;(]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
+    if (/^(?:select|values|explain)\b/i.test(s)) return false;
+    if (/^with\b/i.test(s)) return /\b(?:insert|update|delete|replace)\b/i.test(s);
+    if (/^pragma\b/i.test(s)) return /[=(]/.test(s);
+    return true;
+  };
   // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).
   // Same as server/bindings.ts isTxControl: a batch is one transaction, so no BEGIN/COMMIT/SAVEPOINT/... inside it.
   const isTxControl = (sql) =>
