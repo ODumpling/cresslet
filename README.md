@@ -23,7 +23,7 @@ cd my-app && npm install
 npm run dev                            # http://localhost:3000
 npx cresslet deploy                      # → http://<name>.localhost:8787
 npx cresslet logs -f
-npx cresslet login && npx cresslet claim   # keep it (GitHub login if configured): no expiry, outbound fetch, secrets
+npx cresslet auth login && npx cresslet claim   # keep it (browser login, if GitHub login is configured): no expiry, outbound fetch, secrets
 ```
 
 Browser: open http://localhost:8787 → pick a template → edits, `npm install`, dev server and preview all run in-browser on cresslet-container → **Deploy**.

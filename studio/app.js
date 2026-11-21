@@ -181,6 +181,7 @@ function logOut() {
   auth.email = null;
   $("admin-item").hidden = true;
   renderAccount();
+  if (!$("cli-login").hidden) route(); // its Authorize button needs the session
 }
 
 {
@@ -198,7 +199,7 @@ function logOut() {
           after = sessionStorage.getItem("cresslet.afterLogin");
           sessionStorage.removeItem("cresslet.afterLogin");
         } catch { /* storage blocked */ }
-        if (after?.startsWith("#/view/")) {
+        if (after?.startsWith("#/view/") || after?.startsWith("#/cli?")) {
           location.hash = after;
           return;
         }
@@ -212,7 +213,7 @@ function logOut() {
 // ------------------------------------------------------------------ settings
 let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
 function showOnly(id) {
-  for (const m of ["landing", "home", "settings", "share", "view", "admin", "workspace"]) $(m).hidden = m !== id;
+  for (const m of ["landing", "home", "settings", "share", "view", "cli-login", "admin", "workspace"]) $(m).hidden = m !== id;
   $("app").dataset.view = id;
   $("topbar").hidden = id !== "workspace";
   $("site-nav").hidden = id !== "landing";
@@ -963,6 +964,61 @@ $("page-defaults-form").addEventListener("submit", (e) => {
   savePageDefaults({ visibility: $("def-visibility").value, retentionDays: keepParse($("def-retention").value) }, "Page defaults saved");
 });
 $("page-defaults-reset").addEventListener("click", () => savePageDefaults(null, "Using the server's page defaults"));
+
+/**
+ * #/cli?code=…: where `cresslet login` sends the browser. The user checks the code matches their terminal and
+ * approves it; the CLI's poll then gets a new token for this account.
+ */
+function renderCli(code) {
+  showOnly("cli-login");
+  document.title = "Log in the CLI · Cresslet Studio";
+  const text = (t) => ($("cli-login-text").textContent = t);
+  $("cli-login-code").textContent = code;
+  $("cli-login-code").hidden = !code;
+  const actions = (...b) => $("cli-login-actions").replaceChildren(...b);
+  actions();
+  if (!code) return text("No login code here. Run `cresslet login` again.");
+  if (!auth.token) {
+    text("Log in to let the Cresslet CLI use your account.");
+    return actions(el("button", {
+      className: "btn primary",
+      type: "button",
+      onclick: () => {
+        try {
+          sessionStorage.setItem("cresslet.afterLogin", location.hash);
+        } catch { /* storage blocked: login lands on the home page */ }
+        logIn();
+      },
+    }, icon("github"), "Log in with GitHub"));
+  }
+  text(`Check this code matches the one in your terminal, then authorize. The CLI gets full access to ${auth.email ?? "your account"}.`);
+  const done = (t) => {
+    text(t);
+    $("cli-login-code").hidden = true;
+    actions();
+    focusView();
+  };
+  const approve = el("button", {
+    className: "btn primary",
+    type: "button",
+    onclick: async () => {
+      approve.disabled = true;
+      try {
+        await api("/v1/auth/cli/approve", { method: "POST", body: JSON.stringify({ userCode: code }) });
+        done("CLI logged in. You can close this tab and go back to your terminal.");
+      } catch (e) {
+        if (!auth.token) return renderCli(code); // session expired: offer the login
+        approve.disabled = false;
+        text(`Could not authorize: ${e.message}`);
+      }
+    },
+  }, "Authorize CLI");
+  actions(approve, el("button", {
+    className: "btn",
+    type: "button",
+    onclick: () => done("Cancelled. The CLI wasn't logged in."),
+  }, "Cancel"));
+}
 
 /**
  * #/view/<page>?path=…: where a private page sends a visitor without a session. Asks the server for a
@@ -1716,6 +1772,7 @@ function route() {
     const [n, q] = location.hash.slice("#/view/".length).split("?");
     renderView(decodeURIComponent(n), new URLSearchParams(q ?? "").get("path") ?? "/");
   }
+  else if (location.hash.startsWith("#/cli?")) renderCli(new URLSearchParams(location.hash.slice("#/cli?".length)).get("code") ?? "");
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();
 }

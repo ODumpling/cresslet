@@ -25,7 +25,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/v1` | server info, limits, app URL template, `auth: {github}` |
+| GET | `/v1` | server info, limits, app URL template, `auth: {github, cli}` (`cli`: the browser login below) |
 | POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it) |
 | GET | `/v1/me` | `{account: {id, email, github, role}, tokenInfo}` (`github` = login or null; `role` = `"SiteAdmin"` or null); `tokenInfo: {id, name, role, apps, createdAt, lastUsedAt}` for the calling token (any scope) |
 | GET | `/v1/me/tokens` | `{tokens: [{id, name, role, apps, createdAt, lastUsedAt, current}]}`; never the secret |
@@ -36,6 +36,9 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` |
 | POST | `/v1/auth/github/device` | CLI/agents: → `{deviceCode, userCode, verificationUri, expiresIn, interval}` |
 | POST | `/v1/auth/github/device/token` | `{deviceCode}` → `{status: pending\|slow_down}` or `{status: complete, account, token}`; poll every `interval`s |
+| POST | `/v1/auth/cli` | CLI browser login: → `{deviceCode, userCode, verificationUri, expiresIn, interval}`; open `verificationUri` (the studio's `#/cli?code=<userCode>`). 20 per client per 10 min |
+| POST | `/v1/auth/cli/approve` | full-access account token (the studio) + `{userCode}` → `{approved: true}`; 404 if unknown, expired or already approved |
+| POST | `/v1/auth/cli/token` | `{deviceCode}` → `{status: pending}` or `{status: complete, account, token}` (a new token, once); 400 `expired_token` after. Poll every `interval`s |
 | GET | `/v1/templates` | `{templates: [{name, description}]}` |
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |
