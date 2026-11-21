@@ -175,6 +175,12 @@ export default { async fetch(req) {
     return db.query("INSERT OR FAIL INTO u VALUES (1), (2), (1) RETURNING k").then(() => json("no error"), (e) => json(e.message));
   }
   if (p === "/big") return db.batch([db.sql\`SELECT \${9007199254740993n}\`]).then(() => json("stored"), (e) => json(e.message));
+  if (p === "/big-row") {
+    await db.exec("CREATE TABLE IF NOT EXISTS ids (id INTEGER PRIMARY KEY)");
+    const e = await db.batch([db.sql\`INSERT INTO ids VALUES (9007199254740993) RETURNING id\`]).then(() => "no error", (e) => e.message);
+    return json({ e, rows: await db.sql\`SELECT count(*) AS n FROM ids\` });
+  }
+  if (p === "/proto") return json(Object.keys((await db.batch(['SELECT 42 AS "__proto__"']))[0].rows[0]));
   if (p === "/safe") return json(await db.first(db.sql\`SELECT \${5n} AS x\`));
 } };`));
   try {
@@ -230,6 +236,12 @@ export default { async fetch(req) {
     assert.deepEqual((await w.saved()).exec("PRAGMA user_version")[0].values, [[9]]);
     assert.match((await w.get("/big")).json, /can't store the integer 9007199254740993 exactly/);
     assert.deepEqual((await w.get("/safe")).json, { x: 5 });
+    // results as on the platform: an integer past 2^53 fails the batch (rolled back); __proto__ is a column like any
+    assert.deepEqual((await w.get("/big-row")).json, {
+      e: "batch statement 1: Value is too large to be represented as a JavaScript number: 9007199254740993",
+      rows: [{ n: 0 }],
+    });
+    assert.deepEqual((await w.get("/proto")).json, ["__proto__"]);
   } finally {
     await w.close();
   }

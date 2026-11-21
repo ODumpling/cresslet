@@ -220,7 +220,20 @@ function createDb(SQL, bytes) {
     try {
       stmt.bind(norm(params));
       const rows = [];
-      while (stmt.step()) rows.push(stmt.getAsObject());
+      const cols = stmt.getColumnNames();
+      // As node:sqlite (the platform, cresslet dev) does: an integer past 2^53 is an error, not a rounded number, and
+      // every column (`__proto__` too) is an own property.
+      const cell = (v) => {
+        if (typeof v !== "bigint") return v;
+        if (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(Number.MIN_SAFE_INTEGER)) {
+          throw new RangeError(`Value is too large to be represented as a JavaScript number: ${v}`);
+        }
+        return Number(v);
+      };
+      while (stmt.step()) {
+        const vals = stmt.get(null, { useBigInt: true });
+        rows.push(Object.fromEntries(cols.map((c, i) => [c, cell(vals[i])])));
+      }
       return rows;
     } finally {
       stmt.free();
