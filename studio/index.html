@@ -39,6 +39,7 @@
         <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></symbol>
         <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
         <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+        <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M9.94 14.06 12 20l2.06-5.94L20 12l-5.94-2.06L12 4l-2.06 5.94L4 12z"/><path d="M19 3v4M17 5h4M5 17v4M3 19h4"/></symbol>
         <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
         <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></symbol>
         <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
@@ -102,6 +103,9 @@
           </div>
           <div class="spacer"></div>
           <a class="deploy-link" id="deploy-link" target="_blank" rel="noopener" hidden></a>
+          <button class="btn" id="builder-btn" type="button" aria-expanded="false" aria-controls="builder" hidden>
+            <svg class="icon" aria-hidden="true"><use href="#i-sparkles" /></svg>AI builder
+          </button>
           <button class="btn primary" id="deploy-btn" type="button" hidden>
             <svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg><span id="deploy-btn-label">Deploy</span>
           </button>
@@ -599,6 +603,43 @@
                   <p id="preview-msg" tabindex="-1">Booting runtime…</p>
                 </div>
               </div>
+            </div>
+          </section>
+          <!-- AI builder: Claude, called from this browser with the user's own Anthropic API key (studio/builder.js). -->
+          <section class="pane builder-pane" id="builder" aria-labelledby="builder-title" hidden>
+            <div class="pane-head">
+              <h2 id="builder-title" class="pane-title" tabindex="-1">AI builder</h2>
+              <button class="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat">
+                <svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg>
+              </button>
+              <button class="icon-btn" id="builder-close" type="button" aria-label="Close AI builder" title="Close AI builder">
+                <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
+              </button>
+            </div>
+            <form id="builder-key-form" class="builder-setup" hidden>
+              <p>Ask Claude to change this project. It edits files, runs commands in this tab's terminal and, when you ask, deploys with your session, like the CLI.</p>
+              <div class="field">
+                <label for="builder-key">Anthropic API key</label>
+                <input id="builder-key" class="input mono" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" required aria-describedby="builder-key-help builder-key-error" />
+              </div>
+              <p class="muted small" id="builder-key-help">Kept in this browser and sent only to Anthropic. Usage is billed to your Anthropic account. <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">Create a key<span class="sr-only"> (opens in a new tab)</span></a></p>
+              <p class="error small" id="builder-key-error" role="alert"></p>
+              <div class="row start"><button class="btn primary" type="submit">Save key</button></div>
+            </form>
+            <div id="builder-chat" class="builder-chat" hidden>
+              <ol id="builder-log" class="builder-log" aria-labelledby="builder-title" tabindex="0"></ol>
+              <div class="working" id="builder-working" hidden><span class="spinner" aria-hidden="true"></span><span id="builder-working-text">Working…</span></div>
+              <p class="sr-only" id="builder-status" role="status"></p>
+              <form id="builder-form" class="builder-form">
+                <label class="sr-only" for="builder-input">Message to Claude</label>
+                <textarea id="builder-input" class="input" rows="3" placeholder="Describe a change…" aria-describedby="builder-hint"></textarea>
+                <div class="builder-actions">
+                  <p class="muted small" id="builder-hint"><kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line.</p>
+                  <button class="btn sm" id="builder-forget" type="button">Forget key</button>
+                  <button class="btn sm" id="builder-stop" type="button" hidden>Stop</button>
+                  <button class="btn primary sm" id="builder-send" type="submit">Send</button>
+                </div>
+              </form>
             </div>
           </section>
           <section class="pane bottom-pane" aria-label="Output">

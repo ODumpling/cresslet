@@ -4,6 +4,7 @@ import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWith
 import { FitAddon, Terminal } from "./vendor/terminal.js";
 import { auth, fromTree, ignored, migrateDeployKeys, projects, toTree } from "./store.js";
 import { createCresslet } from "./cresslet-plugin.js";
+import { anthropicClient, apiKey, createAgent, createTools } from "./builder.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, { dataset, ...props } = {}, ...children) => {
@@ -1691,7 +1692,11 @@ async function openProject(id, gen) {
 
   // shell
   const shell = await c.spawn("jsh", [], { cwd: wd, terminal: true });
-  shell.output.pipeTo(new WritableStream({ write: (d) => term.write(d) }));
+  let termOut = ""; // the terminal's latest output, for the AI builder's read_dev_log
+  shell.output.pipeTo(new WritableStream({ write: (d) => {
+    term.write(d);
+    termOut = (termOut + d).slice(-64_000);
+  } }));
   const input = shell.input.getWriter();
   // an untrusted project's shell takes no input until "Run it" (a command could run its code: npm scripts, a build's
   // PostCSS/Tailwind plugins)
@@ -1706,10 +1711,17 @@ async function openProject(id, gen) {
   };
   // Opened from a deployed app's source: its code (and npm deps, and a deploy's build: PostCSS/Tailwind plugins)
   // would run in this browser. Nothing runs, Deploy included, until the user says so.
+  const builder = mountBuilder({
+    c,
+    devLog: () => termOut,
+    // A file the builder changed is the one in the editor: show the new contents.
+    onChange: (path) => path === current && openFile(path),
+  });
   const gate = (on) => {
     locked = on;
     $("deploy-btn").disabled = on;
     $("deploy-btn").title = on ? "Run the project first" : "";
+    builder.lock(on); // its commands would run the project's code too
   };
   gate(project.trusted === false);
   if (project.trusted === false) {
@@ -1755,6 +1767,174 @@ async function openProject(id, gen) {
       btn.disabled = false;
       $("deploy-btn-label").textContent = "Deploy";
     }
+  };
+}
+
+// ------------------------------------------------------------------ AI builder
+// The chat pane (studio/builder.js runs the conversation and the tools).
+const STEP_ICON = { run_command: "terminal", read_dev_log: "terminal" };
+const runningText = (name, input) => ({
+  list_files: "Listing files", read_file: `Reading ${input?.path ?? "a file"}`, write_file: `Writing ${input?.path ?? "a file"}`,
+  edit_file: `Editing ${input?.path ?? "a file"}`, delete_file: `Deleting ${input?.path ?? "a file"}`,
+  run_command: `Running ${input?.command ?? "a command"}`, read_dev_log: "Reading the dev server output",
+})[name] ?? name;
+
+function mountBuilder({ c, devLog, onChange }) {
+  const btn = $("builder-btn"), pane = $("builder"), log = $("builder-log"), input = $("builder-input");
+  const tools = createTools(c, { devLog, onChange });
+  let agent = null, locked = false, busy = false;
+  let bubble = null, step = null; // the assistant text and the tool step being written
+  let replied = "", failed = ""; // this request's latest reply text (read out when it ends), and its error
+  btn.hidden = false;
+
+  const announce = (text) => ($("builder-status").textContent = text);
+  const working = (text) => {
+    $("builder-working").hidden = !text;
+    if (text) $("builder-working-text").textContent = text;
+  };
+  const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+  function add(node) {
+    const stick = nearBottom();
+    log.append(node);
+    if (stick) log.scrollTop = log.scrollHeight;
+    return node;
+  }
+
+  function showView() {
+    const has = !!apiKey.get();
+    $("builder-key-form").hidden = has;
+    $("builder-chat").hidden = !has;
+    return has;
+  }
+  function setOpen(open) {
+    pane.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+    $("workspace").dataset.builder = open ? "open" : "";
+    if (!open) return btn.focus();
+    (showView() ? input : $("builder-key")).focus();
+  }
+  btn.onclick = () => setOpen(pane.hidden);
+  $("builder-close").onclick = () => setOpen(false);
+
+  function render() {
+    $("builder-send").disabled = busy || locked;
+    $("builder-stop").hidden = !busy;
+    $("builder-new").disabled = busy;
+    input.disabled = locked;
+    input.placeholder = locked ? "Run the project first (see the preview)" : "Describe a change…";
+  }
+
+  $("builder-key-form").onsubmit = (e) => {
+    e.preventDefault();
+    const v = $("builder-key").value.trim();
+    if (!v) return;
+    if (!apiKey.set(v)) {
+      $("builder-key-error").textContent = "This browser blocked saving the key (site storage). Allow it and try again.";
+      return;
+    }
+    $("builder-key").value = "";
+    $("builder-key-error").textContent = "";
+    showView();
+    input.focus();
+  };
+  $("builder-key").oninput = () => ($("builder-key-error").textContent = "");
+  $("builder-forget").onclick = () => {
+    agent?.stop();
+    apiKey.set(null);
+    showView();
+    $("builder-key").focus();
+    announce("API key removed from this browser");
+  };
+  $("builder-new").onclick = () => {
+    if (busy) return;
+    agent = null;
+    log.replaceChildren();
+    announce("New chat");
+    input.focus();
+  };
+  $("builder-stop").onclick = () => {
+    agent?.stop();
+    input.focus(); // the Stop button hides
+  };
+
+  function on(ev) {
+    switch (ev.type) {
+      case "turn":
+        bubble = null;
+        working("Thinking…");
+        break;
+      case "thinking":
+        working("Thinking…");
+        break;
+      case "text":
+        bubble ??= add(el("li", { className: "msg assistant" }));
+        bubble.textContent += ev.delta;
+        replied = bubble.textContent;
+        if (nearBottom()) log.scrollTop = log.scrollHeight;
+        working("Writing…");
+        break;
+      case "tool":
+        bubble = null;
+        step = add(el("li", { className: "step", dataset: { state: "running" } }, icon(STEP_ICON[ev.name] ?? "file"), el("span", { textContent: runningText(ev.name, ev.input) })));
+        working(`${runningText(ev.name, ev.input)}…`);
+        break;
+      case "tool-done":
+        if (step) {
+          step.dataset.state = ev.error ? "error" : "ok";
+          step.replaceChildren(icon(ev.error ? "x" : STEP_ICON[ev.name] ?? "check"), el("span", { textContent: ev.summary }), ...(ev.error ? [srOnly(" (failed)")] : []));
+        }
+        step = null;
+        announce(ev.error ? `${ev.summary} (failed)` : ev.summary);
+        working("Thinking…");
+        break;
+      case "notice":
+        add(el("li", { className: "notice", textContent: ev.text, dataset: ev.error ? { error: "" } : undefined }));
+        if (ev.error) announce(ev.text);
+        if (ev.error) failed = ev.text;
+        break;
+    }
+  }
+
+  $("builder-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || busy || locked) return;
+    const key = apiKey.get();
+    if (!key) return void showView();
+    agent ??= createAgent({ client: () => anthropicClient(apiKey.get() ?? key), tools, on });
+    add(el("li", { className: "msg user", textContent: text }));
+    log.scrollTop = log.scrollHeight;
+    input.value = "";
+    replied = "";
+    failed = "";
+    busy = true;
+    render();
+    working("Thinking…");
+    announce("Sent. Claude is working on it.");
+    try {
+      await agent.send(text);
+    } finally {
+      busy = false;
+      bubble = step = null;
+      working("");
+      render();
+      if (replied) announce(`Claude: ${replied}${failed ? ` (${failed})` : ""}`);
+      else if (!failed) announce("Claude finished");
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      $("builder-form").requestSubmit();
+    }
+  });
+
+  render();
+  return {
+    lock(on) {
+      locked = on;
+      render();
+    },
   };
 }
 
