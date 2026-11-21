@@ -16,7 +16,7 @@ export const INSPECT_LIMITS = {
   timeoutMs: 5000,
   /** Rows a query returns at most (more → `truncated`). */
   maxRows: 1000,
-  /** Serialized rows per reply at most (more → `truncated`). */
+  /** Serialized reply (rows, names, schemas) at most (more → `truncated`). */
   maxBytes: 4 * 1024 * 1024,
   /** Inspections running at once, in all and per app (more → 429). */
   maxRunning: 4,
