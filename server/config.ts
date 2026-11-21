@@ -16,6 +16,19 @@ export interface PageDefaults {
   /** Days a page is kept after its last upload or retention change; null = forever. */
   retentionDays: number | null;
 }
+export interface AiConfig {
+  /** The operator's Anthropic API key (`CRESSLET_ANTHROPIC_API_KEY`). */
+  apiKey: string;
+  /** Anthropic API base URL (tests point it at a stub). */
+  baseUrl: string;
+  /** Credits charged per US dollar of Anthropic list price: 100 = a credit is a cent at cost; more is a markup. */
+  creditsPerUsd: number;
+  /** Free credits every account gets each calendar month (UTC); unused ones don't carry over. */
+  monthlyCredits: number;
+  /** Requests one account may have in flight at once (bounds how far one account can overdraw). */
+  maxConcurrent: number;
+}
+
 /** Longest retention that can be set (anything longer: keep forever). */
 export const MAX_RETENTION_DAYS = 3650;
 
@@ -71,6 +84,12 @@ export interface Config {
   };
   /** Server-wide defaults for pages; each account can override them (`PUT /v1/me/settings`). */
   pages: PageDefaults;
+  /**
+   * AI credits (server/credits.ts): the studio's AI builder calls Claude through this server with the operator's
+   * Anthropic API key, and each request's token usage is charged to the account in credits. Null = off: users
+   * bring their own Anthropic API key, as before.
+   */
+  ai: AiConfig | null;
   limits: {
     deployBytes: number;
     deployFiles: number;
@@ -160,6 +179,15 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       runsc: process.env.CRESSLET_RUNSC || null,
       outerGvisor: env("CRESSLET_OUTER_GVISOR", "false") === "true",
     },
+    ai: process.env.CRESSLET_ANTHROPIC_API_KEY
+      ? {
+        apiKey: process.env.CRESSLET_ANTHROPIC_API_KEY,
+        baseUrl: env("CRESSLET_ANTHROPIC_BASE_URL", "https://api.anthropic.com").replace(/\/+$/, ""),
+        creditsPerUsd: num("CRESSLET_AI_CREDITS_PER_USD", 100),
+        monthlyCredits: num("CRESSLET_AI_MONTHLY_CREDITS", 0),
+        maxConcurrent: num("CRESSLET_AI_MAX_CONCURRENT", 2),
+      }
+      : null,
     pages: {
       visibility: env("CRESSLET_PAGE_VISIBILITY", "private") as Visibility,
       // 0 = keep forever.
@@ -213,6 +241,12 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   if (!VISIBILITIES.includes(pages.visibility)) throw new Error(`CRESSLET_PAGE_VISIBILITY must be one of ${VISIBILITIES.join(", ")}`);
   if (pages.retentionDays !== null && !(Number.isInteger(pages.retentionDays) && pages.retentionDays >= 1 && pages.retentionDays <= MAX_RETENTION_DAYS)) {
     throw new Error(`CRESSLET_PAGE_RETENTION_DAYS must be a whole number of days from 1 to ${MAX_RETENTION_DAYS}, or 0 (forever)`);
+  }
+  const ai = merged.ai;
+  if (ai) {
+    if (!(Number.isFinite(ai.creditsPerUsd) && ai.creditsPerUsd > 0)) throw new Error("CRESSLET_AI_CREDITS_PER_USD must be a positive number");
+    if (!(Number.isFinite(ai.monthlyCredits) && ai.monthlyCredits >= 0)) throw new Error("CRESSLET_AI_MONTHLY_CREDITS must be 0 or more");
+    if (!(Number.isSafeInteger(ai.maxConcurrent) && ai.maxConcurrent >= 1)) throw new Error("CRESSLET_AI_MAX_CONCURRENT must be a whole number, 1 or more");
   }
   const limits = { ...base.limits, ...overrides.limits };
   if (overrides.limits?.deployBodyBytes === undefined && !process.env.CRESSLET_MAX_DEPLOY_BODY_MB &&

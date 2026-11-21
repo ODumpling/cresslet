@@ -357,13 +357,37 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .deploy-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; max-width: 22rem; min-width: 0; }
 .deploy-url { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.workspace {
-  flex: 1; min-height: 0; display: grid; gap: 1px; background: var(--line); overflow: auto;
-  grid-template-columns: 232px minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(220px, 1fr) minmax(140px, 240px);
+/* Chat first: the AI builder on the left, and next to it the app's preview or its code (files + editor), with the
+   terminal and deploy log in a drawer under them. Small screens stack the panes (below). */
+.workspace { flex: 1; min-height: 0; display: grid; gap: 1px; background: var(--line); overflow: auto; }
+@media (min-width: 901px) {
+  .workspace {
+    --chat: minmax(320px, 400px);
+    grid-template-columns: var(--chat) minmax(0, 1fr); grid-template-rows: minmax(260px, 1fr); grid-template-areas: "chat main";
+  }
+  .workspace[data-view="code"] { grid-template-columns: var(--chat) 232px minmax(0, 1fr); grid-template-areas: "chat files main"; }
+  .workspace[data-drawer="open"] { grid-template-rows: minmax(260px, 1fr) minmax(140px, 240px); grid-template-areas: "chat main" "chat drawer"; }
+  .workspace[data-view="code"][data-drawer="open"] { grid-template-areas: "chat files main" "chat drawer drawer"; }
+  .workspace:not([data-builder="open"]) { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main"; }
+  .workspace:not([data-builder="open"])[data-view="code"] { grid-template-columns: 232px minmax(0, 1fr); grid-template-areas: "files main"; }
+  .workspace:not([data-builder="open"])[data-drawer="open"] { grid-template-areas: "main" "drawer"; }
+  .workspace:not([data-builder="open"])[data-view="code"][data-drawer="open"] { grid-template-areas: "files main" "drawer drawer"; }
+  .builder-pane { grid-area: chat; }
+  .files { grid-area: files; }
+  .editor-pane, .preview-pane { grid-area: main; }
+  .bottom-pane { grid-area: drawer; }
 }
 .pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); }
-.files { grid-row: 1 / 3; }
-.bottom-pane { grid-column: 2 / 4; }
+.view-switch { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--bg); }
+.view-switch button {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border: 0; border-radius: 7px;
+  background: none; color: var(--text-2); font-weight: 500; cursor: pointer;
+}
+.view-switch button:hover { color: var(--text); }
+.view-switch button[aria-pressed="true"] { background: var(--surface-3); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.view-switch .icon { width: 14px; height: 14px; }
+.drawer-head { padding-left: 6px; }
+.drawer-head .tabs { flex: 1; display: flex; align-items: center; gap: 2px; min-width: 0; }
 .pane-head {
   height: 38px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 12px;
   border-bottom: 1px solid var(--line); color: var(--text-2); font-size: 12.5px;
@@ -421,7 +445,6 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { rotate: 360deg; } }
-.tabs { gap: 2px; padding-left: 6px; }
 .tab {
   display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px; border-radius: 6px;
   border: 0; background: none; color: var(--text-2); font-weight: 500; cursor: pointer;
@@ -436,11 +459,16 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .terminal .xterm-rows .xterm-dim { color: var(--text-2) !important; }
 .deploy-log { flex: 1; margin: 0; padding: 12px 14px; overflow: auto; white-space: pre-wrap; color: var(--text-2); font-size: 12.5px; line-height: 1.6; }
 
-/* AI builder: a fourth column while open */
-.workspace[data-builder="open"] { grid-template-columns: 232px minmax(0, 1fr) minmax(0, 1fr) minmax(300px, 380px); }
-.builder-pane { grid-column: 4; grid-row: 1 / 3; }
-#builder-btn[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent-text); }
-.builder-setup { display: flex; flex-direction: column; gap: 12px; padding: 16px 14px; overflow: auto; line-height: 1.55; }
+/* AI builder */
+#builder-btn[aria-expanded="true"], #drawer-btn[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent-text); }
+.builder-setup, #builder-key-form, .builder-offer { display: flex; flex-direction: column; gap: 12px; }
+.builder-setup { padding: 16px 14px; overflow: auto; line-height: 1.55; }
+.builder-offer .or { margin-top: 4px; }
+.credits { flex: none; font-size: 12px; color: var(--text-2); white-space: nowrap; padding: 0 4px; font-variant-numeric: tabular-nums; }
+.credits[data-low] { color: var(--danger); }
+.sub-title { font-size: 13px; font-weight: 600; margin: 20px 0 8px; }
+.credits-kv { grid-template-columns: 9rem minmax(0, 1fr); }
+.credit-delta { flex: none; min-width: 4.5rem; text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
 .builder-setup .error:empty { display: none; }
 .builder-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .builder-log { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
@@ -668,11 +696,11 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   .l-cta { margin-top: 80px; padding: 44px 20px; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .detail-grid { grid-template-columns: minmax(0, 1fr); }
-  .workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: 180px minmax(280px, 1fr) minmax(280px, 1fr) 220px; overflow: auto; }
-  .files { grid-row: auto; }
-  .bottom-pane { grid-column: auto; }
-  .workspace[data-builder="open"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: 180px minmax(280px, 1fr) minmax(280px, 1fr) minmax(420px, 75dvh) 220px; }
-  .builder-pane { grid-column: auto; grid-row: auto; }
+  .workspace { grid-template-columns: minmax(0, 1fr); grid-auto-rows: auto; align-content: start; }
+  .builder-pane { height: 70dvh; min-height: 420px; }
+  .files { height: 180px; }
+  .editor-pane, .preview-pane { height: 75dvh; min-height: 320px; }
+  .bottom-pane { height: 240px; }
   .topbar { flex-wrap: wrap; height: auto; min-height: 52px; padding: 8px 12px; }
   #project-name { width: 9rem; }
   .deploy-link { min-width: 0; flex: 0 1 auto; }

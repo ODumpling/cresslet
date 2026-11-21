@@ -59,10 +59,16 @@ try {
   await frame.getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
   console.log("preview rendered");
 
+  // Chat first: the builder is open beside the preview from the start (no AI credits on this server: the key form).
   const toggle = page.getByRole("button", { name: "AI builder", exact: true });
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") fail("builder not open by default");
+  const key = page.getByLabel("Anthropic API key");
+  await key.waitFor();
+  // Closing and reopening it: focus goes back to the toggle, then to the key field.
+  await toggle.click();
+  if (!(await page.locator("#builder").isHidden()) || !(await toggle.evaluate((e) => e === document.activeElement))) fail("close: pane shown or focus lost");
   await toggle.click();
   if ((await toggle.getAttribute("aria-expanded")) !== "true") fail("toggle not expanded");
-  const key = page.getByLabel("Anthropic API key");
   if (!(await key.evaluate((e) => e === document.activeElement))) fail("key field not focused on open");
   await key.fill("sk-ant-e2e-test");
   await page.getByRole("button", { name: "Save key" }).click();
@@ -150,6 +156,11 @@ try {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.getByRole("button", { name: "Close AI builder" }).click();
   if (!(await page.locator("#builder").isHidden()) || !(await toggle.evaluate((e) => e === document.activeElement))) fail("close: pane shown or focus lost");
+  // Remembered in this browser: a reload keeps the chat closed.
+  await page.reload();
+  await page.locator("#preview-pane").waitFor();
+  if (!(await page.locator("#builder").isHidden())) fail("closed chat not remembered");
+  await toggle.click();
   console.log("PASS");
 } catch (e) {
   process.exitCode = 1;

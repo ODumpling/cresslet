@@ -233,6 +233,11 @@ On a clean host (or the same one), as root, with Docker and rclone (from rclone.
 | `CRESSLET_ADMIN_TOKEN` | — | bearer token for `POST /v1/accounts` (pre-create accounts / issue tokens) |
 | `CRESSLET_SITE_ADMINS` | — | comma-separated emails / GitHub logins that always have the `SiteAdmin` role (studio Admin page: every site's disk and database usage, delete/restore/purge). Site admins can grant the role to others (`PUT /v1/admin/accounts/role`) |
 | `CRESSLET_DELETED_RETENTION_DAYS` | 30 | sites a site admin deleted stay restorable this long, then are purged with their data |
+| `CRESSLET_ANTHROPIC_API_KEY` | — | turns on [AI credits](api.md#ai-credits): the studio's AI builder calls Claude through the server with this key, and each account pays in credits for the tokens it uses. Unset: users bring their own Anthropic API key |
+| `CRESSLET_AI_MONTHLY_CREDITS` | 0 | free credits every account gets each calendar month (UTC; no carry-over). More: a site admin grants them (`POST /v1/admin/accounts/credits`) |
+| `CRESSLET_AI_CREDITS_PER_USD` | 100 | credits charged per US dollar of Anthropic list price (100: a credit is a cent at cost; above 100 is your margin) |
+| `CRESSLET_AI_MAX_CONCURRENT` | 2 | AI requests one account may have in flight (429 past it); the request that runs out of credits is charged in full, so this bounds how far below 0 an account can go |
+| `CRESSLET_ANTHROPIC_BASE_URL` | https://api.anthropic.com | where those requests go (a gateway, or a stub in tests) |
 | `CRESSLET_GITHUB_CLIENT_ID` / `_SECRET` | — | GitHub OAuth App: the only user login (studio + CLI). Unset = no login, anonymous deploys only |
 | `CRESSLET_GITHUB_URL` / `CRESSLET_GITHUB_API_URL` | github.com / api.github.com | GitHub Enterprise Server |
 | `CRESSLET_MAX_DEPLOY_MB` / `_FILES` / `CRESSLET_MAX_SERVER_MB` | 25 / 2000 / 5 | |

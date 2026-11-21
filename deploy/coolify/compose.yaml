@@ -38,6 +38,11 @@ services:
       CRESSLET_CUSTOM_DOMAINS: ${CRESSLET_CUSTOM_DOMAINS:-false}
       CRESSLET_GITHUB_CLIENT_ID: ${CRESSLET_GITHUB_CLIENT_ID:-}
       CRESSLET_GITHUB_CLIENT_SECRET: ${CRESSLET_GITHUB_CLIENT_SECRET:-}
+      # AI credits for the studio's AI builder (docs/api.md#ai-credits): off while the key is empty.
+      CRESSLET_ANTHROPIC_API_KEY: ${CRESSLET_ANTHROPIC_API_KEY:-}
+      CRESSLET_AI_MONTHLY_CREDITS: ${CRESSLET_AI_MONTHLY_CREDITS:-0}
+      CRESSLET_AI_CREDITS_PER_USD: ${CRESSLET_AI_CREDITS_PER_USD:-100}
+      CRESSLET_AI_MAX_CONCURRENT: ${CRESSLET_AI_MAX_CONCURRENT:-2}
       # Behind Cloudflare: cf-connecting-ip, so per-IP limits see clients, not Traefik.
       CRESSLET_CLIENT_IP_HEADER: ${CRESSLET_CLIENT_IP_HEADER:-}
       # Abuse limits sized for a small shared host (4 vCPU, 8 GB, ~70 GB disk; the server's own

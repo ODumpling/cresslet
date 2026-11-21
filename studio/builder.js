@@ -1,6 +1,7 @@
-// AI builder: a chat that changes the open project. Claude is called straight from this browser with the user's own
-// Anthropic API key, and its tools act on the same things the user does: the project's files in the container, the
-// in-browser shell, and `cresslet deploy` (the same control-plane API the CLI uses). No server endpoint of its own.
+// AI builder: a chat that changes the open project. Claude is reached either through this server on the account's AI
+// credits (`/v1/ai`, server/credits.ts: the operator's key, metered) or straight from this browser with the user's own
+// Anthropic API key. Its tools act on the same things the user does: the project's files in the container, the
+// in-browser shell, and `cresslet deploy` (the same control-plane API the CLI uses).
 // No DOM here (app.js renders): the loop and the tools also run under node for tests/builder_test.ts.
 
 export const MODEL = "claude-opus-5-5";
@@ -247,7 +248,7 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
  * { type: "tool", name, input } | { type: "tool-done", name, summary, error } | { type: "notice", text, error? }.
  * The history is append-only (thinking blocks are passed back unchanged, as the API requires).
  */
-export function createAgent({ client, tools, on = () => {}, model = MODEL }) {
+export function createAgent({ client, tools, on = () => {}, model = MODEL, errorText: describe = errorText }) {
   const messages = [];
   let ctl = null;
 
@@ -368,7 +369,7 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL }) {
       }
     } catch (e) {
       if (signal.aborted) on({ type: "notice", text: "Stopped." });
-      else on({ type: "notice", text: errorText(e), error: true });
+      else on({ type: "notice", text: describe(e), error: true });
     } finally {
       // Nothing came back for this message (stopped, failed, declined): drop it, so it isn't sent again with the next.
       if (messages.length === start + 1) messages.length = start;
@@ -388,13 +389,19 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL }) {
   };
 }
 
-export function errorText(e) {
+/** `credits`: the request went through this server on AI credits (not the user's own key). */
+export function errorText(e, { credits = false } = {}) {
   const s = e?.status;
+  const m = e?.error?.error?.message ?? e?.message ?? String(e);
+  if (credits) {
+    if (s === 401) return "Your Cresslet session expired. Log in again to use your AI credits.";
+    if (s === 402 || s === 403 || s === 400) return m;
+    if (s === 429) return `${m}. Wait a moment and send again.`;
+  }
   if (s === 401) return "Anthropic didn't accept the API key. Check it, or forget it and enter another.";
   if (s === 403) return "This API key isn't allowed to use the model.";
   if (s === 429) return "Anthropic's rate limit for this key was reached. Wait a moment and send again.";
   if (s === 529 || s === 503) return "Claude is overloaded right now. Try again in a moment.";
-  const m = e?.error?.error?.message ?? e?.message ?? String(e);
   return s ? `Anthropic API error ${s}: ${m}` : `Couldn't reach Claude: ${m}`;
 }
 
@@ -424,4 +431,13 @@ export const apiKey = {
 export async function anthropicClient(key) {
   const { Anthropic } = await import("./vendor/anthropic.js");
   return new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true });
+}
+
+/**
+ * An Anthropic client that goes through this server on the account's AI credits: the same Messages API at
+ * `<origin>/v1/ai`, authenticated with the Cresslet session token (it never reaches Anthropic).
+ */
+export async function creditsClient(token, origin = globalThis.location?.origin) {
+  const { Anthropic } = await import("./vendor/anthropic.js");
+  return new Anthropic({ apiKey: null, authToken: token, baseURL: `${origin}/v1/ai`, dangerouslyAllowBrowser: true });
 }

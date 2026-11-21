@@ -40,6 +40,7 @@ import { cliLogin } from "./cli-login.ts";
 import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
 import { adminRoutes, isSiteAdmin, purgeApp } from "./admin.ts";
+import { aiRoutes } from "./credits.ts";
 import { ipKey, RateLimit } from "./limits.ts";
 import {
   beingRemoved,
@@ -378,6 +379,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       anonDeploys: cfg.anonDeploys,
       customDomains: cfg.customDomains,
       auth: { github: !!cfg.github, cli: !!cfg.github }, // cli: browser login via the studio, which logs in with GitHub
+      ai: { credits: !!cfg.ai, monthlyCredits: cfg.ai?.monthlyCredits ?? 0 }, // the AI builder can use credits (docs/api.md#ai-credits)
       limits: cfg.limits,
       docs: "https://github.com/ODumpling/cresslet/blob/main/docs/api.md",
     }));
@@ -1137,6 +1139,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   const settingsView = (acct: Account) => ({ pages: pageDefaults(acct), defaults: { pages: cfg.pages } });
 
   // The account's defaults for new pages (falling back to the server's).
+  aiRoutes(app, { cfg, store, accountWide, readBody: readCappedBytes });
+
   app.get("/me/settings", (c) => c.json(settingsView(accountWide(c, "read"))));
 
   // `pages: null` goes back to the server's defaults; a key left out keeps its value.

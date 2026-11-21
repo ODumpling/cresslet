@@ -71,6 +71,7 @@ const within = (p, what) => Promise.race([p, new Promise((_, reject) => setTimeo
 const frame = async () => (await page.locator("#preview").elementHandle()).contentFrame();
 // Replaces (or appends to) server/index.ts in the editor; the dev server restarts the app's server.
 const editServer = async (text, append = false) => {
+  await page.getByRole("button", { name: "Code", exact: true }).click(); // the preview keeps running, hidden
   await page.locator('#tree button[data-path="server/index.ts"]').click();
   await page.locator("#editor .cm-content").click();
   await page.keyboard.press(append ? "ControlOrMeta+End" : "ControlOrMeta+A");
@@ -82,6 +83,7 @@ try {
   await page.getByRole("button", { name: /vanilla/i }).click();
   await page.waitForURL(/#\/p\//);
   await page.frameLocator("#preview").getByRole("heading", { name: "Hello from Cresslet" }).waitFor({ timeout: 120000 });
+  await page.getByRole("button", { name: "Terminal", exact: true }).click(); // the drawer: dev server output
   await waitFor(async () => /dev server on port/.test(await term.innerText()), "the dev server");
   console.log("preview rendered");
   await editServer(APP);
