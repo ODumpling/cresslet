@@ -179,7 +179,15 @@ function createDb(SQL, bytes) {
       postMessage({ type: "db", bytes: out }, [out.buffer]);
     }, 300);
   };
-  const norm = (params) => params.map((p) => (typeof p === "bigint" ? Number(p) : p === undefined ? null : p));
+  // sql.js binds numbers as doubles: a bigint it can't hold exactly is refused, not rounded.
+  const norm = (params) =>
+    params.map((p) => {
+      if (typeof p !== "bigint") return p === undefined ? null : p;
+      if (p > BigInt(Number.MAX_SAFE_INTEGER) || p < BigInt(Number.MIN_SAFE_INTEGER)) {
+        throw new RangeError(`the studio preview (sql.js) can't store the integer ${p} exactly (beyond ±2^53); the platform and cresslet dev can`);
+      }
+      return Number(p);
+    });
   const all = (sql, params) => {
     const stmt = db.prepare(sql);
     try {
@@ -192,6 +200,15 @@ function createDb(SQL, bytes) {
     }
   };
   const one = (sql) => db.exec(sql)[0]?.values[0][0] ?? 0;
+  // last_insert_rowid(), kept across snapshots (export() reopens the connection, which resets it to 0)
+  let lastRowid = 0;
+  const rowid = () => {
+    const v = Number(one("SELECT last_insert_rowid()"));
+    if (v !== 0) lastRowid = v;
+    return lastRowid;
+  };
+  // Statements that may change the database without changing total_changes() (DDL, PRAGMA, …): not a plain read.
+  const mayWrite = (sql) => !/^(?:select|values|explain)\b/i.test(sql.replace(/^(?:[\s;(]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, ""));
   // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).
   // Same as server/bindings.ts isTxControl: a batch is one transaction, so no BEGIN/COMMIT/SAVEPOINT/... inside it.
   const isTxControl = (sql) =>
@@ -211,7 +228,7 @@ function createDb(SQL, bytes) {
           const before = one("SELECT total_changes()");
           const rows = all(sql, params);
           const changed = one("SELECT total_changes()") !== before;
-          return { rows, changes: changed ? db.getRowsModified() : 0, lastInsertRowid: Number(one("SELECT last_insert_rowid()")) };
+          return { rows, changes: changed ? db.getRowsModified() : 0, lastInsertRowid: rowid() };
         } catch (e) {
           throw new Error(`batch statement ${i + 1}: ${e?.message ?? e}`);
         }
@@ -232,7 +249,7 @@ function createDb(SQL, bytes) {
   const reading = (sql, params) => {
     const before = one("SELECT total_changes()");
     const rows = all(sql, params);
-    if (one("SELECT total_changes()") !== before) persist();
+    if (one("SELECT total_changes()") !== before || mayWrite(sql)) persist();
     return rows;
   };
   return {
@@ -242,7 +259,7 @@ function createDb(SQL, bytes) {
     run: async (sql, ...params) => {
       db.run(sql, norm(params));
       const changes = db.getRowsModified();
-      const lastInsertRowid = Number(db.exec("SELECT last_insert_rowid()")[0]?.values[0][0] ?? 0);
+      const lastInsertRowid = rowid();
       persist();
       return { changes, lastInsertRowid };
     },
