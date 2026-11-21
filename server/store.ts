@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { SecretBox } from "./secretbox.ts";
+import type { Visibility } from "./config.ts";
 
 const encodeHex = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as ArrayBuffer).toString("hex");
 
@@ -13,6 +14,13 @@ export interface Account {
   github_login: string | null;
   /** "SiteAdmin" or null. */
   role: string | null;
+  /** JSON AccountSettings, or null = the server's defaults. */
+  settings: string | null;
+}
+
+/** An account's own defaults; a key left out uses the server's (Config.pages). */
+export interface AccountSettings {
+  pages?: { visibility?: Visibility; retentionDays?: number | null };
 }
 
 export const SITE_ADMIN = "SiteAdmin";
@@ -31,6 +39,28 @@ export interface App {
   deleted_at: number | null;
   created_at: number;
   updated_at: number;
+  /** "app", or "page": uploaded static files, served from `page_deploy_id` with `visibility`. */
+  kind: AppKind;
+  /** Pages only. */
+  visibility: Visibility | null;
+  /** Pages only: days kept after the last upload or retention change (`expires_at`); null = forever. */
+  retention_days: number | null;
+  title: string | null;
+  /**
+   * A page's served deploy. Pages leave `current_deploy_id` null so a server from before pages
+   * (after a rollback) serves none of them: it would ignore their visibility.
+   */
+  page_deploy_id: string | null;
+}
+
+export type AppKind = "app" | "page";
+
+/** A one-time ticket (exchanged on the page's host for a session cookie), or that session. */
+export interface PageSession {
+  app_id: string;
+  account_id: string;
+  ticket: number;
+  expires_at: number;
 }
 
 export interface Deploy {
@@ -174,6 +204,26 @@ export class Store {
         UNIQUE (app_id, email));
       CREATE INDEX IF NOT EXISTS invites_email ON invites (email);
     `);
+    // Pages (an older server sees them as apps with nothing deployed: see App.page_deploy_id).
+    if (!appCols.includes("kind")) {
+      this.db.exec(`
+        BEGIN;
+        ALTER TABLE apps ADD COLUMN kind TEXT NOT NULL DEFAULT 'app';
+        ALTER TABLE apps ADD COLUMN visibility TEXT;
+        ALTER TABLE apps ADD COLUMN retention_days INTEGER;
+        ALTER TABLE apps ADD COLUMN title TEXT;
+        ALTER TABLE apps ADD COLUMN page_deploy_id TEXT;
+        COMMIT;
+      `);
+    }
+    if (!cols.includes("settings")) this.db.exec("ALTER TABLE accounts ADD COLUMN settings TEXT");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS page_sessions (
+        hash TEXT PRIMARY KEY, app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        ticket INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS page_sessions_expiry ON page_sessions (expires_at);
+    `);
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
   }
@@ -236,6 +286,7 @@ export class Store {
       github_id: github?.id ?? null,
       github_login: github?.login ?? null,
       role: null,
+      settings: null,
     };
     this.db.prepare("INSERT INTO accounts (id, email, created_at, github_id, github_login) VALUES (?, ?, ?, ?, ?)")
       .run(a.id, a.email, a.created_at, a.github_id, a.github_login);
@@ -250,6 +301,12 @@ export class Store {
   }
   accountById(accountId: string): Account | undefined {
     return this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId) as Account | undefined;
+  }
+  settings(a: Account): AccountSettings {
+    return a.settings ? JSON.parse(a.settings) : {};
+  }
+  setSettings(accountId: string, settings: AccountSettings) {
+    this.db.prepare("UPDATE accounts SET settings = ? WHERE id = ?").run(JSON.stringify(settings), accountId);
   }
   setRole(accountId: string, role: string | null) {
     this.db.prepare("UPDATE accounts SET role = ? WHERE id = ?").run(role, accountId);
@@ -329,12 +386,65 @@ export class Store {
       deleted_at: null,
       created_at: now,
       updated_at: now,
+      kind: "app",
+      visibility: null,
+      retention_days: null,
+      title: null,
+      page_deploy_id: null,
     };
     this.db.prepare(
       `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(app.id, name, accountId, keyHash, "{}", expiresAt, now, now);
     return { app, deployKey };
+  }
+  /** A page has no usable deploy key (only accounts change it). `check` as in createApp. */
+  async createPage(
+    name: string,
+    accountId: string,
+    p: { title: string | null; visibility: Visibility; retentionDays: number | null },
+    check?: () => void,
+  ): Promise<App> {
+    const keyHash = await sha256(id("clv_none", 24)); // never handed out
+    check?.();
+    const now = Date.now();
+    const app: App = {
+      id: id("app"),
+      name,
+      account_id: accountId,
+      current_deploy_id: null,
+      config: "{}",
+      egress: null,
+      expires_at: p.retentionDays === null ? null : now + p.retentionDays * 86_400_000,
+      deleted_at: null,
+      created_at: now,
+      updated_at: now,
+      kind: "page",
+      visibility: p.visibility,
+      retention_days: p.retentionDays,
+      title: p.title,
+      page_deploy_id: null,
+    };
+    this.db.prepare(
+      `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at,
+         kind, visibility, retention_days, title)
+       VALUES (?, ?, ?, ?, '{}', ?, ?, ?, 'page', ?, ?, ?)`,
+    ).run(app.id, name, accountId, keyHash, app.expires_at, now, now, app.visibility, app.retention_days, app.title);
+    return app;
+  }
+  setPageDeploy(appId: string, deployId: string) {
+    this.db.prepare("UPDATE apps SET page_deploy_id = ?, updated_at = ? WHERE id = ?").run(deployId, Date.now(), appId);
+  }
+  /** Changes a page's settings; a new `retention_days` restarts its clock (`expires_at` from now). */
+  setPage(appId: string, p: { title?: string | null; visibility?: Visibility; retention_days?: number | null }) {
+    const now = Date.now();
+    if (p.title !== undefined) this.db.prepare("UPDATE apps SET title = ? WHERE id = ?").run(p.title, appId);
+    if (p.visibility !== undefined) this.db.prepare("UPDATE apps SET visibility = ? WHERE id = ?").run(p.visibility, appId);
+    if (p.retention_days !== undefined) {
+      this.db.prepare("UPDATE apps SET retention_days = ?, expires_at = ? WHERE id = ?")
+        .run(p.retention_days, p.retention_days === null ? null : now + p.retention_days * 86_400_000, appId);
+    }
+    this.db.prepare("UPDATE apps SET updated_at = ? WHERE id = ?").run(now, appId);
   }
   /** Live apps only; `includeDeleted` also finds ones a site admin deleted (their name stays taken until purged). */
   appByName(name: string, includeDeleted = false): App | undefined {
@@ -383,18 +493,18 @@ export class Store {
       throw e;
     }
   }
-  appsByAccount(accountId: string): App[] {
-    return this.db.prepare("SELECT * FROM apps WHERE account_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC")
-      .all(accountId) as unknown as App[];
+  appsByAccount(accountId: string, kind: AppKind = "app"): App[] {
+    return this.db.prepare("SELECT * FROM apps WHERE account_id = ? AND kind = ? AND deleted_at IS NULL ORDER BY updated_at DESC")
+      .all(accountId, kind) as unknown as App[];
   }
-  /** Live apps the account owns or collaborates on, with its access to each. */
-  appsFor(accountId: string): (App & { access: AppAccess })[] {
+  /** Live apps (or pages) the account owns or collaborates on, with its access to each. */
+  appsFor(accountId: string, kind: AppKind = "app"): (App & { access: AppAccess })[] {
     return this.db.prepare(
       `SELECT a.*, CASE WHEN a.account_id = ?1 THEN 'owner' ELSE c.role END access
        FROM apps a LEFT JOIN collaborators c ON c.app_id = a.id AND c.account_id = ?1
-       WHERE a.deleted_at IS NULL AND (a.account_id = ?1 OR c.account_id IS NOT NULL)
+       WHERE a.deleted_at IS NULL AND a.kind = ?2 AND (a.account_id = ?1 OR c.account_id IS NOT NULL)
        ORDER BY a.updated_at DESC`,
-    ).all(accountId) as unknown as (App & { access: AppAccess })[];
+    ).all(accountId, kind) as unknown as (App & { access: AppAccess })[];
   }
   async checkDeployKey(appId: string, key: string): Promise<boolean> {
     const row = this.db.prepare("SELECT deploy_key_hash h FROM apps WHERE id = ?").get(appId) as
@@ -425,6 +535,37 @@ export class Store {
   expiredApps(now = Date.now()): App[] {
     return this.db.prepare("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ? AND deleted_at IS NULL")
       .all(now) as unknown as App[];
+  }
+
+  // ---- private page sessions (see host.ts)
+  /** A one-time ticket for `accountId` to open the page, good for `ttlMs`. */
+  async pageTicket(appId: string, accountId: string, ttlMs: number): Promise<string> {
+    const t = id("pvt", 24);
+    this.db.prepare("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at) VALUES (?, ?, ?, 1, ?)")
+      .run(await sha256(t), appId, accountId, Date.now() + ttlMs);
+    return t;
+  }
+  /** Spends a ticket for this page: a session token good for `ttlMs`, or undefined. */
+  async redeemPageTicket(appId: string, ticket: string, ttlMs: number): Promise<{ token: string; account_id: string } | undefined> {
+    const hash = await sha256(ticket);
+    const row = this.db.prepare("DELETE FROM page_sessions WHERE hash = ? AND ticket = 1 RETURNING *").get(hash) as
+      | PageSession
+      | undefined;
+    if (!row || row.app_id !== appId || row.expires_at < Date.now()) return undefined;
+    const token = id("pvs", 24);
+    this.db.prepare("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at) VALUES (?, ?, ?, 0, ?)")
+      .run(await sha256(token), appId, row.account_id, Date.now() + ttlMs);
+    return { token, account_id: row.account_id };
+  }
+  /** The account a live session for this page belongs to. */
+  async pageSession(appId: string, token: string): Promise<string | undefined> {
+    const row = this.db.prepare("SELECT * FROM page_sessions WHERE hash = ? AND ticket = 0").get(await sha256(token)) as
+      | PageSession
+      | undefined;
+    return row && row.app_id === appId && row.expires_at > Date.now() ? row.account_id : undefined;
+  }
+  prunePageSessions(now = Date.now()) {
+    this.db.prepare("DELETE FROM page_sessions WHERE expires_at < ?").run(now);
   }
 
   // ---- collaborators and invites

@@ -66,11 +66,41 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/domains/check?domain=` | 200 if it's a verified custom domain, else 404. For on-demand TLS (the root and app subdomains use the wildcard cert) |
 | GET | `/v1/apps/:name/db?limit=100` | tables → `{schema, count, rows}` |
 | POST | `/v1/apps/:name/db/query` | `{sql, params?}` read-only → `{rows}` |
+| GET | `/v1/me/settings` | `{pages: {visibility, retentionDays}, defaults: {pages}}`: the account's defaults for new [pages](#pages) (falling back to the server's), and the server's |
+| PUT | `/v1/me/settings` | full-access token: `{pages: {visibility?, retentionDays?}}` (keys left out keep their value) or `{pages: null}` (back to the server's) |
+| GET | `/v1/pages` | pages the account owns or collaborates on (each with `access`; expired ones left out) → `{pages, defaults}` |
+| POST | `/v1/pages` | `deploy` token over the whole account: `{html}` or `{files}`, `title?`, `visibility?`, `retentionDays?` → `{page}` (201) |
+| GET | `/v1/pages/:name` | `{page}` |
+| PUT | `/v1/pages/:name` | owner or admin (`deploy`): `{html}` or `{files}` → same URL, new files; restarts the retention clock |
+| PATCH | `/v1/pages/:name` | owner or admin: `{title?, visibility?, retentionDays?}`; a new `retentionDays` counts from now |
+| DELETE | `/v1/pages/:name` | owner: delete it and its files |
+| POST | `/v1/pages/:name/view` | any access, logged in: `{path?}` → `{url, expiresIn}`: opens the page in a browser (private pages: a one-time sign-in link, valid `expiresIn` seconds) |
 | GET | `/v1/admin/sites` | **site admin**: every site (deleted too) → `{totals, retentionDays, sites: [{name, url, status: running\|idle\|empty\|deleted, owner, domains, currentDeploy, usage: {deploys, database, files, total} (bytes on disk), deletedAt, purgeAt, …}]}` |
 | GET | `/v1/admin/sites/:name` | **site admin**: `{site, deploys, domains, secrets (count), database: {tables: [{name, rows}]}, runtime}`. `database` is null unless the caller owns the site or is one of its admins |
 | DELETE | `/v1/admin/sites/:name` | **site admin**: soft delete. Offline at once (not served, no crons, 404 to its owner, name stays taken) and restorable until purged after `CRESSLET_DELETED_RETENTION_DAYS`. `?purge=1` deletes it and its data permanently now |
 | POST | `/v1/admin/sites/:name/restore` | **site admin**: undo a soft delete |
 | PUT | `/v1/admin/accounts/role` | **site admin**: `{email, role: "SiteAdmin" \| null}` grant/revoke (not your own) |
+
+## Pages
+
+Static HTML you upload and share, like an artifact: one file (`{"html": "…"}`, served as `index.html`) or a folder (`{"files": [{path, data, encoding}]}` with an `index.html` at the root; same size limits as deploys). No server, crons, secrets or domains: the `/v1/apps` endpoints for those answer 409 `is_page`. Each page gets an unguessable name (`pg-<20 hex>`) and its own origin, `pg-….<domain>`, so its scripts can't read another page's or the studio's storage.
+
+`visibility`:
+- `private`: only its owner and [collaborators](#http-api-v1) (any role), logged in. A visitor without a session is sent to the studio (`/#/view/<name>?path=…`), which calls `POST /v1/pages/:name/view` and sends them back with a one-time ticket (`?cresslet_view=…`, 2 minutes). The page's host swaps it for an HttpOnly session cookie for that host only (`__Host-cresslet_page` on https, 24 h) and drops it from the URL. Each request checks that the account still has access, so removing a collaborator takes effect at once. Responses are `cache-control: private, no-store`.
+- `link`: anyone with the URL. `x-robots-tag: noindex, nofollow` and `referrer-policy: no-referrer` (the URL doesn't leak to the sites it links to).
+- `public`: anyone; search engines may index it.
+
+`retentionDays`: whole days from 1 to 3650, or `null` = keep forever. The page expires that many days after its last upload or retention change (`expiresAt`), then it's gone (404 at once; files purged within ~10 minutes).
+
+Defaults for a new page, in order: the upload's own fields, the account's (`PUT /v1/me/settings`), the server's (`CRESSLET_PAGE_VISIBILITY`, default `private`; `CRESSLET_PAGE_RETENTION_DAYS`, default 30). Every page can be changed later with `PATCH`.
+
+Sharing a private page: invite accounts with `POST /v1/apps/<page>/collaborators` (viewers can open it; admins can also change and re-upload it). Pages count toward `CRESSLET_MAX_PAGES_PER_ACCOUNT` (default 200), not the app limit, and aren't in `GET /v1/apps`.
+
+```sh
+curl -X POST $CRESSLET/v1/pages -H "authorization: Bearer $CRESSLET_TOKEN" -H "content-type: application/json" \
+  -d '{"html":"<h1>Report</h1>","visibility":"link","retentionDays":7}'
+# → {"page":{"name":"pg-…","url":"https://pg-….example.com","visibility":"link","retentionDays":7,"expiresAt":"…",…}}
+```
 
 ## POST /v1/deploys
 

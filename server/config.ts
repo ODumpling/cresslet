@@ -8,6 +8,17 @@ const num = (k: string, d: number) => Number(process.env[k] ?? d);
 /** workerd binary from the `workerd` npm package (platform-specific optional dependency). */
 const bundledWorkerd = (): string => createRequire(import.meta.url)("workerd").default;
 
+/** Who can open a page: signed-in owner and collaborators, anyone with the link (not indexed), or anyone (indexed). */
+export const VISIBILITIES = ["private", "link", "public"] as const;
+export type Visibility = (typeof VISIBILITIES)[number];
+export interface PageDefaults {
+  visibility: Visibility;
+  /** Days a page is kept after its last upload or retention change; null = forever. */
+  retentionDays: number | null;
+}
+/** Longest retention that can be set (anything longer: keep forever). */
+export const MAX_RETENTION_DAYS = 3650;
+
 export interface Config {
   port: number;
   /** Root domain apps live under: `<app>.<domain>`. */
@@ -52,6 +63,8 @@ export interface Config {
      */
     outerGvisor?: boolean;
   };
+  /** Server-wide defaults for pages; each account can override them (`PUT /v1/me/settings`). */
+  pages: PageDefaults;
   limits: {
     deployBytes: number;
     deployFiles: number;
@@ -71,6 +84,8 @@ export interface Config {
     anonAppsPerHour: number;
     /** Deploys per app per hour. */
     deploysPerHour: number;
+    /** Live pages (uploaded static HTML) one account may own (site admins: no limit). */
+    maxPagesPerAccount: number;
     /** Size cap of an app's database (SQLite max_page_count). */
     appDbBytes: number;
     /** Total size of an app's stored files (env.files). */
@@ -114,6 +129,11 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       runsc: process.env.CRESSLET_RUNSC || null,
       outerGvisor: env("CRESSLET_OUTER_GVISOR", "false") === "true",
     },
+    pages: {
+      visibility: env("CRESSLET_PAGE_VISIBILITY", "private") as Visibility,
+      // 0 = keep forever.
+      retentionDays: num("CRESSLET_PAGE_RETENTION_DAYS", 30) || null,
+    },
     limits: {
       deployBytes: num("CRESSLET_MAX_DEPLOY_MB", 25) * 1024 * 1024,
       deployFiles: num("CRESSLET_MAX_DEPLOY_FILES", 2000),
@@ -126,6 +146,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       deletedRetentionMs: num("CRESSLET_DELETED_RETENTION_DAYS", 30) * 86_400_000,
       maxAppsPerAccount: num("CRESSLET_MAX_APPS_PER_ACCOUNT", 50),
       maxAnonApps: num("CRESSLET_MAX_ANON_APPS", 200),
+      maxPagesPerAccount: num("CRESSLET_MAX_PAGES_PER_ACCOUNT", 200),
       anonAppsPerHour: num("CRESSLET_ANON_APPS_PER_HOUR", 10),
       deploysPerHour: num("CRESSLET_DEPLOYS_PER_HOUR", 120),
       appDbBytes: num("CRESSLET_APP_DB_MB", 512) * 1024 * 1024,
@@ -148,8 +169,14 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   if (parsed !== merged.previewHost || !merged.previewHost.split(".").every((l) => label.test(l)) || merged.previewHost === merged.domain) {
     throw new Error("CRESSLET_PREVIEW_HOST must be a bare hostname (no scheme or port), different from CRESSLET_DOMAIN");
   }
+  const pages = { ...base.pages, ...overrides.pages };
+  if (!VISIBILITIES.includes(pages.visibility)) throw new Error(`CRESSLET_PAGE_VISIBILITY must be one of ${VISIBILITIES.join(", ")}`);
+  if (pages.retentionDays !== null && !(Number.isInteger(pages.retentionDays) && pages.retentionDays >= 1 && pages.retentionDays <= MAX_RETENTION_DAYS)) {
+    throw new Error(`CRESSLET_PAGE_RETENTION_DAYS must be a whole number of days from 1 to ${MAX_RETENTION_DAYS}, or 0 (forever)`);
+  }
   return {
     ...merged,
+    pages,
     sandbox: { ...base.sandbox, ...overrides.sandbox },
     limits: { ...base.limits, ...overrides.limits },
   };

@@ -203,6 +203,43 @@ export async function writeDeploy(cfg: Config, store: Store, app: App, input: De
   return { id: deployId, bytes, files: decoded.length, server: !!server, ...(warning ? { warning } : {}) };
 }
 
+/**
+ * A page's upload: static files only (no server, crons or source), with an `index.html` at the
+ * root. Served from `page_deploy_id`, like an app's deploy otherwise.
+ */
+export async function writePage(cfg: Config, store: Store, app: App, files: DeployFile[], source = "api") {
+  if (!Array.isArray(files) || !files.length) throw new HttpError(400, "files must be a non-empty array (or send html)");
+  if (files.length > cfg.limits.deployFiles) throw new HttpError(413, `too many files (max ${cfg.limits.deployFiles})`, "too_large");
+  const { decoded, bytes } = decodeFiles(cfg, files, { bytes: 0, files: 0 });
+  if (!decoded.some(([p]) => p === "index.html")) throw new HttpError(400, "a page needs an index.html at its root", "no_index");
+  const deployId = id("dep");
+  const dir = paths(cfg, app.id).deploy(deployId);
+  const pub = join(dir, "public");
+  try {
+    await mkdir(pub, { recursive: true });
+    for (const [p, data] of decoded) {
+      await mkdir(dirname(join(pub, p)), { recursive: true });
+      await writeFile(join(pub, p), data);
+    }
+    await writeFile(join(dir, "deploy.json"), JSON.stringify({ routes: [], server: false }));
+  } catch (e) {
+    await rm(dir, { recursive: true, force: true });
+    throw e;
+  }
+  store.addDeploy({
+    id: deployId,
+    app_id: app.id,
+    created_at: Date.now(),
+    bytes,
+    file_count: decoded.length,
+    has_server: 0,
+    source: String(source).slice(0, 20),
+  });
+  store.setPageDeploy(app.id, deployId);
+  await pruneDeploys(cfg, store, app.id, deployId);
+  return { id: deployId, bytes, files: decoded.length };
+}
+
 /** Keep the 10 most recent deploys for rollback. */
 async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string) {
   const all = store.deploys(appId, 1000);

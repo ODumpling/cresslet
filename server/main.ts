@@ -80,8 +80,12 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
   );
   scheduler.start();
 
-  /** Purges expired anonymous apps, and sites a site admin deleted longer ago than the retention period (owned here). */
+  /**
+   * Purges expired anonymous apps and pages past their retention, and sites a site admin deleted longer
+   * ago than the retention period (owned here).
+   */
   async function reap() {
+    store.prunePageSessions();
     for (const a of [...store.expiredApps(), ...store.deletedBefore(Date.now() - cfg.limits.deletedRetentionMs)]) {
       if (cluster.local(a.id)) await purgeApp(cfg, store, runtime, a);
     }

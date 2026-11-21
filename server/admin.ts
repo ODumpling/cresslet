@@ -114,12 +114,15 @@ export function adminRoutes(
   const siteView = async (a: App) => {
     const config = JSON.parse(a.config) as { server?: boolean; crons?: string[] };
     const rt = runtime.status(a.id);
-    const deploy = a.current_deploy_id ? store.deploy(a.current_deploy_id) : undefined;
+    const served = a.current_deploy_id ?? a.page_deploy_id;
+    const deploy = served ? store.deploy(served) : undefined;
     return {
       id: a.id,
       name: a.name,
+      kind: a.kind,
+      ...(a.kind === "page" ? { visibility: a.visibility } : {}),
       url: appUrl(cfg, a.name),
-      status: a.deleted_at ? "deleted" : rt.running ? "running" : a.current_deploy_id ? "idle" : "empty",
+      status: a.deleted_at ? "deleted" : rt.running ? "running" : served ? "idle" : "empty",
       owner: owner(a.account_id),
       server: !!config.server,
       crons: config.crons?.length ?? 0,
@@ -181,7 +184,7 @@ export function adminRoutes(
         files: d.file_count,
         server: !!d.has_server,
         source: d.source,
-        current: d.id === a.current_deploy_id,
+        current: d.id === (a.current_deploy_id ?? a.page_deploy_id),
       })),
       domains: store.domains(a.id).map((d) => ({ domain: d.domain, verified: !!d.verified_at })),
       secrets: store.secretKeys(a.id).length,

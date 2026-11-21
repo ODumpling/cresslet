@@ -28,6 +28,8 @@ npx cresslet login && npx cresslet claim   # keep it (GitHub login if configured
 
 Browser: open http://localhost:8787 → pick a template → edits, `npm install`, dev server and preview all run in-browser on cresslet-container → **Deploy**.
 
+Pages: upload a static HTML file or folder (studio home, or `cresslet page upload report.html`) and share it: private (you and people you invite), anyone with the link, or public; kept 30 days unless you or your account defaults say otherwise ([docs/api.md#pages](docs/api.md#pages)).
+
 Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`. Raw API: [docs/api.md](docs/api.md). Server also serves `/llms.txt`.
 
 ## Docs

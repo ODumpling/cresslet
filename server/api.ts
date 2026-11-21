@@ -7,7 +7,18 @@ import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { appUrl, type Config, paths, previewAppName, previewOrigin, rootUrl } from "./config.ts";
+import {
+  appUrl,
+  type Config,
+  MAX_RETENTION_DAYS,
+  paths,
+  previewAppName,
+  previewOrigin,
+  rootUrl,
+  type Visibility,
+  VISIBILITIES,
+} from "./config.ts";
+import { PAGE_TICKET_MS, PAGE_TICKET_PARAM } from "./host.ts";
 import {
   type Access,
   ACCESS,
@@ -15,6 +26,7 @@ import {
   type App,
   type AppAccess,
   type Domain,
+  id,
   type Invite,
   type Role,
   ROLES,
@@ -30,12 +42,14 @@ import { normalizeEgress } from "./egress.ts";
 import { adminRoutes, isSiteAdmin, purgeApp } from "./admin.ts";
 import { RateLimit } from "./limits.ts";
 import {
+  type DeployFile,
   type DeployInput,
   HttpError,
   randomName,
   removeAppFiles,
   validName,
   writeDeploy,
+  writePage,
 } from "./deploys.ts";
 
 export const VERSION = "0.1.0";
@@ -63,6 +77,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   };
   app.use("/apps/:name/*", toOwner);
   app.use("/admin/sites/:name/*", toOwner);
+  app.use("/pages/:name", toOwner);
+  app.use("/pages/:name/*", toOwner);
   // A deploy names its app in the body: one for an app another node owns goes there as sent (bytes,
   // auth). A single node owns them all, so it doesn't read the body before auth.
   app.use("/deploys", async (c, next) => {
@@ -159,6 +175,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = store.appByName(name);
     if (!a) throw new HttpError(404, `app not found: ${name}`, "not_found");
     return a;
+  }
+  /** App-only features (deploys, rollback, secrets, egress, domains): a page is static files. */
+  function notPage(a: App) {
+    if (a.kind === "page") throw new HttpError(409, `${a.name} is a page: change it with /v1/pages/${a.name}`, "is_page");
   }
 
   const accountView = (a: Account) => ({
@@ -402,6 +422,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (target && !cluster.local(target.id)) return forwardDeploy(c, target.id); // created on another node meanwhile
     let createdKey: string | undefined;
     if (target) {
+      notPage(target);
       await authorize(c, target, "deploy");
       if (!appDeploys.take(target.id)) {
         throw new HttpError(429, `too many deploys of ${target.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
@@ -517,6 +538,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   app.post("/apps/:name/rollback", async (c) => {
     const a = getApp(c.req.param("name"));
+    notPage(a);
     await authorize(c, a, "deploy");
     const { deployId } = await body<{ deployId?: string }>(c);
     await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
@@ -729,6 +751,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   app.put("/apps/:name/secrets", async (c) => {
     const a = getApp(c.req.param("name"));
+    notPage(a);
     await authorize(c, a, "admin");
     if (!a.account_id) throw new HttpError(403, "secrets require a claimed app (cresslet claim)", "unclaimed");
     const input = await body<Record<string, string | null>>(c);
@@ -760,6 +783,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   app.put("/apps/:name/egress", async (c) => {
     const a = getApp(c.req.param("name"));
+    notPage(a);
     await authorize(c, a, "admin");
     if (!a.account_id) throw new HttpError(403, "outbound network requires a claimed app (cresslet claim)", "unclaimed");
     const { allow } = await body<{ allow?: unknown }>(c);
@@ -790,6 +814,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   });
   const claimed = async (c: Context<Env>, role: Role) => {
     const a = getApp(c.req.param("name")!);
+    notPage(a);
     await authorize(c, a, role);
     if (!a.account_id) throw new HttpError(403, "custom domains require a claimed app (cresslet claim)", "unclaimed");
     return a;
@@ -846,6 +871,193 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const d = normDomain(c.req.query("domain") ?? "");
     // The preview host needs a certificate too when it isn't covered by the wildcard.
     return c.body(null, store.appByDomain(d) || (d === cfg.previewHost && !previewAppName(cfg)) ? 200 : 404);
+  });
+
+  // ---- pages: uploaded static HTML with a visibility and a retention (docs/api.md#pages)
+  const pageDefaults = (acct: Account) => {
+    const own = store.settings(acct).pages ?? {};
+    return {
+      visibility: own.visibility ?? cfg.pages.visibility,
+      retentionDays: own.retentionDays !== undefined ? own.retentionDays : cfg.pages.retentionDays,
+    };
+  };
+  const visibility = (v: unknown): Visibility => {
+    if (!VISIBILITIES.includes(v as Visibility)) throw new HttpError(400, `visibility must be one of ${VISIBILITIES.join(", ")}`);
+    return v as Visibility;
+  };
+  /** Whole days from 1 to MAX_RETENTION_DAYS, or null: keep forever. */
+  const retention = (v: unknown): number | null => {
+    if (v === null) return null;
+    if (!Number.isInteger(v) || (v as number) < 1 || (v as number) > MAX_RETENTION_DAYS) {
+      throw new HttpError(400, `retentionDays must be a whole number of days from 1 to ${MAX_RETENTION_DAYS}, or null (keep forever)`);
+    }
+    return v as number;
+  };
+  const pageTitle = (v: unknown): string | null => {
+    if (v === null) return null;
+    if (typeof v !== "string" || v.trim().length > 200) throw new HttpError(400, "title must be a string of at most 200 characters, or null");
+    return v.trim() || null;
+  };
+  type PageInput = { html?: unknown; files?: unknown; title?: unknown; visibility?: unknown; retentionDays?: unknown; source?: unknown };
+  /** `html`: a single-file page (its index.html); `files`: a static site with an index.html at the root. */
+  const pageFiles = (input: PageInput): DeployFile[] => {
+    if (typeof input.html === "string") {
+      if (input.files !== undefined) throw new HttpError(400, "send html or files, not both");
+      return [{ path: "index.html", data: input.html }];
+    }
+    if (!Array.isArray(input.files)) throw new HttpError(400, "html (a string) or files (an array) required");
+    return input.files as DeployFile[];
+  };
+  const pageView = (a: App, access?: AppAccess | null) => {
+    const d = a.page_deploy_id ? store.deploy(a.page_deploy_id) : undefined;
+    return {
+      id: a.id,
+      name: a.name,
+      title: a.title,
+      url: appUrl(cfg, a.name),
+      visibility: a.visibility,
+      retentionDays: a.retention_days,
+      expiresAt: iso(a.expires_at),
+      files: d?.file_count ?? 0,
+      bytes: d?.bytes ?? 0,
+      ...(access !== undefined ? { access } : {}),
+      createdAt: iso(a.created_at),
+      updatedAt: iso(a.updated_at),
+    };
+  };
+  function getPage(name: string): App {
+    const a = store.appByName(name);
+    // Expired: gone, though the reaper may not have purged it yet.
+    if (!a || a.kind !== "page" || (a.expires_at !== null && a.expires_at <= Date.now())) {
+      throw new HttpError(404, `page not found: ${name}`, "not_found");
+    }
+    return a;
+  }
+  const checkPageQuota = (acct: Account) => {
+    if (isSiteAdmin(cfg, acct)) return;
+    if (store.appsByAccount(acct.id, "page").length >= cfg.limits.maxPagesPerAccount) {
+      throw new HttpError(403, `page limit reached (${cfg.limits.maxPagesPerAccount} per account): delete one first`, "quota");
+    }
+  };
+  const settingsView = (acct: Account) => ({ pages: pageDefaults(acct), defaults: { pages: cfg.pages } });
+
+  // The account's defaults for new pages (falling back to the server's).
+  app.get("/me/settings", (c) => c.json(settingsView(accountWide(c, "read"))));
+
+  // `pages: null` goes back to the server's defaults; a key left out keeps its value.
+  app.put("/me/settings", async (c) => {
+    const acct = accountWide(c, "admin");
+    const input = await body<{ pages?: { visibility?: unknown; retentionDays?: unknown } | null } | null>(c) ?? {};
+    const settings = store.settings(store.accountById(acct.id)!);
+    if (input.pages === null) delete settings.pages;
+    else if (input.pages !== undefined) {
+      if (typeof input.pages !== "object" || Array.isArray(input.pages)) throw new HttpError(400, "pages must be an object or null");
+      const pages = { ...settings.pages };
+      if (input.pages.visibility !== undefined) pages.visibility = visibility(input.pages.visibility);
+      if (input.pages.retentionDays !== undefined) pages.retentionDays = retention(input.pages.retentionDays);
+      settings.pages = pages;
+    }
+    store.setSettings(acct.id, settings);
+    return c.json(settingsView(store.accountById(acct.id)!));
+  });
+
+  app.get("/pages", (c) => {
+    const a = c.get("account"), t = c.get("token");
+    if (!a || !t) throw new HttpError(401, "login required", "unauthorized");
+    const only = tokenApps(t);
+    const now = Date.now();
+    return c.json({
+      pages: store.appsFor(a.id, "page")
+        .filter((x) => (!only || only.includes(x.id)) && (x.expires_at === null || x.expires_at > now))
+        .map((x) => pageView(x, x.access)),
+      defaults: pageDefaults(a),
+    });
+  });
+
+  // Upload a new page. Settings left out come from the account's defaults (GET /v1/me/settings).
+  app.post("/pages", async (c) => {
+    const acct = accountWide(c, "deploy");
+    const input = await body<PageInput | null>(c) ?? {};
+    const defaults = pageDefaults(acct);
+    const files = pageFiles(input);
+    const settings = {
+      title: input.title === undefined ? null : pageTitle(input.title),
+      visibility: input.visibility === undefined ? defaults.visibility : visibility(input.visibility),
+      retentionDays: input.retentionDays === undefined ? defaults.retentionDays : retention(input.retentionDays),
+    };
+    checkPageQuota(acct);
+    // Unguessable: a link-only page's URL is all that protects it.
+    let name = "";
+    for (let i = 0; i < 5 && (!name || store.appByName(name, true)); i++) name = id("pg").replace("_", "-");
+    if (store.appByName(name, true)) throw new HttpError(500, "could not allocate name");
+    const page = await store.createPage(name, acct.id, settings, () => checkPageQuota(acct));
+    try {
+      await writePage(cfg, store, page, files, typeof input.source === "string" ? input.source : "api");
+    } catch (e) {
+      store.deleteApp(page.id);
+      await removeAppFiles(cfg, page.id);
+      throw e;
+    }
+    return c.json({ page: pageView(store.appById(page.id)!, "owner") }, 201);
+  });
+
+  app.get("/pages/:name", async (c) => {
+    const a = getPage(c.req.param("name"));
+    const access = await authorize(c, a, "read");
+    return c.json({ page: pageView(a, access ?? null) });
+  });
+
+  // Replace the page's files (same URL). Restarts its retention clock.
+  app.put("/pages/:name", async (c) => {
+    const a = getPage(c.req.param("name"));
+    await authorize(c, a, "deploy");
+    const input = await body<PageInput | null>(c) ?? {};
+    const files = pageFiles(input);
+    const access = await authorize(c, a, "deploy"); // again: access may have changed while the body arrived
+    if (!appDeploys.take(a.id)) {
+      throw new HttpError(429, `too many uploads to ${a.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
+    }
+    await writePage(cfg, store, a, files, typeof input.source === "string" ? input.source : "api");
+    store.setPage(a.id, { retention_days: a.retention_days });
+    return c.json({ page: pageView(store.appById(a.id)!, access ?? null) });
+  });
+
+  // Change the title, visibility or retention (a new retention counts from now).
+  app.patch("/pages/:name", async (c) => {
+    const a = getPage(c.req.param("name"));
+    await authorize(c, a, "admin");
+    const input = await body<PageInput | null>(c) ?? {};
+    const change = {
+      ...(input.title !== undefined ? { title: pageTitle(input.title) } : {}),
+      ...(input.visibility !== undefined ? { visibility: visibility(input.visibility) } : {}),
+      ...(input.retentionDays !== undefined ? { retention_days: retention(input.retentionDays) } : {}),
+    };
+    const access = await authorize(c, a, "admin"); // again, after the body
+    store.setPage(a.id, change);
+    return c.json({ page: pageView(store.appById(a.id)!, access ?? null) });
+  });
+
+  app.delete("/pages/:name", async (c) => {
+    const a = getPage(c.req.param("name"));
+    await authorize(c, a, "admin", { owner: true });
+    await purgeApp(cfg, store, runtime, a);
+    return c.json({ deleted: a.name });
+  });
+
+  // A URL that opens the page in a browser: for a private page, with a one-time ticket the page's host
+  // exchanges for a session cookie (only the owner and collaborators get one).
+  app.post("/pages/:name/view", async (c) => {
+    const a = getPage(c.req.param("name"));
+    await authorize(c, a, "read", { account: true });
+    const input = await body<{ path?: unknown } | null>(c).catch(() => null) ?? {};
+    const path = typeof input.path === "string" && input.path.startsWith("/") && !input.path.startsWith("//") ? input.path : "/";
+    const url = new URL(path, appUrl(cfg, a.name));
+    if (url.origin !== new URL(appUrl(cfg, a.name)).origin) throw new HttpError(400, "invalid path");
+    if (a.visibility === "private") {
+      url.searchParams.set(PAGE_TICKET_PARAM, await store.pageTicket(a.id, c.get("account")!.id, PAGE_TICKET_MS));
+    }
+    c.header("cache-control", "no-store");
+    return c.json({ url: url.href, expiresIn: a.visibility === "private" ? PAGE_TICKET_MS / 1000 : null });
   });
 
   // ---- database inspection (read-only)
