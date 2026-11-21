@@ -17,7 +17,8 @@
 # Restarts of a Cresslet container alert whatever the thresholds.
 #   CRESSLET_ALERT_PATHS     (/var/lib/docker /var/backups/cresslet)
 # --install writes them, with CRESSLET_ALERT_URL, to /etc/cresslet-alerts.env (0600); one not given
-# keeps its value from the last --install.
+# keeps its value from the last --install. Checks and --test read that file, over the environment:
+# change a setting with --install.
 set -eu
 NET=${1:?usage: alerts.sh <docker network> [--install|--test]}
 MODE=${2:-check}
