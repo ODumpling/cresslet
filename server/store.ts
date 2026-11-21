@@ -711,11 +711,20 @@ export class Store {
     ).run(d.id, d.app_id, d.created_at, d.bytes, d.file_count, d.has_server, d.source);
   }
   deploys(appId: string, limit = 20): Deploy[] {
-    return this.db.prepare("SELECT * FROM deploys WHERE app_id = ? ORDER BY created_at DESC LIMIT ?")
+    return this.db.prepare("SELECT * FROM deploys WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
       .all(appId, limit) as unknown as Deploy[];
+  }
+  /** A page's versions (pages only: an app's rollback breaks this order), newest upload first, which is the order a page served them (the clock can step back). */
+  pageVersions(appId: string): Deploy[] {
+    return this.db.prepare("SELECT * FROM deploys WHERE app_id = ? ORDER BY rowid DESC").all(appId) as unknown as Deploy[];
   }
   deploy(deployId: string): Deploy | undefined {
     return this.db.prepare("SELECT * FROM deploys WHERE id = ?").get(deployId) as Deploy | undefined;
+  }
+  /** Pages with deploys other than the one each serves. */
+  pagesWithOldVersions(): string[] {
+    return (this.db.prepare(`SELECT DISTINCT d.app_id FROM deploys d JOIN apps a ON a.id = d.app_id
+      WHERE a.kind = 'page' AND a.page_deploy_id IS NOT NULL AND d.id <> a.page_deploy_id`).all() as { app_id: string }[]).map((r) => r.app_id);
   }
   deleteDeploy(deployId: string) {
     this.db.prepare("DELETE FROM deploys WHERE id = ?").run(deployId);

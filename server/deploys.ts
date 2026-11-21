@@ -1,7 +1,7 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import { type Config, paths, previewAppName } from "./config.ts";
-import { type App, id, type Store } from "./store.ts";
+import { type App, type Deploy, id, type Store } from "./store.ts";
 import { normalizeCrons } from "./cron.ts";
 import { filesSettled } from "./bindings.ts";
 
@@ -235,18 +235,77 @@ export async function writePage(cfg: Config, store: Store, app: App, files: Depl
     has_server: 0,
     source: String(source).slice(0, 20),
   });
+  const previous = store.appById(app.id, true)?.page_deploy_id;
   store.setPageDeploy(app.id, deployId);
-  await pruneDeploys(cfg, store, app.id, deployId);
+  if (previous) replacedAt.set(previous, performance.now());
+  await prunePage(cfg, store, app.id);
   return { id: deployId, bytes, files: decoded.length };
 }
 
-/** Keep the 10 most recent deploys for rollback. */
-async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string) {
-  const all = store.deploys(appId, 1000);
-  for (const d of all.slice(10)) {
-    if (d.id === keep) continue;
-    store.deleteDeploy(d.id);
-    await rm(paths(cfg, appId).deploy(d.id), { recursive: true, force: true });
+/** Keep `keep` and the `keepCount - 1` most recent others (10 in all for an app's rollback). */
+async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = 10) {
+  const others = store.deploys(appId, 1000).filter((d) => d.id !== keep);
+  await removeDeploys(cfg, store, others.slice(keepCount - 1));
+}
+
+/** A replaced page version stays this long, so a request that read the old pointer can finish. */
+const PAGE_GRACE_MS = 60_000;
+/** …but no more than this many versions in all (the served one included), however fast the uploads. */
+const MAX_PAGE_VERSIONS = 3;
+/**
+ * When each page version stopped being served (monotonic clock: wall time can step). Kept in memory:
+ * a request in flight doesn't outlive the process, so a version not here (replaced before a restart,
+ * or by an older server) has no grace left.
+ */
+const replacedAt = new Map<string, number>();
+
+/**
+ * Pages have no rollback: removes the versions a page no longer serves, once they were replaced
+ * `graceMs` ago (or they're past MAX_PAGE_VERSIONS). After an upload, and by the reaper.
+ */
+async function prunePage(cfg: Config, store: Store, appId: string, graceMs = PAGE_GRACE_MS) {
+  const served = store.appById(appId, true)?.page_deploy_id; // a deleted page only needs the version a restore serves
+  if (!served) return;
+  const cutoff = performance.now() - graceMs;
+  const old = store.pageVersions(appId).filter((d, i) =>
+    d.id !== served && (i >= MAX_PAGE_VERSIONS || (replacedAt.get(d.id) ?? -Infinity) <= cutoff));
+  for (const d of old) replacedAt.delete(d.id);
+  await removeDeploys(cfg, store, old);
+}
+
+/** The reaper's pass: pages (owned here) with versions they don't serve, kept by prunePage or an older server. */
+export async function pruneOldPageVersions(cfg: Config, store: Store, local: (appId: string) => boolean, graceMs = PAGE_GRACE_MS) {
+  for (const [id, at] of replacedAt) if (at <= performance.now() - PAGE_GRACE_MS) replacedAt.delete(id); // e.g. purged pages
+  for (const appId of store.pagesWithOldVersions()) {
+    if (local(appId)) await prunePage(cfg, store, appId, graceMs);
+  }
+}
+
+/** Deploys a prune is removing (until their directory has been moved aside): rollback refuses them. */
+const removing = new Set<string>();
+export const beingRemoved = (deployId: string) => removing.has(deployId);
+
+/**
+ * Marked at once (before any await; ones another prune is removing are left to it). The directory is
+ * first renamed aside, in one step, so nothing (a rollback, even after a restart) finds a half-removed
+ * deploy; then removed, then the row. If removal fails, the row stays and the next prune tries again.
+ */
+async function removeDeploys(cfg: Config, store: Store, deploys: Pick<Deploy, "id" | "app_id">[]) {
+  const todo = deploys.filter((d) => !removing.has(d.id));
+  for (const d of todo) removing.add(d.id);
+  for (const d of todo) {
+    const dir = paths(cfg, d.app_id).deploy(d.id);
+    try {
+      await rename(dir, `${dir}.removing`).catch((e) => {
+        if (e?.code !== "ENOENT") throw e; // already moved aside by a removal that failed later
+      });
+      await rm(`${dir}.removing`, { recursive: true, force: true });
+      store.deleteDeploy(d.id);
+    } catch (e) {
+      console.error(`cresslet: couldn't remove deploy ${d.id}:`, e);
+    } finally {
+      removing.delete(d.id);
+    }
   }
 }
 

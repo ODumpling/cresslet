@@ -14,6 +14,7 @@ import { Scheduler } from "./cron.ts";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { purgeApp } from "./admin.ts";
+import { pruneOldPageVersions } from "./deploys.ts";
 import { settled as sandboxSettled } from "./sandbox.ts";
 import { bindingsSettled } from "./bindings.ts";
 import { type Cluster, singleNode } from "./cluster.ts";
@@ -82,7 +83,7 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
 
   /**
    * Purges expired anonymous apps and pages past their retention, and sites a site admin deleted longer
-   * ago than the retention period (owned here).
+   * ago than the retention period (owned here), and pages' old versions.
    */
   async function reap() {
     store.prunePageSessions();
@@ -90,6 +91,7 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
     for (const a of [...store.expiredApps(), ...store.deletedBefore(Date.now() - cfg.limits.deletedRetentionMs)]) {
       if (cluster.local(a.id)) await purgeApp(cfg, store, runtime, a);
     }
+    await pruneOldPageVersions(cfg, store, (id) => cluster.local(id));
   }
   const reaper = setInterval(reap, 10 * 60_000);
 

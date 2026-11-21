@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { loadConfig, paths } from "../server/config.ts";
+import { pruneOldPageVersions } from "../server/deploys.ts";
 
 const DAY = 86_400_000;
 
@@ -286,6 +287,127 @@ test("pages: expired pages are gone at once and purged by the reaper; secure coo
     const u = new URL((await t.send("POST", `/v1/pages/${priv.name}/view`, tok, {})).body.url);
     const r = await t.visit(priv.name, u.pathname + u.search);
     assert.match(r.headers.get("set-cookie")!, /^__Host-cresslet_page=pvs_[0-9a-f]+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=86400; Secure$/);
+  } finally {
+    t.srv.close();
+    await rm(t.dataDir, { recursive: true, force: true });
+  }
+});
+
+test("pages keep only the version they serve on disk; apps keep 10 for rollback", async () => {
+  const t = await setup();
+  try {
+    const tok = await t.account("a@b.co");
+    const { store, cfg } = t.srv;
+    const rows = (appId: string) => store.deploys(appId, 100).map((d) => d.id);
+    const onDisk = async (appId: string) => (await readdir(paths(cfg, appId).deploys)).sort();
+    const page = (await t.send("POST", "/v1/pages", tok, { html: "v1", visibility: "link" })).body.page;
+    const row = store.appByName(page.name)!;
+    const put = async (html: string) => {
+      assert.equal((await t.send("PUT", `/v1/pages/${page.name}`, tok, { html })).status, 200);
+      return store.appByName(page.name)!.page_deploy_id!;
+    };
+    const v1 = row.page_deploy_id!;
+    // Versions replaced in the last minute stay (a request in flight may have read the old pointer)…
+    const v2 = await put("v2");
+    const v3 = await put("v3");
+    assert.deepEqual(rows(row.id), [v3, v2, v1]);
+    // …up to 3 in all.
+    const v4 = await put("v4");
+    assert.deepEqual(rows(row.id), [v4, v3, v2]);
+    assert.deepEqual(await onDisk(row.id), [v4, v3, v2].sort());
+    assert.equal(await (await t.visit(page.name)).text(), "v4");
+
+    // A minute's grace by the process's own clock: the wall clock (deploy times) jumping doesn't end it.
+    store.db.prepare("UPDATE deploys SET created_at = created_at - 3600000 WHERE app_id = ?").run(row.id);
+    await t.srv.reap();
+    assert.deepEqual(rows(row.id), [v4, v3, v2]);
+
+    // Versions an older server kept (rows and directories; no grace left), uploaded before these.
+    for (const [i, d] of ["dep_old1", "dep_old2"].entries()) {
+      store.db.prepare("INSERT INTO deploys (rowid, id, app_id, created_at, bytes, file_count, has_server, source) VALUES (?, ?, ?, ?, 2, 1, 0, 'api')")
+        .run(-1 - i, d, row.id, Date.now() + 600_000 * (i + 1)); // their clock was ahead: order is upload order (rowid)
+      await mkdir(join(paths(cfg, row.id).deploy(d), "public"), { recursive: true });
+    }
+    // The reaper leaves pages another node owns alone…
+    await pruneOldPageVersions(cfg, store, () => false, 0);
+    assert.deepEqual(new Set(rows(row.id)), new Set([v4, v3, v2, "dep_old1", "dep_old2"]));
+    // …and here removes what's past the 3 at once, the rest once their minute is up.
+    await t.srv.reap();
+    assert.deepEqual(rows(row.id), [v4, v3, v2]);
+    await pruneOldPageVersions(cfg, store, () => true, 0);
+    assert.deepEqual(rows(row.id), [v4]);
+    assert.deepEqual(await onDisk(row.id), [v4]);
+    assert.equal(await (await t.visit(page.name)).text(), "v4");
+    // A version replaced before this process started (no grace recorded) goes at once, within the 3 too.
+    store.db.prepare("INSERT INTO deploys (rowid, id, app_id, created_at, bytes, file_count, has_server, source) VALUES (-10, 'dep_old3', ?, ?, 2, 1, 0, 'api')")
+      .run(row.id, Date.now());
+    await mkdir(join(paths(cfg, row.id).deploy("dep_old3"), "public"), { recursive: true });
+    await t.srv.reap();
+    assert.deepEqual(rows(row.id), [v4]);
+    assert.deepEqual(await onDisk(row.id), [v4]);
+
+    // A deleted page keeps only the version a restore would serve.
+    const v5 = await put("v5");
+    store.db.prepare("UPDATE apps SET deleted_at = ? WHERE id = ?").run(Date.now(), row.id);
+    await pruneOldPageVersions(cfg, store, () => true, 0);
+    assert.deepEqual(rows(row.id), [v5]);
+    assert.deepEqual(await onDisk(row.id), [v5]);
+    store.db.prepare("UPDATE apps SET deleted_at = NULL WHERE id = ?").run(row.id);
+
+    // A removal that fails keeps the row, so the next prune tries again (root could remove it anyway);
+    // the directory was moved aside first, so nothing finds the half-removed deploy meanwhile.
+    const unremovable = async (deployId: string, appId: string) => {
+      const dir = paths(cfg, appId).deploy(deployId);
+      await mkdir(join(dir, "public", "sub"));
+      await writeFile(join(dir, "public", "sub", "f"), "x");
+      await chmod(join(dir, "public", "sub"), 0o500);
+      return () => chmod(join(`${dir}.removing`, "public", "sub"), 0o700);
+    };
+    const quiet = async <T>(f: () => Promise<T>) => {
+      const error = console.error;
+      console.error = () => {};
+      try { return await f(); } finally { console.error = error; }
+    };
+    const asUser = process.getuid?.() !== 0;
+    if (asUser) {
+      const v6 = await put("v6");
+      const restore = await unremovable(v5, row.id);
+      await quiet(() => pruneOldPageVersions(cfg, store, () => true, 0));
+      assert.deepEqual(rows(row.id), [v6, v5]);
+      assert.deepEqual(await onDisk(row.id), [v5 + ".removing", v6].sort());
+      await restore();
+      await pruneOldPageVersions(cfg, store, () => true, 0);
+      assert.deepEqual(rows(row.id), [v6]);
+      assert.deepEqual(await onDisk(row.id), [v6]);
+    }
+
+    // An app keeps its last 10 deploys (rollback), files and rows alike; the reaper leaves them alone.
+    for (let i = 0; i < 12; i++) {
+      assert.equal((await t.send("POST", "/v1/deploys", tok, { app: "site", files: [{ path: "index.html", data: `a${i}` }] })).status, 201);
+    }
+    const site = store.appByName("site")!;
+    store.db.prepare("UPDATE deploys SET created_at = 1 WHERE app_id = ?").run(site.id); // same-millisecond ties
+    await t.srv.reap();
+    const kept = rows(site.id);
+    assert.equal(kept.length, 10);
+    assert.equal(kept[0], site.current_deploy_id);
+    assert.deepEqual(await onDisk(site.id), [...kept].sort());
+    assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, {})).status, 200);
+    assert.equal(await (await t.visit("site")).text(), "a10");
+    assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, { deployId: kept[9] })).status, 200);
+    assert.equal(await (await t.visit("site")).text(), "a2");
+    // A deploy whose removal failed can't be rolled back to (its files may be half gone); a later prune removes it.
+    if (asUser) {
+      const restore = await unremovable(kept[9], site.id);
+      const deploy = (data: string) => quiet(() => t.send("POST", "/v1/deploys", tok, { app: "site", files: [{ path: "index.html", data }] }));
+      assert.equal((await deploy("a12")).status, 201);
+      assert.ok(store.deploy(kept[9]));
+      assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, { deployId: kept[9] })).status, 404);
+      await restore();
+      await deploy("a13");
+      assert.equal(store.deploy(kept[9]), undefined);
+      assert.equal(rows(site.id).length, 10);
+    }
   } finally {
     t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
