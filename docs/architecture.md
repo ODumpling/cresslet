@@ -79,6 +79,16 @@ Previews run on their own origin (`CRESSLET_PREVIEW_HOST`, default `preview.<dom
 
 Project code in workers runs there too: the app's *server* code in `cresslet dev` (a container project worker, `c.projectWorker`) and `node` scripts, npm bins and the CSS worker (container `node` processes) are started by the relay frame on the preview origin, not in Web Workers on the studio origin. So they can't open the studio's IndexedDB (every local project's files, including `.env.cresslet`) or Cache Storage, and requests to the studio are cross-origin; they still get their own project's files through the container. Any `blob:` URL they mint is a preview-origin one. The e2e checks both from a `node` script and from a server route. What's left on the preview origin is one trust boundary: previews can script the relay and so reach those workers (a project's client code can do what its server code can).
 
+### AI builder
+
+The workspace's **AI builder** pane is a chat with Claude that changes the open project ([`studio/builder.js`](../studio/builder.js)). It has no server side: the browser calls the Anthropic API directly (`claude-opus-5-5`, streamed) with the user's own API key, and Claude's tools act on what the user can already reach from the tab: the project's files in the container, a `jsh -c` shell in the project root (stopped after 120 s), the dev server's terminal output, and `cresslet deploy`, which goes through `POST /v1/deploys` with the user's session or the project's deploy key, as the CLI would. So it needs no endpoint of its own.
+
+- The key is kept in the studio origin's `localStorage` (`cresslet.anthropicKey`), like the Cresslet token: previews and project code run on the preview origin and can't read it. It's sent only to `api.anthropic.com`; **Forget key** removes it.
+- Deploys need the user's yes each time: while a builder command runs (or in a process it left running, marked `CRESSLET_AI_BUILDER=1`), the in-browser `cresslet deploy` shows **Approve deploy** / **Decline** in the chat, naming the target app, before it builds, however it was started (directly, an npm script, `sh -c`, with the variable unset). Stop declines it, or aborts an upload already under way. A deploy you start in the terminal while a builder command runs asks too.
+- The file tools take paths inside the project only (no absolute paths, `..` or `.git`) and refuse local secret files and directories (`.env*`, `.envrc`, `.dev.vars`), so their contents aren't sent to Anthropic by a file read. That's a guard against accidents, not a boundary: command output and the dev server's terminal (which includes what the user typed there) go to Anthropic as they are, since the model runs the user's own shell.
+- A project opened from a deployed app's source keeps the builder locked, like the terminal and Deploy, until **Run it**: its files (an `AGENTS.md`, say) could carry instructions for the model, and its commands would run the project's code.
+- The conversation lives in the page (a reload or **New chat** starts over). The SDK bundle (`studio/vendor/anthropic.js`, from `scripts/vendor`) loads on the first message.
+
 ## Scaling out
 
 v1 runs one server process. [`server/cluster.ts`](../server/cluster.ts) is the seam a second node would plug into; the default (`singleNode`) owns every app, so nothing changes until another implementation is passed to `createServer`.
@@ -120,4 +130,3 @@ Left before a second node works:
 ## Roadmap
 
 - Stronger isolation: the public instance runs the whole server under gVisor, and any other multi-tenant instance without a gVisor mode gets a startup warning (see [Isolation](#isolation)). Next, where KVM is available: Firecracker microVMs, a guest kernel per app (needs a vsock bridge for the unix sockets, and a kernel and rootfs per sandbox).
-- AI builder in the studio driving the same API (deferred from v1).

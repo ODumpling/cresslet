@@ -4,6 +4,7 @@ import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWith
 import { FitAddon, Terminal } from "./vendor/terminal.js";
 import { auth, fromTree, ignored, migrateDeployKeys, projects, toTree } from "./store.js";
 import { createCresslet } from "./cresslet-plugin.js";
+import { anthropicClient, apiKey, createAgent, createTools } from "./builder.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, { dataset, ...props } = {}, ...children) => {
@@ -1554,6 +1555,9 @@ async function openProject(id, gen) {
       }
       showDeployLink(project.deploy);
     },
+    // `cresslet deploy` in a command the AI builder started: the user says yes first.
+    builderRunning: () => builder.running(),
+    approveDeploy: (target, signal) => builder.approve(`Claude wants to deploy ${target ? `to ${target}` : "this project as a new app"}. It goes live at once.`, signal),
   });
 
   // editor
@@ -1592,6 +1596,16 @@ async function openProject(id, gen) {
     try {
       text = await c.fs.readFile(`${wd}/${path}`, "utf8");
     } catch {
+      if (path === current) {
+        // The open file is gone (deleted from the terminal or by the AI builder): don't let typing recreate it.
+        current = null;
+        suppress = true;
+        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "" }, effects: lang.reconfigure([]) });
+        suppress = false;
+        $("open-file").textContent = "No file open";
+        view.contentDOM.setAttribute("aria-label", "Code");
+        renderTree();
+      }
       return;
     }
     current = path;
@@ -1657,6 +1671,9 @@ async function openProject(id, gen) {
     treeTimer = setTimeout(() => {
       renderTree();
       save();
+      // the open file removed (a command, the AI builder): openFile clears the editor
+      const open = current;
+      if (open) c.fs.exists(`${wd}/${open}`).then((ok) => ok || openFile(open), () => {});
     }, 300);
   });
 
@@ -1691,7 +1708,11 @@ async function openProject(id, gen) {
 
   // shell
   const shell = await c.spawn("jsh", [], { cwd: wd, terminal: true });
-  shell.output.pipeTo(new WritableStream({ write: (d) => term.write(d) }));
+  let termOut = ""; // the terminal's latest output, for the AI builder's read_dev_log
+  shell.output.pipeTo(new WritableStream({ write: (d) => {
+    term.write(d);
+    termOut = (termOut + d).slice(-64_000);
+  } }));
   const input = shell.input.getWriter();
   // an untrusted project's shell takes no input until "Run it" (a command could run its code: npm scripts, a build's
   // PostCSS/Tailwind plugins)
@@ -1706,10 +1727,17 @@ async function openProject(id, gen) {
   };
   // Opened from a deployed app's source: its code (and npm deps, and a deploy's build: PostCSS/Tailwind plugins)
   // would run in this browser. Nothing runs, Deploy included, until the user says so.
+  const builder = mountBuilder({
+    c,
+    devLog: () => termOut,
+    // A file the builder changed is the one in the editor: show the new contents.
+    onChange: (path) => path === current && openFile(path),
+  });
   const gate = (on) => {
     locked = on;
     $("deploy-btn").disabled = on;
     $("deploy-btn").title = on ? "Run the project first" : "";
+    builder.lock(on); // its commands would run the project's code too
   };
   gate(project.trusted === false);
   if (project.trusted === false) {
@@ -1726,7 +1754,7 @@ async function openProject(id, gen) {
     $("preview-msg").replaceChildren(
       "This project was opened from a deployed app's source. Review it, then ",
       btn,
-      " to install its dependencies and start it here (the terminal and Deploy unlock then).",
+      " to install its dependencies and start it here (the terminal, Deploy and the AI builder unlock then).",
     );
   } else start();
 
@@ -1755,6 +1783,230 @@ async function openProject(id, gen) {
       btn.disabled = false;
       $("deploy-btn-label").textContent = "Deploy";
     }
+  };
+}
+
+// ------------------------------------------------------------------ AI builder
+// The chat pane (studio/builder.js runs the conversation and the tools).
+const STEP_ICON = { run_command: "terminal", read_dev_log: "terminal" };
+const runningText = (name, input) => ({
+  list_files: "Listing files", read_file: `Reading ${input?.path ?? "a file"}`, write_file: `Writing ${input?.path ?? "a file"}`,
+  edit_file: `Editing ${input?.path ?? "a file"}`, delete_file: `Deleting ${input?.path ?? "a file"}`,
+  run_command: `Running ${input?.command ?? "a command"}`, read_dev_log: "Reading the dev server output",
+})[name] ?? name;
+
+function mountBuilder({ c, devLog, onChange }) {
+  const btn = $("builder-btn"), pane = $("builder"), log = $("builder-log"), input = $("builder-input");
+  const approvals = new Set(); // decline functions of the deploy approvals waiting for the user
+  const tools = createTools(c, { devLog, onChange, paused: () => approvals.size > 0 });
+  let agent = null, locked = false, busy = false;
+  let approved = false, stopped = false; // this request: a deploy was approved; the user pressed Stop
+  let bubble = null, step = null; // the assistant text and the tool step being written
+  let replied = "", failed = ""; // this request's latest reply text (read out when it ends), and its error
+  btn.hidden = false;
+
+  const announce = (text) => ($("builder-status").textContent = text);
+  const working = (text) => {
+    $("builder-working").hidden = !text;
+    if (text) $("builder-working-text").textContent = text;
+  };
+  const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+  function add(node) {
+    const stick = nearBottom();
+    log.append(node);
+    if (stick) log.scrollTop = log.scrollHeight;
+    return node;
+  }
+
+  function showView() {
+    const has = !!apiKey.get();
+    $("builder-key-form").hidden = has;
+    $("builder-chat").hidden = !has;
+    return has;
+  }
+  // Where focus goes in the chat: the message field, or the heading while it's locked (a disabled field can't take it).
+  const chatFocus = () => (locked ? $("builder-title") : input).focus();
+  function setOpen(open, { focus = true } = {}) {
+    pane.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+    $("workspace").dataset.builder = open ? "open" : "";
+    const chat = showView();
+    if (!focus) return;
+    if (!open) btn.focus();
+    else if (chat) chatFocus();
+    else $("builder-key").focus();
+  }
+  btn.onclick = () => setOpen(pane.hidden);
+  $("builder-close").onclick = () => setOpen(false);
+
+  function render() {
+    $("builder-send").disabled = busy || locked;
+    $("builder-stop").hidden = !busy;
+    $("builder-new").disabled = busy;
+    input.disabled = locked;
+    $("builder-locked").hidden = !locked;
+    input.setAttribute("aria-describedby", locked ? "builder-locked builder-hint" : "builder-hint");
+  }
+
+  $("builder-key-form").onsubmit = (e) => {
+    e.preventDefault();
+    const v = $("builder-key").value.trim();
+    if (!v) return;
+    if (!apiKey.set(v)) {
+      $("builder-key-error").textContent = "This browser blocked saving the key (site storage). Allow it and try again.";
+      return;
+    }
+    $("builder-key").value = "";
+    $("builder-key-error").textContent = "";
+    showView();
+    chatFocus();
+  };
+  $("builder-key").oninput = () => ($("builder-key-error").textContent = "");
+  $("builder-forget").onclick = () => {
+    agent?.stop();
+    apiKey.set(null);
+    showView();
+    $("builder-key").focus();
+    announce("API key removed from this browser");
+  };
+  $("builder-new").onclick = () => {
+    if (busy) return;
+    for (const decline of approvals) decline(); // e.g. from a process the builder left running
+    working("");
+    agent = null;
+    log.replaceChildren();
+    announce("New chat");
+    chatFocus();
+  };
+  $("builder-stop").onclick = () => {
+    stopped = true;
+    agent?.stop();
+    input.focus(); // the Stop button hides
+  };
+
+  function on(ev) {
+    switch (ev.type) {
+      case "turn":
+        bubble = null;
+        working("Thinking…");
+        break;
+      case "thinking":
+        working("Thinking…");
+        break;
+      case "retry": // the partial reply is sent again in full
+        bubble?.remove();
+        bubble = null;
+        replied = "";
+        break;
+      case "text":
+        bubble ??= add(el("li", { className: "msg assistant" }));
+        bubble.textContent += ev.delta;
+        replied = bubble.textContent;
+        if (nearBottom()) log.scrollTop = log.scrollHeight;
+        working("Writing…");
+        break;
+      case "tool":
+        bubble = null;
+        step = add(el("li", { className: "step", dataset: { state: "running" } }, icon(STEP_ICON[ev.name] ?? "file"), el("span", { textContent: runningText(ev.name, ev.input) })));
+        working(`${runningText(ev.name, ev.input)}…`);
+        break;
+      case "tool-done":
+        if (step) {
+          step.dataset.state = ev.error ? "error" : "ok";
+          step.replaceChildren(icon(ev.error ? "x" : STEP_ICON[ev.name] ?? "check"), el("span", { textContent: ev.summary }), ...(ev.error ? [srOnly(" (failed)")] : []));
+        }
+        step = null;
+        if (ev.name === "run_command" && !stopped) approved = false; // an approved deploy in it has finished
+        announce(ev.error ? `${ev.summary} (failed)` : ev.summary);
+        working("Thinking…");
+        break;
+      case "notice":
+        add(el("li", { className: "notice", textContent: ev.text, dataset: ev.error ? { error: "" } : undefined }));
+        if (ev.error) announce(ev.text);
+        if (ev.error) failed = ev.text;
+        break;
+    }
+  }
+
+  $("builder-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || busy || locked) return;
+    const key = apiKey.get();
+    if (!key) return void showView();
+    agent ??= createAgent({ client: () => anthropicClient(apiKey.get()), tools, on });
+    add(el("li", { className: "msg user", textContent: text }));
+    log.scrollTop = log.scrollHeight;
+    input.value = "";
+    replied = "";
+    failed = "";
+    approved = stopped = false;
+    const fromSend = document.activeElement === $("builder-send");
+    busy = true;
+    render();
+    if (fromSend) input.focus(); // Send is disabled while Claude works
+    working("Thinking…");
+    announce("Sent. Claude is working on it.");
+    try {
+      await agent.send(text);
+    } finally {
+      for (const decline of approvals) decline(); // its command is gone (stopped, timed out, or left running)
+      if (approved && stopped) on({ type: "notice", text: "If the deploy had started uploading, it may still go live: check the app.", error: true });
+      busy = false;
+      bubble = step = null;
+      working("");
+      render();
+      if (replied) announce(`Claude: ${replied}${failed ? ` (${failed})` : ""}`);
+      else if (!failed) announce("Claude finished");
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      $("builder-form").requestSubmit();
+    }
+  });
+
+  /** Asks the user to approve a deploy the builder started. Resolves to true if approved; false if declined or stopped. */
+  function approve(text, signal) {
+    return new Promise((resolve) => {
+      if (signal?.aborted) return resolve(false);
+      if (pane.hidden) setOpen(true, { focus: false });
+      const done = (ok) => {
+        if (!approvals.delete(stop)) return; // already answered
+        approved ||= ok;
+        signal?.removeEventListener("abort", stop);
+        const hadFocus = row.contains(document.activeElement);
+        row.className = "step";
+        row.dataset.state = ok ? "ok" : "error";
+        row.replaceChildren(icon(ok ? "rocket" : "x"), el("span", { textContent: ok ? "Deploy approved" : "Deploy not approved" }));
+        if (hadFocus) chatFocus();
+        announce(ok ? "Deploy approved" : "Deploy not approved");
+        working(approvals.size ? "Waiting for your approval…" : !busy ? "" : ok ? "Deploying…" : "Thinking…");
+        resolve(ok);
+      };
+      const stop = () => done(false);
+      // Focus stays where it is (a stray Enter mid-typing must not approve); the request is announced.
+      const row = add(el("li", { className: "approval" },
+        el("p", { textContent: text }),
+        el("div", { className: "row start" },
+          el("button", { type: "button", className: "btn primary sm", textContent: "Approve deploy", onclick: () => done(true) }),
+          el("button", { type: "button", className: "btn sm", textContent: "Decline", onclick: () => done(false) }))));
+      approvals.add(stop);
+      signal?.addEventListener("abort", stop, { once: true });
+      working("Waiting for your approval…");
+      announce(`${text} Approve or decline it in the AI builder.`);
+    });
+  }
+
+  render();
+  return {
+    approve,
+    running: () => tools.running > 0,
+    lock(on) {
+      locked = on;
+      render();
+    },
   };
 }
 

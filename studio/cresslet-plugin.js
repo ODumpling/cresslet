@@ -55,7 +55,11 @@ function toBase64(bytes) {
 
 /**
  * @param {import("./vendor/cresslet-container/index").Container} c
- * @param {{ auth: () => { token?: string|null }, project: () => any, onDeployed?: (r: any) => void }} opts
+ * @param {{ auth: () => { token?: string|null }, project: () => any, onDeployed?: (r: any) => void,
+ *   builderRunning?: () => boolean, approveDeploy?: (target: string|null, signal: AbortSignal) => Promise<boolean> }} opts
+ *   approveDeploy: asked before `cresslet deploy` runs while the AI builder runs a command (builderRunning), or in a
+ *   process it started (CRESSLET_AI_BUILDER set); without it, such deploys are refused. target: the app it deploys
+ *   to, null for a new one.
  */
 export function createCresslet(c, opts) {
   const wd = c.workdir;
@@ -113,9 +117,18 @@ export function createCresslet(c, opts) {
     return { files: r.files, server };
   }
 
-  async function deploy(log = () => {}) {
-    const cfg = await config();
+  /** Where a deploy goes: the project's app (and its deploy key), else cresslet.json's name, else a new app. */
+  const targetOf = (cfg) => {
+    const d = opts.project()?.deploy;
+    return { app: d?.name ?? (cfg.name || undefined), deployKey: d?.deployKey };
+  };
+
+  /** `cfg`, `target`: read before an approval, so the app it named is the one deployed to. */
+  async function deploy(log = () => {}, signal = undefined, cfg = undefined, target = undefined) {
+    cfg ??= await config();
+    target ??= targetOf(cfg);
     const { files: built, server } = await build(log);
+    signal?.throwIfAborted();
     const files = [];
     for (const f of built) {
       const abs = f.startsWith("/") ? f : p(`dist/${f}`);
@@ -123,11 +136,10 @@ export function createCresslet(c, opts) {
       const bytes = await c.fs.readFile(abs);
       files.push({ path: rel, data: toBase64(typeof bytes === "string" ? enc.encode(bytes) : bytes), encoding: "base64" });
     }
-    const project = opts.project();
     const headers = { "content-type": "application/json" };
     const token = opts.auth().token;
     if (token) headers.authorization = `Bearer ${token}`;
-    if (project?.deploy?.deployKey) headers["x-cresslet-deploy-key"] = project.deploy.deployKey;
+    if (target.deployKey) headers["x-cresslet-deploy-key"] = target.deployKey;
     // Project source too, so the CLI (`cresslet pull`) or another browser can open it. Never local secrets.
     const sources = [];
     const walk = (tree, prefix) => {
@@ -147,24 +159,25 @@ export function createCresslet(c, opts) {
     walk(await c.export(wd, { excludes: ["node_modules/**", "dist/**", ".cresslet/**", ".git/**"] }), "");
     log(`uploading ${files.length} files…`);
     const payload = {
-      app: project?.deploy?.name ?? (cfg.name || undefined),
+      app: target.app,
       files,
       server,
       config: { routes: cfg.routes, crons: cfg.crons },
       source: "studio",
       sources,
     };
-    let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload) });
+    let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload), signal });
     let body = await res.json();
     if (res.status === 413 && body?.error === "body_too_large" && sources.length) {
       log("warning: project source omitted (request exceeded server upload limit)");
-      res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }) });
+      res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }), signal });
       body = await res.json();
     }
     if (!res.ok) throw new Error(body.message ?? `deploy failed (${res.status})`);
-    if (!cfg.name) {
-      await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...cfg, name: body.app.name }, null, 2) + "\n");
-    }
+    // A new app's name into cresslet.json as it is now (it may have been edited since it was read); a name the user
+    // removed meanwhile isn't put back.
+    const now = await config().catch(() => null);
+    if (!cfg.name && now && !now.name) await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...now, name: body.app.name }, null, 2) + "\n");
     log(`deployed ${body.app.name} → ${body.app.url}`);
     if (body.deploy?.warning) log(`warning: ${body.deploy.warning}`);
     if (!body.app.claimed) log(`unclaimed: expires ${new Date(body.app.expiresAt).toLocaleString()}. Log in to keep it.`);
@@ -413,7 +426,16 @@ export function createCresslet(c, opts) {
         return 0;
       }
       if (sub === "deploy") {
-        await deploy(out);
+        // Started by the AI builder (directly or through a script): the user approves each deploy.
+        // (Its own running count, not just the env var: a command can unset that.) The app named is the one deployed
+        // to: cresslet.json is read once, before asking.
+        const cfg = await config();
+        const target = targetOf(cfg);
+        if ((opts.builderRunning?.() || ctx.env.CRESSLET_AI_BUILDER) && !(await opts.approveDeploy?.(target.app ?? null, ctx.signal))) {
+          err("deploy not approved by the user");
+          return 1;
+        }
+        await deploy(out, ctx.signal, cfg, target);
         return 0;
       }
       out("usage: cresslet dev [--port 3000] | build | deploy\r\n(other commands: use the real CLI: npx cresslet, or npm i -g cresslet)");
