@@ -107,15 +107,15 @@ test("host /db/batch: atomic, nests in an app transaction, validates its input",
     });
     // no transaction control inside a batch (a COMMIT would leave a failing batch half applied)
     const commit = await db("batch", { statements: [{ sql: "DELETE FROM t" }, { sql: "-- c\n COMMIT" }, { sql: "INSERT INTO t (v) VALUES (NULL)" }] });
-    assert.deepEqual(commit, { status: 400, body: "batch statement 2: transaction control and PRAGMA aren't allowed in a batch (it is one transaction; a PRAGMA isn't rolled back with it)" });
+    assert.deepEqual(commit, { status: 400, body: "batch statement 2: transaction control, PRAGMA, ATTACH and DETACH aren't allowed in a batch (it is one transaction; the others aren't rolled back with it)" });
     for (const sql of ["begin", "END", "ROLLBACK", "SAVEPOINT s", "/* x */ RELEASE s", ";COMMIT", " ; /*x*/ END"]) {
       assert.equal((await db("batch", { statements: [{ sql }] })).status, 400, sql);
     }
     assert.deepEqual((await db("first", { sql: "SELECT count(*) n FROM t" })).body, { n: 2 });
     // the confinement holds inside a batch too
-    const attach = await db("batch", { statements: [{ sql: "ATTACH 'x.db' AS x" }] });
-    assert.equal(attach.status, 400);
-    assert.match(attach.body, /not authorized/);
+    const temp = await db("batch", { statements: [{ sql: "CREATE TEMP TABLE x (a)" }] });
+    assert.equal(temp.status, 400);
+    assert.match(temp.body, /not authorized/);
   } finally {
     await b.close();
     await rm(dir, { recursive: true, force: true });

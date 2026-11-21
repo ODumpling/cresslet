@@ -255,16 +255,17 @@ function createDb(SQL, bytes) {
     return true;
   };
   // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).
-  // Same as server/bindings.ts notInBatch: a batch is one transaction, so no BEGIN/COMMIT/SAVEPOINT/… or PRAGMA in it.
+  // Same as server/bindings.ts notInBatch: a batch is one transaction, so no BEGIN/COMMIT/SAVEPOINT/…, PRAGMA, ATTACH or
+  // DETACH in it (after comments and an EXPLAIN prefix).
   const notInBatch = (sql) =>
-    /^(?:begin|commit|end|rollback|savepoint|release|pragma)\b/i.test(sql.replace(/^(?:[\s;]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, ""));
+    /^(?:begin|commit|end|rollback|savepoint|release|pragma|attach|detach)\b/i.test(sql.replace(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, " ").replace(/^[\s;]+/, "").replace(/^explain\s+(?:query\s+plan\s+)?/i, ""));
   const batch = (statements) => {
     if (!Array.isArray(statements)) throw new TypeError("batch takes an array of { sql, params }");
     statements.forEach((s, i) => {
       const { sql, params } = s ?? {};
       if (typeof sql !== "string") throw new TypeError(`batch statement ${i + 1}: sql required`);
       if (params !== undefined && !Array.isArray(params)) throw new TypeError(`batch statement ${i + 1}: params must be an array`);
-      if (notInBatch(sql)) throw new TypeError(`batch statement ${i + 1}: transaction control and PRAGMA aren't allowed in a batch (it is one transaction; a PRAGMA isn't rolled back with it)`);
+      if (notInBatch(sql)) throw new TypeError(`batch statement ${i + 1}: transaction control, PRAGMA, ATTACH and DETACH aren't allowed in a batch (it is one transaction; the others aren't rolled back with it)`);
     });
     const changesBefore = one("SELECT total_changes()");
     db.exec("SAVEPOINT cresslet_batch");

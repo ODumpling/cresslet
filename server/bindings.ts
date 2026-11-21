@@ -48,13 +48,15 @@ function isVacuum(sql: string): boolean {
   return /^\s*vacuum(\s+main)?\s*;?\s*$/i.test(out);
 }
 /**
- * True if `sql` starts with transaction control or PRAGMA, after comments and empty statements (SQLite skips a leading
- * `;`). A batch refuses those: transaction control could commit or drop the batch's savepoint and leave a failing batch
- * half applied, and a PRAGMA's effect isn't rolled back with it. Same as cresslet-cli lib/bindings.js notInBatch.
+ * True if `sql` is transaction control, PRAGMA, ATTACH or DETACH, after comments, empty statements (SQLite skips a
+ * leading `;`) and an EXPLAIN prefix. A batch refuses those: transaction control could commit or drop the batch's
+ * savepoint and leave a failing batch half applied, and the others' effects aren't rolled back with it. Same as cresslet-cli lib/bindings.js notInBatch.
  */
 export function notInBatch(sql: string): boolean {
-  const rest = sql.replace(/^(?:[\s;]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
-  return /^(?:begin|commit|end|rollback|savepoint|release|pragma)\b/i.test(rest);
+  // comments out (between tokens too), leading `;`, and an EXPLAIN [QUERY PLAN] prefix (EXPLAIN PRAGMA x = 1 sets it)
+  const rest = sql.replace(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, " ").replace(/^[\s;]+/, "")
+    .replace(/^explain\s+(?:query\s+plan\s+)?/i, "");
+  return /^(?:begin|commit|end|rollback|savepoint|release|pragma|attach|detach)\b/i.test(rest);
 }
 
 export function confine(db: DatabaseSync, vacuum: () => boolean = () => false) {
@@ -374,7 +376,7 @@ export function createBindings(
             if (typeof s?.sql !== "string") return text(`batch statement ${i + 1}: sql required`, 400);
             if (s.params !== undefined && !Array.isArray(s.params)) return text(`batch statement ${i + 1}: params must be an array`, 400);
             if (notInBatch(s.sql)) {
-              return text(`batch statement ${i + 1}: transaction control and PRAGMA aren't allowed in a batch (it is one transaction; a PRAGMA isn't rolled back with it)`, 400);
+              return text(`batch statement ${i + 1}: transaction control, PRAGMA, ATTACH and DETACH aren't allowed in a batch (it is one transaction; the others aren't rolled back with it)`, 400);
             }
           }
           result = db.batch(list);
