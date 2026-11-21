@@ -146,19 +146,21 @@ export function createCresslet(c, opts) {
     };
     walk(await c.export(wd, { excludes: ["node_modules/**", "dist/**", ".cresslet/**", ".git/**"] }), "");
     log(`uploading ${files.length} files…`);
-    const res = await fetch("/v1/deploys", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        app: project?.deploy?.name ?? (cfg.name || undefined),
-        files,
-        server,
-        config: { routes: cfg.routes, crons: cfg.crons },
-        source: "studio",
-        sources,
-      }),
-    });
-    const body = await res.json();
+    const payload = {
+      app: project?.deploy?.name ?? (cfg.name || undefined),
+      files,
+      server,
+      config: { routes: cfg.routes, crons: cfg.crons },
+      source: "studio",
+      sources,
+    };
+    let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload) });
+    let body = await res.json();
+    if (res.status === 413 && body?.error === "body_too_large" && sources.length) {
+      log("warning: project source omitted (request exceeded server upload limit)");
+      res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }) });
+      body = await res.json();
+    }
     if (!res.ok) throw new Error(body.message ?? `deploy failed (${res.status})`);
     if (!cfg.name) {
       await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...cfg, name: body.app.name }, null, 2) + "\n");

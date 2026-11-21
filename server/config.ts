@@ -75,6 +75,10 @@ export interface Config {
     deployBytes: number;
     deployFiles: number;
     serverBytes: number;
+    /** Max JSON request body for deploys and page uploads (accounts for base64 + JSON overhead). */
+    deployBodyBytes: number;
+    /** Max JSON request body for all other control-plane API endpoints. */
+    jsonBodyBytes: number;
     requestMs: number;
     memoryMb: number;
     idleMs: number;
@@ -103,6 +107,13 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   const port = num("PORT", 8787);
   const dataDir = resolve(env("CRESSLET_DATA_DIR", "data"));
   const githubId = process.env.CRESSLET_GITHUB_CLIENT_ID, githubSecret = process.env.CRESSLET_GITHUB_CLIENT_SECRET;
+  const deployBytes = num("CRESSLET_MAX_DEPLOY_MB", 25) * 1024 * 1024;
+  const serverBytes = num("CRESSLET_MAX_SERVER_MB", 5) * 1024 * 1024;
+  // Base64 expands binary files by 4/3, plus server bundle and JSON envelope overhead (~40 MB at defaults).
+  const deriveDeployBodyBytes = (d: number, s: number) => Math.ceil((d * 4) / 3 + s + 2 * 1024 * 1024);
+  const deployBodyBytes = process.env.CRESSLET_MAX_DEPLOY_BODY_MB
+    ? num("CRESSLET_MAX_DEPLOY_BODY_MB", 40) * 1024 * 1024
+    : deriveDeployBodyBytes(deployBytes, serverBytes);
   const base: Config = {
     port,
     domain: env("CRESSLET_DOMAIN", "localhost"),
@@ -142,9 +153,11 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       retentionDays: num("CRESSLET_PAGE_RETENTION_DAYS", 30) || null,
     },
     limits: {
-      deployBytes: num("CRESSLET_MAX_DEPLOY_MB", 25) * 1024 * 1024,
+      deployBytes,
       deployFiles: num("CRESSLET_MAX_DEPLOY_FILES", 2000),
-      serverBytes: num("CRESSLET_MAX_SERVER_MB", 5) * 1024 * 1024,
+      serverBytes,
+      deployBodyBytes,
+      jsonBodyBytes: num("CRESSLET_MAX_JSON_BODY_KB", 1024) * 1024,
       requestMs: num("CRESSLET_REQUEST_TIMEOUT_MS", 30_000),
       memoryMb: num("CRESSLET_APP_MEMORY_MB", 256),
       idleMs: num("CRESSLET_IDLE_MS", 5 * 60_000),
@@ -181,11 +194,22 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   if (pages.retentionDays !== null && !(Number.isInteger(pages.retentionDays) && pages.retentionDays >= 1 && pages.retentionDays <= MAX_RETENTION_DAYS)) {
     throw new Error(`CRESSLET_PAGE_RETENTION_DAYS must be a whole number of days from 1 to ${MAX_RETENTION_DAYS}, or 0 (forever)`);
   }
+  const limits = { ...base.limits, ...overrides.limits };
+  if (overrides.limits?.deployBodyBytes === undefined && !process.env.CRESSLET_MAX_DEPLOY_BODY_MB &&
+      (overrides.limits?.deployBytes !== undefined || overrides.limits?.serverBytes !== undefined)) {
+    limits.deployBodyBytes = deriveDeployBodyBytes(limits.deployBytes, limits.serverBytes);
+  }
+  if (!Number.isSafeInteger(limits.deployBodyBytes) || limits.deployBodyBytes < 1) {
+    throw new Error("CRESSLET_MAX_DEPLOY_BODY_MB / limits.deployBodyBytes must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(limits.jsonBodyBytes) || limits.jsonBodyBytes < 1) {
+    throw new Error("CRESSLET_MAX_JSON_BODY_KB / limits.jsonBodyBytes must be a positive safe integer");
+  }
   return {
     ...merged,
     pages,
     sandbox: { ...base.sandbox, ...overrides.sandbox },
-    limits: { ...base.limits, ...overrides.limits },
+    limits,
   };
 }
 

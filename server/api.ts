@@ -59,11 +59,70 @@ const encodeBase64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 const SECRET_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 
 /** `remoteAddr`: the TCP peer (main.ts passes it; tests don't). */
-type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string; deploy?: unknown } };
+type Env = {
+  Bindings: { remoteAddr?: string };
+  Variables: {
+    account?: Account;
+    token?: Token;
+    bearer?: string;
+    deploy?: unknown;
+    deployBytes?: Uint8Array<ArrayBuffer>;
+    deployRead?: boolean;
+  };
+};
+
+/** Rejects immediately if `Content-Length` is a valid integer exceeding `maxBytes`. */
+async function checkContentLength(req: Request, maxBytes: number): Promise<void> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error(`invalid maxBytes: ${maxBytes}`);
+  const cl = req.headers.get("content-length")?.trim();
+  if (cl && /^\d+$/.test(cl) && Number(cl) > maxBytes) {
+    await req.body?.cancel().catch(() => {});
+    throw new HttpError(413, `request body exceeds ${maxBytes} bytes`, "body_too_large");
+  }
+}
+
+/**
+ * Reads a request body up to `maxBytes`, rejecting early on `Content-Length` and aborting the
+ * stream as soon as incoming chunks cross the cap (413 `body_too_large`). Copies chunks into a single
+ * capped growable buffer so fragmented small chunks cannot amplify heap usage.
+ */
+async function readCappedBytes(req: Request, maxBytes: number): Promise<Uint8Array<ArrayBuffer>> {
+  await checkContentLength(req, maxBytes);
+  if (!req.body) return new Uint8Array(0);
+  const reader = req.body.getReader();
+  let buf = new Uint8Array(0);
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength === 0) continue;
+      if (total + value.byteLength > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new HttpError(413, `request body exceeds ${maxBytes} bytes`, "body_too_large");
+      }
+      if (total + value.byteLength > buf.byteLength) {
+        let nextCap = buf.byteLength ? buf.byteLength * 2 : Math.min(maxBytes, Math.max(value.byteLength, 4096));
+        while (nextCap < total + value.byteLength) nextCap *= 2;
+        const next = new Uint8Array(Math.min(nextCap, maxBytes));
+        next.set(buf.subarray(0, total));
+        buf = next;
+      }
+      buf.set(value, total);
+      total += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return total === buf.byteLength ? buf : buf.subarray(0, total);
+}
 
 export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluster) {
   const app = new Hono<Env>().basePath("/v1");
   app.use("*", cors({ origin: "*", allowHeaders: ["authorization", "content-type", "x-cresslet-deploy-key"] }));
+
+  const deployBodyLimit = cfg.limits.deployBodyBytes;
+  const jsonBodyLimit = cfg.limits.jsonBodyBytes;
 
   // One app's calls run on the node that owns it (its files, sandbox, logs): forwarded unchanged,
   // before auth (the owner authorizes). Deleted sites too (admin restore/purge).
@@ -71,20 +130,73 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const res = await cluster.forward(appId, req);
     return new Response(res.body, res); // mutable headers (CORS)
   };
-  const toOwner = async (c: Context<Env>, next: Next) => {
+  /** Streams a forwarded request while enforcing `maxBytes` without buffering the body. */
+  const cappedForward = async (appId: string, req: Request, maxBytes: number) => {
+    await checkContentLength(req, maxBytes);
+    if (!req.body) return forward(appId, req);
+    let overflowed = false;
+    const upstream = req.body.getReader();
+    const release = () => {
+      try { upstream.releaseLock(); } catch { /* already released */ }
+    };
+    let total = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(ctrl) {
+        let done: boolean, value: Uint8Array | undefined;
+        try {
+          ({ done, value } = await upstream.read());
+        } catch (e) {
+          release();
+          throw e;
+        }
+        if (done) {
+          release();
+          return ctrl.close();
+        }
+        total += value!.byteLength;
+        if (total > maxBytes) {
+          overflowed = true;
+          await upstream.cancel().catch(() => {});
+          release();
+          return ctrl.error(new HttpError(413, `request body exceeds ${maxBytes} bytes`, "body_too_large"));
+        }
+        ctrl.enqueue(value!);
+      },
+      async cancel(reason) {
+        await upstream.cancel(reason).catch(() => {});
+        release();
+      },
+    });
+    const { url, method, headers, signal } = req;
+    try {
+      return await forward(appId, new Request(url, { method, headers, body: stream, signal, duplex: "half" } as RequestInit));
+    } catch (e) {
+      if (overflowed) throw new HttpError(413, `request body exceeds ${maxBytes} bytes`, "body_too_large");
+      throw e;
+    }
+  };
+  const toOwner = (maxBytes = jsonBodyLimit) => async (c: Context<Env>, next: Next) => {
     const a = c.req.method === "OPTIONS" ? undefined : store.appByName(c.req.param("name") ?? "", true);
-    if (a && !cluster.local(a.id)) return forward(a.id, c.req.raw);
+    if (a && !cluster.local(a.id)) return cappedForward(a.id, c.req.raw, maxBytes);
     await next();
   };
-  app.use("/apps/:name/*", toOwner);
-  app.use("/admin/sites/:name/*", toOwner);
-  app.use("/pages/:name", toOwner);
-  app.use("/pages/:name/*", toOwner);
+  const toOwnerJson = toOwner(jsonBodyLimit);
+  const toOwnerDeploy = toOwner(deployBodyLimit);
+  app.use("/apps/:name/*", toOwnerJson);
+  app.use("/admin/sites/:name/*", toOwnerJson);
+  app.use("/pages/:name", (c, next) => (c.req.method === "PUT" ? toOwnerDeploy : toOwnerJson)(c, next));
+  app.use("/pages/:name/*", toOwnerJson);
+
   // A deploy names its app in the body: one for an app another node owns goes there as sent (bytes,
   // auth). A single node owns them all, so it doesn't read the body before auth.
   app.use("/deploys", async (c, next) => {
     if (cluster === singleNode || c.req.method !== "POST") return next();
-    const bytes = await c.req.arrayBuffer().catch(() => undefined); // unreadable: the route answers 400
+    c.set("deployRead", true);
+    const bytes = await readCappedBytes(c.req.raw, deployBodyLimit).catch((e) => {
+      if (e instanceof HttpError) throw e;
+      return undefined; // unreadable: the route answers 400
+    });
+    c.set("deployBytes", bytes);
     let input: { app?: unknown } | null | undefined;
     try {
       if (bytes) input = JSON.parse(new TextDecoder().decode(bytes));
@@ -97,7 +209,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   /** The deploy request as sent (bytes cached by the middleware above). */
   const forwardDeploy = async (c: Context<Env>, appId: string) => {
     const { url, method, headers, signal } = c.req.raw;
-    return forward(appId, new Request(url, { method, headers, body: await c.req.arrayBuffer(), signal }));
+    return forward(appId, new Request(url, { method, headers, body: c.get("deployBytes"), signal }));
   };
 
   app.onError((err, c) => {
@@ -230,9 +342,16 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     }
   };
 
-  const body = async <T>(c: Context<Env>): Promise<T> => {
+  const body = async <T>(c: Context<Env>, maxBytes = jsonBodyLimit): Promise<T> => {
+    let bytes: Uint8Array;
     try {
-      return await c.req.json<T>();
+      bytes = await readCappedBytes(c.req.raw, maxBytes);
+    } catch (e) {
+      if (e instanceof HttpError) throw e;
+      throw new HttpError(400, "invalid JSON body", "bad_request");
+    }
+    try {
+      return JSON.parse(new TextDecoder().decode(bytes)) as T;
     } catch {
       throw new HttpError(400, "invalid JSON body", "bad_request");
     }
@@ -445,8 +564,19 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   // ---- deploys
   app.post("/deploys", async (c) => {
-    const input = (c.get("deploy") ?? await body(c)) as DeployInput & { app?: string };
     const acct = c.get("account");
+    if (!acct && !deployKey(c) && !cfg.anonDeploys) {
+      throw new HttpError(401, "login required to deploy here (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
+    }
+    let raw: unknown;
+    if (c.get("deployRead")) {
+      raw = c.get("deploy");
+      if (raw === undefined) throw new HttpError(400, "invalid JSON body", "bad_request");
+    } else {
+      raw = await body(c, deployBodyLimit);
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new HttpError(400, "invalid JSON body", "bad_request");
+    const input = raw as DeployInput & { app?: string };
     let target = input.app ? store.appByName(input.app) : undefined;
     if (target && !cluster.local(target.id)) return forwardDeploy(c, target.id); // created on another node meanwhile
     let createdKey: string | undefined;
@@ -554,7 +684,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!c.get("account")) throw new HttpError(401, "login required (cresslet login)", "unauthorized");
     const acct = accountWide(c, "admin");
     const a = getApp(c.req.param("name"));
-    const { deployKey: k } = await body<{ deployKey?: string }>(c).catch(() => ({ deployKey: undefined }));
+    const { deployKey: k } = await body<{ deployKey?: string }>(c).catch((e) => {
+      if (e instanceof HttpError && e.status === 413) throw e;
+      return { deployKey: undefined };
+    });
     const key = k ?? c.req.header("x-cresslet-deploy-key");
     if (a.account_id === acct.id) return c.json({ app: view(a) });
     if (a.account_id) throw new HttpError(409, "app already claimed", "conflict");
@@ -1013,7 +1146,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   // Upload a new page. Settings left out come from the account's defaults (GET /v1/me/settings).
   app.post("/pages", async (c) => {
     const acct = accountWide(c, "deploy");
-    const input = await body<PageInput | null>(c) ?? {};
+    const input = await body<PageInput | null>(c, deployBodyLimit) ?? {};
     const defaults = pageDefaults(acct);
     const files = pageFiles(input);
     const settings = {
@@ -1047,7 +1180,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.put("/pages/:name", async (c) => {
     const a = getPage(c.req.param("name"));
     await authorize(c, a, "deploy");
-    const input = await body<PageInput | null>(c) ?? {};
+    const input = await body<PageInput | null>(c, deployBodyLimit) ?? {};
     const files = pageFiles(input);
     const access = await authorize(c, a, "deploy"); // again: access may have changed while the body arrived
     if (!appDeploys.take(a.id)) {
@@ -1085,7 +1218,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.post("/pages/:name/view", async (c) => {
     const a = getPage(c.req.param("name"));
     await authorize(c, a, "read", { account: true });
-    const input = await body<{ path?: unknown } | null>(c).catch(() => null) ?? {};
+    const input = await body<{ path?: unknown } | null>(c).catch((e) => {
+      if (e instanceof HttpError && e.status === 413) throw e;
+      return null;
+    }) ?? {};
     const path = typeof input.path === "string" && input.path.startsWith("/") && !input.path.startsWith("//") ? input.path : "/";
     const url = new URL(path, appUrl(cfg, a.name));
     if (url.origin !== new URL(appUrl(cfg, a.name)).origin) throw new HttpError(400, "invalid path");
