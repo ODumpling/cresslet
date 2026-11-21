@@ -10,7 +10,7 @@
 # Each alert goes to the journal (journalctl -t cresslet-alert) and, with CRESSLET_ALERT_URL set, is
 # POSTed there: as plain text (ntfy), or as JSON {"<key>": "<text>"} with CRESSLET_ALERT_JSON_KEY
 # (`content` for a Discord webhook, `text` for Slack). One alert when a check starts failing, one
-# when it recovers; one the URL refuses is queued and sent after the checks of a later run.
+# when it recovers; deliveries come after the checks, and one the URL refuses goes in a later run.
 #   CRESSLET_ALERT_DISK_PCT  (80)  a filesystem holding CRESSLET_ALERT_PATHS is this full
 #   CRESSLET_ALERT_MEM_PCT   (90)  the host's memory in use (from MemAvailable), or a Cresslet
 #                                  container's of its memory limit
@@ -67,6 +67,7 @@ DISK=${CRESSLET_ALERT_DISK_PCT:-80} MEM=${CRESSLET_ALERT_MEM_PCT:-90}
 PATHS=${CRESSLET_ALERT_PATHS:-/var/lib/docker /var/backups/cresslet}
 HOST=$(hostname 2>/dev/null || uname -n)
 OUTBOX=$STATE/outbox
+T0=$(date +%s) # the unit stops a run at 50 s: Docker gets until 25 (+10), deliveries until 38 (+10)
 rc=0
 
 # post <text>: to CRESSLET_ALERT_URL (nothing to do without one).
@@ -79,7 +80,7 @@ post() {
   fi
   # The URL goes in on stdin, not argv (ps shows argv; a webhook URL is a secret).
   printf 'url = "%s"\n' "$(printf %s "$URL" | sed 's/\\/\\\\/g; s/"/\\"/g')" |
-    curl -fsS -m 20 -K - -H "content-type: $type" --data-binary "$body" -o /dev/null && return 0
+    curl -fsS -m 10 -K - -H "content-type: $type" --data-binary "$body" -o /dev/null && return 0
   echo "cresslet-alerts: couldn't send the alert to CRESSLET_ALERT_URL" >&2
   rc=1
   return 1
@@ -91,12 +92,16 @@ if [ "$MODE" = --test ]; then
 fi
 
 mkdir -p "$STATE"
-# send <text>: to the journal now, and to the URL now, or (queued, with the time) at the end of
-# this or a later check, after anything queued before it.
+# One check at a time (the timer's and one run by hand share the state and the queue).
+if command -v flock >/dev/null; then
+  exec 9> "$STATE/lock"
+  flock -n 9 || { echo "cresslet-alerts: another check is running" >&2; exit 0; }
+fi
+# send <text>: to the journal now; queued for the URL, which gets it after the checks (so a slow
+# URL can't hold them up), after anything queued before it. "<run> <time> <text>" lines.
 send() {
   logger -t cresslet-alert -- "cresslet on $HOST: $1" 2>/dev/null || echo "cresslet on $HOST: $1" >&2
-  [ ! -s "$OUTBOX" ] && post "cresslet on $HOST: $1" ||
-    printf '%s\n' "cresslet on $HOST: $1 (at $(date -u +%Y-%m-%dT%H:%M:%SZ))" >> "$OUTBOX"
+  [ -z "$URL" ] || printf '%s %s %s\n' "$T0.$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "cresslet on $HOST: $1" >> "$OUTBOX" || :
 }
 # report <check> <problem>: alert when <problem> appears (non-empty), and again when it's gone.
 report() {
@@ -115,7 +120,10 @@ failed() { systemctl is-failed --quiet "$1" 2>/dev/null; }
 unit_bad() { failed "$1" || { [ -f "$STATE/$2" ] && [ "$(systemctl is-active "$1" 2>/dev/null)" = activating ]; }; }
 # Docker calls are bounded: a hung dockerd (likely when the disk or memory runs out) mustn't stall
 # the checks. Those that don't need Docker go first.
-if command -v timeout >/dev/null; then dk() { timeout 15 docker "$@"; }; else dk() { docker "$@"; }; fi
+dk() {
+  [ $(($(date +%s) - T0)) -lt 25 ] || { echo "cresslet-alerts: out of time for docker $1" >&2; return 1; }
+  if command -v timeout >/dev/null; then timeout 10 docker "$@"; else docker "$@"; fi
+}
 # limit <check> <threshold>: 5 points lower while <check> is firing, so a value hovering at the
 # threshold doesn't alert and recover over and over.
 limit() { if [ -f "$STATE/$1" ]; then echo $(($2 - 5)); else echo "$2"; fi; }
@@ -132,6 +140,10 @@ for d in $PATHS; do
   case $seen in *" $1 "*) continue ;; esac
   seen="$seen$1 "
   [ "$2" -lt "$lim" ] || p="${p:+$p; }disk $2% full on $1"
+  # Inodes too: many small files can run out of them with room to spare (some filesystems: "-").
+  mnt=$1
+  set -- $(df -Pi "$d" 2>/dev/null | awk 'NR == 2 { sub("%", "", $5); print $5 }')
+  case ${1:-} in '' | *[!0-9]*) ;; *) [ "$1" -lt "$lim" ] || p="${p:+$p; }inodes $1% used on $mnt" ;; esac
 done
 [ -n "$p" ] || [ -z "$err" ] || [ ! -f "$STATE/disk" ] || p=$(cat "$STATE/disk")
 report disk "$p"
@@ -205,10 +217,15 @@ for f in "$STATE"/restarts-*; do
 done
 
 # Last, so slow deliveries never hold up the checks: queued alerts, oldest first, each removed once
-# sent (a run killed mid-way sends at most one twice), up to the first that fails again. Not after
-# a send that already failed this time.
-while [ "$rc" -eq 0 ] && [ -s "$OUTBOX" ]; do
+# sent (a run killed mid-way sends at most one twice), up to the first that fails, within the time.
+while [ "$rc" -eq 0 ] && [ -s "$OUTBOX" ] && [ $(($(date +%s) - T0)) -lt 38 ]; do
   IFS= read -r m < "$OUTBOX" || break
+  run=${m%% *}
+  m=${m#* }
+  at=${m%% *}
+  m=${m#* }
+  # From an earlier run: say when it happened.
+  [ "$run" = "$T0.$$" ] || m="$m (at $at)"
   post "$m" || break
   sed 1d "$OUTBOX" > "$OUTBOX.n" && mv "$OUTBOX.n" "$OUTBOX" || break # disk full: not the same line again
 done

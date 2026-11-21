@@ -2,7 +2,7 @@
 // iptables, with a real HTTP endpoint for the webhook.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,6 +35,7 @@ case $1 in
 esac`,
   df: `#!/bin/sh
 [ ! -f "$FIX/df-fails" ] || exit 1
+if [ "$1" = -Pi ]; then echo "Filesystem Inodes IUsed IFree IUse% Mounted on"; echo "/dev/sda1 100 1 99 $(cat "$FIX/dfi" 2>/dev/null || echo 1)% /"; exit 0; fi
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 printf '/dev/sda1 100 0 100 %s%% %s\\n' "$(cat "$FIX/df")" "$(cat "$FIX/mount" 2>/dev/null || echo /)"`,
   logger: `#!/bin/sh
@@ -126,6 +127,8 @@ test("disk: one alert when it crosses the threshold, none while it stays, one wh
     assert.deepEqual((await t.check()).sent.map((s) => s.replace(/^cresslet on [^:]+: /, "")), ["recovered: disk 85% full on /"]);
     assert.deepEqual((await t.check()).sent, []);
     assert.match(readFileSync(join(t.fix, "log"), "utf8"), /-t cresslet-alert -- cresslet on .+: disk 85% full/);
+    t.set("dfi", "92"); // out of inodes with room to spare
+    assert.match((await t.check()).sent[0], /: inodes 92% used on \/$/);
   } finally {
     t.done();
   }
@@ -322,6 +325,45 @@ test("delivery: JSON for Discord/Slack; alerts that couldn't be sent go at a lat
     assert.equal(c.code, 0, c.stderr);
     assert.equal(t.hits.at(-1)!.type, "text/plain");
     assert.match(t.hits.at(-1)!.body, /test alert/);
+  } finally {
+    t.done();
+  }
+});
+
+const hasFlock = spawnSync("sh", ["-c", "command -v flock"]).status === 0;
+test("one check at a time: a run by hand while the timer's runs skips", { skip: skip || (!hasFlock && "needs flock") }, async () => {
+  const t = await setup();
+  try {
+    t.set("df", "90");
+    mkdirSync(join(t.dir, "state"));
+    const holder = spawn("flock", [join(t.dir, "state", "lock"), "sleep", "3"]);
+    await new Promise((r) => setTimeout(r, 300));
+    const a = await t.check();
+    assert.equal(a.code, 0);
+    assert.match(a.stderr, /another check is running/);
+    assert.deepEqual(a.sent, []);
+    await new Promise((r) => holder.on("exit", r));
+    assert.equal((await t.check()).sent.length, 1);
+  } finally {
+    t.done();
+  }
+});
+
+test("firewall: a marker it can't remove once the rules apply doesn't fail the run (or stop Cresslet)", {
+  skip: skip || (process.getuid?.() === 0 && "root ignores the read-only dir"),
+}, async () => {
+  const t = await setup();
+  try {
+    t.set("ipt-fails", "");
+    t.set("stop-fails", "");
+    await t.run(FIREWALL, [NET]);
+    rmSync(join(t.fix, "ipt-fails"));
+    chmodSync(join(t.dir, "fw"), 0o555);
+    const fw = await t.run(FIREWALL, [NET]);
+    chmodSync(join(t.dir, "fw"), 0o755);
+    assert.equal(fw.code, 0, fw.stderr);
+    assert.match(fw.stderr, /couldn't remove/);
+    assert.doesNotMatch(fw.stderr, /stopping its containers/);
   } finally {
     t.done();
   }

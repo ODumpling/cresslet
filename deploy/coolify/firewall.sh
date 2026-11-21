@@ -146,6 +146,6 @@ M=$DIR/$NET.stopped
 if [ "$MODE" != --boot ] && [ -f "$M" ]; then
   if ! grep -q ' stopped$' "$M" ||
     docker ps --filter "network=$NET" --format '{{.ID}} {{.Label "coolify.proxy"}}' | awk '$2 != "true" { f = 1 } END { exit !f }'; then
-    rm -f "$M"
+    rm -f "$M" || echo "cresslet-firewall: couldn't remove $M" >&2 # not a reason to fail closed
   fi
 fi
