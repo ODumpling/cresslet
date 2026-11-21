@@ -77,7 +77,7 @@ deploy/coolify/firewall.sh <app uuid> --install     # <app uuid> = the compose a
 
 A network that doesn't exist yet (the first deploy, or one Coolify recreated) is covered within a minute of its creation; a connection opened in that minute stays up. Run the script once right after the first deploy. If the rules can't be applied, the script stops the containers on that network (not Coolify's proxy) rather than leave them unfirewalled; start them again once it's fixed. It handles one Cresslet network per host.
 
-Then the alerts ([Alerts](#alerts)), with the same network:
+Then the alerts ([Alerts](#alerts)), with the same network (on a host set up before them, rerun `firewall.sh <app uuid> --install` first: the installed copy doesn't leave the marker its fail-closed alert needs):
 
 ```sh
 CRESSLET_ALERT_URL=https://ntfy.sh/<secret topic> deploy/coolify/alerts.sh <app uuid> --install

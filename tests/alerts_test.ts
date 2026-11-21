@@ -330,6 +330,9 @@ test("delivery: JSON for Discord/Slack; alerts that couldn't be sent go at a lat
     const none = await t.run(ALERTS, [NET, "--test"], { CRESSLET_ALERT_URL: "" });
     assert.equal(none.code, 1);
     assert.match(none.stderr, /no CRESSLET_ALERT_URL/);
+    t.setStatus(302); // a redirect isn't a delivery
+    assert.equal((await t.run(ALERTS, [NET, "--test"])).code, 1);
+    t.setStatus(204);
     const c = await t.run(ALERTS, [NET, "--test"]);
     assert.equal(c.code, 0, c.stderr);
     assert.equal(t.hits.at(-1)!.type, "text/plain");

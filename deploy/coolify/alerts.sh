@@ -79,8 +79,10 @@ post() {
     body=$1 type=text/plain
   fi
   # The URL goes in on stdin, not argv (ps shows argv; a webhook URL is a secret).
-  printf 'url = "%s"\n' "$(printf %s "$URL" | sed 's/\\/\\\\/g; s/"/\\"/g')" |
-    curl -fsS -m 10 -K - -H "content-type: $type" --data-binary "$body" -o /dev/null && return 0
+  # Delivered only on a 2xx: a redirect isn't (curl doesn't follow it here, and -f lets it pass).
+  code=$(printf 'url = "%s"\n' "$(printf %s "$URL" | sed 's/\\/\\\\/g; s/"/\\"/g')" |
+    curl -sS -m 10 -K - -H "content-type: $type" --data-binary "$body" -o /dev/null -w '%{http_code}') || code=""
+  case $code in 2??) return 0 ;; esac
   echo "cresslet-alerts: couldn't send the alert to CRESSLET_ALERT_URL" >&2
   rc=1
   return 1
@@ -109,8 +111,9 @@ send() {
 report() {
   f=$STATE/$1
   if [ -n "$2" ]; then
-    # A full disk can refuse the write: the alert went, the rest of the checks still run.
-    [ -f "$f" ] || { send "$2"; printf '%s\n' "$2" > "$f" || :; }
+    # A full disk can refuse the write: the alert went, the rest of the checks still run, and no
+    # empty file is left (it would hold back the next alerts): the next check tries again.
+    [ -f "$f" ] || { send "$2"; printf '%s\n' "$2" > "$f" || rm -f "$f"; }
   elif [ -f "$f" ]; then
     send "recovered: $(cat "$f")"
     rm -f "$f"
