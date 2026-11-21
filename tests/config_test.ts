@@ -38,3 +38,17 @@ test("CRESSLET_OUTER_GVISOR: only the literal true turns it on", () => {
     else process.env.CRESSLET_OUTER_GVISOR = prev;
   }
 });
+
+test("CRESSLET_CUSTOM_DOMAINS: on unless set to something other than true", () => {
+  const prev = process.env.CRESSLET_CUSTOM_DOMAINS;
+  try {
+    for (const [v, want] of [[undefined, true], ["true", true], ["false", false], ["0", false]] as const) {
+      if (v === undefined) delete process.env.CRESSLET_CUSTOM_DOMAINS;
+      else process.env.CRESSLET_CUSTOM_DOMAINS = v;
+      assert.equal(loadConfig().customDomains, want, String(v));
+    }
+  } finally {
+    if (prev === undefined) delete process.env.CRESSLET_CUSTOM_DOMAINS;
+    else process.env.CRESSLET_CUSTOM_DOMAINS = prev;
+  }
+});

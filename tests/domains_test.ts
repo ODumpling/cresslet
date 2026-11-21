@@ -41,6 +41,8 @@ test("custom domains: DNS-verified, first verifier wins, routed, TLS ask endpoin
       (await json("/v1/deploys", { method: "POST", headers: auth, body: JSON.stringify({ files: [{ path: "index.html", data: html }] }) })).body.app;
     const a = await deploy(alice, "alice"), m = await deploy(mallory, "mallory");
 
+    assert.equal((await json("/v1")).body.customDomains, true);
+
     // Validation.
     assert.equal((await json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: "null" })).status, 400);
     assert.equal((await json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: JSON.stringify({ domain: "a".repeat(60) + "." + "b".repeat(60) + "." + "c".repeat(60) + "." + "d".repeat(60) + ".com" }) })).status, 400);
@@ -124,6 +126,61 @@ test("TLS ask endpoint: a preview host outside the wildcard needs its own certif
     assert.equal((await check("preview.test.local")).status, 404);
   } finally {
     srv.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("CRESSLET_CUSTOM_DOMAINS=false: adding and verifying refused, reported in GET /v1, earlier domains keep routing", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "cresslet-dom-"));
+  const start = (customDomains: boolean) => {
+    const srv = createServer(loadConfig({
+      dataDir,
+      domain: "test.local",
+      publicPort: 80,
+      adminToken: "adm",
+      customDomains,
+      resolveTxt: async (name) => (name === "_cresslet.old.example.com" ? [[token]] : []),
+    }));
+    const json = async (path: string, init: RequestInit & { host?: string } = {}) => {
+      const headers = new Headers(init.headers);
+      headers.set("host", init.host ?? "test.local");
+      if (init.body) headers.set("content-type", "application/json");
+      const r = await srv.handler(new Request(`http://${init.host ?? "test.local"}${path}`, { ...init, headers }));
+      return { status: r.status, text: await r.text() };
+    };
+    return { srv, json };
+  };
+  let token = "";
+  let on = start(true);
+  try {
+    // While on: a domain gets added and verified.
+    const alice = { authorization: `Bearer ${JSON.parse((await on.json("/v1/accounts", { method: "POST", headers: { authorization: "Bearer adm" }, body: '{"email":"a@b.co"}' })).text).token}` };
+    const a = JSON.parse((await on.json("/v1/deploys", { method: "POST", headers: alice, body: JSON.stringify({ files: [{ path: "index.html", data: "alice" }] }) })).text).app;
+    const added = JSON.parse((await on.json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: '{"domain":"old.example.com"}' })).text);
+    token = added.domain.dns.find((r: { type: string }) => r.type === "TXT").value;
+    assert.equal((await on.json(`/v1/apps/${a.name}/domains/old.example.com/verify`, { method: "POST", headers: alice })).status, 200);
+    assert.equal((await on.json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: '{"domain":"pending.example.com"}' })).status, 201);
+    on.srv.close();
+
+    // Turned off: the server says so, and refuses new domains and verification with a clear error.
+    on = start(false);
+    assert.equal(JSON.parse((await on.json("/v1")).text).customDomains, false);
+    for (const [path, body] of [[`/v1/apps/${a.name}/domains`, '{"domain":"new.example.com"}'], [`/v1/apps/${a.name}/domains/pending.example.com/verify`, undefined]] as const) {
+      const r = await on.json(path, { method: "POST", headers: alice, body });
+      assert.equal(r.status, 403, path);
+      const err = JSON.parse(r.text);
+      assert.equal(err.error, "custom_domains_disabled", r.text);
+      assert.match(r.text, new RegExp(`custom domains are turned off on this server: use http://${a.name}\\.test\\.local`));
+    }
+    // Access is checked first: others get the usual refusal, not the setting.
+    assert.doesNotMatch((await on.json(`/v1/apps/${a.name}/domains`, { method: "POST", body: '{"domain":"new.example.com"}' })).text, /custom_domains_disabled/);
+    // Listing and removing still work, and the domain verified earlier still routes.
+    const listed = JSON.parse((await on.json(`/v1/apps/${a.name}/domains`, { headers: alice })).text).domains.map((d: { domain: string; verified: boolean }) => [d.domain, d.verified]);
+    assert.deepEqual(listed, [["old.example.com", true], ["pending.example.com", false]]);
+    assert.equal((await on.json("/", { host: "old.example.com" })).text, "alice");
+    assert.equal((await on.json(`/v1/apps/${a.name}/domains/pending.example.com`, { method: "DELETE", headers: alice })).status, 200);
+  } finally {
+    on.srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });

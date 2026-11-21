@@ -248,6 +248,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       previewOrigin: previewOrigin(cfg),
       openSignup: cfg.openSignup,
       anonDeploys: cfg.anonDeploys,
+      customDomains: cfg.customDomains,
       auth: { github: !!cfg.github, cli: !!cfg.github }, // cli: browser login via the studio, which logs in with GitHub
       limits: cfg.limits,
       docs: "https://github.com/ODumpling/cresslet/blob/main/docs/api.md",
@@ -847,6 +848,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!a.account_id) throw new HttpError(403, "custom domains require a claimed app (cresslet claim)", "unclaimed");
     return a;
   };
+  /** Adding and verifying need the server to route and certify the hostname (`CRESSLET_CUSTOM_DOMAINS`). */
+  const domainsEnabled = (a: App) => {
+    if (!cfg.customDomains) {
+      throw new HttpError(403, `custom domains are turned off on this server: use ${appUrl(cfg, a.name)}`, "custom_domains_disabled");
+    }
+  };
 
   app.get("/apps/:name/domains", async (c) => {
     const a = await claimed(c, "read");
@@ -855,6 +862,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   app.post("/apps/:name/domains", async (c) => {
     const a = await claimed(c, "admin");
+    domainsEnabled(a);
     const raw = (await body<{ domain?: unknown } | null>(c))?.domain;
     await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     const domain = typeof raw === "string" ? normDomain(raw) : "";
@@ -870,6 +878,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   app.post("/apps/:name/domains/:domain/verify", async (c) => {
     const a = await claimed(c, "admin");
+    domainsEnabled(a);
     const d = store.domains(a.id).find((x) => x.domain === normDomain(c.req.param("domain")));
     if (!d) throw new HttpError(404, "domain not found", "not_found");
     if (!d.verified_at) {
