@@ -14,6 +14,7 @@ import { finished, Readable } from "node:stream";
 import { Client } from "undici";
 import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
+import { Metrics } from "./metrics.ts";
 import { serveBindings } from "./bindings.ts";
 import { createEgressProxy } from "./egress.ts";
 import { adoptListener, instanceId, jail, prepareHost, sweep } from "./sandbox.ts";
@@ -130,6 +131,8 @@ const probe = (path: string) =>
 export class Runtime {
   procs = new Map<string, Proc>();
   logs: Logs;
+  /** Requests per app over the last 24h (host.ts records them). */
+  metrics = new Metrics();
   #cfg: Config;
   #starting = new Map<string, { spec: AppSpec; p: Promise<Proc> }>();
   #timer: ReturnType<typeof setInterval>;

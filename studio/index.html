@@ -599,6 +599,19 @@
           <section id="admin-body" aria-labelledby="admin-title"><p class="muted">Loading…</p></section>
         </main>
 
+        <!-- #/apps/<name>[/database|secrets|logs]: one deployed app's dashboard (anyone with access; viewers read only) -->
+        <main id="site" class="page wide" hidden aria-labelledby="site-title">
+          <header class="page-head">
+            <div>
+              <h1 id="site-title" tabindex="-1">App</h1>
+              <p class="muted" id="site-sub"></p>
+            </div>
+            <div class="row start" id="site-actions"></div>
+          </header>
+          <nav class="site-tabs" id="site-tabs" aria-label="App sections"></nav>
+          <section id="site-body" aria-labelledby="site-title"><p class="muted">Loading…</p></section>
+        </main>
+
         <main id="workspace" class="workspace" hidden aria-labelledby="workspace-title">
           <h1 class="sr-only" id="workspace-title" tabindex="-1">Project</h1>
           <!-- AI builder: Claude, through this server with the account's AI credits, or called from this browser with
