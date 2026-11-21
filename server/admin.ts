@@ -1,14 +1,12 @@
 // Site admin API (/v1/admin): every site on the server, its disk and database usage, delete/restore/purge.
 // Allowed for accounts with the SiteAdmin role (or listed in CRESSLET_SITE_ADMINS) and the operator's admin token.
 import type { Context, Hono } from "hono";
-import { DatabaseSync } from "node:sqlite";
-import { existsSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { appUrl, type Config, paths } from "./config.ts";
 import { type Account, type App, SITE_ADMIN, type Store, type Token } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
-import { confine } from "./bindings.ts";
+import { inspect } from "./inspect.ts";
 import { HttpError, removeAppFiles } from "./deploys.ts";
 
 type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
@@ -57,24 +55,6 @@ export async function usage(cfg: Config, appId: string) {
   ]);
   const database = db + wal + shm;
   return { deploys, database, files, total: deploys + database + files };
-}
-
-/** Tables and row counts of an app's database (read-only). */
-function dbTables(cfg: Config, appId: string): { name: string; rows: number }[] {
-  const p = paths(cfg, appId).db;
-  if (!existsSync(p)) return [];
-  const db = confine(new DatabaseSync(p, { readOnly: true }));
-  try {
-    const names = (db.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-    ).all() as { name: string }[]).map((t) => t.name);
-    return names.map((name) => ({
-      name,
-      rows: Number((db.prepare(`SELECT count(*) n FROM "${name.replace(/"/g, '""')}"`).get() as { n: number }).n),
-    }));
-  } finally {
-    db.close();
-  }
 }
 
 export function adminRoutes(
@@ -170,7 +150,7 @@ export function adminRoutes(
     if (access === "owner" || access === "admin") {
       database = { tables: [], error: null };
       try {
-        database.tables = dbTables(cfg, a.id);
+        database.tables = await inspect<{ name: string; rows: number }[]>(a.id, paths(cfg, a.id).db, { kind: "counts" }) ?? [];
       } catch (e) {
         database.error = (e as Error).message;
       }

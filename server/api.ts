@@ -2,7 +2,6 @@
 import { type Context, Hono, type Next } from "hono";
 import { cors } from "hono/cors";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import { DatabaseSync } from "node:sqlite";
 import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -38,7 +37,7 @@ import type { Runtime } from "./runtime.ts";
 import { type Cluster, singleNode } from "./cluster.ts";
 import { github } from "./github.ts";
 import { cliLogin } from "./cli-login.ts";
-import { confine } from "./bindings.ts";
+import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
 import { adminRoutes, isSiteAdmin, purgeApp } from "./admin.ts";
 import { RateLimit } from "./limits.ts";
@@ -1232,51 +1231,26 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.json({ url: url.href, expiresIn: a.visibility === "private" ? PAGE_TICKET_MS / 1000 : null });
   });
 
-  // ---- database inspection (read-only)
-  function openAppDb(a: App) {
-    const p = paths(cfg, a.id).db;
-    if (!existsSync(p)) return null;
-    return confine(new DatabaseSync(p, { readOnly: true }));
-  }
-
+  // ---- database inspection (read-only, in a child process with a deadline: see inspect.ts)
   app.post("/apps/:name/db/query", async (c) => {
     const a = getApp(c.req.param("name"));
     await authorize(c, a, "read");
     const { sql, params = [] } = await body<{ sql?: string; params?: unknown[] }>(c);
     if (!sql) throw new HttpError(400, "sql required");
-    const db = openAppDb(a);
-    if (!db) return c.json({ rows: [] });
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rows = db.prepare(sql).all(...(params as any[]));
-      return c.json({ rows: jsonSafe(rows) });
-    } catch (e) {
-      throw new HttpError(400, (e as Error).message, "sql_error");
-    } finally {
-      db.close();
-    }
+    if (typeof sql !== "string" || !Array.isArray(params)) throw new HttpError(400, "sql must be a string, params an array");
+    const r = await inspect<{ rows: unknown[]; truncated: boolean }>(a.id, paths(cfg, a.id).db, {
+      kind: "query", sql, params, maxRows: INSPECT_LIMITS.maxRows,
+    });
+    return c.json(r ? { rows: r.rows, ...(r.truncated ? { truncated: true } : {}) } : { rows: [] });
   });
 
   app.get("/apps/:name/db", async (c) => {
     const a = getApp(c.req.param("name"));
     await authorize(c, a, "read");
-    const db = openAppDb(a);
-    if (!db) return c.json({ tables: {} });
-    try {
-      const tables = db.prepare(
-        "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-      ).all() as { name: string; sql: string }[];
-      const out: Record<string, unknown> = {};
-      const limit = Math.min(Number(c.req.query("limit") ?? 100), 1000);
-      for (const t of tables) {
-        const count = db.prepare(`SELECT count(*) n FROM "${t.name.replace(/"/g, '""')}"`).get() as { n: number };
-        const rows = db.prepare(`SELECT * FROM "${t.name.replace(/"/g, '""')}" LIMIT ?`).all(limit);
-        out[t.name] = { schema: t.sql, count: count.n, rows: jsonSafe(rows) };
-      }
-      return c.json({ tables: out });
-    } finally {
-      db.close();
-    }
+    const n = Math.trunc(Number(c.req.query("limit") ?? 100));
+    const limit = Number.isFinite(n) ? Math.min(Math.max(n, 0), 1000) : 100;
+    const tables = await inspect<Record<string, unknown>>(a.id, paths(cfg, a.id).db, { kind: "tables", limit });
+    return c.json({ tables: tables ?? {} });
   });
 
   adminRoutes(app, { cfg, store, runtime, isAdminToken: isAdmin, body });
@@ -1291,9 +1265,4 @@ export const normDomain = (d: string) => d.trim().toLowerCase().replace(/\.$/, "
 const DOMAIN_RE = /^(?=.{1,243}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 function validDomain(d: string) {
   return DOMAIN_RE.test(d);
-}
-
-function jsonSafe(v: unknown): unknown {
-  return JSON.parse(JSON.stringify(v, (_k, x) =>
-    typeof x === "bigint" ? Number(x) : x instanceof Uint8Array ? { $bytes: encodeBase64(x) } : x));
 }

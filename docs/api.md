@@ -67,8 +67,8 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/apps/:name/domains/:domain/verify` | checks the TXT record; first app to verify a domain gets it (409 after). 403 `custom_domains_disabled` when off |
 | DELETE | `/v1/apps/:name/domains/:domain` | |
 | GET | `/v1/domains/check?domain=` | 200 if it's a verified custom domain, else 404. For on-demand TLS (the root and app subdomains use the wildcard cert) |
-| GET | `/v1/apps/:name/db?limit=100` | tables → `{schema, count, rows}` |
-| POST | `/v1/apps/:name/db/query` | `{sql, params?}` read-only → `{rows}` |
+| GET | `/v1/apps/:name/db?limit=100` | tables → `{schema, count, rows, truncated?}` (limit ≤ 1000 rows per table) |
+| POST | `/v1/apps/:name/db/query` | `{sql, params?}` read-only → `{rows, truncated?}`: at most 1000 rows and 4 MiB per reply; stopped after 5 s (`504 query_timeout`); `429 busy` past 2 running per app, 4 in all |
 | GET | `/v1/me/settings` | `{pages: {visibility, retentionDays}, defaults: {pages}}`: the account's defaults for new [pages](#pages) (falling back to the server's), and the server's |
 | PUT | `/v1/me/settings` | full-access token: `{pages: {visibility?, retentionDays?}}` (keys left out keep their value) or `{pages: null}` (back to the server's) |
 | GET | `/v1/pages` | pages the account owns or collaborates on (each with `access`; expired ones left out) → `{pages, defaults}` |
