@@ -176,6 +176,7 @@ test("AI credits: proxied with the operator's key, charged from the monthly allo
     assert.equal((await grant(tok, { email: "a@b.co", credits: 10 })).status, 403);
     assert.equal((await grant("adm", { email: "nobody@b.co", credits: 10 })).status, 404);
     assert.equal((await grant("adm", { email: "a@b.co", credits: 0 })).status, 400);
+    assert.equal((await grant("adm", { email: "a@b.co", credits: 0.0004 })).status, 400, "rounds to 0 millicredits");
     const g = await grant("adm", { email: "a@b.co", credits: 10, note: "beta tester" });
     assert.equal(g.status, 200);
     assert.equal(g.body.balance, 9.06);

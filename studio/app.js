@@ -546,6 +546,7 @@ async function renderAdmin(name, { credits = false } = {}) {
     else await renderAdminSites();
   } catch (e) {
     if (!current()) return false;
+    if (credits) $("admin-title").replaceChildren("AI credits");
     $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 403 ? "Only site admins can see this page." : `Could not load: ${e.message}` }));
     if (e.status !== 403) {
       const retry = el("button", { className: "btn", type: "button", onclick: () => renderAdmin(name, { credits }).then((ok) => ok && refocus(name ? null : $("admin-actions").querySelector("button"))) }, icon("refresh"), "Retry");
@@ -722,7 +723,11 @@ function grantForm({ email = null, emails = [], after }) {
     const credits = Math.round(Number(amount.value) * 1000) / 1000; // the server keeps millicredits
     err.hidden = true;
     if (!who) return void to.focus();
-    if (grantBusy) return; // a grant from before a Refresh is still being sent
+    if (grantBusy) { // a grant from before a Refresh is still being sent
+      err.textContent = "A grant is still being sent. Try again in a moment.";
+      err.hidden = false;
+      return;
+    }
     if (!Number.isFinite(credits) || credits === 0) {
       err.textContent = "Enter a number of credits other than 0 (at most 3 decimal places).";
       err.hidden = false;
@@ -737,7 +742,9 @@ function grantForm({ email = null, emails = [], after }) {
       if (gen === routeGen) after();
     } catch (x) {
       if (gen !== routeGen) return;
-      err.textContent = x.status === 404 ? `No account with the email ${who}.` : `Could not give credits: ${x.message}`;
+      const msg = x.status === 404 ? `No account with the email ${who}.` : `Could not give credits: ${x.message}`;
+      if (!form.isConnected) return void toast(msg); // a Refresh replaced this form meanwhile
+      err.textContent = msg;
       err.hidden = false;
       submit.disabled = false;
       (x.status === 404 && !email ? to : amount).focus();
@@ -787,7 +794,7 @@ const ledgerTable = (rows, { account = false } = {}) =>
         return el("tr", {},
           el("td", {}, timeAgo(h.at)),
           account ? el("td", {}, el("a", { href: `#/admin-credits/${encodeURIComponent(h.account.id)}`, textContent: h.account.email })) : null,
-          el("td", {}, el("span", { textContent: what }), el("span", { className: "sub", textContent: sub, title: sub })),
+          el("td", { className: "wrap" }, el("span", { textContent: what }), el("span", { className: "sub", textContent: sub })),
           el("td", { className: `num credit-delta${h.credits > 0 ? " plus" : ""}`, textContent: signed(h.credits) }));
       }) : [el("tr", {}, el("td", { colSpan: account ? 4 : 3, className: "empty", textContent: "No credit activity yet." }))]))));
 

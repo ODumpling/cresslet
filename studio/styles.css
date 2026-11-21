@@ -531,6 +531,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .section-title.flush { margin: 0; }
 .toolbar-title { font-size: 14px; margin-right: 8px; }
 .credit-delta.plus { color: var(--success); }
+.table td.wrap { white-space: normal; min-width: 14rem; }
+.table td.wrap .sub { max-width: 36rem; overflow: visible; overflow-wrap: anywhere; }
 .day-table { margin-top: 12px; font-size: 13px; }
 .day-table summary { cursor: pointer; color: var(--text-2); }
 .day-table .table { margin-top: 8px; }

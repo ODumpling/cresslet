@@ -65,7 +65,7 @@ try {
   if ((await page.getByLabel("Account email").inputValue()) !== user) fail("Give didn't fill the email");
   if (!(await page.getByLabel("Credits", { exact: true }).evaluate((e) => e === document.activeElement))) fail("credits field not focused");
   await page.getByLabel("Credits", { exact: true }).fill("50");
-  await page.getByLabel("Note (optional)").fill("e2e top-up");
+  await page.getByLabel("Note (optional)").fill("e2e top-up for the launch week beta testers who ran out of credits early in the month");
   await page.getByRole("button", { name: "Give credits", exact: true }).click();
   await page.locator("#toast", { hasText: `Gave 50 credits to ${user}. Granted balance: 46.96.` }).waitFor();
   await row.locator("td", { hasText: "46.96" }).first().waitFor();
