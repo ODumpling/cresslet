@@ -38,7 +38,7 @@ export default {
 
 async function setup(overrides: Partial<Config> = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-test-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, limits: { requestMs: 1500 } as never, ...overrides }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, limits: { requestMs: 1500 } as never, ...overrides }));
   const call = (path: string, init: RequestInit & { host?: string } = {}) => {
     const headers = new Headers(init.headers);
     headers.set("host", init.host ?? "test.local");
@@ -59,7 +59,7 @@ async function setup(overrides: Partial<Config> = {}) {
     call,
     json,
     async dispose() {
-      srv.close();
+      await srv.close();
       await rm(dataDir, { recursive: true, force: true });
     },
   };

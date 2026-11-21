@@ -171,28 +171,28 @@ test("egress proxy without an allowlist (gVisor): tunnels CONNECT to public host
 test("secrets: encrypted at rest, plaintext rows migrated, env key takes over from file key", async () => {
   const dir = await tmp();
   try {
-    let store = new Store(dir);
+    let store = await Store.open(dir);
     const { app } = await store.createApp("a", null, null);
-    store.setSecret(app.id, "TOKEN", "hunter2");
+    await store.setSecret(app.id, "TOKEN", "hunter2");
     // Simulate a database from before encryption: plaintext TEXT rows (one written by an older
     // version after a rollback that happens to look sealed), and a secret deleted back then.
-    store.db.exec("PRAGMA user_version = 0");
-    const legacy = store.db.prepare("INSERT INTO secrets (app_id, key, value) VALUES (?, ?, ?)");
-    legacy.run(app.id, "OLD", "plain");
-    legacy.run(app.id, "LOOKS_SEALED", "v1:not:sealed");
-    legacy.run(app.id, "GONE", "deleted-long-ago");
-    store.deleteSecret(app.id, "GONE");
-    store.db.close();
+    await store.db.exec("PRAGMA user_version = 0");
+    const legacy = (key: string, value: string) => store.db.run("INSERT INTO secrets (app_id, key, value) VALUES (?, ?, ?)", app.id, key, value);
+    await legacy("OLD", "plain");
+    await legacy("LOOKS_SEALED", "v1:not:sealed");
+    await legacy("GONE", "deleted-long-ago");
+    await store.deleteSecret(app.id, "GONE");
+    await store.close();
 
-    store = new Store(dir);
+    store = await Store.open(dir);
     const all = { LOOKS_SEALED: "v1:not:sealed", OLD: "plain", TOKEN: "hunter2" };
-    assert.deepEqual(store.secrets(app.id), all);
+    assert.deepEqual(await store.secrets(app.id), all);
     // While the server runs, old plaintext is gone from the files too (free pages, WAL).
     for (const f of ["cresslet.db", "cresslet.db-wal"]) {
       const bytes = await readFile(join(dir, f)).catch(() => Buffer.alloc(0));
       for (const p of ["plain", "deleted-long-ago", "not:sealed"]) assert.ok(!bytes.includes(p), `${f} still contains ${p}`);
     }
-    store.db.close();
+    await store.close();
     const raw = () =>
       new DatabaseSync(join(dir, "cresslet.db")).prepare("SELECT key, value, typeof(value) t FROM secrets ORDER BY key").all() as {
         value: Uint8Array;
@@ -207,20 +207,20 @@ test("secrets: encrypted at rest, plaintext rows migrated, env key takes over fr
     const before = raw().map((r) => Buffer.from(r.value).toString());
     process.env.CRESSLET_SECRETS_KEY = "operator-key";
     try {
-      new Store(dir).db.close();
+      await (await Store.open(dir)).close();
       assert.notDeepEqual(raw().map((r) => Buffer.from(r.value).toString()), before);
       await rm(join(dir, "secrets.key"));
-      store = new Store(dir);
-      assert.deepEqual(store.secrets(app.id), all);
+      store = await Store.open(dir);
+      assert.deepEqual(await store.secrets(app.id), all);
       assert.ok(!existsSync(join(dir, "secrets.key")));
-      store.db.close();
+      await store.close();
     } finally {
       delete process.env.CRESSLET_SECRETS_KEY;
     }
     // Wrong key fails loudly instead of returning garbage.
     process.env.CRESSLET_SECRETS_KEY = "wrong";
     try {
-      assert.throws(() => new Store(dir), /cannot decrypt/);
+      await assert.rejects(Store.open(dir), /cannot decrypt/);
     } finally {
       delete process.env.CRESSLET_SECRETS_KEY;
     }
@@ -234,7 +234,7 @@ test("claimed app: egress allowlist enforced at the network level; secrets never
   // Left behind by older versions (run dir with plaintext secrets): swept at startup.
   await mkdir(join(dataDir, "apps", "app_old", "run"), { recursive: true });
   await writeFile(join(dataDir, "apps", "app_old", "run", "secrets.json"), '{"OLD":"plaintext"}');
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }));
   const call = (path: string, init: RequestInit & { host?: string } = {}) => {
     const headers = new Headers(init.headers);
     headers.set("host", init.host ?? "test.local");
@@ -299,14 +299,14 @@ test("claimed app: egress allowlist enforced at the network level; secrets never
     await json(`/v1/apps/${app.name}/egress`, { method: "PUT", headers: auth, body: '{"allow":null}' });
     assert.equal((await json("/api/x", { host })).body.other, "200");
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
 
 test("concurrent requests to an app that crashes on start share one failed start", async () => {
   const dataDir = await tmp();
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
   try {
     const req = (path: string, host = "test.local", init: RequestInit = {}) =>
       srv.handler(new Request(`http://${host}${path}`, { ...init, headers: { host, "content-type": "application/json" } }));
@@ -322,14 +322,14 @@ test("concurrent requests to an app that crashes on start share one failed start
     await Promise.all(Array.from({ length: 5 }, () => req("/api/x", host).then((r) => r.text())));
     assert.equal(starts() - one, 1, `expected one more start, got ${starts() - one}`);
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
 
 test("unclaimed apps can't set an egress allowlist", async () => {
   const dataDir = await tmp();
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
   try {
     const req = (path: string, init: RequestInit = {}) =>
       srv.handler(new Request(`http://test.local${path}`, { ...init, headers: { host: "test.local", "content-type": "application/json", ...init.headers } }));
@@ -341,14 +341,14 @@ test("unclaimed apps can't set an egress allowlist", async () => {
     });
     assert.equal(r.status, 403);
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
 
 test("app SQL can't reach other databases (ATTACH / VACUUM INTO)", async () => {
   const dataDir = await tmp();
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
   const SQL = `export default { async fetch(req, env) {
     const sql = new URL(req.url).searchParams.get("sql");
     try { return Response.json(await env.db.query(sql)); } catch (e) { return new Response(e.message, { status: 400 }); }
@@ -385,7 +385,7 @@ test("app SQL can't reach other databases (ATTACH / VACUUM INTO)", async () => {
     });
     assert.equal(q.status, 400);
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });

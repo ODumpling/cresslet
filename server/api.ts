@@ -32,6 +32,7 @@ import {
   SITE_ADMIN,
   type Store,
   type Token,
+  inviteLock,
 } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
 import { type Cluster, singleNode } from "./cluster.ts";
@@ -44,6 +45,7 @@ import { aiRoutes } from "./credits.ts";
 import { ipKey, RateLimit } from "./limits.ts";
 import {
   beingRemoved,
+  deploysLock,
   type DeployFile,
   type DeployInput,
   HttpError,
@@ -178,7 +180,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     }
   };
   const toOwner = (maxBytes = jsonBodyLimit) => async (c: Context<Env>, next: Next) => {
-    const a = c.req.method === "OPTIONS" ? undefined : store.appByName(c.req.param("name") ?? "", true);
+    const a = c.req.method === "OPTIONS" ? undefined : await store.appByName(c.req.param("name") ?? "", true);
     if (a && !cluster.local(a.id)) return cappedForward(a.id, c.req.raw, maxBytes);
     await next();
   };
@@ -204,7 +206,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       if (bytes) input = JSON.parse(new TextDecoder().decode(bytes));
     } catch { /* the route answers 400 */ }
     c.set("deploy", input);
-    const a = typeof input?.app === "string" ? store.appByName(input.app) : undefined;
+    const a = typeof input?.app === "string" ? await store.appByName(input.app) : undefined;
     // Create-only (`create: true`) for a name that exists: the route answers 409 here, whoever owns the app.
     if (!a || cluster.local(a.id) || input?.create === true) return next();
     return forwardDeploy(c, a.id);
@@ -272,7 +274,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   ): Promise<AppAccess | undefined> {
     const acct = c.get("account"), t = c.get("token");
     let scopeError: string | undefined;
-    const access = acct && t ? store.access(a, acct.id) : undefined;
+    const access = acct && t ? await store.access(a, acct.id) : undefined;
     if (access) {
       const apps = tokenApps(t!);
       if (apps && !apps.includes(a.id)) scopeError = `this token is not scoped to app ${a.name}`;
@@ -287,8 +289,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     throw new HttpError(a.account_id || key || acct ? 403 : 401, scopeError ?? `not authorized for app ${a.name}`, "forbidden");
   }
 
-  function getApp(name: string): App {
-    const a = store.appByName(name);
+  async function getApp(name: string): Promise<App> {
+    const a = await store.appByName(name);
     if (!a) throw new HttpError(404, `app not found: ${name}`, "not_found");
     return a;
   }
@@ -304,14 +306,14 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     role: isSiteAdmin(cfg, a) ? SITE_ADMIN : null,
   });
   const iso = (ms: number | null) => ms ? new Date(ms).toISOString() : null;
-  const tokenView = (t: Token, current?: Token) => {
+  const tokenView = async (t: Token, current?: Token) => {
     const ids = tokenApps(t);
     return {
       id: t.id,
       name: t.name,
       role: t.role,
       // Names of the apps it's limited to (deleted apps drop out), or null = every app.
-      apps: ids ? ids.map((x) => store.appById(x)?.name).filter((n): n is string => !!n) : null,
+      apps: ids ? (await Promise.all(ids.map((x) => store.appById(x)))).map((x) => x?.name).filter((n): n is string => !!n) : null,
       createdAt: iso(t.created_at),
       lastUsedAt: iso(t.last_used_at),
       ...(current ? { current: t.id === current.id } : {}),
@@ -340,16 +342,16 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   const clientIp = (c: Context<Env>) =>
     (cfg.clientIpHeader && c.req.header(cfg.clientIpHeader)?.split(",")[0].trim()) || c.env?.remoteAddr || "unknown";
   /** New apps and pages per account per hour: deleting doesn't give the allowance back, so create/delete loops stop. */
-  const takeCreate = (acct: Account) => {
+  const takeCreate = async (acct: Account) => {
     if (isSiteAdmin(cfg, acct)) return;
-    if (!accountCreates.take(acct.id)) {
+    if (!await accountCreates.take(acct.id)) {
       throw new HttpError(429, `too many new apps and pages (${cfg.limits.createsPerHour} per hour): try later`, "rate_limited");
     }
   };
   /** A new app (or a claimed one) for `acct` must fit its app quota. */
-  const checkAppQuota = (acct: Account) => {
+  const checkAppQuota = async (acct: Account) => {
     if (isSiteAdmin(cfg, acct)) return;
-    if (store.appsByAccount(acct.id).length >= cfg.limits.maxAppsPerAccount) {
+    if ((await store.appsByAccount(acct.id)).length >= cfg.limits.maxAppsPerAccount) {
       throw new HttpError(403, `app limit reached (${cfg.limits.maxAppsPerAccount} per account): delete one first`, "quota");
     }
   };
@@ -393,30 +395,30 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!isAdmin(c.get("bearer"))) throw new HttpError(403, "log in with GitHub", "forbidden");
     const { email } = await body<{ email?: string }>(c);
     if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
-    const account = store.accountByEmail(email) ?? store.createAccount(email);
+    const account = await store.accountByEmail(email) ?? await store.createAccount(email);
     const { token } = await store.issueToken(account.id, { name: "Operator-issued" });
     return c.json({ account: accountView(account), token }, 201);
   });
 
   // Any valid token, whatever its scope (the CLI's `login --token` checks a token with this).
-  app.get("/me", (c) => {
+  app.get("/me", async (c) => {
     const a = c.get("account"), t = c.get("token");
     if (!a || !t) throw new HttpError(401, "login required", "unauthorized");
-    return c.json({ account: accountView(a), tokenInfo: tokenView(t) });
+    return c.json({ account: accountView(a), tokenInfo: await tokenView(t) });
   });
 
   // Revoke every token for this account (studio, CLI, CI) and issue a fresh full-access one.
   app.post("/me/token", async (c) => {
     const a = accountWide(c, "admin");
-    store.revokeTokens(a.id);
+    await store.revokeTokens(a.id);
     const { token } = await store.issueToken(a.id, { name: c.get("token")!.name });
     return c.json({ account: accountView(a), token });
   });
 
   // ---- named / scoped tokens (managed with a full-access token)
-  app.get("/me/tokens", (c) => {
+  app.get("/me/tokens", async (c) => {
     const a = accountWide(c, "admin");
-    return c.json({ tokens: store.tokens(a.id).map((t) => tokenView(t, c.get("token"))) });
+    return c.json({ tokens: await Promise.all((await store.tokens(a.id)).map((t) => tokenView(t, c.get("token")))) });
   });
 
   app.post("/me/tokens", async (c) => {
@@ -431,24 +433,25 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       if (!Array.isArray(input.apps) || !input.apps.length || input.apps.length > 50) {
         throw new HttpError(400, "apps must be a list of 1-50 app names, or null for every app");
       }
-      apps = [...new Set(input.apps.map((n) => {
-        const app = typeof n === "string" ? store.appByName(n) : undefined;
-        if (!app || !store.access(app, a.id)) throw new HttpError(400, `not one of your apps: ${String(n)}`);
-        return app.id;
-      }))];
+      apps = [];
+      for (const n of input.apps) {
+        const app = typeof n === "string" ? await store.appByName(n) : undefined;
+        if (!app || !await store.access(app, a.id)) throw new HttpError(400, `not one of your apps: ${String(n)}`);
+        if (!apps.includes(app.id)) apps.push(app.id);
+      }
     }
     const { token, info } = await store.issueToken(a.id, { name, role: role as Role, apps });
     // The issuing token may have been revoked while this request was in flight (e.g. a slow body).
-    if (!store.tokens(a.id).some((t) => t.id === c.get("token")!.id)) {
-      store.revokeToken(a.id, info.id);
+    if (!(await store.tokens(a.id)).some((t) => t.id === c.get("token")!.id)) {
+      await store.revokeToken(a.id, info.id);
       throw new HttpError(401, "invalid token", "unauthorized");
     }
-    return c.json({ token, info: tokenView(info) }, 201);
+    return c.json({ token, info: await tokenView(info) }, 201);
   });
 
-  app.delete("/me/tokens/:id", (c) => {
+  app.delete("/me/tokens/:id", async (c) => {
     const a = accountWide(c, "admin");
-    if (!store.revokeToken(a.id, c.req.param("id"))) throw new HttpError(404, "token not found", "not_found");
+    if (!await store.revokeToken(a.id, c.req.param("id"))) throw new HttpError(404, "token not found", "not_found");
     return c.json({ revoked: c.req.param("id") });
   });
 
@@ -460,7 +463,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const studio = (hash: Record<string, string>) => `${rootUrl(cfg)}/#${new URLSearchParams(hash)}`;
 
     // Studio: browser navigates here, comes back to /#cresslet_login=<one-time code>.
-    app.get("/auth/github", (c) => {
+    app.get("/auth/github", async (c) => {
       const { state, url } = gh.authorize(redirectUri);
       setCookie(c, STATE_COOKIE, state, {
         path: "/v1/auth/github",
@@ -508,15 +511,15 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const cli = cliLogin(store);
     const cliStarts = new RateLimit(20, 10 * 60_000);
     const cliApproves = new RateLimit(10, 10 * 60_000);
-    app.post("/auth/cli", (c) => {
-      if (!cliStarts.take(clientIp(c))) throw new HttpError(429, "too many logins, try again in a few minutes", "rate_limited");
+    app.post("/auth/cli", async (c) => {
+      if (!await cliStarts.take(clientIp(c))) throw new HttpError(429, "too many logins, try again in a few minutes", "rate_limited");
       return c.json(cli.start(rootUrl(cfg)));
     });
 
     app.post("/auth/cli/approve", async (c) => {
       const a = accountWide(c, "admin");
       // Guessing someone else's pending code would log their CLI in to this account.
-      if (!cliApproves.take(a.id)) throw new HttpError(429, "too many tries, wait a few minutes", "rate_limited");
+      if (!await cliApproves.take(a.id)) throw new HttpError(429, "too many tries, wait a few minutes", "rate_limited");
       const { userCode } = await body<{ userCode?: unknown } | null>(c) ?? {};
       if (typeof userCode !== "string" || !userCode) throw new HttpError(400, "userCode required");
       cli.approve(userCode, a, c.get("token")!.id);
@@ -590,7 +593,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     }
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new HttpError(400, "invalid JSON body", "bad_request");
     const input = raw as DeployInput & { app?: string; create?: boolean };
-    let target = input.app ? store.appByName(input.app) : undefined;
+    let target = input.app ? await store.appByName(input.app) : undefined;
     // `create`: a new app only (the studio's address picker), never a deploy over one that took the name meanwhile.
     if (target && input.create === true) throw new HttpError(409, `app name unavailable: ${target.name}`, "conflict");
     if (target && !cluster.local(target.id)) return forwardDeploy(c, target.id); // created on another node meanwhile
@@ -598,7 +601,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (target) {
       notPage(target);
       await authorize(c, target, "deploy");
-      if (!appDeploys.take(target.id)) {
+      if (!await appDeploys.take(target.id)) {
         throw new HttpError(429, `too many deploys of ${target.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
       }
     } else {
@@ -607,31 +610,31 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       if (!acct && !cfg.anonDeploys) {
         throw new HttpError(401, "login required to deploy here (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
       }
-      const name = input.app ?? uniqueName();
-      if (store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict");
+      const name = input.app ?? await uniqueName();
+      if (await store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict");
       if (!validName(name, cfg)) throw new HttpError(400, `app name must be ${NAME_RULES}`, "invalid_name");
       const client = ipKey(clientIp(c));
-      const anonCap = () => {
-        if (store.anonAppCountBy(client) >= cfg.limits.maxAnonAppsPerIp) {
+      const anonCap = async () => {
+        if (await store.anonAppCountBy(client) >= cfg.limits.maxAnonAppsPerIp) {
           throw new HttpError(429, `too many live anonymous apps from your address (${cfg.limits.maxAnonAppsPerIp}): log in, or delete or claim one`, "rate_limited");
         }
-        if (store.anonAppCount() >= cfg.limits.maxAnonApps) {
+        if (await store.anonAppCount() >= cfg.limits.maxAnonApps) {
           throw new HttpError(429, "too many anonymous apps on this server right now: log in to deploy (cresslet login)", "rate_limited");
         }
       };
-      if (acct) checkAppQuota(acct);
-      else anonCap();
+      if (acct) await checkAppQuota(acct);
+      else await anonCap();
       const expires = acct ? null : Date.now() + cfg.limits.anonTtlMs;
       // Checked again just before the insert: concurrent deploys can't share the last slot. The hourly
       // allowance is spent only there, so a request that loses the last slot doesn't use it up.
-      const created = await store.createApp(name, expires, acct?.id ?? null, () => {
-        if (store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict"); // taken meanwhile
+      const created = await store.createApp(name, expires, acct?.id ?? null, async () => {
+        if (await store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict"); // taken meanwhile
         if (acct) {
-          checkAppQuota(acct);
-          takeCreate(acct);
+          await checkAppQuota(acct);
+          await takeCreate(acct);
         } else {
-          anonCap();
-          if (!anonApps.take(client)) {
+          await anonCap();
+          if (!await anonApps.take(client)) {
             throw new HttpError(429, `too many new anonymous apps from your address (${cfg.limits.anonAppsPerHour} per hour): log in, or try later`, "rate_limited");
           }
         }
@@ -641,11 +644,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     }
     let deploy;
     try {
-      if (createdKey) appDeploys.take(target.id);
+      if (createdKey) await appDeploys.take(target.id);
       deploy = await writeDeploy(cfg, store, target, input);
     } catch (e) {
       if (createdKey) {
-        store.deleteApp(target.id);
+        await store.deleteApp(target.id);
         await removeAppFiles(cfg, target.id);
       }
       throw e;
@@ -653,47 +656,47 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     runtime.stop(target.id); // next request boots the new version
     runtime.logs.push(target.id, "system", `deployed ${deploy.id} (${deploy.files} files${deploy.server ? ", server" : ""})`);
     return c.json({
-      app: view(store.appById(target.id)!),
+      app: view((await store.appById(target.id))!),
       deploy,
       ...(createdKey ? { deployKey: createdKey } : {}),
     }, 201);
   });
 
-  function uniqueName() {
+  async function uniqueName() {
     for (let i = 0; i < 20; i++) {
       const n = randomName();
-      if (!store.appByName(n, true)) return n;
+      if (!await store.appByName(n, true)) return n;
     }
     throw new HttpError(500, "could not allocate name");
   }
   /** Unguessable: a link-only page's URL is all that protects it. */
-  function uniquePageName() {
+  async function uniquePageName() {
     let name = "";
-    for (let i = 0; i < 5 && (!name || store.appByName(name, true)); i++) name = id("pg").replace("_", "-");
-    if (store.appByName(name, true)) throw new HttpError(500, "could not allocate name");
+    for (let i = 0; i < 5 && (!name || await store.appByName(name, true)); i++) name = id("pg").replace("_", "-");
+    if (await store.appByName(name, true)) throw new HttpError(500, "could not allocate name");
     return name;
   }
   const NAME_RULES = "1-40 chars of a-z, 0-9 and single dashes, not starting or ending with one";
   /** Why a new app or page can't have this name, or null if it's free. Deleted apps keep theirs until purged. */
-  const nameProblem = (name: string): "invalid" | "reserved" | "taken" | null =>
-    reservedName(name, cfg) ? "reserved" : !validName(name, cfg) ? "invalid" : store.appByName(name, true) ? "taken" : null;
+  const nameProblem = async (name: string): Promise<"invalid" | "reserved" | "taken" | null> =>
+    reservedName(name, cfg) ? "reserved" : !validName(name, cfg) ? "invalid" : await store.appByName(name, true) ? "taken" : null;
 
   // ---- names: pick a new app's or page's subdomain before deploying (docs/api.md#names)
   const nameChecks = new RateLimit(120, 60_000);
-  const checkNames = (c: Context<Env>) => {
-    if (!nameChecks.take(ipKey(clientIp(c)))) throw new HttpError(429, "too many name checks, wait a minute", "rate_limited");
+  const checkNames = async (c: Context<Env>) => {
+    if (!await nameChecks.take(ipKey(clientIp(c)))) throw new HttpError(429, "too many name checks, wait a minute", "rate_limited");
   };
-  app.get("/names", (c) => {
-    checkNames(c);
+  app.get("/names", async (c) => {
+    await checkNames(c);
     const kind = c.req.query("kind") ?? "app";
     if (kind !== "app" && kind !== "page") throw new HttpError(400, "kind must be app or page");
-    const name = kind === "page" ? uniquePageName() : uniqueName();
+    const name = kind === "page" ? await uniquePageName() : await uniqueName();
     return c.json({ name, url: appUrl(cfg, name) });
   });
-  app.get("/names/:name", (c) => {
-    checkNames(c);
+  app.get("/names/:name", async (c) => {
+    await checkNames(c);
     const name = c.req.param("name");
-    const problem = nameProblem(name);
+    const problem = await nameProblem(name);
     return c.json({
       name,
       available: !problem,
@@ -704,22 +707,22 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   });
 
   // ---- apps
-  app.get("/apps", (c) => {
+  app.get("/apps", async (c) => {
     const a = c.get("account"), t = c.get("token");
     if (!a || !t) throw new HttpError(401, "login required", "unauthorized");
     const only = tokenApps(t);
     // Owned and shared apps; `access`: owner, admin or viewer.
     return c.json({
-      apps: store.appsFor(a.id).filter((x) => !only || only.includes(x.id)).map((x) => ({ ...view(x), access: x.access })),
+      apps: (await store.appsFor(a.id)).filter((x) => !only || only.includes(x.id)).map((x) => ({ ...view(x), access: x.access })),
     });
   });
 
   app.get("/apps/:name", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     const access = await authorize(c, a, "read");
     return c.json({
       app: { ...view(a), access: access ?? null },
-      deploys: store.deploys(a.id, 10).map((d) => ({
+      deploys: (await store.deploys(a.id, 10)).map((d) => ({
         id: d.id,
         createdAt: new Date(d.created_at).toISOString(),
         bytes: d.bytes,
@@ -729,12 +732,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         current: d.id === a.current_deploy_id,
       })),
       runtime: runtime.status(a.id),
-      secrets: store.secretKeys(a.id),
+      secrets: await store.secretKeys(a.id),
     });
   });
 
   app.delete("/apps/:name", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     await authorize(c, a, "admin", { owner: true });
     await purgeApp(cfg, store, runtime, a);
     return c.json({ deleted: a.name });
@@ -743,7 +746,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.post("/apps/:name/claim", async (c) => {
     if (!c.get("account")) throw new HttpError(401, "login required (cresslet login)", "unauthorized");
     const acct = accountWide(c, "admin");
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     const { deployKey: k } = await body<{ deployKey?: string }>(c).catch((e) => {
       if (e instanceof HttpError && e.status === 413) throw e;
       return { deployKey: undefined };
@@ -752,31 +755,42 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (a.account_id === acct.id) return c.json({ app: view(a) });
     if (a.account_id) throw new HttpError(409, "app already claimed", "conflict");
     if (!key || !await store.checkDeployKey(a.id, key)) throw new HttpError(403, "deploy key required", "forbidden");
-    checkAppQuota(acct);
-    store.claimApp(a.id, acct.id);
+    // Under the app-creation lock (quota checks can't race new apps or other claims), unclaimed still.
+    await store.serialized("cresslet:create-app", async () => {
+      const now = await store.appById(a.id);
+      if (!now) throw new HttpError(404, `app not found: ${a.name}`, "not_found");
+      if (now.account_id && now.account_id !== acct.id) throw new HttpError(409, "app already claimed", "conflict");
+      if (!now.account_id) {
+        await checkAppQuota(acct);
+        await store.claimApp(a.id, acct.id);
+      }
+    });
     runtime.stop(a.id); // restart with network access
-    return c.json({ app: view(store.appById(a.id)!) });
+    return c.json({ app: view((await store.appById(a.id))!) });
   });
 
   app.post("/apps/:name/rollback", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "deploy");
     const { deployId } = await body<{ deployId?: string }>(c);
     await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
-    const d = deployId ? store.deploy(deployId) : store.deploys(a.id, 2)[1];
+    const d = deployId ? await store.deploy(deployId) : (await store.deploys(a.id, 2))[1];
     if (!d || d.app_id !== a.id || beingRemoved(d.id)) throw new HttpError(404, "deploy not found", "not_found");
     const file = join(paths(cfg, a.id).deploy(d.id), "deploy.json");
     const json = await readFile(file, "utf8").catch((e) => {
       throw e?.code === "ENOENT" ? new HttpError(404, "deploy not found", "not_found") : e;
     });
     const config = JSON.parse(json);
-    // A prune may have picked it (or moved it aside) meanwhile: checked again with no await before the swap.
-    if (beingRemoved(d.id) || !store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
-    store.setCurrentDeploy(a.id, d.id, config);
+    // A prune may have picked it (or moved it aside) meanwhile: checked again, under the lock a prune
+    // chooses under, together with the swap.
+    await store.serialized(deploysLock(a.id), async () => {
+      if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
+      await store.setCurrentDeploy(a.id, d.id, config);
+    });
     runtime.stop(a.id);
     runtime.logs.push(a.id, "system", `rolled back to ${d.id}`);
-    return c.json({ app: view(store.appById(a.id)!) });
+    return c.json({ app: view((await store.appById(a.id))!) });
   });
 
   // ---- collaborators: accounts invited to an app as admin or viewer (see docs/api.md)
@@ -784,8 +798,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
   const person = (p: { id: string; email: string; github_login: string | null }) =>
     ({ id: p.id, email: p.email, github: p.github_login });
-  const inviteView = (i: Invite) => {
-    const by = i.invited_by ? store.accountById(i.invited_by) : undefined;
+  const inviteView = async (i: Invite) => {
+    const by = i.invited_by ? await store.accountById(i.invited_by) : undefined;
     return { id: i.id, email: i.email, role: i.role, invitedBy: by ? person(by) : null, createdAt: iso(i.created_at) };
   };
   const accessRole = (v: unknown): Access => {
@@ -794,7 +808,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   };
   /** Managing who has access: the owner or an admin, logged in (a deploy key isn't an account). */
   const manage = async (c: Context<Env>) => {
-    const a = getApp(c.req.param("name")!);
+    const a = await getApp(c.req.param("name")!);
     await authorize(c, a, "admin", { account: true });
     return a;
   };
@@ -804,18 +818,18 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
    */
   const stillManages = async (c: Context<Env>, a: App) => {
     const acct = c.get("account")!;
-    if (!store.tokens(acct.id).some((t) => t.id === c.get("token")!.id)) throw new HttpError(401, "invalid token", "unauthorized");
+    if (!(await store.tokens(acct.id)).some((t) => t.id === c.get("token")!.id)) throw new HttpError(401, "invalid token", "unauthorized");
     await authorize(c, a, "admin", { account: true });
   };
 
   app.get("/apps/:name/collaborators", async (c) => {
     const a = await manage(c);
-    const owner = store.accountById(a.account_id!)!;
+    const owner = (await store.accountById(a.account_id!))!;
     return c.json({
       owner: person(owner),
-      collaborators: store.collaborators(a.id).map((x) =>
+      collaborators: (await store.collaborators(a.id)).map((x) =>
         ({ ...person({ id: x.account_id, email: x.email, github_login: x.github_login }), role: x.role, createdAt: iso(x.created_at) })),
-      invites: store.invites(a.id).map(inviteView),
+      invites: await Promise.all((await store.invites(a.id)).map(inviteView)),
     });
   });
 
@@ -828,24 +842,27 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!EMAIL_RE.test(email) || email.length > 254) throw new HttpError(400, "valid email required");
     const role = accessRole(input.role ?? "viewer");
     await stillManages(c, a);
-    const invitee = store.accountByEmail(email);
-    if (invitee && invitee.id === a.account_id) throw new HttpError(400, `${email} owns ${a.name}`);
-    if (invitee && store.access(a, invitee.id)) {
-      throw new HttpError(409, `${email} already has access: change their role instead`, "conflict");
-    }
-    const invites = store.invites(a.id);
-    if (!invites.some((i) => i.email === email) && invites.length + store.collaborators(a.id).length >= MAX_COLLABORATORS) {
-      throw new HttpError(400, `at most ${MAX_COLLABORATORS} collaborators and invites per app`);
-    }
-    const r = store.invite(a.id, email, role, c.get("account")!.id);
-    return c.json({ invite: inviteView(r.invite) }, r.created ? 201 : 200);
+    // Checks and write under the app's invite lock: concurrent invites can't pass the cap together.
+    const r = await store.serialized(inviteLock(a.id), async () => {
+      const invitee = await store.accountByEmail(email);
+      if (invitee && invitee.id === a.account_id) throw new HttpError(400, `${email} owns ${a.name}`);
+      if (invitee && await store.access(a, invitee.id)) {
+        throw new HttpError(409, `${email} already has access: change their role instead`, "conflict");
+      }
+      const invites = await store.invites(a.id);
+      if (!invites.some((i) => i.email === email) && invites.length + (await store.collaborators(a.id)).length >= MAX_COLLABORATORS) {
+        throw new HttpError(400, `at most ${MAX_COLLABORATORS} collaborators and invites per app`);
+      }
+      return await store.invite(a.id, email, role, c.get("account")!.id);
+    });
+    return c.json({ invite: await inviteView(r.invite) }, r.created ? 201 : 200);
   });
 
   app.put("/apps/:name/collaborators/:account", async (c) => {
     const a = await manage(c);
     const role = accessRole((await body<{ role?: unknown } | null>(c))?.role);
     await stillManages(c, a);
-    if (!store.setCollaboratorRole(a.id, c.req.param("account"), role)) {
+    if (!await store.setCollaboratorRole(a.id, c.req.param("account"), role)) {
       throw new HttpError(404, "collaborator not found", "not_found");
     }
     return c.json({ account: c.req.param("account"), role });
@@ -856,61 +873,61 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const target = c.req.param("account");
     const me = c.get("account"), t = c.get("token");
     if (me && t && target === me.id) {
-      const a = getApp(c.req.param("name"));
-      const access = store.access(a, me.id), apps = tokenApps(t);
+      const a = await getApp(c.req.param("name"));
+      const access = await store.access(a, me.id), apps = tokenApps(t);
       if (!access) throw new HttpError(404, "collaborator not found", "not_found");
       if (access === "owner") throw new HttpError(400, "the owner can't leave their own app");
       if ((apps && !apps.includes(a.id)) || !atLeast(t, "admin")) {
         throw new HttpError(403, `this token can't do that (needs admin access to ${a.name})`, "forbidden");
       }
-      store.removeCollaborator(a.id, me.id);
+      await store.removeCollaborator(a.id, me.id);
       return c.json({ removed: me.id });
     }
     const a = await manage(c);
-    if (!store.removeCollaborator(a.id, target)) throw new HttpError(404, "collaborator not found", "not_found");
+    if (!await store.removeCollaborator(a.id, target)) throw new HttpError(404, "collaborator not found", "not_found");
     return c.json({ removed: target });
   });
 
   app.delete("/apps/:name/invites/:id", async (c) => {
     const a = await manage(c);
-    if (!store.cancelInvite(a.id, c.req.param("id"))) throw new HttpError(404, "invite not found", "not_found");
+    if (!await store.cancelInvite(a.id, c.req.param("id"))) throw new HttpError(404, "invite not found", "not_found");
     return c.json({ cancelled: c.req.param("id") });
   });
 
   // ---- invites to the calling account (matched by its email)
-  app.get("/me/invites", (c) => {
+  app.get("/me/invites", async (c) => {
     const acct = accountWide(c, "read");
     return c.json({
-      invites: store.invitesFor(acct.email).map((i) => ({ ...inviteView(i), app: i.app_name })),
+      invites: await Promise.all((await store.invitesFor(acct.email)).map(async (i) => ({ ...await inviteView(i), app: i.app_name }))),
     });
   });
 
-  const myInvite = (c: Context<Env>) => {
+  const myInvite = async (c: Context<Env>) => {
     const acct = accountWide(c, "admin");
-    const inv = store.inviteFor(acct.email, c.req.param("id")!);
-    const a = inv && store.appById(inv.app_id);
+    const inv = await store.inviteFor(acct.email, c.req.param("id")!);
+    const a = inv && await store.appById(inv.app_id);
     if (!inv || !a) throw new HttpError(404, "invite not found", "not_found");
     return { acct, inv, a };
   };
 
-  app.post("/me/invites/:id/accept", (c) => {
-    const { acct, inv, a } = myInvite(c);
-    store.acceptInvite(inv, acct.id);
-    return c.json({ app: { ...view(a), access: store.access(a, acct.id) ?? null } });
+  app.post("/me/invites/:id/accept", async (c) => {
+    const { acct, inv, a } = await myInvite(c);
+    if (!await store.acceptInvite(inv, acct.id)) throw new HttpError(404, "invite not found", "not_found");
+    return c.json({ app: { ...view(a), access: await store.access(a, acct.id) ?? null } });
   });
 
-  app.delete("/me/invites/:id", (c) => {
-    const { inv } = myInvite(c);
-    store.declineInvite(inv.id);
+  app.delete("/me/invites/:id", async (c) => {
+    const { inv } = await myInvite(c);
+    await store.declineInvite(inv.id);
     return c.json({ declined: inv.id });
   });
 
   // ---- project source uploaded with a deploy (cresslet pull / studio "Open")
   app.get("/apps/:name/source", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
     const deployId = c.req.query("deploy") ?? a.current_deploy_id;
-    const d = deployId ? store.deploy(deployId) : undefined;
+    const d = deployId ? await store.deploy(deployId) : undefined;
     if (!d || d.app_id !== a.id) throw new HttpError(404, "deploy not found", "not_found");
     const root = join(paths(cfg, a.id).deploy(d.id), "source");
     if (!existsSync(root)) throw new HttpError(404, "this deploy has no source (deployed without it)", "no_source");
@@ -935,27 +952,38 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   // ---- logs (NDJSON; ?follow=1 streams)
   app.get("/apps/:name/logs", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     const access = await authorize(c, a, "read");
     const n = Math.min(Number(c.req.query("n") ?? 200), cfg.limits.logLines);
     // A collaborator's stream ends when they lose access (removed, or left): checked per line and every 15s.
     const acct = c.get("account");
     const collaborator = access === "admin" || access === "viewer";
-    const revoked = () => collaborator && !store.access(a, acct!.id);
+    const revoked = async () => collaborator && !await store.access(a, acct!.id);
     const follow = c.req.query("follow") === "1";
     const enc = new TextEncoder();
     const line = (l: unknown) => enc.encode(JSON.stringify(l) + "\n");
     let unsub = () => {};
+    let ended = false;
     const stream = new ReadableStream<Uint8Array>({
       start(ctrl) {
         for (const l of runtime.logs.recent(a.id, n)) ctrl.enqueue(line(l));
         if (!follow) return ctrl.close();
         const end = () => {
+          if (ended) return;
+          ended = true;
           unsub();
           ctrl.close();
         };
-        const sub = runtime.logs.subscribe(a.id, (l) => (revoked() ? end() : ctrl.enqueue(line(l))));
-        const timer = collaborator ? setInterval(() => revoked() && end(), 15_000) : undefined;
+        // In order: each line waits for the access check before it (and the ones before that).
+        let queue = Promise.resolve();
+        const sub = runtime.logs.subscribe(a.id, (l) => {
+          queue = queue.then(async () => {
+            if (ended) return;
+            if (await revoked()) end();
+            else if (!ended) ctrl.enqueue(line(l));
+          }).catch(end);
+        });
+        const timer = collaborator ? setInterval(() => void revoked().then((r) => r && end(), () => {}), 15_000) : undefined;
         timer?.unref();
         unsub = () => {
           sub();
@@ -964,6 +992,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         };
       },
       cancel() {
+        ended = true;
         unsub();
       },
     });
@@ -972,13 +1001,13 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   // ---- secrets (claimed apps only; values are write-only)
   app.get("/apps/:name/secrets", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
-    return c.json({ keys: store.secretKeys(a.id) });
+    return c.json({ keys: await store.secretKeys(a.id) });
   });
 
   app.put("/apps/:name/secrets", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "admin");
     if (!a.account_id) throw new HttpError(403, "secrets require a claimed app (cresslet claim)", "unclaimed");
@@ -986,31 +1015,31 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     for (const [k, v] of Object.entries(input)) {
       if (!SECRET_KEY_RE.test(k)) throw new HttpError(400, `invalid secret name: ${k} (use UPPER_SNAKE)`);
-      if (v === null) store.deleteSecret(a.id, k);
-      else if (typeof v === "string" && v.length <= 32_768) store.setSecret(a.id, k, v);
+      if (v === null) await store.deleteSecret(a.id, k);
+      else if (typeof v === "string" && v.length <= 32_768) await store.setSecret(a.id, k, v);
       else throw new HttpError(400, `invalid value for ${k}`);
     }
     runtime.stop(a.id);
-    return c.json({ keys: store.secretKeys(a.id) });
+    return c.json({ keys: await store.secretKeys(a.id) });
   });
 
   app.delete("/apps/:name/secrets/:key", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     await authorize(c, a, "admin");
-    store.deleteSecret(a.id, c.req.param("key"));
+    await store.deleteSecret(a.id, c.req.param("key"));
     runtime.stop(a.id);
-    return c.json({ keys: store.secretKeys(a.id) });
+    return c.json({ keys: await store.secretKeys(a.id) });
   });
 
   // ---- egress allowlist (claimed apps; null = any public host)
   app.get("/apps/:name/egress", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
     return c.json({ allow: a.egress ? JSON.parse(a.egress) : null });
   });
 
   app.put("/apps/:name/egress", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "admin");
     if (!a.account_id) throw new HttpError(403, "outbound network requires a claimed app (cresslet claim)", "unclaimed");
@@ -1024,7 +1053,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         throw new HttpError(400, (e as Error).message);
       }
     }
-    store.setEgress(a.id, list);
+    await store.setEgress(a.id, list);
     runtime.stop(a.id);
     runtime.logs.push(a.id, "system", list ? `egress allowlist: ${list.join(", ") || "(none)"}` : "egress: any public host");
     return c.json({ allow: list });
@@ -1045,7 +1074,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
    * (`CRESSLET_CUSTOM_DOMAINS`). Checked after access, before the claim, so an unclaimed app isn't told to claim for nothing.
    */
   const claimed = async (c: Context<Env>, role: Role, adding = false) => {
-    const a = getApp(c.req.param("name")!);
+    const a = await getApp(c.req.param("name")!);
     notPage(a);
     await authorize(c, a, role);
     if (adding && !cfg.customDomains) {
@@ -1057,7 +1086,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   app.get("/apps/:name/domains", async (c) => {
     const a = await claimed(c, "read");
-    return c.json({ domains: store.domains(a.id).map((d) => domainView(a, d)) });
+    return c.json({ domains: (await store.domains(a.id)).map((d) => domainView(a, d)) });
   });
 
   app.post("/apps/:name/domains", async (c) => {
@@ -1068,16 +1097,21 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!validDomain(domain) || domain === cfg.domain || domain.endsWith("." + cfg.domain) || domain === cfg.previewHost) {
       throw new HttpError(400, `invalid domain: ${String(raw)}`);
     }
-    const existing = store.domains(a.id).find((d) => d.domain === domain);
-    if (existing) return c.json({ domain: domainView(a, existing) });
-    if (store.domains(a.id).length >= MAX_DOMAINS) throw new HttpError(400, `at most ${MAX_DOMAINS} domains per app`);
-    if (store.appByDomain(domain)) throw new HttpError(409, `${domain} is already in use`, "conflict");
-    return c.json({ domain: domainView(a, store.addDomain(a.id, domain)) }, 201);
+    // Under a per-app lock: concurrent adds can't pass the cap together, and a repeat finds the first.
+    const r = await store.serialized(`cresslet:domains:${a.id}`, async () => {
+      const domains = await store.domains(a.id);
+      const existing = domains.find((d) => d.domain === domain);
+      if (existing) return { d: existing, created: false };
+      if (domains.length >= MAX_DOMAINS) throw new HttpError(400, `at most ${MAX_DOMAINS} domains per app`);
+      if (await store.appByDomain(domain)) throw new HttpError(409, `${domain} is already in use`, "conflict");
+      return { d: await store.addDomain(a.id, domain), created: true };
+    });
+    return c.json({ domain: domainView(a, r.d) }, r.created ? 201 : 200);
   });
 
   app.post("/apps/:name/domains/:domain/verify", async (c) => {
     const a = await claimed(c, "admin", true);
-    const d = store.domains(a.id).find((x) => x.domain === normDomain(c.req.param("domain")));
+    const d = (await store.domains(a.id)).find((x) => x.domain === normDomain(c.req.param("domain")));
     if (!d) throw new HttpError(404, "domain not found", "not_found");
     if (!d.verified_at) {
       const records = await cfg.resolveTxt(`_cresslet.${d.domain}`).catch(() => [] as string[][]);
@@ -1085,27 +1119,27 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         throw new HttpError(400, `TXT _cresslet.${d.domain} = ${d.token} not found (DNS can take a few minutes)`, "unverified");
       }
       await authorize(c, a, "admin"); // again: access may have changed during the lookup (a collaborator removed)
-      const v = store.verifyDomain(a.id, d.domain, d.token);
+      const v = await store.verifyDomain(a.id, d.domain, d.token);
       if (v === "taken") throw new HttpError(409, `${d.domain} is already in use`, "conflict");
       if (v === "gone") throw new HttpError(404, "domain was removed", "not_found");
       runtime.logs.push(a.id, "system", `domain verified: ${d.domain}`);
     }
-    return c.json({ domain: domainView(a, store.domains(a.id).find((x) => x.domain === d.domain)!) });
+    return c.json({ domain: domainView(a, (await store.domains(a.id)).find((x) => x.domain === d.domain)!) });
   });
 
   app.delete("/apps/:name/domains/:domain", async (c) => {
     const a = await claimed(c, "admin");
-    store.deleteDomain(a.id, normDomain(c.req.param("domain")));
-    return c.json({ domains: store.domains(a.id).map((d) => domainView(a, d)) });
+    await store.deleteDomain(a.id, normDomain(c.req.param("domain")));
+    return c.json({ domains: (await store.domains(a.id)).map((d) => domainView(a, d)) });
   });
 
   // For a TLS terminator's on-demand certificates (e.g. Caddy `on_demand_tls { ask … }`): 200 only for
   // verified custom domains. The root and app subdomains use the wildcard cert, and approving every app
   // name would let anyone burn the CA's per-domain rate limit by creating apps.
-  app.get("/domains/check", (c) => {
+  app.get("/domains/check", async (c) => {
     const d = normDomain(c.req.query("domain") ?? "");
     // The preview host needs a certificate too when it isn't covered by the wildcard.
-    return c.body(null, store.appByDomain(d) || (d === cfg.previewHost && !previewAppName(cfg)) ? 200 : 404);
+    return c.body(null, await store.appByDomain(d) || (d === cfg.previewHost && !previewAppName(cfg)) ? 200 : 404);
   });
 
   // ---- pages: uploaded static HTML with a visibility and a retention (docs/api.md#pages)
@@ -1143,8 +1177,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!Array.isArray(input.files)) throw new HttpError(400, "html (a string) or files (an array) required");
     return input.files as DeployFile[];
   };
-  const pageView = (a: App, access?: AppAccess | null) => {
-    const d = a.page_deploy_id ? store.deploy(a.page_deploy_id) : undefined;
+  const pageView = async (a: App, access?: AppAccess | null) => {
+    const d = a.page_deploy_id ? await store.deploy(a.page_deploy_id) : undefined;
     return {
       id: a.id,
       name: a.name,
@@ -1160,17 +1194,17 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       updatedAt: iso(a.updated_at),
     };
   };
-  function getPage(name: string): App {
-    const a = store.appByName(name);
+  async function getPage(name: string): Promise<App> {
+    const a = await store.appByName(name);
     // Expired: gone, though the reaper may not have purged it yet.
     if (!a || a.kind !== "page" || (a.expires_at !== null && a.expires_at <= Date.now())) {
       throw new HttpError(404, `page not found: ${name}`, "not_found");
     }
     return a;
   }
-  const checkPageQuota = (acct: Account) => {
+  const checkPageQuota = async (acct: Account) => {
     if (isSiteAdmin(cfg, acct)) return;
-    if (store.appsByAccount(acct.id, "page").length >= cfg.limits.maxPagesPerAccount) {
+    if ((await store.appsByAccount(acct.id, "page")).length >= cfg.limits.maxPagesPerAccount) {
       throw new HttpError(403, `page limit reached (${cfg.limits.maxPagesPerAccount} per account): delete one first`, "quota");
     }
   };
@@ -1185,7 +1219,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.put("/me/settings", async (c) => {
     const acct = accountWide(c, "admin");
     const input = await body<{ pages?: { visibility?: unknown; retentionDays?: unknown } | null } | null>(c) ?? {};
-    const settings = store.settings(store.accountById(acct.id)!);
+    const settings = store.settings((await store.accountById(acct.id))!);
     if (input.pages === null) delete settings.pages;
     else if (input.pages !== undefined) {
       if (typeof input.pages !== "object" || Array.isArray(input.pages)) throw new HttpError(400, "pages must be an object or null");
@@ -1194,19 +1228,19 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       if (input.pages.retentionDays !== undefined) pages.retentionDays = retention(input.pages.retentionDays);
       settings.pages = pages;
     }
-    store.setSettings(acct.id, settings);
-    return c.json(settingsView(store.accountById(acct.id)!));
+    await store.setSettings(acct.id, settings);
+    return c.json(settingsView((await store.accountById(acct.id))!));
   });
 
-  app.get("/pages", (c) => {
+  app.get("/pages", async (c) => {
     const a = c.get("account"), t = c.get("token");
     if (!a || !t) throw new HttpError(401, "login required", "unauthorized");
     const only = tokenApps(t);
     const now = Date.now();
     return c.json({
-      pages: store.appsFor(a.id, "page")
+      pages: await Promise.all((await store.appsFor(a.id, "page"))
         .filter((x) => (!only || only.includes(x.id)) && (x.expires_at === null || x.expires_at > now))
-        .map((x) => pageView(x, x.access)),
+        .map((x) => pageView(x, x.access))),
       defaults: pageDefaults(a),
     });
   });
@@ -1224,50 +1258,50 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     };
     // A name of the owner's choosing, or a generated unguessable one.
     if (input.name !== undefined && typeof input.name !== "string") throw new HttpError(400, "name must be a string");
-    const name = input.name ?? uniquePageName();
-    const problem = nameProblem(name);
+    const name = input.name ?? await uniquePageName();
+    const problem = await nameProblem(name);
     if (problem === "taken") throw new HttpError(409, `page name unavailable: ${name}`, "conflict");
     if (problem) throw new HttpError(400, problem === "reserved" ? `${name} is reserved` : `page name must be ${NAME_RULES}`, "invalid_name");
-    checkPageQuota(acct);
-    const page = await store.createPage(name, acct.id, settings, () => {
-      if (store.appByName(name, true)) throw new HttpError(409, `page name unavailable: ${name}`, "conflict"); // taken meanwhile
-      checkPageQuota(acct);
-      takeCreate(acct); // spent only here, as for new apps (POST /deploys)
+    await checkPageQuota(acct);
+    const page = await store.createPage(name, acct.id, settings, async () => {
+      if (await store.appByName(name, true)) throw new HttpError(409, `page name unavailable: ${name}`, "conflict"); // taken meanwhile
+      await checkPageQuota(acct);
+      await takeCreate(acct); // spent only here, as for new apps (POST /deploys)
     });
     try {
       await writePage(cfg, store, page, files, typeof input.source === "string" ? input.source : "api");
     } catch (e) {
-      store.deleteApp(page.id);
+      await store.deleteApp(page.id);
       await removeAppFiles(cfg, page.id);
       throw e;
     }
-    return c.json({ page: pageView(store.appById(page.id)!, "owner") }, 201);
+    return c.json({ page: await pageView((await store.appById(page.id))!, "owner") }, 201);
   });
 
   app.get("/pages/:name", async (c) => {
-    const a = getPage(c.req.param("name"));
+    const a = await getPage(c.req.param("name"));
     const access = await authorize(c, a, "read");
-    return c.json({ page: pageView(a, access ?? null) });
+    return c.json({ page: await pageView(a, access ?? null) });
   });
 
   // Replace the page's files (same URL). Restarts its retention clock.
   app.put("/pages/:name", async (c) => {
-    const a = getPage(c.req.param("name"));
+    const a = await getPage(c.req.param("name"));
     await authorize(c, a, "deploy");
     const input = await body<PageInput | null>(c, deployBodyLimit) ?? {};
     const files = pageFiles(input);
     const access = await authorize(c, a, "deploy"); // again: access may have changed while the body arrived
-    if (!appDeploys.take(a.id)) {
+    if (!await appDeploys.take(a.id)) {
       throw new HttpError(429, `too many uploads to ${a.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
     }
     await writePage(cfg, store, a, files, typeof input.source === "string" ? input.source : "api");
-    store.setPage(a.id, { retention_days: a.retention_days });
-    return c.json({ page: pageView(store.appById(a.id)!, access ?? null) });
+    await store.setPage(a.id, { retention_days: a.retention_days });
+    return c.json({ page: await pageView((await store.appById(a.id))!, access ?? null) });
   });
 
   // Change the title, visibility or retention (a new retention counts from now).
   app.patch("/pages/:name", async (c) => {
-    const a = getPage(c.req.param("name"));
+    const a = await getPage(c.req.param("name"));
     await authorize(c, a, "admin");
     const input = await body<PageInput | null>(c) ?? {};
     const change = {
@@ -1276,12 +1310,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       ...(input.retentionDays !== undefined ? { retention_days: retention(input.retentionDays) } : {}),
     };
     const access = await authorize(c, a, "admin"); // again, after the body
-    store.setPage(a.id, change);
-    return c.json({ page: pageView(store.appById(a.id)!, access ?? null) });
+    await store.setPage(a.id, change);
+    return c.json({ page: await pageView((await store.appById(a.id))!, access ?? null) });
   });
 
   app.delete("/pages/:name", async (c) => {
-    const a = getPage(c.req.param("name"));
+    const a = await getPage(c.req.param("name"));
     await authorize(c, a, "admin", { owner: true });
     await purgeApp(cfg, store, runtime, a);
     return c.json({ deleted: a.name });
@@ -1290,7 +1324,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   // A URL that opens the page in a browser: for a private page, with a one-time ticket the page's host
   // exchanges for a session cookie (only the owner and collaborators get one).
   app.post("/pages/:name/view", async (c) => {
-    const a = getPage(c.req.param("name"));
+    const a = await getPage(c.req.param("name"));
     await authorize(c, a, "read", { account: true });
     const input = await body<{ path?: unknown } | null>(c).catch((e) => {
       if (e instanceof HttpError && e.status === 413) throw e;
@@ -1308,7 +1342,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   // ---- database inspection (read-only, in a child process with a deadline: see inspect.ts)
   app.post("/apps/:name/db/query", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
     const { sql, params = [] } = await body<{ sql?: string; params?: unknown[] }>(c);
     if (!sql) throw new HttpError(400, "sql required");
@@ -1320,7 +1354,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   });
 
   app.get("/apps/:name/db", async (c) => {
-    const a = getApp(c.req.param("name"));
+    const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
     const n = Math.trunc(Number(c.req.query("limit") ?? 100));
     const limit = Number.isFinite(n) ? Math.min(Math.max(n, 0), 1000) : 100;

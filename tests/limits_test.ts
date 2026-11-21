@@ -17,7 +17,7 @@ import type { Store } from "../server/store.ts";
 async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> = {}, reuseDir?: string) {
   const dataDir = reuseDir ?? await mkdtemp(join(tmpdir(), "cresslet-lim-"));
   const base = loadConfig();
-  const srv = createServer(loadConfig({
+  const srv = await createServer(loadConfig({
     dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["boss@b.co"],
     limits: { ...base.limits, ...limits }, ...extra,
   }));
@@ -34,7 +34,7 @@ async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> =
   const deploy = (headers: Record<string, string>, app?: string) =>
     json("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ app, files: [{ path: "index.html", data: "hi" }] }) });
   const done = async () => {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   };
   /** Stops the server but keeps its data (to start another on it). */

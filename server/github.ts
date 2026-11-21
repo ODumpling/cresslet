@@ -53,10 +53,10 @@ export function github(cfg: Config, store: Store) {
     const user = u.body;
     const ident = { id: user.id, login: user.login };
 
-    let account = store.accountByGithub(user.id);
+    let account = await store.accountByGithub(user.id);
     if (account) {
       if (account.github_login !== user.login) {
-        store.linkGithub(account.id, ident);
+        await store.linkGithub(account.id, ident);
         account = { ...account, github_login: user.login };
       }
     } else {
@@ -65,17 +65,17 @@ export function github(cfg: Config, store: Store) {
       // Public profile emails are verified by GitHub; /user/emails can 403 for some token types.
       const email = (verified.find((x) => x.primary) ?? verified[0])?.email ?? user.email ??
         `${user.id}+${user.login}@users.noreply.github.com`;
-      const existing = store.accountByEmail(email);
+      const existing = await store.accountByEmail(email);
       if (existing && !existing.github_id) {
         // Operator-created (or legacy email-login) account: tokens issued before this link weren't proven
         // to belong to this person.
-        store.linkGithub(existing.id, ident);
-        store.revokeTokens(existing.id);
+        await store.linkGithub(existing.id, ident);
+        await store.revokeTokens(existing.id);
         account = { ...existing, github_id: ident.id, github_login: ident.login };
       } else {
         if (!cfg.openSignup) throw new HttpError(403, "signup is closed; ask the operator for an account", "forbidden");
         // Email already taken by another GitHub-linked account: fall back to the GitHub noreply address.
-        account = store.createAccount(existing ? `${user.id}+${user.login}@users.noreply.github.com` : email, ident);
+        account = await store.createAccount(existing ? `${user.id}+${user.login}@users.noreply.github.com` : email, ident);
       }
     }
     return { account, token: (await store.issueToken(account.id, { name: tokenName })).token };

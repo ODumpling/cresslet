@@ -41,7 +41,8 @@ export function appSpec(cfg: Config, store: Store, app: App): AppSpec {
 
 /** HTTP upgrades (WebSockets) on server routes go to the sandbox; anything else is refused. */
 export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
-  return async (req: IncomingMessage, socket: Duplex, head: Buffer, appName: string, app = store.appByName(appName)) => {
+  return async (req: IncomingMessage, socket: Duplex, head: Buffer, appName: string, app?: App) => {
+    app ??= await store.appByName(appName);
     const target = req.url ?? "/";
     if (!target.startsWith("/") || target.startsWith("//")) {
       socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
@@ -61,7 +62,7 @@ export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
 /** One cron invocation: an internal request the sandbox entry routes to `scheduled()` (runtime/worker.js). */
 export function scheduled(cfg: Config, store: Store, runtime: Runtime) {
   return async (appId: string, cron: string, at: Date) => {
-    const app = store.appById(appId);
+    const app = await store.appById(appId);
     // Checked at dispatch: a run queued behind another may outlive a redeploy that dropped the cron.
     if (!app?.current_deploy_id || !app.account_id || !(JSON.parse(app.config).crons ?? []).includes(cron)) return;
     const started = performance.now();
@@ -106,7 +107,7 @@ function pages(cfg: Config, store: Store) {
   const viewer = async (req: Request, app: App) => {
     for (const token of cookies(req, pageCookie(cfg))) {
       const acct = await store.pageSession(app.id, token);
-      if (acct && store.access(app, acct)) return acct;
+      if (acct && await store.access(app, acct)) return acct;
     }
   };
   return async (req: Request, app: App): Promise<Response> => {
@@ -122,7 +123,7 @@ function pages(cfg: Config, store: Store) {
       if (ticket !== null) {
         url.searchParams.delete(PAGE_TICKET_PARAM);
         const s = await store.redeemPageTicket(app.id, ticket, PAGE_SESSION_MS);
-        if (!s || !store.access(app, s.account_id)) {
+        if (!s || !await store.access(app, s.account_id)) {
           return new Response("This sign-in link expired or was already used. Open the page again.", {
             status: 403,
             headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", ...extra },
@@ -160,7 +161,8 @@ function pages(cfg: Config, store: Store) {
 
 export function host(cfg: Config, store: Store, runtime: Runtime) {
   const servePage = pages(cfg, store);
-  return async (req: Request, appName: string, app = store.appByName(appName)): Promise<Response> => {
+  return async (req: Request, appName: string, app?: App): Promise<Response> => {
+    app ??= await store.appByName(appName);
     if (app?.kind === "page") return servePage(req, app);
     if (!app || !app.current_deploy_id) {
       return new Response(`No app named "${appName}" is deployed here.`, {

@@ -22,8 +22,14 @@ function fakeCluster() {
   const forwards: { appId: string; method: string; url: string; body: Uint8Array; length: string | null; signal: AbortSignal }[] = [];
   const upgrades: string[] = [];
   let failUpgrade = false;
+  /** Apps that move to the other side of `remote` right after the next ownership check. */
+  const moveAfterCheck = new Set<string>();
   const cluster: Cluster = {
-    local: (id) => !remote.has(id),
+    local: (id) => {
+      const here = !remote.has(id);
+      if (moveAfterCheck.delete(id)) here ? remote.add(id) : remote.delete(id);
+      return here;
+    },
     async forward(appId, req) {
       forwards.push({ appId, method: req.method, url: req.url, body: new Uint8Array(await req.arrayBuffer()), length: req.headers.get("content-length"), signal: req.signal });
       return new Response("from owner", { status: 203 });
@@ -34,7 +40,7 @@ function fakeCluster() {
       socket.end("HTTP/1.1 418 I'm a teapot\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
     },
   };
-  return { cluster, remote, forwards, upgrades, failUpgrade: (v: boolean) => (failUpgrade = v) };
+  return { cluster, remote, forwards, upgrades, moveAfterCheck, failUpgrade: (v: boolean) => (failUpgrade = v) };
 }
 
 /** Status of an upgrade request with a custom Host, or "error" if the socket is destroyed. */
@@ -55,7 +61,7 @@ const upgradeStatus = (port: number, host: string) =>
 test("apps another node owns: their requests are forwarded; their crons and reaping are skipped", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-cluster-"));
   const fake = fakeCluster();
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }), fake.cluster);
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }), fake.cluster);
   srv.scheduler.stop(); // the test drives ticks itself
   const http = serve({ fetch: srv.handler, port: 0 });
   http.on("upgrade", srv.upgrade);
@@ -77,7 +83,7 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     const deployed = await call("/v1/deploys", { method: "POST", headers: auth, body: deployBody });
     assert.equal(deployed.status, 201);
     const app = (await deployed.json()).app;
-    srv.store.db.prepare("INSERT INTO domains (domain, app_id, token, verified_at, created_at) VALUES ('shop.example.com', ?, 't', 1, 1)").run(app.id);
+    await srv.store.db.run("INSERT INTO domains (domain, app_id, token, verified_at, created_at) VALUES ('shop.example.com', ?, 't', 1, 1)", app.id);
     const host = "shop.test.local";
     const cronRuns = () => srv.runtime.logs.recent(app.id, 1000).filter((l) => l.msg.startsWith("cron ")).length;
 
@@ -138,23 +144,23 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     srv.store.useToken = useToken;
     assert.equal(fake.forwards.at(-1)!.appId, late);
     assert.equal(new TextDecoder().decode(fake.forwards.at(-1)!.body), lateBody);
-    assert.equal(srv.store.deploys(late).length, 0);
+    assert.equal((await srv.store.deploys(late)).length, 0);
     fake.forwards.pop();
     // Not app-scoped, or a CORS preflight: answered here.
     assert.equal((await call("/v1/apps/shop", { method: "OPTIONS", headers: { origin: "http://x", "access-control-request-method": "GET" } })).status, 204);
     assert.equal((await call("/v1/apps", { headers: auth })).status, 200);
     assert.equal(fake.forwards.length, 8);
-    assert.equal(srv.store.deploys(app.id).length, 1); // the forwarded deploy didn't land here
+    assert.equal((await srv.store.deploys(app.id)).length, 1); // the forwarded deploy didn't land here
 
     // Crons: not queued for it (even if it moves here before the run would start), and a run queued
     // while it was owned here doesn't start after it moved.
-    const notQueued = srv.scheduler.tick(new Date("2026-11-19T10:10:00Z"));
-    fake.remote.delete(app.id);
-    await notQueued;
+    fake.moveAfterCheck.add(app.id);
+    await srv.scheduler.tick(new Date("2026-11-19T10:10:00Z"));
+    assert.ok(!fake.remote.has(app.id));
     assert.equal(cronRuns(), 2);
-    const queued = srv.scheduler.tick(new Date("2026-11-19T10:15:00Z"));
-    fake.remote.add(app.id);
-    await queued;
+    fake.moveAfterCheck.add(app.id);
+    await srv.scheduler.tick(new Date("2026-11-19T10:15:00Z"));
+    assert.ok(fake.remote.has(app.id));
     assert.equal(cronRuns(), 2);
 
     // Deleted sites are forwarded too (admin restore and purge on the owner, which holds the files).
@@ -163,25 +169,25 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     fake.remote.add(app.id);
     assert.equal(await text("/v1/admin/sites/shop/restore", { method: "POST" }), "203 from owner");
     assert.equal(await text("/v1/admin/sites/shop?purge=1", { method: "DELETE" }), "203 from owner");
-    assert.ok(srv.store.appById(app.id, true) && existsSync(paths(srv.cfg, app.id).app));
+    assert.ok(await srv.store.appById(app.id, true) && existsSync(paths(srv.cfg, app.id).app));
 
     // Reaping (expired or long-deleted): only by the owner.
-    srv.store.db.prepare("UPDATE apps SET deleted_at = 1 WHERE id = ?").run(app.id);
+    await srv.store.db.run("UPDATE apps SET deleted_at = 1 WHERE id = ?", app.id);
     await srv.reap();
-    assert.ok(srv.store.appById(app.id, true) && existsSync(paths(srv.cfg, app.id).app));
+    assert.ok(await srv.store.appById(app.id, true) && existsSync(paths(srv.cfg, app.id).app));
     fake.remote.delete(app.id);
     await srv.reap();
-    assert.ok(!srv.store.appById(app.id, true) && !existsSync(paths(srv.cfg, app.id).app));
+    assert.ok(!await srv.store.appById(app.id, true) && !existsSync(paths(srv.cfg, app.id).app));
   } finally {
     http.close();
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
 
 test("a single node rejects a bad token on a deploy without reading its body", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-cluster-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
   try {
     const pending = new ReadableStream({ start() {} }); // never ends
     const res = srv.handler(new Request("http://test.local/v1/deploys", {
@@ -193,7 +199,7 @@ test("a single node rejects a bad token on a deploy without reading its body", a
     const timeout = new Promise<string>((r) => setTimeout(() => r("still reading the body"), 2000).unref());
     assert.equal(await Promise.race([res.then((r) => r.status), timeout]), 401);
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -204,7 +210,7 @@ test("cluster forwarding caps oversized payloads (Content-Length and chunked) be
   const base = loadConfig();
   const jsonCap = 128;
   const deployCap = 512;
-  const srv = createServer(loadConfig({
+  const srv = await createServer(loadConfig({
     dataDir, domain: "test.local", publicPort: 80, adminToken: "adm",
     limits: { ...base.limits, jsonBodyBytes: jsonCap, deployBodyBytes: deployCap },
   }), fake.cluster);
@@ -312,7 +318,7 @@ test("cluster forwarding caps oversized payloads (Content-Length and chunked) be
     assert.equal(overPagePut.status, 413);
     assert.equal((await overPagePut.json()).error, "body_too_large");
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });

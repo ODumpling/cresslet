@@ -10,16 +10,19 @@
     "start": "node server/main.ts",
     "test": "node --test --test-concurrency=1 \"tests/*_test.ts\"",
     "check": "tsc --noEmit",
-    "vendor": "node scripts/vendor-container.ts"
+    "vendor": "node scripts/vendor-container.ts",
+    "test:pg": "CRESSLET_TEST_SCHEMA_PER_DATA_DIR=1 node --test --test-concurrency=1 \"tests/*_test.ts\""
   },
   "dependencies": {
     "@hono/node-server": "^2.1.9",
     "hono": "^4.13.19",
+    "pg": "^8.23.1",
     "undici": "^8.12.4",
     "workerd": "^1.20261119.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1",
     "typescript": "^7.0.2"
   }
 }

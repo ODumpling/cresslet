@@ -8,7 +8,7 @@ import { loadConfig } from "../server/config.ts";
 
 async function setup() {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-names-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }));
   const json = async (method: string, path: string, token?: string, input?: unknown) => {
     const headers = new Headers({ host: "test.local" });
     if (token) headers.set("authorization", `Bearer ${token}`);
@@ -73,7 +73,7 @@ test("names: suggest a free name, check one, and create apps and pages with a ch
     // The chosen name is the page's (GET /v1/pages/:name).
     assert.equal((await t.json("GET", "/v1/pages/q3-report", tok)).body.page.name, "q3-report");
   } finally {
-    t.srv.close();
+    await t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
   }
 });

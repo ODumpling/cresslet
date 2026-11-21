@@ -124,7 +124,7 @@ The firewall alert also fires while the network is missing (its first deploy, or
 
 ## Backups
 
-Everything lives in the data volume: `cresslet.db`, `secrets.key` (without it the server won't start and app secrets can't be read), every app's deploys, database and files. [`deploy/backup.sh`](../deploy/backup.sh) snapshots it on the Docker host (root) while the server runs: each SQLite database through `.backup` (consistent) and an integrity check, the rest copied, as one `.tgz`. `secrets.key` isn't in the snapshot: it's kept apart, as `secrets-<fingerprint>.key`, and each snapshot's name ends with the fingerprint of the key it needs (`cresslet-20261120T033012Z-1a2b3c4d5e6f.tgz`).
+Everything lives in the data volume (unless the metadata is on [Postgres](database.md): back that up with `pg_dump` alongside): `cresslet.db`, `secrets.key` (without it the server won't start and app secrets can't be read), every app's deploys, database and files. [`deploy/backup.sh`](../deploy/backup.sh) snapshots it on the Docker host (root) while the server runs: each SQLite database through `.backup` (consistent) and an integrity check, the rest copied, as one `.tgz`. `secrets.key` isn't in the snapshot: it's kept apart, as `secrets-<fingerprint>.key`, and each snapshot's name ends with the fingerprint of the key it needs (`cresslet-20261120T033012Z-1a2b3c4d5e6f.tgz`).
 
 ```sh
 deploy/backup.sh <volume>              # one snapshot now, in /var/backups/cresslet
@@ -261,6 +261,8 @@ On a clean host (or the same one), as root, with Docker and rclone (from rclone.
 | `CRESSLET_PAGE_VISIBILITY` | private | default for new [pages](api.md#pages) (`private`, `link` or `public`); each account can set its own |
 | `CRESSLET_PAGE_RETENTION_DAYS` | 30 | days a new page is kept after its last upload (`0` = forever); each account can set its own |
 | `CRESSLET_MAX_PAGES_PER_ACCOUNT` | 200 | live pages an account may own (403 `quota`; site admins exempt) |
+| `CRESSLET_DATABASE_URL` | — | Postgres for the metadata (`postgres://user:pass@host:5432/db`) instead of `<data dir>/cresslet.db`; moving an existing instance: [Metadata database](database.md#moving-to-postgres). App databases and files stay in the data dir |
+| `CRESSLET_DATABASE_SCHEMA` | public | Postgres schema for Cresslet's tables (created if missing) |
 | `CRESSLET_APP_DB_MB` / `CRESSLET_APP_FILES_MB` | 512 / 1024 | per-app database size (SQLite `max_page_count`; apps can't change it) / total size of its files |
 | `CRESSLET_CLIENT_IP_HEADER` | — | header with the real client IP for per-IP limits, e.g. `cf-connecting-ip` behind Cloudflare (the [Caddy setup](#production) uses `x-forwarded-for`, which Caddy overwrites with the client's address). Without it the TCP peer is used (behind a proxy that's the proxy, so every client shares one allowance). The proxy must set it to the one client address (Cloudflare does for `cf-connecting-ip`); a request that reaches the server some other way can send any value, so set it only if every request comes through that proxy |
 

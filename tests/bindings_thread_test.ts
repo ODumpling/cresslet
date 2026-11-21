@@ -108,7 +108,7 @@ test("bindings thread: a failed start rejects (socket path taken)", async () => 
 // Issue #27: app SQL used to run on the control plane's main thread, so one slow query stalled every request.
 test("a slow app query doesn't stall the control plane", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-test-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
   const call = (path: string, init: RequestInit & { host?: string } = {}) => {
     const headers = new Headers(init.headers);
     headers.set("host", init.host ?? "test.local");
@@ -147,7 +147,7 @@ test("a slow app query doesn't stall the control plane", async () => {
     assert.ok(worst < 200, `worst timer + /healthz round trip while it ran: ${Math.round(worst)} ms of ${Math.round(slowMs)} ms`);
     assert.ok(healthz > 5, `${healthz} /healthz answered during the query`);
   } finally {
-    srv.close();
+    await srv.close();
     await bindingsSettled(); // its thread closes the app's db before the dir goes
     await rm(dataDir, { recursive: true, force: true });
   }

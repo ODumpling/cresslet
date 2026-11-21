@@ -38,7 +38,7 @@ async function setup(ai: Partial<AiConfig> | null = {}) {
   });
   await new Promise<void>((r) => stub.listen(0, "127.0.0.1", r));
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-ai-"));
-  const srv = createServer(loadConfig({
+  const srv = await createServer(loadConfig({
     dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["boss@b.co"],
     ai: ai && { apiKey: "sk-operator", baseUrl: `http://127.0.0.1:${(stub.address() as AddressInfo).port}`, creditsPerUsd: 100, monthlyCredits: 1, maxConcurrent: 1, ...ai },
   }));
@@ -70,7 +70,7 @@ async function setup(ai: Partial<AiConfig> | null = {}) {
     res.end();
   };
   const close = async () => {
-    srv.close();
+    await srv.close();
     stub.closeAllConnections();
     await new Promise((r) => stub.close(r));
     await rm(dataDir, { recursive: true, force: true });

@@ -56,7 +56,7 @@ function wsRoundTrip(port: number, host: string, path: string, text: string, hea
 
 test("websockets reach the app server through the sandbox", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-ws-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, limits: { requestMs: 1000, idleMs: 0 } as never }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, limits: { requestMs: 1000, idleMs: 0 } as never }));
   const http = serve({ fetch: srv.handler, port: 0 });
   http.on("upgrade", srv.upgrade);
   await new Promise((r) => http.once("listening", r));
@@ -104,7 +104,7 @@ test("websockets reach the app server through the sandbox", async () => {
     assert.equal((await wsRoundTrip(port, host, "/not-a-route", "hi")).status, 404); // static route
     assert.equal((await wsRoundTrip(port, "nope.test.local", "/api/ws", "hi")).status, 404);
     // Verified custom domains route upgrades too.
-    srv.store.db.prepare("INSERT INTO domains (domain, app_id, token, verified_at, created_at) VALUES ('ws.example.com', ?, 't', 1, 1)").run(d.app.id);
+    await srv.store.db.run("INSERT INTO domains (domain, app_id, token, verified_at, created_at) VALUES ('ws.example.com', ?, 't', 1, 1)", d.app.id);
     assert.equal((await wsRoundTrip(port, "WS.example.com.", "/api/ws", "hi")).reply, "echo:hi:/api/ws:-");
     assert.equal((await wsRoundTrip(port, "test.local", "/api/ws", "hi")).status, 404); // root host
     assert.equal((await wsRoundTrip(port, "preview.test.local", "/api/ws", "hi")).status, 404); // studio preview host
@@ -112,7 +112,7 @@ test("websockets reach the app server through the sandbox", async () => {
     assert.match(logs, /WS \/api\/ws 101/);
   } finally {
     http.close();
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });

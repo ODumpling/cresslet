@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { resolveTxt } from "node:dns/promises";
 import { join, resolve } from "node:path";
@@ -43,6 +44,12 @@ export interface Config {
   /** Port shown in public URLs (omitted when 80/443). */
   publicPort: number;
   dataDir: string;
+  /**
+   * Metadata database (accounts, apps, deploys, secrets…; docs/database.md): `url` null = SQLite at
+   * <dataDir>/cresslet.db (CRESSLET_DATABASE_URL, a postgres:// URL, to use Postgres); `schema`: the Postgres
+   * schema its tables live in (CRESSLET_DATABASE_SCHEMA). Apps' own databases stay SQLite files either way.
+   */
+  database: { url: string | null; schema: string };
   sockDir: string;
   workerdPath: string;
   /** Let any GitHub user create an account (off: only accounts the operator pre-created). */
@@ -153,6 +160,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     scheme: env("CRESSLET_SCHEME", "http") as "http" | "https",
     publicPort: num("CRESSLET_PUBLIC_PORT", port),
     dataDir,
+    database: { url: process.env.CRESSLET_DATABASE_URL || null, schema: env("CRESSLET_DATABASE_SCHEMA", "public") },
     // Unix socket paths are capped at ~104 bytes on macOS, keep them short.
     sockDir: env("CRESSLET_SOCK_DIR", "/tmp/cresslet-sock"),
     workerdPath: process.env.CRESSLET_WORKERD ?? bundledWorkerd(),
@@ -266,8 +274,18 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       throw new Error(`${env} must be a whole number from 0 (no limit) to ${2 ** 31 - 1}`);
     }
   }
+  const database = { ...base.database, ...overrides.database };
+  if (database.url && !/^postgres(ql)?:\/\//.test(database.url)) throw new Error("CRESSLET_DATABASE_URL must be a postgres:// URL");
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(database.schema)) {
+    throw new Error("CRESSLET_DATABASE_SCHEMA must be a lowercase identifier (a-z, 0-9, _)");
+  }
+  // Test runs against Postgres (npm run test:pg): each data dir gets its own schema, as it gets its own SQLite file.
+  if (database.url && process.env.CRESSLET_TEST_SCHEMA_PER_DATA_DIR === "1" && !overrides.database?.schema) {
+    database.schema = "t_" + createHash("sha256").update(merged.dataDir).digest("hex").slice(0, 16);
+  }
   return {
     ...merged,
+    database,
     pages,
     sandbox: { ...base.sandbox, ...overrides.sandbox },
     limits,

@@ -1,13 +1,9 @@
-// Sliding-window counters for abuse limits. Kept in the store's SQLite database (table rate_hits)
+// Sliding-window counters for abuse limits. Kept in the store's database (table rate_hits)
 // when one is given, so a crash or restart doesn't hand out fresh allowances; in memory otherwise
 // (short-lived limits like CLI logins, where a reset doesn't matter).
 import { isIPv6 } from "node:net";
 
-/** Where persisted hits live (Store: table rate_hits). */
-export interface RateHits {
-  rateHitCount(bucket: string, key: string, since: number): number;
-  addRateHit(bucket: string, key: string, at: number, until: number): void;
-}
+import type { RateHits } from "./store.ts";
 
 export class RateLimit {
   private hits = new Map<string, number[]>();
@@ -22,14 +18,12 @@ export class RateLimit {
   }
 
   /** Records a hit for `key` and returns true, or returns false (no hit recorded) if it's over. */
-  take(key: string, now = Date.now()): boolean {
+  async take(key: string, now = Date.now()): Promise<boolean> {
     const since = now - this.windowMs;
     if (this.persist) {
-      // node:sqlite is synchronous and the control plane is one process: count + insert can't interleave.
+      // Count + insert in one transaction under a lock on the key: concurrent requests (or servers) can't both take the last one.
       const { hits, bucket } = this.persist;
-      if (hits.rateHitCount(bucket, key, since) >= this.max) return false;
-      hits.addRateHit(bucket, key, now, now + this.windowMs);
-      return true;
+      return hits.takeRateHit(bucket, key, since, this.max, now, now + this.windowMs);
     }
     const recent = (this.hits.get(key) ?? []).filter((t) => t > since);
     if (recent.length >= this.max) {

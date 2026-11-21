@@ -18,7 +18,7 @@ export default {
 
 test("site admins list every site with usage, delete (soft), restore and purge", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-admin-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["boss@example.com"] }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["boss@example.com"] }));
   const call = (path: string, init: RequestInit & { host?: string } = {}) => {
     const headers = new Headers(init.headers);
     headers.set("host", init.host ?? "test.local");
@@ -85,7 +85,7 @@ test("site admins list every site with usage, delete (soft), restore and purge",
     assert.equal((await json("/v1/admin/sites", { headers: bearer(boss) })).body.totals.deleted, 1);
     const appId = del.body.site.id;
     assert.ok(existsSync(paths(srv.cfg, appId).db));
-    assert.deepEqual(srv.store.deletedBefore(Date.now() + 1).map((a) => a.id), [appId]);
+    assert.deepEqual((await srv.store.deletedBefore(Date.now() + 1)).map((a) => a.id), [appId]);
 
     // restore: back online with its data
     const res = await json("/v1/admin/sites/shop/restore", { method: "POST", headers: bearer(boss) });
@@ -109,7 +109,7 @@ test("site admins list every site with usage, delete (soft), restore and purge",
     assert.equal((await role("dev@example.com", null)).status, 200);
     assert.equal((await json("/v1/admin/sites", { headers: bearer(owner) })).status, 403);
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
