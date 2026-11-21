@@ -275,6 +275,7 @@ async function prunePage(cfg: Config, store: Store, appId: string, graceMs = PAG
 
 /** The reaper's pass: pages (owned here) with versions they don't serve, kept by prunePage or an older server. */
 export async function pruneOldPageVersions(cfg: Config, store: Store, local: (appId: string) => boolean, graceMs = PAGE_GRACE_MS) {
+  for (const [id, at] of replacedAt) if (at <= performance.now() - PAGE_GRACE_MS) replacedAt.delete(id); // e.g. purged pages
   for (const appId of store.pagesWithOldVersions()) {
     if (local(appId)) await prunePage(cfg, store, appId, graceMs);
   }
