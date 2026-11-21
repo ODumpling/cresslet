@@ -138,14 +138,33 @@ test("a create that loses the last quota slot to a concurrent one doesn't spend 
   }
 });
 
+test("two first deploys of one name: the loser gets 409 and keeps its hourly allowance", async () => {
+  const t = await setup({ createsPerHour: 2 });
+  try {
+    const a = t.bearer(await t.account("a@b.co"));
+    const both = await Promise.all([t.deploy(a, "same"), t.deploy(a, "same")]);
+    assert.deepEqual(both.map((r) => r.status).sort(), [201, 409]);
+    assert.equal((await t.json("/v1/apps/same", { method: "DELETE", headers: a })).status, 200);
+    assert.equal((await t.deploy(a, "next")).status, 201, "the 409 didn't count");
+  } finally {
+    await t.done();
+  }
+});
+
 test("hourly limits survive a restart", async () => {
   const t = await setup({ createsPerHour: 1, anonAppsPerHour: 1 }, { clientIpHeader: "cf-connecting-ip" });
-  const tok = await t.account("a@b.co");
-  assert.equal((await t.deploy(t.bearer(tok), "one")).status, 201);
-  const anon = await t.deploy({ "cf-connecting-ip": "1.1.1.1" });
-  assert.equal(anon.status, 201);
-  assert.equal((await t.json(`/v1/apps/${anon.body.app.name}`, { method: "DELETE", headers: { "x-cresslet-deploy-key": anon.body.deployKey } })).status, 200);
-  t.stop();
+  let tok: string;
+  try {
+    tok = await t.account("a@b.co");
+    assert.equal((await t.deploy(t.bearer(tok), "one")).status, 201);
+    const anon = await t.deploy({ "cf-connecting-ip": "1.1.1.1" });
+    assert.equal(anon.status, 201);
+    assert.equal((await t.json(`/v1/apps/${anon.body.app.name}`, { method: "DELETE", headers: { "x-cresslet-deploy-key": anon.body.deployKey } })).status, 200);
+    t.stop();
+  } catch (e) {
+    await t.done();
+    throw e;
+  }
   const again = await setup({ createsPerHour: 1, anonAppsPerHour: 1 }, { clientIpHeader: "cf-connecting-ip" }, t.dataDir);
   try {
     assert.equal((await again.deploy(again.bearer(tok), "two")).status, 429);
@@ -170,15 +189,17 @@ test("anonymous pool under saturation: live apps per client IP (IPv6 by /64), fr
     assert.equal((await t.deploy(ip("2001:db8:1:2:ffff::9"))).status, 201);
     assert.equal((await t.deploy(ip("2001:db8:1:2::abcd"))).status, 429, "the same IPv6 /64 is one client");
 
-    assert.equal((await t.deploy(ip("3.3.3.3"))).status, 201, "pool: 5 of 5");
+    const third = await t.deploy(ip("3.3.3.3"));
+    assert.equal(third.status, 201, "pool: 5 of 5");
     const full = await t.deploy(ip("4.4.4.4"));
     assert.equal(full.status, 429, "a full pool still turns new clients away");
     assert.match(full.body.message, /too many anonymous apps on this server/);
 
-    const del = await t.json(`/v1/apps/${mine[0].body.app.name}`, { method: "DELETE", headers: { "x-cresslet-deploy-key": mine[0].body.deployKey } });
+    const del = await t.json(`/v1/apps/${third.body.app.name}`, { method: "DELETE", headers: { "x-cresslet-deploy-key": third.body.deployKey } });
     assert.equal(del.status, 200);
     assert.equal((await t.deploy(ip("4.4.4.4"))).status, 201, "a delete frees a slot");
 
+    // 1.1.1.1 is still at its cap (2 live): a claim takes one off it, and off the pool.
     const a = t.bearer(await t.account("a@b.co"));
     const claim = await t.json(`/v1/apps/${mine[1].body.app.name}/claim`, { method: "POST", headers: a, body: JSON.stringify({ deployKey: mine[1].body.deployKey }) });
     assert.equal(claim.status, 200);

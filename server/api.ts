@@ -620,6 +620,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       // Checked again just before the insert: concurrent deploys can't share the last slot. The hourly
       // allowance is spent only there, so a request that loses the last slot doesn't use it up.
       const created = await store.createApp(name, expires, acct?.id ?? null, () => {
+        if (store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict"); // taken meanwhile
         if (acct) {
           checkAppQuota(acct);
           takeCreate(acct);
