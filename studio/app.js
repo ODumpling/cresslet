@@ -779,9 +779,6 @@ async function renderAdminSite(name) {
         el("thead", {}, el("tr", {}, ...heads.map((h, i) => el("th", { scope: "col", textContent: h, className: i ? "num" : "" })))),
         el("tbody", {}, ...rows.map((r) => el("tr", {}, ...r.map((c, i) => el("td", { className: i ? "num" : "" }, c)))))))
       : el("p", { className: "muted small", textContent: empty });
-  const db = d.database && el("div", { className: "panel" }, el("h2", { textContent: "Database tables" }),
-    d.database.error ? el("p", { className: "error small", textContent: d.database.error })
-      : tableOf(["Table", "Rows"], d.database.tables.map((t) => [el("span", { className: "mono", textContent: t.name }), t.rows.toLocaleString()]), "No database yet."));
   const deploys = el("div", { className: "panel" }, el("h2", { textContent: "Deploys" }),
     tableOf(["Deploy", "Size", "When"], d.deploys.map((x) => [
       el("span", {}, el("span", { className: "mono", textContent: x.id }), x.current ? el("span", { className: "badge", textContent: "live" }) : null),
@@ -790,7 +787,7 @@ async function renderAdminSite(name) {
     ]), "No deploys."));
 
   $("admin-body").replaceChildren(banner, stats,
-    el("div", { className: "detail-grid" }, info, el("div", { className: "stack" }, db, deploys)));
+    el("div", { className: "detail-grid" }, info, el("div", { className: "stack" }, deploys)));
 }
 
 // ------------------------------------------------------------------ admin: AI credits (#/admin-credits[/<account id>])
