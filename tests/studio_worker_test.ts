@@ -176,6 +176,7 @@ export default { async fetch(req) {
     assert.match((await w.get("/partial")).json, /UNIQUE constraint failed/);
     assert.deepEqual((await w.saved()).exec("SELECT k FROM u ORDER BY k")[0].values, [[1], [2]]);
     assert.match((await w.get("/partial-run")).json, /UNIQUE constraint failed/);
+    assert.deepEqual((await w.saved()).exec("SELECT k FROM u ORDER BY k")[0].values, [[1], [2], [3], [4]]);
     assert.match((await w.get("/partial-exec")).json, /UNIQUE constraint failed/);
     assert.deepEqual((await w.saved()).exec("SELECT k FROM u ORDER BY k")[0].values, [[1], [2], [3], [4], [5]]);
     await w.get("/ddl");
