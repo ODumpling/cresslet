@@ -841,18 +841,19 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       { type: "TXT", name: `_cresslet.${d.domain}`, value: d.token },
     ],
   });
-  const claimed = async (c: Context<Env>, role: Role) => {
+  /**
+   * `adding`: adding or verifying, which need the server to route and certify the hostname
+   * (`CRESSLET_CUSTOM_DOMAINS`). Checked before the claim, so an unclaimed app isn't told to claim for nothing.
+   */
+  const claimed = async (c: Context<Env>, role: Role, adding = false) => {
     const a = getApp(c.req.param("name")!);
     notPage(a);
     await authorize(c, a, role);
-    if (!a.account_id) throw new HttpError(403, "custom domains require a claimed app (cresslet claim)", "unclaimed");
-    return a;
-  };
-  /** Adding and verifying need the server to route and certify the hostname (`CRESSLET_CUSTOM_DOMAINS`). */
-  const domainsEnabled = (a: App) => {
-    if (!cfg.customDomains) {
+    if (adding && !cfg.customDomains) {
       throw new HttpError(403, `custom domains are turned off on this server: use ${appUrl(cfg, a.name)}`, "custom_domains_disabled");
     }
+    if (!a.account_id) throw new HttpError(403, "custom domains require a claimed app (cresslet claim)", "unclaimed");
+    return a;
   };
 
   app.get("/apps/:name/domains", async (c) => {
@@ -861,8 +862,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   });
 
   app.post("/apps/:name/domains", async (c) => {
-    const a = await claimed(c, "admin");
-    domainsEnabled(a);
+    const a = await claimed(c, "admin", true);
     const raw = (await body<{ domain?: unknown } | null>(c))?.domain;
     await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     const domain = typeof raw === "string" ? normDomain(raw) : "";
@@ -877,8 +877,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   });
 
   app.post("/apps/:name/domains/:domain/verify", async (c) => {
-    const a = await claimed(c, "admin");
-    domainsEnabled(a);
+    const a = await claimed(c, "admin", true);
     const d = store.domains(a.id).find((x) => x.domain === normDomain(c.req.param("domain")));
     if (!d) throw new HttpError(404, "domain not found", "not_found");
     if (!d.verified_at) {

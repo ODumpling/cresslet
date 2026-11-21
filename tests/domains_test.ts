@@ -173,11 +173,22 @@ test("CRESSLET_CUSTOM_DOMAINS=false: adding and verifying refused, reported in G
       assert.match(r.text, new RegExp(`custom domains are turned off on this server: use http://${a.name}\\.test\\.local`));
     }
     // Access is checked first: others get the usual refusal, not the setting.
-    assert.doesNotMatch((await on.json(`/v1/apps/${a.name}/domains`, { method: "POST", body: '{"domain":"new.example.com"}' })).text, /custom_domains_disabled/);
+    const mallory = { authorization: `Bearer ${JSON.parse((await on.json("/v1/accounts", { method: "POST", headers: { authorization: "Bearer adm" }, body: '{"email":"m@b.co"}' })).text).token}` };
+    for (const headers of [undefined, mallory]) {
+      const r = await on.json(`/v1/apps/${a.name}/domains`, { method: "POST", headers, body: '{"domain":"new.example.com"}' });
+      assert.equal(r.status, 403);
+      assert.notEqual(JSON.parse(r.text).error, "custom_domains_disabled", r.text);
+    }
+    // An unclaimed app's owner hears that domains are off, not that claiming would help.
+    const anon = JSON.parse((await on.json("/v1/deploys", { method: "POST", body: JSON.stringify({ files: [{ path: "index.html", data: "anon" }] }) })).text);
+    const r = await on.json(`/v1/apps/${anon.app.name}/domains`, { method: "POST", headers: { "x-cresslet-deploy-key": anon.deployKey }, body: '{"domain":"new.example.com"}' });
+    assert.equal(JSON.parse(r.text).error, "custom_domains_disabled", r.text);
     // Listing and removing still work, and the domain verified earlier still routes.
     const listed = JSON.parse((await on.json(`/v1/apps/${a.name}/domains`, { headers: alice })).text).domains.map((d: { domain: string; verified: boolean }) => [d.domain, d.verified]);
     assert.deepEqual(listed, [["old.example.com", true], ["pending.example.com", false]]);
     assert.equal((await on.json("/", { host: "old.example.com" })).text, "alice");
+    assert.equal((await on.json("/v1/domains/check?domain=old.example.com")).status, 200);
+    assert.equal((await on.json("/v1/domains/check?domain=pending.example.com")).status, 404);
     assert.equal((await on.json(`/v1/apps/${a.name}/domains/pending.example.com`, { method: "DELETE", headers: alice })).status, 200);
   } finally {
     on.srv.close();
