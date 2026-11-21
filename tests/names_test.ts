@@ -27,20 +27,21 @@ test("names: suggest a free name, check one, and create apps and pages with a ch
     const tok = await t.account("a@b.co");
 
     // Suggestions: a readable name for an app, an unguessable one for a page. No login needed.
-    const app = (await t.json("GET", "/v1/names/suggest")).body;
+    const app = (await t.json("GET", "/v1/names")).body;
     assert.match(app.name, /^[a-z]+-[a-z]+-[0-9a-f]{4}$/);
     assert.equal(app.url, `http://${app.name}.test.local`);
-    assert.match((await t.json("GET", "/v1/names/suggest?kind=page")).body.name, /^pg-[0-9a-f]{20}$/);
-    assert.equal((await t.json("GET", "/v1/names/suggest?kind=x")).status, 400);
+    assert.match((await t.json("GET", "/v1/names?kind=page")).body.name, /^pg-[0-9a-f]{20}$/);
+    assert.equal((await t.json("GET", "/v1/names?kind=x")).status, 400);
 
     // Checks: free, invalid (format, reserved), taken.
     assert.deepEqual((await t.json("GET", "/v1/names/my-shop")).body, { name: "my-shop", available: true, url: "http://my-shop.test.local" });
-    for (const bad of ["My-Shop", "-shop", "shop-", "a--b", "api", "x".repeat(41)]) {
+    for (const bad of ["My-Shop", "-shop", "shop-", "a--b", "x".repeat(41)]) {
       const r = (await t.json("GET", `/v1/names/${bad}`)).body;
       assert.equal(r.available, false, bad);
       assert.equal(r.reason, "invalid", bad);
     }
-    assert.equal((await t.json("GET", "/v1/names/api")).body.message, "api is reserved");
+    assert.deepEqual((await t.json("GET", "/v1/names/api")).body, { name: "api", available: false, reason: "reserved", message: "api is reserved" });
+    assert.equal((await t.json("GET", "/v1/names/suggest")).body.available, true); // a name like any other
 
     // An app deployed under the chosen name gets it; the name is then taken for apps and pages alike.
     const d = await t.json("POST", "/v1/deploys", tok, { app: "my-shop", files: [{ path: "index.html", data: "hi" }] });
@@ -50,6 +51,10 @@ test("names: suggest a free name, check one, and create apps and pages with a ch
     const taken = (await t.json("GET", "/v1/names/my-shop")).body;
     assert.equal(taken.available, false);
     assert.equal(taken.reason, "taken");
+    // Create-only (the studio's picker): a name taken since the check is a 409, not a deploy over that app.
+    const again = await t.json("POST", "/v1/deploys", tok, { app: "my-shop", create: true, files: [{ path: "index.html", data: "over" }] });
+    assert.equal(again.status, 409);
+    assert.equal(again.body.error, "conflict");
     // Someone else can't create (or deploy over) it.
     const other = await t.account("o@b.co");
     assert.equal((await t.json("POST", "/v1/deploys", other, { app: "my-shop", files: [{ path: "index.html", data: "x" }] })).status, 403);

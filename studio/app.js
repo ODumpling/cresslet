@@ -170,7 +170,8 @@ function slugField(input, kind) {
     field.querySelector(".js-slug-before").textContent = before ?? "";
     field.querySelector(".js-slug-after").textContent = after ?? "";
   });
-  // `seq` counts edits: an answer for an older value is dropped. `last`: the latest check (or suggestion).
+  // `seq` counts edits: an answer for an older value is dropped. `last`: the latest check (or suggestion);
+  // `retry` marks one that failed (network, 429), so submitting asks again.
   field.querySelector(".slug-input").addEventListener("mousedown", (e) => {
     if (e.target !== input) {
       e.preventDefault();
@@ -199,7 +200,7 @@ function slugField(input, kind) {
         (r) => r.available
           ? settle(my, name, true, "ok", `${name} is available`)
           : settle(my, name, false, "bad", r.reason === "taken" ? `${name} is taken. Try another.` : r.message ?? "Not a valid address."),
-        (e) => settle(my, name, false, "bad", `Couldn't check this address: ${e.message}`),
+        (e) => ({ ...settle(my, name, false, "bad", `Couldn't check this address: ${e.message}`), retry: true }),
       );
     }
     return last;
@@ -224,7 +225,7 @@ function slugField(input, kind) {
       const my = ++seq;
       clearTimeout(timer);
       show("", "Picking an address…");
-      last = api(`/v1/names/suggest?kind=${kind}`).then(
+      last = api(`/v1/names?kind=${kind}`).then(
         ({ name }) => {
           if (my !== seq) return { name, ok: false };
           input.value = name;
@@ -237,7 +238,7 @@ function slugField(input, kind) {
     /** The address once it's checked and free, else null (the field says why). */
     async value() {
       let r = last && (await last);
-      if (!r || r.name !== input.value) r = await check();
+      if (!r || r.retry || r.name !== input.value) r = await check();
       return r.ok && r.name === input.value ? r.name : null;
     },
   };
@@ -2225,7 +2226,7 @@ async function openProject(id, gen) {
       if (cfg && !cfg.name) {
         const app = await pickAppName();
         if (!app) return btn.focus();
-        newApp = { app };
+        newApp = { app, create: true };
       }
     }
     btn.disabled = true;
@@ -2530,14 +2531,17 @@ function mountBuilder({ c, devLog, onChange }) {
 
 const deploySlug = slugField($("deploy-name"), "app");
 /** Asks for a new app's address (a generated one to start with). Resolves to the name, or null if cancelled. */
+let appNameAsks = 0;
 function pickAppName() {
   const dlg = $("deploy-dialog");
+  const ask = ++appNameAsks;
   return new Promise((resolve) => {
     let picked = null;
     $("deploy-form").onsubmit = async (e) => {
       e.preventDefault();
       $("deploy-confirm").disabled = true;
       const name = await deploySlug.value().finally(() => ($("deploy-confirm").disabled = false));
+      if (ask !== appNameAsks || !dlg.open) return; // cancelled while checking (or asked again since)
       if (!name) return $("deploy-name").focus();
       picked = name;
       dlg.close();

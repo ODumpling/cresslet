@@ -40,8 +40,8 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/auth/cli/approve` | full-access account token (the studio) + `{userCode}` (case, dashes ignored) → `{approved: true}`; 404 if unknown, expired or already approved. 10 tries per account per 10 min |
 | POST | `/v1/auth/cli/token` | `{deviceCode}` → `{status: pending}` or `{status: complete, account, token}` (a new token, once); 400 `expired_token` after, or if the approving token was revoked. Poll every `interval`s |
 | GET | `/v1/templates` | `{templates: [{name, description}]}` |
-| GET | `/v1/names/suggest?kind=app\|page` | no auth: a free generated [name](#names) for a new app (`amber-comet-1a2b`) or page (`pg-<20 hex>`) → `{name, url}` |
-| GET | `/v1/names/:name` | no auth: can a new app or page have this name? → `{name, available: true, url}` or `{name, available: false, reason: invalid\|taken, message}` |
+| GET | `/v1/names?kind=app\|page` | no auth: a free generated [name](#names) for a new app (`amber-comet-1a2b`) or page (`pg-<20 hex>`) → `{name, url}` |
+| GET | `/v1/names/:name` | no auth: can a new app or page have this name? → `{name, available: true, url}` or `{name, available: false, reason: invalid\|reserved\|taken, message}` |
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |
 | GET | `/v1/apps` | apps the account owns or collaborates on; each has `access: owner\|admin\|viewer` |
@@ -136,7 +136,7 @@ With `CRESSLET_ANTHROPIC_API_KEY` set ([self-hosting](self-hosting.md#configurat
 }
 ```
 
-- `app` omitted → random name. `app` unknown → created with that name. `app` exists → needs auth.
+- `app` omitted → random name. `app` unknown → created with that name. `app` exists → needs auth, or 409 with `"create": true` (create only).
 - Anonymous create → app expires (`expiresAt`), response includes `deployKey` (store it).
 - Logged-in create → claimed immediately.
 - `files` = built static output. `server` = single ESM bundle (or omit for static).
@@ -156,7 +156,7 @@ Response `201`:
 
 A new app or page is served at `<name>.<domain>`. Names are 1-40 characters of `a-z`, `0-9` and single dashes, not starting or ending with a dash, and not a reserved word (`www`, `api`, `studio`, `admin`, `app`, `apps`, `docs`, `status`, `mail`, `preview`). Apps and pages share one namespace, and a deleted app's name stays taken until it's purged. The name is fixed once created.
 
-The studio asks for one before an app's first deploy and on the page upload form: it starts from `GET /v1/names/suggest` and checks each edit with `GET /v1/names/:name` (both 120 per minute per address). The check is advisory: `POST /v1/deploys` and `POST /v1/pages` still answer 409 if someone took the name in between.
+The studio asks for one before an app's first deploy and on the page upload form: it starts from `GET /v1/names?kind=…` and checks each edit with `GET /v1/names/:name` (both 120 per minute per address). The check is advisory: `POST /v1/deploys` and `POST /v1/pages` still answer 409 if someone took the name in between (for an app, when the deploy says `"create": true`: without it, a name taken by one of your own apps is a deploy to that app).
 
 ## Minimal agent deploy (no CLI)
 

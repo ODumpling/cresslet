@@ -160,6 +160,7 @@ export function createCresslet(c, opts) {
     log(`uploading ${files.length} files…`);
     const payload = {
       app: target.app,
+      ...(target.create ? { create: true } : {}), // a new app only: never a deploy over one that took the name meanwhile
       files,
       server,
       config: { routes: cfg.routes, crons: cfg.crons },

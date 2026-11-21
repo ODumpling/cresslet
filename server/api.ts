@@ -588,8 +588,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       raw = await body(c, deployBodyLimit);
     }
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new HttpError(400, "invalid JSON body", "bad_request");
-    const input = raw as DeployInput & { app?: string };
+    const input = raw as DeployInput & { app?: string; create?: boolean };
     let target = input.app ? store.appByName(input.app) : undefined;
+    // `create`: a new app only (the studio's address picker), never a deploy over one that took the name meanwhile.
+    if (target && input.create === true) throw new HttpError(409, `app name unavailable: ${target.name}`, "conflict");
     if (target && !cluster.local(target.id)) return forwardDeploy(c, target.id); // created on another node meanwhile
     let createdKey: string | undefined;
     if (target) {
@@ -672,15 +674,15 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   }
   const NAME_RULES = "1-40 chars of a-z, 0-9 and single dashes, not starting or ending with one";
   /** Why a new app or page can't have this name, or null if it's free. Deleted apps keep theirs until purged. */
-  const nameProblem = (name: string): "invalid" | "taken" | null =>
-    !validName(name, cfg) ? "invalid" : store.appByName(name, true) ? "taken" : null;
+  const nameProblem = (name: string): "invalid" | "reserved" | "taken" | null =>
+    reservedName(name, cfg) ? "reserved" : !validName(name, cfg) ? "invalid" : store.appByName(name, true) ? "taken" : null;
 
   // ---- names: pick a new app's or page's subdomain before deploying (docs/api.md#names)
   const nameChecks = new RateLimit(120, 60_000);
   const checkNames = (c: Context<Env>) => {
     if (!nameChecks.take(ipKey(clientIp(c)))) throw new HttpError(429, "too many name checks, wait a minute", "rate_limited");
   };
-  app.get("/names/suggest", (c) => {
+  app.get("/names", (c) => {
     checkNames(c);
     const kind = c.req.query("kind") ?? "app";
     if (kind !== "app" && kind !== "page") throw new HttpError(400, "kind must be app or page");
@@ -695,7 +697,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       name,
       available: !problem,
       ...(problem
-        ? { reason: problem, message: problem === "taken" ? `${name} is taken` : reservedName(name, cfg) ? `${name} is reserved` : `a name must be ${NAME_RULES}` }
+        ? { reason: problem, message: problem === "invalid" ? `a name must be ${NAME_RULES}` : `${name} is ${problem}` }
         : { url: appUrl(cfg, name) }),
     });
   });
@@ -1224,7 +1226,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const name = input.name ?? uniquePageName();
     const problem = nameProblem(name);
     if (problem === "taken") throw new HttpError(409, `page name unavailable: ${name}`, "conflict");
-    if (problem) throw new HttpError(400, `page name must be ${NAME_RULES}`, "invalid_name");
+    if (problem) throw new HttpError(400, problem === "reserved" ? `${name} is reserved` : `page name must be ${NAME_RULES}`, "invalid_name");
     checkPageQuota(acct);
     const page = await store.createPage(name, acct.id, settings, () => {
       if (store.appByName(name, true)) throw new HttpError(409, `page name unavailable: ${name}`, "conflict"); // taken meanwhile
