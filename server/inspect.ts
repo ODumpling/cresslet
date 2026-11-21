@@ -61,7 +61,7 @@ export async function inspect<T>(appId: string, path: string, job: Job): Promise
       try {
         child.send({ path, job, maxBytes });
       } catch (e) {
-        finish(() => reject(e));
+        finish(() => reject(new HttpError(500, `database inspection failed: ${(e as Error).message}`)));
       }
     });
   } finally {
