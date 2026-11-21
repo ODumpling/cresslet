@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -342,6 +342,25 @@ test("pages keep only the version they serve on disk; apps keep 10 for rollback"
     await t.srv.reap();
     assert.deepEqual(rows(row.id), [v5]);
     assert.deepEqual(await onDisk(row.id), [v5]);
+
+    // A removal that fails keeps the row, so the next prune tries again.
+    const v6 = await put("v6");
+    const sub = join(paths(cfg, row.id).deploy(v5), "public", "sub");
+    await mkdir(sub);
+    await writeFile(join(sub, "f"), "x");
+    await chmod(sub, 0o500);
+    const error = console.error;
+    console.error = () => {};
+    try {
+      await pruneOldPageVersions(cfg, store, () => true, 0);
+    } finally {
+      console.error = error;
+      await chmod(sub, 0o700);
+    }
+    if (process.getuid?.() !== 0) assert.deepEqual(rows(row.id), [v6, v5]); // root removes it anyway
+    await pruneOldPageVersions(cfg, store, () => true, 0);
+    assert.deepEqual(rows(row.id), [v6]);
+    assert.deepEqual(await onDisk(row.id), [v6]);
 
     // An app keeps its last 10 deploys (rollback), files and rows alike; the reaper leaves them alone.
     for (let i = 0; i < 12; i++) {
