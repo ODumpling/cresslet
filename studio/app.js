@@ -996,12 +996,14 @@ function renderCli() {
   // Name the account this session's token belongs to, and approve only with that same token.
   const token = (cliToken = auth.token);
   text("Checking your account…");
+  // Session changed meanwhile (another tab): start over with the current one.
+  const stale = () => location.hash !== "#/cli" || (auth.token !== token && (renderCli(), true));
   api("/v1/me").then(({ account }) => {
-    if (auth.token !== token || location.hash !== "#/cli") return;
+    if (stale()) return;
     text(`Enter the code that cresslet auth login shows in your terminal. The CLI gets full access to ${account.github ?? account.email}. Only enter a code from a terminal you're using.`);
     form.hidden = false;
   }, (e) => {
-    if (auth.token === token) text(`Could not load your account: ${e.message}`);
+    if (!stale()) text(`Could not load your account: ${e.message}`);
   });
 }
 function cliError(t) {
