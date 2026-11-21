@@ -215,7 +215,8 @@ function createDb(SQL, bytes) {
       }
       return Number(p);
     });
-  const all = (sql, params) => {
+  /** `max`: stop after that many rows (first(): one, as node:sqlite's get() steps once). */
+  const all = (sql, params, max = Infinity) => {
     const stmt = db.prepare(sql);
     try {
       stmt.bind(norm(params));
@@ -230,7 +231,7 @@ function createDb(SQL, bytes) {
         }
         return Number(v);
       };
-      while (stmt.step()) {
+      while (rows.length < max && stmt.step()) {
         const vals = stmt.get(null, { useBigInt: true });
         rows.push(Object.fromEntries(cols.map((c, i) => [c, cell(vals[i])])));
       }
@@ -307,10 +308,10 @@ function createDb(SQL, bytes) {
   };
   db.exec("PRAGMA foreign_keys = ON;");
   // query/first can write too (INSERT … RETURNING): save when they changed anything
-  const reading = (sql, params) => {
+  const reading = (sql, params, max) => {
     const before = one("SELECT total_changes()");
     try {
-      return all(sql, params);
+      return all(sql, params, max);
     } finally {
       // a statement that failed part-way may still have written (INSERT OR FAIL … RETURNING)
       if (one("SELECT total_changes()") !== before || mayWrite(sql)) persist();
@@ -319,7 +320,7 @@ function createDb(SQL, bytes) {
   return {
     batch: async (statements) => batch(statements),
     query: async (sql, ...params) => reading(sql, params),
-    first: async (sql, ...params) => reading(sql, params)[0] ?? null,
+    first: async (sql, ...params) => reading(sql, params, 1)[0] ?? null,
     // persist in finally: a statement (or script) that failed part-way may still have written
     run: async (sql, ...params) => {
       try {

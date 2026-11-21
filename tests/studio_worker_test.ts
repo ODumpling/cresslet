@@ -180,6 +180,7 @@ export default { async fetch(req) {
     const e = await db.batch([db.sql\`INSERT INTO ids VALUES (9007199254740993) RETURNING id\`]).then(() => "no error", (e) => e.message);
     return json({ e, rows: await db.sql\`SELECT count(*) AS n FROM ids\` });
   }
+  if (p === "/first-big") return json(await db.first("SELECT column1 AS v FROM (VALUES (1), (9007199254740993))"));
   if (p === "/proto") return json(Object.keys((await db.batch(['SELECT 42 AS "__proto__"']))[0].rows[0]));
   if (p === "/safe") return json(await db.first(db.sql\`SELECT \${5n} AS x\`));
 } };`));
@@ -242,6 +243,7 @@ export default { async fetch(req) {
       rows: [{ n: 0 }],
     });
     assert.deepEqual((await w.get("/proto")).json, ["__proto__"]);
+    assert.deepEqual((await w.get("/first-big")).json, { v: 1 }); // first reads one row, as node:sqlite's get()
   } finally {
     await w.close();
   }
