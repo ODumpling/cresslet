@@ -223,7 +223,15 @@ export class Store {
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         ticket INTEGER NOT NULL, expires_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS page_sessions_expiry ON page_sessions (expires_at);
+      CREATE TABLE IF NOT EXISTS rate_hits (
+        bucket TEXT NOT NULL, key TEXT NOT NULL, at INTEGER NOT NULL, until INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS rate_hits_key ON rate_hits (bucket, key, at);
+      CREATE INDEX IF NOT EXISTS rate_hits_until ON rate_hits (until);
     `);
+    // The client (ipKey) that created an anonymous app, for the per-client cap; cleared on claim.
+    if (!(this.db.prepare("PRAGMA table_info(apps)").all() as { name: string }[]).some((c) => c.name === "anon_client")) {
+      this.db.exec("ALTER TABLE apps ADD COLUMN anon_client TEXT");
+    }
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
   }
@@ -370,7 +378,8 @@ export class Store {
 
   // ---- apps
   /** `check` runs right before the insert, with no await in between (quota checks can't race). */
-  async createApp(name: string, expiresAt: number | null, accountId: string | null, check?: () => void) {
+  /** `anonClient`: the client (ipKey) creating an anonymous app. */
+  async createApp(name: string, expiresAt: number | null, accountId: string | null, check?: () => void, anonClient?: string) {
     const deployKey = id("clv_app", 24);
     const keyHash = await sha256(deployKey);
     check?.();
@@ -393,9 +402,9 @@ export class Store {
       page_deploy_id: null,
     };
     this.db.prepare(
-      `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(app.id, name, accountId, keyHash, "{}", expiresAt, now, now);
+      `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at, anon_client)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(app.id, name, accountId, keyHash, "{}", expiresAt, now, now, accountId ? null : anonClient ?? null);
     return { app, deployKey };
   }
   /** A page has no usable deploy key (only accounts change it). `check` as in createApp. */
@@ -513,7 +522,7 @@ export class Store {
     return !!row && row.h === await sha256(key);
   }
   claimApp(appId: string, accountId: string) {
-    this.db.prepare("UPDATE apps SET account_id = ?, expires_at = NULL, updated_at = ? WHERE id = ?")
+    this.db.prepare("UPDATE apps SET account_id = ?, expires_at = NULL, anon_client = NULL, updated_at = ? WHERE id = ?")
       .run(accountId, Date.now(), appId);
   }
   setCurrentDeploy(appId: string, deployId: string, config: unknown) {
@@ -531,6 +540,23 @@ export class Store {
   /** Live unclaimed apps (anonymous deploys) on the instance. */
   anonAppCount(): number {
     return (this.db.prepare("SELECT count(*) n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL").get() as { n: number }).n;
+  }
+  /** Live unclaimed apps one client (ipKey) created. */
+  anonAppCountBy(client: string): number {
+    return (this.db.prepare("SELECT count(*) n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL AND anon_client = ?")
+      .get(client) as { n: number }).n;
+  }
+  // ---- rate-limit hits (limits.ts RateHits)
+  rateHitCount(bucket: string, key: string, since: number): number {
+    return (this.db.prepare("SELECT count(*) n FROM rate_hits WHERE bucket = ? AND key = ? AND at > ?")
+      .get(bucket, key, since) as { n: number }).n;
+  }
+  addRateHit(bucket: string, key: string, at: number, until: number) {
+    this.db.prepare("INSERT INTO rate_hits (bucket, key, at, until) VALUES (?, ?, ?, ?)").run(bucket, key, at, until);
+  }
+  /** Drops rate-limit hits that have left their window. */
+  pruneRateHits(now = Date.now()) {
+    this.db.prepare("DELETE FROM rate_hits WHERE until <= ?").run(now);
   }
   expiredApps(now = Date.now()): App[] {
     return this.db.prepare("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ? AND deleted_at IS NULL")

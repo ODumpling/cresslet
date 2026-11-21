@@ -40,7 +40,7 @@ import { cliLogin } from "./cli-login.ts";
 import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
 import { adminRoutes, isSiteAdmin, purgeApp } from "./admin.ts";
-import { RateLimit } from "./limits.ts";
+import { ipKey, RateLimit } from "./limits.ts";
 import {
   type DeployFile,
   type DeployInput,
@@ -329,10 +329,19 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   // ---- abuse limits (docs/self-hosting.md#configuration)
   const HOUR = 3600_000;
-  const anonApps = new RateLimit(cfg.limits.anonAppsPerHour, HOUR);
-  const appDeploys = new RateLimit(cfg.limits.deploysPerHour, HOUR);
+  // Persisted (rate_hits), so a restart doesn't reset them.
+  const anonApps = new RateLimit(cfg.limits.anonAppsPerHour, HOUR, { hits: store, bucket: "anon-apps" });
+  const appDeploys = new RateLimit(cfg.limits.deploysPerHour, HOUR, { hits: store, bucket: "deploys" });
+  const accountCreates = new RateLimit(cfg.limits.createsPerHour, HOUR, { hits: store, bucket: "creates" });
   const clientIp = (c: Context<Env>) =>
     (cfg.clientIpHeader && c.req.header(cfg.clientIpHeader)?.split(",")[0].trim()) || c.env?.remoteAddr || "unknown";
+  /** New apps and pages per account per hour: deleting doesn't give the allowance back, so create/delete loops stop. */
+  const takeCreate = (acct: Account) => {
+    if (isSiteAdmin(cfg, acct)) return;
+    if (!accountCreates.take(acct.id)) {
+      throw new HttpError(429, `too many new apps and pages (${cfg.limits.createsPerHour} per hour): try later`, "rate_limited");
+    }
+  };
   /** A new app (or a claimed one) for `acct` must fit its app quota. */
   const checkAppQuota = (acct: Account) => {
     if (isSiteAdmin(cfg, acct)) return;
@@ -596,21 +605,27 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       if (!validName(name, cfg)) {
         throw new HttpError(400, "app name must be 1-40 chars of a-z, 0-9 and single dashes", "invalid_name");
       }
+      const client = ipKey(clientIp(c));
       const anonCap = () => {
+        if (store.anonAppCountBy(client) >= cfg.limits.maxAnonAppsPerIp) {
+          throw new HttpError(429, `too many live anonymous apps from your address (${cfg.limits.maxAnonAppsPerIp}): log in, or delete or claim one`, "rate_limited");
+        }
         if (store.anonAppCount() >= cfg.limits.maxAnonApps) {
           throw new HttpError(429, "too many anonymous apps on this server right now: log in to deploy (cresslet login)", "rate_limited");
         }
       };
-      if (acct) checkAppQuota(acct);
-      else {
+      if (acct) {
+        checkAppQuota(acct);
+        takeCreate(acct);
+      } else {
         anonCap();
-        if (!anonApps.take(clientIp(c))) {
+        if (!anonApps.take(client)) {
           throw new HttpError(429, `too many new anonymous apps from your address (${cfg.limits.anonAppsPerHour} per hour): log in, or try later`, "rate_limited");
         }
       }
       const expires = acct ? null : Date.now() + cfg.limits.anonTtlMs;
       // Checked again just before the insert: concurrent deploys can't share the last slot.
-      const created = await store.createApp(name, expires, acct?.id ?? null, () => acct ? checkAppQuota(acct) : anonCap());
+      const created = await store.createApp(name, expires, acct?.id ?? null, () => acct ? checkAppQuota(acct) : anonCap(), client);
       target = created.app;
       createdKey = created.deployKey;
       appDeploys.take(target.id);
@@ -1154,6 +1169,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       retentionDays: input.retentionDays === undefined ? defaults.retentionDays : retention(input.retentionDays),
     };
     checkPageQuota(acct);
+    takeCreate(acct);
     // Unguessable: a link-only page's URL is all that protects it.
     let name = "";
     for (let i = 0; i < 5 && (!name || store.appByName(name, true)); i++) name = id("pg").replace("_", "-");

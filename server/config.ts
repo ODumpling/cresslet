@@ -101,6 +101,10 @@ export interface Config {
     maxAnonApps: number;
     /** Anonymous apps one client IP may create per hour. */
     anonAppsPerHour: number;
+    /** Live anonymous apps one client IP (an IPv6 /64) may have. */
+    maxAnonAppsPerIp: number;
+    /** New apps and pages one account may create per hour (site admins: no limit). */
+    createsPerHour: number;
     /** Deploys per app per hour. */
     deploysPerHour: number;
     /** Live pages (uploaded static HTML) one account may own (site admins: no limit). */
@@ -182,6 +186,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       maxAnonApps: num("CRESSLET_MAX_ANON_APPS", 200),
       maxPagesPerAccount: num("CRESSLET_MAX_PAGES_PER_ACCOUNT", 200),
       anonAppsPerHour: num("CRESSLET_ANON_APPS_PER_HOUR", 10),
+      maxAnonAppsPerIp: num("CRESSLET_MAX_ANON_APPS_PER_IP", 20),
+      createsPerHour: num("CRESSLET_CREATES_PER_HOUR", 60),
       deploysPerHour: num("CRESSLET_DEPLOYS_PER_HOUR", 120),
       appDbBytes: num("CRESSLET_APP_DB_MB", 512) * 1024 * 1024,
       appFilesBytes: num("CRESSLET_APP_FILES_MB", 1024) * 1024 * 1024,
