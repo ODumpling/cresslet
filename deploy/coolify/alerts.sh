@@ -51,6 +51,7 @@ Description=Check the Cresslet host every minute
 [Timer]
 OnBootSec=1min
 OnUnitActiveSec=1min
+AccuracySec=5s
 [Install]
 WantedBy=timers.target
 EOF
@@ -101,13 +102,17 @@ send() {
 report() {
   f=$STATE/$1
   if [ -n "$2" ]; then
-    [ -f "$f" ] || { send "$2"; printf '%s\n' "$2" > "$f"; }
+    # A full disk can refuse the write: the alert went, the rest of the checks still run.
+    [ -f "$f" ] || { send "$2"; printf '%s\n' "$2" > "$f" || :; }
   elif [ -f "$f" ]; then
     send "recovered: $(cat "$f")"
     rm -f "$f"
   fi
 }
 failed() { systemctl is-failed --quiet "$1" 2>/dev/null; }
+# unit_bad <unit> <check>: it failed, or <check> is firing and the next run hasn't finished yet
+# (a unit that runs again is "activating", no longer "failed": that isn't a recovery yet).
+unit_bad() { failed "$1" || { [ -f "$STATE/$2" ] && [ "$(systemctl is-active "$1" 2>/dev/null)" = activating ]; }; }
 # Docker calls are bounded: a hung dockerd (likely when the disk or memory runs out) mustn't stall
 # the checks. Those that don't need Docker go first.
 if command -v timeout >/dev/null; then dk() { timeout 15 docker "$@"; }; else dk() { docker "$@"; }; fi
@@ -144,11 +149,11 @@ fi
 report firewall-stop "${stopped:+$stopped (journalctl -u cresslet-firewall)}"
 report firewall-unstopped "${unstopped:+$unstopped (journalctl -u cresslet-firewall)}"
 p=""
-failed cresslet-firewall.service && p="cresslet-firewall can't apply its rules (journalctl -u cresslet-firewall)"
+unit_bad cresslet-firewall.service firewall && p="cresslet-firewall can't apply its rules (journalctl -u cresslet-firewall)"
 report firewall "$p"
 
 p=""
-failed cresslet-backup.service && p="the last backup failed (journalctl -u cresslet-backup)"
+unit_bad cresslet-backup.service backup && p="the last backup failed (journalctl -u cresslet-backup)"
 report backup "$p"
 
 # The Cresslet containers: running on the network, not Coolify's proxy. Sets out to "<id> <fields>"
@@ -189,12 +194,12 @@ while read -r c name n oom; do
   case $old in '' | *[!0-9]*) old=0 ;; esac # none yet, or cut short by a killed run
   [ -n "$oom" ] && [ "$n" -gt "$old" ] || continue
   send "${name#/} restarted (restarts: $n, last exit OOM-killed: $oom; docker logs ${name#/})"
-  echo "$n" > "$f"
+  echo "$n" > "$f" || :
 done <<EOF
 $out
 EOF
 for f in "$STATE"/restarts-*; do
-  [ -f "$f" ] || continue
+  [ -f "$f" ] && [ -z "$err" ] || continue # Docker failing (each call can take 15 s): another time
   # Only once Docker says it's gone (not when the call fails or times out).
   ! dk inspect "${f##*/restarts-}" 2>&1 >/dev/null | grep -qi "no such" || rm -f "$f"
 done
@@ -205,7 +210,7 @@ done
 while [ "$rc" -eq 0 ] && [ -s "$OUTBOX" ]; do
   IFS= read -r m < "$OUTBOX" || break
   post "$m" || break
-  sed 1d "$OUTBOX" > "$OUTBOX.n" && mv "$OUTBOX.n" "$OUTBOX"
+  sed 1d "$OUTBOX" > "$OUTBOX.n" && mv "$OUTBOX.n" "$OUTBOX" || break # disk full: not the same line again
 done
 
 exit $rc

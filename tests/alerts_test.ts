@@ -277,11 +277,16 @@ test("firewall: a container it couldn't stop runs unfirewalled, a new alert afte
   }
 });
 
-test("a failed backup run alerts", { skip }, async () => {
+test("a failed backup run alerts, until a run works (one still running isn't a recovery)", { skip }, async () => {
   const t = await setup();
   try {
     t.fail("cresslet-backup.service");
     assert.match((await t.check()).sent[0], /the last backup failed \(journalctl -u cresslet-backup\)$/);
+    t.fail("cresslet-backup.service", false);
+    t.set("active-cresslet-backup.service", "");
+    assert.deepEqual((await t.check()).sent, []);
+    rmSync(join(t.fix, "active-cresslet-backup.service"));
+    assert.match((await t.check()).sent[0], /recovered: the last backup failed/);
   } finally {
     t.done();
   }
