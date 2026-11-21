@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import { type Config, paths, previewAppName } from "./config.ts";
-import { type App, id, type Store } from "./store.ts";
+import { type App, type Deploy, id, type Store } from "./store.ts";
 import { normalizeCrons } from "./cron.ts";
 import { filesSettled } from "./bindings.ts";
 
@@ -236,25 +236,35 @@ export async function writePage(cfg: Config, store: Store, app: App, files: Depl
     source: String(source).slice(0, 20),
   });
   store.setPageDeploy(app.id, deployId);
-  await pruneDeploys(cfg, store, app.id, deployId, 1); // pages have no rollback: only the served version stays
+  // No rollback for pages: older versions go now. The one just replaced stays until the reaper
+  // (pruneOldPageVersions), so a request that read the old pointer can still finish.
+  await pruneDeploys(cfg, store, app.id, deployId, 2);
   return { id: deployId, bytes, files: decoded.length };
 }
 
 /** Keep `keep` and the `keepCount - 1` most recent others (10 in all for an app's rollback). */
 async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = 10) {
   const others = store.deploys(appId, 1000).filter((d) => d.id !== keep);
-  for (const d of others.slice(keepCount - 1)) {
-    store.deleteDeploy(d.id);
-    await rm(paths(cfg, appId).deploy(d.id), { recursive: true, force: true });
+  for (const d of others.slice(keepCount - 1)) await removeDeploy(cfg, store, d);
+}
+
+/**
+ * Removes the versions a page no longer serves, once it has served its current one for `graceMs`
+ * (the one before, which writePage leaves; and any an older server kept, 10 per page).
+ */
+export async function pruneOldPageVersions(cfg: Config, store: Store, local: (appId: string) => boolean, graceMs = 60_000) {
+  for (const d of store.oldPageDeploys(Date.now() - graceMs)) {
+    if (local(d.app_id)) await removeDeploy(cfg, store, d);
   }
 }
 
-/** Removes pages' old versions (kept by older servers, before pages kept only the one they serve). */
-export async function pruneOldPageVersions(cfg: Config, store: Store, local: (appId: string) => boolean) {
-  for (const d of store.oldPageDeploys()) {
-    if (!local(d.app_id)) continue;
-    store.deleteDeploy(d.id);
+/** Files first: if removing them fails, the row stays, so the next prune tries again. */
+async function removeDeploy(cfg: Config, store: Store, d: Pick<Deploy, "id" | "app_id">) {
+  try {
     await rm(paths(cfg, d.app_id).deploy(d.id), { recursive: true, force: true });
+    store.deleteDeploy(d.id);
+  } catch (e) {
+    console.error(`cresslet: couldn't remove deploy ${d.id}:`, e);
   }
 }
 

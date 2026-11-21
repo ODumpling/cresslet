@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { loadConfig, paths } from "../server/config.ts";
+import { pruneOldPageVersions } from "../server/deploys.ts";
 
 const DAY = 86_400_000;
 
@@ -296,35 +297,52 @@ test("pages keep only the version they serve on disk; apps keep 10 for rollback"
   const t = await setup();
   try {
     const tok = await t.account("a@b.co");
-    const onDisk = async (appId: string) => (await readdir(paths(t.srv.cfg, appId).deploys)).sort();
+    const { store, cfg } = t.srv;
+    const rows = (appId: string) => store.deploys(appId, 100).map((d) => d.id);
+    const rowSet = (appId: string) => rows(appId).sort();
+    const onDisk = async (appId: string) => (await readdir(paths(cfg, appId).deploys)).sort();
     const page = (await t.send("POST", "/v1/pages", tok, { html: "v1", visibility: "link" })).body.page;
     for (const v of ["v2", "v3", "v4"]) assert.equal((await t.send("PUT", `/v1/pages/${page.name}`, tok, { html: v })).status, 200);
-    let row = t.srv.store.appByName(page.name)!;
-    assert.deepEqual(t.srv.store.deploys(row.id, 100).map((d) => d.id), [row.page_deploy_id]);
-    assert.deepEqual(await onDisk(row.id), [row.page_deploy_id]);
+    const row = store.appByName(page.name)!;
+    const served = row.page_deploy_id!;
+    // An upload removes all but the version it replaced, which a request in flight may still read.
+    const [, previous] = rows(row.id);
+    assert.deepEqual(rows(row.id), [served, previous]);
+    assert.deepEqual(await onDisk(row.id), [served, previous].sort());
     assert.equal(await (await t.visit(page.name)).text(), "v4");
 
-    // Versions an older server kept (rows and directories) go with the reaper; the served one stays.
-    const old = ["dep_old1", "dep_old2"];
-    for (const [i, d] of old.entries()) {
-      t.srv.store.addDeploy({ id: d, app_id: row.id, created_at: Date.now() - 1000 * (i + 1), bytes: 2, file_count: 1, has_server: 0, source: "api" });
-      await mkdir(join(paths(t.srv.cfg, row.id).deploy(d), "public"), { recursive: true });
+    // Versions an older server kept (rows and directories).
+    for (const [i, d] of ["dep_old1", "dep_old2"].entries()) {
+      store.addDeploy({ id: d, app_id: row.id, created_at: Date.now() - 1000 * (i + 1), bytes: 2, file_count: 1, has_server: 0, source: "api" });
+      await mkdir(join(paths(cfg, row.id).deploy(d), "public"), { recursive: true });
     }
+    const all = [served, previous, "dep_old1", "dep_old2"];
+    // The reaper waits a minute after an upload, and leaves pages another node owns alone.
     await t.srv.reap();
-    assert.deepEqual(t.srv.store.deploys(row.id, 100).map((d) => d.id), [row.page_deploy_id]);
-    assert.deepEqual(await onDisk(row.id), [row.page_deploy_id]);
+    assert.deepEqual(rows(row.id), all);
+    store.db.prepare("UPDATE deploys SET created_at = ? WHERE id = ?").run(Date.now() - 61_000, served);
+    await pruneOldPageVersions(cfg, store, () => false);
+    assert.deepEqual(rowSet(row.id), [...all].sort());
+    assert.deepEqual(await onDisk(row.id), [...all].sort());
+    // Then only the served version is left.
+    await t.srv.reap();
+    assert.deepEqual(rows(row.id), [served]);
+    assert.deepEqual(await onDisk(row.id), [served]);
     assert.equal(await (await t.visit(page.name)).text(), "v4");
 
     // An app keeps its last 10 deploys (rollback), files and rows alike; the reaper leaves them alone.
     for (let i = 0; i < 12; i++) {
       assert.equal((await t.send("POST", "/v1/deploys", tok, { app: "site", files: [{ path: "index.html", data: `a${i}` }] })).status, 201);
     }
+    const site = store.appByName("site")!;
+    store.db.prepare("UPDATE deploys SET created_at = 1 WHERE app_id = ?").run(site.id); // same-millisecond ties
     await t.srv.reap();
-    row = t.srv.store.appByName("site")!;
-    const kept = t.srv.store.deploys(row.id, 100).map((d) => d.id);
+    const kept = rows(site.id);
     assert.equal(kept.length, 10);
-    assert.equal(kept[0], row.current_deploy_id);
-    assert.deepEqual(await onDisk(row.id), [...kept].sort());
+    assert.equal(kept[0], site.current_deploy_id);
+    assert.deepEqual(await onDisk(site.id), [...kept].sort());
+    assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, {})).status, 200);
+    assert.equal(await (await t.visit("site")).text(), "a10");
     assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, { deployId: kept[9] })).status, 200);
     assert.equal(await (await t.visit("site")).text(), "a2");
   } finally {
