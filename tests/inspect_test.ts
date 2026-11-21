@@ -89,6 +89,17 @@ test("db inspection: normal queries, row and byte caps, sql errors, busy", async
     const wide = await q("WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 10) SELECT replace(printf('%.*c', 1000000, 'a'), 'a', '€') s FROM r");
     assert.equal(wide.body.truncated, true);
     assert.equal(wide.body.rows.length, 1);
+    // Escapes count too: under a small cap, the whole reply stays within it.
+    const maxBytes0 = INSPECT_LIMITS.maxBytes;
+    INSPECT_LIMITS.maxBytes = 256;
+    try {
+      const esc = await q("WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 50) SELECT char(10, 9, 34, 92, 1) || x \"a\nb\" FROM r");
+      assert.equal(esc.body.truncated, true);
+      assert.ok(esc.body.rows.length > 0);
+      assert.ok(Buffer.byteLength(JSON.stringify(esc.body)) <= 256, JSON.stringify(esc.body));
+    } finally {
+      INSPECT_LIMITS.maxBytes = maxBytes0;
+    }
     // A single value bigger than the cap: refused, not built (Node ≥ 24.15); before, left out of the reply.
     const huge = await q("SELECT zeroblob(100000000) z");
     if (new DatabaseSync(":memory:").limits) {
@@ -119,12 +130,13 @@ test("db inspection: normal queries, row and byte caps, sql errors, busy", async
 
     // Table names and schemas count against the budget too (here a tiny one): the listing stops.
     const maxBytes = INSPECT_LIMITS.maxBytes;
-    INSPECT_LIMITS.maxBytes = 150;
+    INSPECT_LIMITS.maxBytes = 200;
     try {
       const cut = (await t.json("GET", "/v1/apps/shop/db?limit=0", t.owner)).body;
       assert.equal(cut.truncated, true);
       assert.deepEqual(Object.keys(cut.tables), ["blob"]);
-      INSPECT_LIMITS.maxBytes = 80;
+      assert.ok(Buffer.byteLength(JSON.stringify(cut)) <= 200);
+      INSPECT_LIMITS.maxBytes = 130;
       const site = (await t.json("GET", "/v1/admin/sites/shop", t.owner)).body.database;
       assert.equal(site.truncated, true);
       assert.ok(site.tables.length < 3);

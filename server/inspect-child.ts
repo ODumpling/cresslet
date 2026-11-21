@@ -10,19 +10,23 @@ process.once("message", ({ path, job, maxBytes }: { path: string; job: Job; maxB
     // A query builds no value bigger than the whole reply (stored ones, which the listing reads, are
     // bounded by the app's database cap). `limits` is Node ≥ 24.15; before, only the deadline bounds it.
     if (job.kind === "query" && db.limits) db.limits.length = maxBytes;
-    let bytes = 0;
+    // The reply's own framing (`{"rows":[],"truncated":true}` and the like) is reserved up front.
+    let bytes = 64;
     /** Counts `n` bytes against the reply's budget; false (and nothing counted) if they don't fit. */
     const charge = (n: number) => bytes + n <= maxBytes && ((bytes += n), true);
-    /** A value's size in the reply, before building it (a stored blob's base64 may not even fit a string). */
+    /**
+     * A value's size in the reply (JSON, UTF-8, escapes included), worked out before building it: a
+     * stored blob's base64 may not even fit in a string.
+     */
     const size = (x: unknown) =>
-      x instanceof Uint8Array ? Math.ceil(x.length / 3) * 4 + 12 : typeof x === "string" ? Buffer.byteLength(x) + 2 : 24;
+      x instanceof Uint8Array ? Math.ceil(x.length / 3) * 4 + 12 : typeof x === "string" ? Buffer.byteLength(JSON.stringify(x)) : 24;
     /** Rows (JSON-safe) until `max` rows or the shared byte budget runs out. */
     const take = (sql: string, params: SQLInputValue[], max: number) => {
       const rows: unknown[] = [];
       for (const row of db.prepare(sql).iterate(...params) as Iterable<Record<string, unknown>>) {
         if (rows.length >= max) return { rows, truncated: true };
-        let len = 2;
-        for (const [k, v] of Object.entries(row)) len += Buffer.byteLength(k) + 4 + size(v);
+        let len = 3; // {},
+        for (const [k, v] of Object.entries(row)) len += size(k) + 2 + size(v); // "k":v,
         if (!charge(len)) return { rows, truncated: true };
         rows.push(JSON.parse(JSON.stringify(row, (_k, x) =>
           typeof x === "bigint" ? Number(x) : x instanceof Uint8Array ? { $bytes: Buffer.from(x).toString("base64") } : x)));
@@ -40,7 +44,7 @@ process.once("message", ({ path, job, maxBytes }: { path: string; job: Job; maxB
       const list: { name: string; rows: number }[] = [];
       let truncated = false;
       for (const t of tables()) {
-        if (!charge(size(t.name) + 32)) {
+        if (!charge(size(t.name) + 40)) { // {"name":…,"rows":N},
           truncated = true;
           break;
         }
@@ -52,7 +56,7 @@ process.once("message", ({ path, job, maxBytes }: { path: string; job: Job; maxB
       let truncated = false;
       for (const t of tables()) {
         // Names and schemas count too: a database of many tables mustn't make an unbounded reply.
-        if (!charge(size(t.name) + size(t.sql) + 64)) {
+        if (!charge(size(t.name) + size(t.sql) + 64)) { // "name":{"schema":…,"count":N,"rows":[],"truncated":true},
           truncated = true;
           break;
         }
