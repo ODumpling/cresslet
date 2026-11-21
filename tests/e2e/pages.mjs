@@ -39,33 +39,33 @@ try {
   // Settings: defaults start at the server's; save link-only, kept 7 days.
   const o = await as(owner.token);
   await o.goto(base + "/#/settings");
-  await o.getByLabel("Who can open new pages").waitFor();
+  await o.getByLabel("Who can open new artifacts").waitFor();
   await o.waitForFunction(() => document.getElementById("def-server").textContent !== "—");
-  assert(await o.getByLabel("Who can open new pages").inputValue() === "private", "server default visibility");
-  assert(await o.getByLabel("Keep new pages for").inputValue() === "30", "server default retention");
-  await o.getByLabel("Who can open new pages").selectOption("link");
-  await o.getByLabel("Keep new pages for").selectOption("7");
+  assert(await o.getByLabel("Who can open new artifacts").inputValue() === "private", "server default visibility");
+  assert(await o.getByLabel("Keep new artifacts for").inputValue() === "30", "server default retention");
+  await o.getByLabel("Who can open new artifacts").selectOption("link");
+  await o.getByLabel("Keep new artifacts for").selectOption("7");
   await o.getByRole("button", { name: "Save defaults" }).click();
-  await o.getByText("Page defaults saved").waitFor();
+  await o.getByText("Artifact defaults saved").waitFor();
   const saved = await call("/v1/me/settings", owner.token);
   assert(saved.pages.visibility === "link" && saved.pages.retentionDays === 7, `saved ${JSON.stringify(saved.pages)}`);
   await shot(o, "pages-settings");
 
   // Home: the form starts at the account's defaults; upload a file with them.
   await o.goto(base + "/#/pages");
-  await o.getByRole("heading", { name: "Pages", exact: true }).waitFor();
+  await o.getByRole("heading", { name: "Artifacts", exact: true }).waitFor();
   await o.waitForFunction(() => document.getElementById("page-retention").value === "7");
   assert(await o.getByLabel("Who can open it").inputValue() === "link", "form default visibility");
-  await o.getByRole("button", { name: "Upload" }).click();
+  await o.getByRole("button", { name: "Deploy" }).click();
   await o.getByText("Choose an HTML file or a folder first.").waitFor();
   await o.locator("#page-file").setInputFiles(join(dir, "report.html"));
-  await o.getByText("report.html").waitFor();
+  await o.getByText("report.html", { exact: true }).waitFor();
   // Its address: a generated unguessable one unless changed.
   await o.locator("#page-name-status", { hasText: "is available" }).waitFor();
   const generated = await o.getByRole("textbox", { name: "Address" }).inputValue();
   assert(/^pg-[0-9a-f]{20}$/.test(generated), `generated page name ${generated}`);
-  await o.getByRole("button", { name: "Upload" }).click();
-  await o.getByText(/^Uploaded report:/).waitFor();
+  await o.getByRole("button", { name: "Deploy" }).click();
+  await o.getByText(/^Deployed report:/).waitFor();
   let pages = (await call("/v1/pages", owner.token)).pages;
   assert(pages.length === 1 && pages[0].name === generated && pages[0].title === "report" && pages[0].visibility === "link" && pages[0].retentionDays === 7, `upload 1 ${JSON.stringify(pages)}`);
   const report = pages[0];
@@ -83,14 +83,14 @@ try {
   assert(await address.inputValue() !== generated, "a new address for the next page");
   await address.fill(generated);
   await o.locator("#page-name-status", { hasText: `${generated} is taken` }).waitFor();
-  await o.getByRole("button", { name: "Upload" }).click();
+  await o.getByRole("button", { name: "Deploy" }).click();
   assert(await o.evaluate(() => document.activeElement?.id) === "page-name", "upload to a taken name didn't return to the address");
   const custom = `site-${run.toString(36)}`;
   await address.fill(custom);
   await o.locator("#page-name-status", { hasText: `${custom} is available` }).waitFor();
   await shot(o, "pages-custom-name");
-  await o.getByRole("button", { name: "Upload" }).click();
-  await o.getByText(/^Uploaded site:/).waitFor();
+  await o.getByRole("button", { name: "Deploy" }).click();
+  await o.getByText(/^Deployed site:/).waitFor();
   pages = (await call("/v1/pages", owner.token)).pages;
   const site = pages.find((p) => p.title === "site");
   assert(site?.name === custom && site.url.includes(`//${custom}.`), `custom page name ${JSON.stringify(site)}`);
@@ -119,12 +119,27 @@ try {
   // A stranger, logged in, lands on the studio's explanation; logged out, on a login prompt.
   const s = await as(stranger.token);
   await s.goto(report.url);
-  await s.getByText(/You don't have access to this page/).waitFor();
+  await s.getByText(/You don't have access to this artifact/).waitFor();
   await shot(s, "pages-no-access");
   const anon = await (await browser.newContext()).newPage();
   await anon.goto(report.url);
   await anon.locator("#view").getByRole("button", { name: "Log in with GitHub" }).waitFor();
   assert(anon.url().startsWith(base + "/#/view/"), `anon at ${anon.url()}`);
+  // Logged out: the landing page links to artifacts, which ask for a login; they stay in the nav; the old #/pages
+  // address goes to #/artifacts.
+  await anon.goto(base + "/");
+  await anon.locator("#landing").getByRole("link", { name: "artifact", exact: true }).click();
+  await anon.getByText("Log in to deploy artifacts").waitFor();
+  await anon.goto(base + "/#/pages");
+  await anon.getByText("Log in to deploy artifacts").waitFor();
+  assert(anon.url().endsWith("#/artifacts"), `old address at ${anon.url()}`);
+  assert(await anon.getByRole("link", { name: "Artifacts" }).isVisible(), "Artifacts in the nav when logged out");
+  assert(!await anon.locator("#page-form").isVisible(), "no form when logged out");
+  // Sharing an artifact describes what its roles can do with it, not an app's logs and secrets.
+  await o.goto(base + "/#/share/" + report.name);
+  await o.getByRole("heading", { name: /Share report/ }).waitFor();
+  await o.locator("#invite-role").waitFor();
+  assert(/open it, even when it's private/.test(await o.locator("#invite-role option[value=viewer]").textContent()), "artifact viewer role text");
 
   // Replace a page with a folder: same link, all its files swapped; a missing page there is a 404, not the index.
   await o.goto(base + "/#/pages");
@@ -146,7 +161,7 @@ try {
   // Phone width: no horizontal scroll.
   const narrow = await as(owner.token, { width: 320, height: 700 });
   await narrow.goto(base + "/#/pages");
-  await narrow.getByRole("heading", { name: "Pages", exact: true }).waitFor();
+  await narrow.getByRole("heading", { name: "Artifacts", exact: true }).waitFor();
   await narrow.getByLabel("Who can open report").waitFor();
   for (const hash of ["#/", "#/pages", "#/settings"]) {
     await narrow.goto(base + "/" + hash);

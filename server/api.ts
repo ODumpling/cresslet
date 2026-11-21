@@ -296,7 +296,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   }
   /** App-only features (deploys, rollback, secrets, egress, domains): a page is static files. */
   function notPage(a: App) {
-    if (a.kind === "page") throw new HttpError(409, `${a.name} is a page: change it with /v1/pages/${a.name}`, "is_page");
+    if (a.kind === "page") throw new HttpError(409, `${a.name} is an artifact (static files, no server): change it with /v1/pages/${a.name}`, "is_page");
   }
 
   const accountView = (a: Account) => ({
@@ -345,7 +345,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   const takeCreate = async (acct: Account) => {
     if (isSiteAdmin(cfg, acct)) return;
     if (!await accountCreates.take(acct.id)) {
-      throw new HttpError(429, `too many new apps and pages (${cfg.limits.createsPerHour} per hour): try later`, "rate_limited");
+      throw new HttpError(429, `too many new apps and artifacts (${cfg.limits.createsPerHour} per hour): try later`, "rate_limited");
     }
   };
   /** A new app (or a claimed one) for `acct` must fit its app quota. */
@@ -1142,7 +1142,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.body(null, await store.appByDomain(d) || (d === cfg.previewHost && !previewAppName(cfg)) ? 200 : 404);
   });
 
-  // ---- pages: uploaded static HTML with a visibility and a retention (docs/api.md#pages)
+  // ---- pages (artifacts to users): uploaded static HTML with a visibility and a retention (docs/api.md#artifacts)
   const pageDefaults = (acct: Account) => {
     const own = store.settings(acct).pages ?? {};
     return {
@@ -1198,14 +1198,14 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await store.appByName(name);
     // Expired: gone, though the reaper may not have purged it yet.
     if (!a || a.kind !== "page" || (a.expires_at !== null && a.expires_at <= Date.now())) {
-      throw new HttpError(404, `page not found: ${name}`, "not_found");
+      throw new HttpError(404, `artifact not found: ${name}`, "not_found");
     }
     return a;
   }
   const checkPageQuota = async (acct: Account) => {
     if (isSiteAdmin(cfg, acct)) return;
     if ((await store.appsByAccount(acct.id, "page")).length >= cfg.limits.maxPagesPerAccount) {
-      throw new HttpError(403, `page limit reached (${cfg.limits.maxPagesPerAccount} per account): delete one first`, "quota");
+      throw new HttpError(403, `artifact limit reached (${cfg.limits.maxPagesPerAccount} per account): delete one first`, "quota");
     }
   };
   const settingsView = (acct: Account) => ({ pages: pageDefaults(acct), defaults: { pages: cfg.pages } });
@@ -1260,11 +1260,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (input.name !== undefined && typeof input.name !== "string") throw new HttpError(400, "name must be a string");
     const name = input.name ?? await uniquePageName();
     const problem = await nameProblem(name);
-    if (problem === "taken") throw new HttpError(409, `page name unavailable: ${name}`, "conflict");
-    if (problem) throw new HttpError(400, problem === "reserved" ? `${name} is reserved` : `page name must be ${NAME_RULES}`, "invalid_name");
+    if (problem === "taken") throw new HttpError(409, `name unavailable: ${name}`, "conflict");
+    if (problem) throw new HttpError(400, problem === "reserved" ? `${name} is reserved` : `an artifact's name must be ${NAME_RULES}`, "invalid_name");
     await checkPageQuota(acct);
     const page = await store.createPage(name, acct.id, settings, async () => {
-      if (await store.appByName(name, true)) throw new HttpError(409, `page name unavailable: ${name}`, "conflict"); // taken meanwhile
+      if (await store.appByName(name, true)) throw new HttpError(409, `name unavailable: ${name}`, "conflict"); // taken meanwhile
       await checkPageQuota(acct);
       await takeCreate(acct); // spent only here, as for new apps (POST /deploys)
     });

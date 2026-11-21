@@ -40,8 +40,8 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/auth/cli/approve` | full-access account token (the studio) + `{userCode}` (case, dashes ignored) → `{approved: true}`; 404 if unknown, expired or already approved. 10 tries per account per 10 min |
 | POST | `/v1/auth/cli/token` | `{deviceCode}` → `{status: pending}` or `{status: complete, account, token}` (a new token, once); 400 `expired_token` after, or if the approving token was revoked. Poll every `interval`s |
 | GET | `/v1/templates` | `{templates: [{name, description}]}` |
-| GET | `/v1/names?kind=app\|page` | no auth: a free generated [name](#names) for a new app (`amber-comet-1a2b`) or page (`pg-<20 hex>`) → `{name, url}` |
-| GET | `/v1/names/:name` | no auth: can a new app or page have this name? → `{name, available: true, url}` or `{name, available: false, reason: invalid\|reserved\|taken, message}` |
+| GET | `/v1/names?kind=app\|page` | no auth: a free generated [name](#names) for a new app (`amber-comet-1a2b`) or artifact (`pg-<20 hex>`) → `{name, url}` |
+| GET | `/v1/names/:name` | no auth: can a new app or artifact have this name? → `{name, available: true, url}` or `{name, available: false, reason: invalid\|reserved\|taken, message}` |
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |
 | GET | `/v1/apps` | apps the account owns or collaborates on; each has `access: owner\|admin\|viewer` |
@@ -71,9 +71,9 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/domains/check?domain=` | 200 if it's a verified custom domain, else 404. For on-demand TLS (the root and app subdomains use the wildcard cert) |
 | GET | `/v1/apps/:name/db?limit=100` | `{tables: {name: {schema, count, rows, truncated?}}, truncated?}` (limit ≤ 1000 rows per table; same 4 MiB / 5 s caps as `db/query`) |
 | POST | `/v1/apps/:name/db/query` | `{sql, params?}` read-only → `{rows, truncated?}`: at most 1000 rows and 4 MiB per reply; stopped after 5 s (`504 query_timeout`); `429 busy` past 2 running per app, 4 in all |
-| GET | `/v1/me/settings` | `{pages: {visibility, retentionDays}, defaults: {pages}}`: the account's defaults for new [pages](#pages) (falling back to the server's), and the server's |
+| GET | `/v1/me/settings` | `{pages: {visibility, retentionDays}, defaults: {pages}}`: the account's defaults for new [artifacts](#artifacts) (falling back to the server's), and the server's |
 | PUT | `/v1/me/settings` | full-access token: `{pages: {visibility?, retentionDays?}}` (keys left out keep their value) or `{pages: null}` (back to the server's) |
-| GET | `/v1/pages` | pages the account owns or collaborates on (each with `access`; expired ones left out) → `{pages, defaults}` |
+| GET | `/v1/pages` | [artifacts](#artifacts) the account owns or collaborates on (each with `access`; expired ones left out) → `{pages, defaults}` |
 | POST | `/v1/pages` | `deploy` token over the whole account: `{html}` or `{files}`, `name?`, `title?`, `visibility?`, `retentionDays?` → `{page}` (201). `name` left out: a generated unguessable one. 409 if taken, 400 `invalid_name` |
 | GET | `/v1/pages/:name` | `{page}` |
 | PUT | `/v1/pages/:name` | owner or admin (`deploy`): `{html}` or `{files}` → same URL, new files; restarts the retention clock |
@@ -91,11 +91,15 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/admin/credits` | **site admin**: `{enabled: false}`, or `{enabled: true, creditsPerUsd, monthlyCredits, period, resetsAt, totals: {used, free, usd, requests, granted, grants, balance, overdrawn, accounts, active}, days: [{date, credits, requests}] (last 30, UTC), models: [{model, credits, requests, usd, inputTokens, outputTokens}], accounts: [{id, email, github, available, balance, monthlyUsed, used, requests, lastUsedAt}], recent: [ledger row + {account}]}`. `totals.used/free/usd/requests/granted/grants/active`, `models`, and each account's `used` and `requests` are this month (UTC); `totals.balance`/`overdrawn` are granted credits held / owed across all wallets now, `totals.accounts` counts every wallet; `accounts` lists every account that has used or been given credits, most used first; `recent` is the last 50 rows, which also carry `usd` and `free` (usage) or `by` (grants) |
 | GET | `/v1/admin/credits/accounts/:id` | **site admin**: one account: `{enabled, monthlyCredits, resetsAt, account: {id, email, github, siteAdmin, available, balance, monthlyUsed, used, requests, lastUsedAt}, history}` (last 200 ledger rows), or `{enabled: false}` without AI credits. 404 for an unknown id |
 
-## Pages
+<a id="pages"></a>
 
-Static HTML you upload and share, like an artifact: one file (`{"html": "…"}`, served as `index.html`) or a folder (`{"files": [{path, data, encoding}]}` with an `index.html` at the root; same size limits as deploys). No server, crons, secrets or domains: the `/v1/apps` endpoints for those answer 409 `is_page`. Each page gets an unguessable name (`pg-<20 hex>`), or the `name` you upload it with, and its own origin, `pg-….<domain>`, so its scripts can't read another page's or the studio's storage.
+## Artifacts
 
-A name you choose can be guessed: keep the generated one for a `link` page that only the people you send it to should open.
+An artifact is static HTML you share (called a page in the API: `/v1/pages`, `kind: "page"`, the `page` and `pages` keys): one file (`{"html": "…"}`, served as `index.html`) or a folder (`{"files": [{path, data, encoding}]}` with an `index.html` at the root; same size limits as deploys). No server, crons, secrets or domains: the `/v1/apps` endpoints for those answer 409 `is_page`. Each artifact gets an unguessable name (`pg-<20 hex>`), or the `name` you upload it with, and its own origin, `pg-….<domain>`, so its scripts can't read another artifact's or the studio's storage.
+
+App or artifact? An app is software that runs: an optional server with a database, files, secrets and crons, always public, with the last 10 deploys kept for rollback. An artifact is a finished file or folder you hand to people: who can open it and how long it's kept are up to you, and it keeps only the version it serves. The CLI's `cresslet deploy` makes one or the other: a project (`cresslet.json`) or any other folder is an app; a single `.html` file, or a folder with `--artifact` (or `--visibility` / `--keep` / `--title`), is an artifact, and deploying the same file or folder again updates it (`PUT /v1/pages/:name`). `--name` picks its address.
+
+A name you choose can be guessed: keep the generated one for a `link` artifact that only the people you send it to should open.
 
 `visibility`:
 - `private`: only its owner and [collaborators](#http-api-v1) (any role), logged in. A visitor without a session is sent to the studio (`/#/view/<name>?path=…`), which calls `POST /v1/pages/:name/view` and sends them back with a one-time ticket (`?cresslet_view=…`, 2 minutes). The page's host swaps it for an HttpOnly session cookie for that host only (`__Host-cresslet_page` on https, 24 h) and drops it from the URL. Each request checks that the account still has access, so removing a collaborator takes effect at once. Responses are `cache-control: private, no-store`.
@@ -104,9 +108,9 @@ A name you choose can be guessed: keep the generated one for a `link` page that 
 
 `retentionDays`: whole days from 1 to 3650, or `null` = keep forever. The page expires that many days after its last upload or retention change (`expiresAt`), then it's gone (404 at once; files purged within ~10 minutes).
 
-Defaults for a new page, in order: the upload's own fields, the account's (`PUT /v1/me/settings`), the server's (`CRESSLET_PAGE_VISIBILITY`, default `private`; `CRESSLET_PAGE_RETENTION_DAYS`, default 30). Every page can be changed later with `PATCH`.
+Defaults for a new artifact, in order: the upload's own fields, the account's (`PUT /v1/me/settings`), the server's (`CRESSLET_PAGE_VISIBILITY`, default `private`; `CRESSLET_PAGE_RETENTION_DAYS`, default 30). Every artifact can be changed later with `PATCH`.
 
-Sharing a private page: invite accounts with `POST /v1/apps/<page>/collaborators` (viewers can open it; admins can also change and re-upload it). Pages count toward `CRESSLET_MAX_PAGES_PER_ACCOUNT` (default 200), not the app limit, and aren't in `GET /v1/apps`. A page keeps only the version it serves: re-uploading replaces the files, with no history or rollback (the replaced files are removed a minute or more later, or sooner when more than 3 versions pile up).
+Sharing a private artifact: invite accounts with `POST /v1/apps/<page>/collaborators` (viewers can open it; admins can also change and re-upload it). Artifacts count toward `CRESSLET_MAX_PAGES_PER_ACCOUNT` (default 200), not the app limit, and aren't in `GET /v1/apps`. An artifact keeps only the version it serves: re-uploading replaces the files, with no history or rollback (the replaced files are removed a minute or more later, or sooner when more than 3 versions pile up).
 
 ```sh
 curl -X POST $CRESSLET/v1/pages -H "authorization: Bearer $CRESSLET_TOKEN" -H "content-type: application/json" \
@@ -154,9 +158,9 @@ Response `201`:
 
 ## Names
 
-A new app or page is served at `<name>.<domain>`. Names are 1-40 characters of `a-z`, `0-9` and single dashes, not starting or ending with a dash, and not a reserved word (`www`, `api`, `studio`, `admin`, `app`, `apps`, `docs`, `status`, `mail`, `preview`). Apps and pages share one namespace, and a deleted app's name stays taken until it's purged. The name is fixed once created.
+A new app or artifact is served at `<name>.<domain>`. Names are 1-40 characters of `a-z`, `0-9` and single dashes, not starting or ending with a dash, and not a reserved word (`www`, `api`, `studio`, `admin`, `app`, `apps`, `docs`, `status`, `mail`, `preview`). Apps and artifacts share one namespace, and a deleted app's name stays taken until it's purged. The name is fixed once created.
 
-The studio asks for one before an app's first deploy and on the page upload form: it starts from `GET /v1/names?kind=…` and checks each edit with `GET /v1/names/:name` (both 120 per minute per address). The check is advisory: `POST /v1/deploys` and `POST /v1/pages` still answer 409 if someone took the name in between (for an app, when the deploy says `"create": true`: without it, a name taken by one of your own apps is a deploy to that app).
+The studio asks for one before an app's first deploy and on the artifact form: it starts from `GET /v1/names?kind=…` and checks each edit with `GET /v1/names/:name` (both 120 per minute per address). The check is advisory: `POST /v1/deploys` and `POST /v1/pages` still answer 409 if someone took the name in between (for an app, when the deploy says `"create": true`: without it, a name taken by one of your own apps is a deploy to that app).
 
 ## Minimal agent deploy (no CLI)
 
