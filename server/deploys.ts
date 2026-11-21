@@ -236,17 +236,25 @@ export async function writePage(cfg: Config, store: Store, app: App, files: Depl
     source: String(source).slice(0, 20),
   });
   store.setPageDeploy(app.id, deployId);
-  await pruneDeploys(cfg, store, app.id, deployId);
+  await pruneDeploys(cfg, store, app.id, deployId, 1); // pages have no rollback: only the served version stays
   return { id: deployId, bytes, files: decoded.length };
 }
 
-/** Keep the 10 most recent deploys for rollback. */
-async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string) {
-  const all = store.deploys(appId, 1000);
-  for (const d of all.slice(10)) {
-    if (d.id === keep) continue;
+/** Keep `keep` and the `keepCount - 1` most recent others (10 in all for an app's rollback). */
+async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = 10) {
+  const others = store.deploys(appId, 1000).filter((d) => d.id !== keep);
+  for (const d of others.slice(keepCount - 1)) {
     store.deleteDeploy(d.id);
     await rm(paths(cfg, appId).deploy(d.id), { recursive: true, force: true });
+  }
+}
+
+/** Removes pages' old versions (kept by older servers, before pages kept only the one they serve). */
+export async function pruneOldPageVersions(cfg: Config, store: Store, local: (appId: string) => boolean) {
+  for (const d of store.oldPageDeploys()) {
+    if (!local(d.app_id)) continue;
+    store.deleteDeploy(d.id);
+    await rm(paths(cfg, d.app_id).deploy(d.id), { recursive: true, force: true });
   }
 }
 

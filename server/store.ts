@@ -711,11 +711,16 @@ export class Store {
     ).run(d.id, d.app_id, d.created_at, d.bytes, d.file_count, d.has_server, d.source);
   }
   deploys(appId: string, limit = 20): Deploy[] {
-    return this.db.prepare("SELECT * FROM deploys WHERE app_id = ? ORDER BY created_at DESC LIMIT ?")
+    return this.db.prepare("SELECT * FROM deploys WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
       .all(appId, limit) as unknown as Deploy[];
   }
   deploy(deployId: string): Deploy | undefined {
     return this.db.prepare("SELECT * FROM deploys WHERE id = ?").get(deployId) as Deploy | undefined;
+  }
+  /** Deploys of pages other than the one each serves. */
+  oldPageDeploys(): Pick<Deploy, "id" | "app_id">[] {
+    return this.db.prepare(`SELECT d.id, d.app_id FROM deploys d JOIN apps a ON a.id = d.app_id
+      WHERE a.kind = 'page' AND a.page_deploy_id IS NOT NULL AND d.id <> a.page_deploy_id`).all() as unknown as Pick<Deploy, "id" | "app_id">[];
   }
   deleteDeploy(deployId: string) {
     this.db.prepare("DELETE FROM deploys WHERE id = ?").run(deployId);

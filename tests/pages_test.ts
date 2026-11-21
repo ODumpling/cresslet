@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -286,6 +286,47 @@ test("pages: expired pages are gone at once and purged by the reaper; secure coo
     const u = new URL((await t.send("POST", `/v1/pages/${priv.name}/view`, tok, {})).body.url);
     const r = await t.visit(priv.name, u.pathname + u.search);
     assert.match(r.headers.get("set-cookie")!, /^__Host-cresslet_page=pvs_[0-9a-f]+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=86400; Secure$/);
+  } finally {
+    t.srv.close();
+    await rm(t.dataDir, { recursive: true, force: true });
+  }
+});
+
+test("pages keep only the version they serve on disk; apps keep 10 for rollback", async () => {
+  const t = await setup();
+  try {
+    const tok = await t.account("a@b.co");
+    const onDisk = async (appId: string) => (await readdir(paths(t.srv.cfg, appId).deploys)).sort();
+    const page = (await t.send("POST", "/v1/pages", tok, { html: "v1", visibility: "link" })).body.page;
+    for (const v of ["v2", "v3", "v4"]) assert.equal((await t.send("PUT", `/v1/pages/${page.name}`, tok, { html: v })).status, 200);
+    let row = t.srv.store.appByName(page.name)!;
+    assert.deepEqual(t.srv.store.deploys(row.id, 100).map((d) => d.id), [row.page_deploy_id]);
+    assert.deepEqual(await onDisk(row.id), [row.page_deploy_id]);
+    assert.equal(await (await t.visit(page.name)).text(), "v4");
+
+    // Versions an older server kept (rows and directories) go with the reaper; the served one stays.
+    const old = ["dep_old1", "dep_old2"];
+    for (const [i, d] of old.entries()) {
+      t.srv.store.addDeploy({ id: d, app_id: row.id, created_at: Date.now() - 1000 * (i + 1), bytes: 2, file_count: 1, has_server: 0, source: "api" });
+      await mkdir(join(paths(t.srv.cfg, row.id).deploy(d), "public"), { recursive: true });
+    }
+    await t.srv.reap();
+    assert.deepEqual(t.srv.store.deploys(row.id, 100).map((d) => d.id), [row.page_deploy_id]);
+    assert.deepEqual(await onDisk(row.id), [row.page_deploy_id]);
+    assert.equal(await (await t.visit(page.name)).text(), "v4");
+
+    // An app keeps its last 10 deploys (rollback), files and rows alike; the reaper leaves them alone.
+    for (let i = 0; i < 12; i++) {
+      assert.equal((await t.send("POST", "/v1/deploys", tok, { app: "site", files: [{ path: "index.html", data: `a${i}` }] })).status, 201);
+    }
+    await t.srv.reap();
+    row = t.srv.store.appByName("site")!;
+    const kept = t.srv.store.deploys(row.id, 100).map((d) => d.id);
+    assert.equal(kept.length, 10);
+    assert.equal(kept[0], row.current_deploy_id);
+    assert.deepEqual(await onDisk(row.id), [...kept].sort());
+    assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, { deployId: kept[9] })).status, 200);
+    assert.equal(await (await t.visit("site")).text(), "a2");
   } finally {
     t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
