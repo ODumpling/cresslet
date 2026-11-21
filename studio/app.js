@@ -1185,7 +1185,7 @@ function renderPages() {
     }
     $("page-list").replaceChildren(pages.length
       ? dataTable("pages-title", [["Artifact"], ["Who can open it"], ["Keep for"], ["Actions", "actions", true]], pages.map(pageRow))
-      : emptyState("No artifacts yet", "Deploy an HTML file above, or run cresslet deploy <file.html>."));
+      : emptyState("No artifacts yet", "Deploy an HTML file above, or run npx cresslet@latest deploy <file.html>."));
   }).catch((e) => $("page-list").replaceChildren(el("p", { className: "error", textContent: `Could not load artifacts: ${e.message}` })));
 }
 
