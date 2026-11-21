@@ -20,7 +20,7 @@ F=$FIX
 for last; do :; done
 case $1 in
   ps) [ -f "$F/ps" ] || exit 0; case "$*" in *coolify.proxy*) cat "$F/ps" ;; *) cut -d' ' -f1 "$F/ps" ;; esac ;;
-  inspect) [ -f "$F/inspect-$last" ] || exit 1; [ "$2" = -f ] || exit 0; . "$F/inspect-$last"
+  inspect) [ -f "$F/inspect-$last" ] || { echo "Error: No such object: $last" >&2; exit 1; }; [ "$2" = -f ] || exit 0; . "$F/inspect-$last"
     printf '%s\\n' "$3" | sed -e "s#{{or (index .Config.Labels \\"coolify.proxy\\") \\"-\\"}}#$label#" -e "s#{{.Name}}#$name#" \\
       -e "s#{{.RestartCount}}#$restarts#" -e "s#{{.State.OOMKilled}}#$oom#" ;;
   stats) cat "$F/stats-$last" 2>/dev/null || exit 1 ;;
@@ -36,7 +36,7 @@ esac`,
   df: `#!/bin/sh
 [ ! -f "$FIX/df-fails" ] || exit 1
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
-echo "/dev/sda1 100 0 100 $(cat "$FIX/df")% /"`,
+printf '/dev/sda1 100 0 100 %s%% %s\\n' "$(cat "$FIX/df")" "$(cat "$FIX/mount" 2>/dev/null || echo /)"`,
   logger: `#!/bin/sh
 echo "$@" >> "$FIX/log"`,
   iptables: "#!/bin/sh\nexit 1",
@@ -119,6 +119,8 @@ test("disk: one alert when it crosses the threshold, none while it stays, one wh
     assert.match(a.sent[0], /^cresslet on .+: disk 85% full on \/$/); // the two paths share one filesystem
     t.set("df", "90");
     assert.deepEqual((await t.check()).sent, []);
+    t.set("df", "77"); // under 80 but not under 75: still firing (no flapping at the threshold)
+    assert.deepEqual((await t.check()).sent, []);
     t.set("df", "50");
     assert.deepEqual((await t.check()).sent.map((s) => s.replace(/^cresslet on [^:]+: /, "")), ["recovered: disk 85% full on /"]);
     assert.deepEqual((await t.check()).sent, []);
@@ -146,6 +148,16 @@ test("memory: host use, the Cresslet container against its limit (not the proxy)
     assert.deepEqual((await t.check()).sent, []);
     t.container("c1", "cresslet-abc", { restarts: 3 });
     assert.match((await t.check()).sent[0], /restarts: 3, last exit OOM-killed: false/);
+    // Its state goes once Docker says the container is gone (a redeploy), and not before.
+    const state = join(t.dir, "state", "restarts-c1");
+    assert.ok(existsSync(state));
+    t.set("ps", "c2 \nproxy true\n");
+    t.container("c2", "cresslet-def");
+    await t.check();
+    assert.ok(existsSync(state));
+    rmSync(join(t.fix, "inspect-c1"));
+    await t.check();
+    assert.ok(!existsSync(state));
   } finally {
     t.done();
   }
@@ -248,6 +260,7 @@ test("delivery: JSON for Discord/Slack; alerts that couldn't be sent go at a lat
   const t = await setup(500);
   try {
     const json = { CRESSLET_ALERT_JSON_KEY: "content" };
+    t.set("mount", '/mnt/a"b\\c');
     t.set("df", "99");
     const a = await t.check(json);
     assert.equal(a.code, 1);
@@ -260,8 +273,8 @@ test("delivery: JSON for Discord/Slack; alerts that couldn't be sent go at a lat
     const b = await t.check(json);
     assert.equal(b.code, 0, b.stderr);
     assert.deepEqual(b.sent.map((x) => JSON.parse(x).content.replace(/^[^:]+: /, "")), [
-      "disk 99% full on / (at " + JSON.parse(b.sent[0]).content.split("(at ")[1],
-      "recovered: disk 99% full on / (at " + JSON.parse(b.sent[1]).content.split("(at ")[1],
+      'disk 99% full on /mnt/a"b\\c (at ' + JSON.parse(b.sent[0]).content.split("(at ")[1],
+      'recovered: disk 99% full on /mnt/a"b\\c (at ' + JSON.parse(b.sent[1]).content.split("(at ")[1],
     ]);
     assert.match(JSON.parse(b.sent[0]).content, /\(at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\)$/);
     assert.equal(t.hits.at(-1)!.type, "application/json");

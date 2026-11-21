@@ -40,6 +40,8 @@ Description=Cresslet host alerts ($NET)
 After=docker.service
 [Service]
 Type=oneshot
+# A hung run would hold every later check (the timer doesn't start a unit still running).
+TimeoutStartSec=50s
 ExecStart=/usr/local/sbin/cresslet-alerts $NET
 EOF
   cat > /etc/systemd/system/cresslet-alerts.timer <<EOF
@@ -87,7 +89,12 @@ if [ "$MODE" = --test ]; then
 fi
 
 mkdir -p "$STATE"
-# Alerts that couldn't be sent go first, in order (up to the first that fails again).
+# Alerts that couldn't be sent go first, in order (up to the first that fails again). A run killed
+# mid-way (the unit's timeout) leaves .sending: those go again, rather than being lost.
+if [ -f "$OUTBOX.sending" ]; then
+  cat "$OUTBOX" >> "$OUTBOX.sending" 2>/dev/null || :
+  mv "$OUTBOX.sending" "$OUTBOX"
+fi
 if [ -s "$OUTBOX" ]; then
   mv "$OUTBOX" "$OUTBOX.sending"
   while IFS= read -r m; do
@@ -112,37 +119,44 @@ report() {
   fi
 }
 failed() { systemctl is-failed --quiet "$1" 2>/dev/null; }
+# Docker calls are bounded: a hung dockerd (likely when the disk or memory runs out) mustn't stall
+# the checks after them. The disk check comes first and doesn't need Docker.
+if command -v timeout >/dev/null; then dk() { timeout 15 docker "$@"; }; else dk() { docker "$@"; }; fi
+# limit <check> <threshold>: 5 points lower while <check> is firing, so a value hovering at the
+# threshold doesn't alert and recover over and over.
+limit() { if [ -f "$STATE/$1" ]; then echo $(($2 - 5)); else echo "$2"; fi; }
 # The firewall's last run worked and none is running now (a run that fails closed is "activating"
 # until it exits, after writing its marker).
 fw_ok() { [ "$(systemctl is-active cresslet-firewall.service 2>/dev/null)" = inactive ]; }
 # cresslet <fields>: "<id> <fields>" for each running container on the network but Coolify's proxy.
 cresslet() {
-  for c in $(docker ps --filter "network=$NET" --format '{{.ID}}' 2>/dev/null); do
+  for c in $(dk ps --filter "network=$NET" --format '{{.ID}}' 2>/dev/null); do
     # Gone since `docker ps` (a redeploy): skipped.
-    i=$(docker inspect -f "{{or (index .Config.Labels \"coolify.proxy\") \"-\"}} $1" "$c" 2>/dev/null) || continue
+    i=$(dk inspect -f "{{or (index .Config.Labels \"coolify.proxy\") \"-\"}} $1" "$c" 2>/dev/null) || continue
     [ "${i%% *}" = true ] || echo "$c ${i#* }"
   done
 }
 
 # Disk: each filesystem once. A path df can't read is skipped (and said on stderr).
-p="" seen=" "
+p="" seen=" " lim=$(limit disk "$DISK")
 for d in $PATHS; do
   [ -e "$d" ] || continue
   set -- $(df -P "$d" 2>/dev/null | awk 'NR == 2 { sub("%", "", $5); print $6, $5 }')
   [ $# -eq 2 ] || { echo "cresslet-alerts: df couldn't read $d" >&2; rc=1; continue; }
   case $seen in *" $1 "*) continue ;; esac
   seen="$seen$1 "
-  [ "$2" -lt "$DISK" ] || p="${p:+$p; }disk $2% full on $1"
+  [ "$2" -lt "$lim" ] || p="${p:+$p; }disk $2% full on $1"
 done
 report disk "$p"
 
 # Memory: the host, and each Cresslet container of its limit.
+lim=$(limit memory "$MEM")
 p=$(awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 }
-  END { u = int((t - a) * 100 / t); if (u >= m) print "host memory " u "% in use" }' m="$MEM" "$MEMINFO")
+  END { u = int((t - a) * 100 / t); if (u >= m) print "host memory " u "% in use" }' m="$lim" "$MEMINFO")
 for c in $(cresslet '{{.Name}}' | cut -d' ' -f1); do
-  u=$(docker stats --no-stream --format '{{.Name}} {{.MemPerc}}' "$c" 2>/dev/null) || continue
+  u=$(dk stats --no-stream --format '{{.Name}} {{.MemPerc}}' "$c" 2>/dev/null) || continue
   pct=$(echo "${u#* }" | cut -d. -f1 | tr -dc 0-9)
-  [ "${pct:-0}" -lt "$MEM" ] || p="${p:+$p; }${u%% *} at $pct% of its memory limit"
+  [ "${pct:-0}" -lt "$lim" ] || p="${p:+$p; }${u%% *} at $pct% of its memory limit"
 done
 report memory "$p"
 
@@ -158,7 +172,8 @@ $(cresslet '{{.Name}} {{.RestartCount}} {{.State.OOMKilled}}')
 EOF
 for f in "$STATE"/restarts-*; do
   [ -f "$f" ] || continue
-  docker inspect "${f##*/restarts-}" >/dev/null 2>&1 || rm -f "$f"
+  # Only once Docker says it's gone (not when the call fails or times out).
+  ! dk inspect "${f##*/restarts-}" 2>&1 >/dev/null | grep -qi "no such" || rm -f "$f"
 done
 
 # Firewall: failed closed (firewall.sh's marker), and failing. The marker is written after the
