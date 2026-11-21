@@ -266,6 +266,7 @@ function createDb(SQL, bytes) {
       if (params !== undefined && !Array.isArray(params)) throw new TypeError(`batch statement ${i + 1}: params must be an array`);
       if (isTxControl(sql)) throw new TypeError(`batch statement ${i + 1}: transaction control isn't allowed in a batch (it is one transaction)`);
     });
+    const changesBefore = one("SELECT total_changes()");
     db.exec("SAVEPOINT cresslet_batch");
     try {
       const out = statements.map(({ sql, params = [] } = {}, i) => {
@@ -286,7 +287,8 @@ function createDb(SQL, bytes) {
       } catch { /* SQLite already rolled back: report the statement's error */ }
       throw e;
     } finally {
-      persist();
+      // a read-only batch doesn't ask for a save (one reopens the connection)
+      if (one("SELECT total_changes()") !== changesBefore || statements.some((st) => mayWrite(st.sql))) persist();
     }
   };
   db.exec("PRAGMA foreign_keys = ON;");

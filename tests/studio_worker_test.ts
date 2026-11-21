@@ -205,8 +205,9 @@ export default { async fetch(req) {
     assert.deepEqual((await w.get("/fk")).json, { foreign_keys: 0 });
     // PRAGMAs by name: reads don't save (a save reopens the connection), others do
     assert.equal((await w.get("/table-info")).json, 1);
+    await w.get("/rowid"); // a read-only batch
     await new Promise((r) => setTimeout(r, 700));
-    assert.ok(!w.saving(), "a PRAGMA read doesn't save");
+    assert.ok(!w.saving(), "a PRAGMA read or a read-only batch doesn't save");
     await w.get("/vacuum-inc");
     await w.saved();
     await w.get("/version");
