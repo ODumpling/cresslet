@@ -75,9 +75,13 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     c.set("deploy", input);
     const a = typeof input?.app === "string" ? store.appByName(input.app) : undefined;
     if (!a || cluster.local(a.id)) return next();
-    const { url, method, headers, signal } = c.req.raw;
-    return forward(a.id, new Request(url, { method, headers, body: bytes, signal }));
+    return forwardDeploy(c, a.id);
   });
+  /** The deploy request as sent (bytes cached by the middleware above). */
+  const forwardDeploy = async (c: Context<Env>, appId: string) => {
+    const { url, method, headers, signal } = c.req.raw;
+    return forward(appId, new Request(url, { method, headers, body: await c.req.arrayBuffer(), signal }));
+  };
 
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.code, message: err.message }, err.status as 400);
@@ -395,6 +399,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const input = (c.get("deploy") ?? await body(c)) as DeployInput & { app?: string };
     const acct = c.get("account");
     let target = input.app ? store.appByName(input.app) : undefined;
+    if (target && !cluster.local(target.id)) return forwardDeploy(c, target.id); // created on another node meanwhile
     let createdKey: string | undefined;
     if (target) {
       await authorize(c, target, "deploy");

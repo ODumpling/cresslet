@@ -123,6 +123,20 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     assert.equal(fake.forwards[6].length, String(bom.length));
     client.abort(); // the client going away reaches the owner
     assert.ok(fake.forwards[6].signal.aborted);
+    // An app another node creates while this one checks the token: still forwarded, not deployed here.
+    const useToken = srv.store.useToken.bind(srv.store);
+    let late = "";
+    srv.store.useToken = async (t) => {
+      if (!late) fake.remote.add(late = (await srv.store.createApp("late", null, null)).app.id);
+      return useToken(t);
+    };
+    const lateBody = JSON.stringify({ app: "late", files: [{ path: "index.html", data: "x" }] });
+    assert.equal(await text("/v1/deploys", { method: "POST", headers: auth, body: lateBody }), "203 from owner");
+    srv.store.useToken = useToken;
+    assert.equal(fake.forwards.at(-1)!.appId, late);
+    assert.equal(new TextDecoder().decode(fake.forwards.at(-1)!.body), lateBody);
+    assert.equal(srv.store.deploys(late).length, 0);
+    fake.forwards.pop();
     // Not app-scoped, or a CORS preflight: answered here.
     assert.equal((await call("/v1/apps/shop", { method: "OPTIONS", headers: { origin: "http://x", "access-control-request-method": "GET" } })).status, 204);
     assert.equal((await call("/v1/apps", { headers: auth })).status, 200);
