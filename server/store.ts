@@ -714,7 +714,7 @@ export class Store {
     return this.db.prepare("SELECT * FROM deploys WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
       .all(appId, limit) as unknown as Deploy[];
   }
-  /** A page's versions, newest upload first: in the order they were served (not by clock, which can step back). */
+  /** A page's versions (pages only: an app's rollback breaks this order), newest upload first, which is the order a page served them (the clock can step back). */
   pageVersions(appId: string): Deploy[] {
     return this.db.prepare("SELECT * FROM deploys WHERE app_id = ? ORDER BY rowid DESC").all(appId) as unknown as Deploy[];
   }
