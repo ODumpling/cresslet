@@ -114,7 +114,7 @@ The worst cases don't fit either, and no limit bounds the total: accounts aren't
 | Check | Fires when |
 |---|---|
 | disk | a filesystem holding Docker's data or the backups (`CRESSLET_ALERT_PATHS`) is `CRESSLET_ALERT_DISK_PCT` (80) % full, or has used that much of its inodes (many small files) |
-| memory | the host has `CRESSLET_ALERT_MEM_PCT` (90) % of its memory in use (from `MemAvailable`), or a Cresslet container that much of its limit |
+| memory | the host has `CRESSLET_ALERT_MEM_PCT` (90) % of its memory in use (from `MemAvailable`); separately, a Cresslet container that much of its limit |
 | restart | a running Cresslet container's restart count went up since the last check (an OOM kill or a crash; several in a minute are one alert; Docker doesn't keep which, see `docker logs` and `journalctl -k`). A container that stays stopped isn't checked: Coolify shows it |
 | firewall | `cresslet-firewall` fails (its own alert); it failed closed and stopped Cresslet, until its first run after Cresslet runs again (start or redeploy it in Coolify once the rules apply); or it couldn't stop a container, which runs unfirewalled until the rules apply. Each of these is its own alert |
 | backup | the last `cresslet-backup` run failed |
@@ -165,7 +165,7 @@ rclone lsf keys:cresslet-snapshots
 Then:
 
 ```sh
-CRESSLET_BACKUP_RCLONE=snaps:cresslet-snapshots CRESSLET_BACKUP_KEY_RCLONE=keys:cresslet-keys \
+CRESSLET_BACKUP_RCLONE=snaps:cresslet-snapshots CRESSLET_BACKUP_KEY_RCLONE=keys:cresslet-keys CRESSLET_BACKUP_KEEP=3 \
   deploy/backup.sh <volume> --install   # the variables are written into the unit: rerun with them all
 systemctl start cresslet-backup; journalctl -u cresslet-backup -n 20   # one run now
 ```

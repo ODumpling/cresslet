@@ -202,18 +202,20 @@ cresslet() {
   done
 }
 
-# Memory: the host, and each Cresslet container of its limit.
-lim=$(limit memory "$MEM")
+# Memory: the host (every app on it), and each Cresslet container of its limit (only Cresslet):
+# two checks, so one firing doesn't hide the other.
 p=$(awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 }
-  END { u = int((t - a) * 100 / t); if (u >= m) print "host memory " u "% in use" }' m="$lim" "$MEMINFO")
+  END { u = int((t - a) * 100 / t); if (u >= m) print "host memory " u "% in use" }' m="$(limit memory "$MEM")" "$MEMINFO")
+report memory "$p"
+p="" lim=$(limit container-memory "$MEM")
 cresslet '{{.Name}}'
 for c in $(printf %s "$out" | cut -d' ' -f1); do
   u=$(dk stats --no-stream --format '{{.Name}} {{.MemPerc}}' "$c") || { err=1; continue; }
   pct=$(echo "${u#* }" | cut -d. -f1 | tr -dc 0-9)
   [ "${pct:-0}" -lt "$lim" ] || p="${p:+$p; }${u%% *} at $pct% of its memory limit"
 done
-[ -n "$p" ] || [ -z "$err" ] || [ ! -f "$STATE/memory" ] || p=$(cat "$STATE/memory")
-report memory "$p"
+[ -n "$p" ] || [ -z "$err" ] || [ ! -f "$STATE/container-memory" ] || p=$(cat "$STATE/container-memory")
+report container-memory "$p"
 
 # Restarts (an OOM kill, a crash): an alert when the count goes up (two in a minute: one alert).
 # Not why: Docker clears State.OOMKilled when the container starts again.

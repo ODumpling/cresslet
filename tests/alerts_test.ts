@@ -143,14 +143,16 @@ test("disk: one alert when it crosses the threshold, none while it stays, one wh
 test("memory: host use, the Cresslet container against its limit (not the proxy), and each restart", { skip }, async () => {
   const t = await setup();
   try {
-    t.meminfo(95);
+    // The container first; the host later (a build of another app): two alerts, one doesn't hide the other.
+    const strip = (x: string[]) => x.map((s) => s.replace(/^[^:]+: /, ""));
     t.container("c1", "cresslet-abc", { mem: "93.10%" });
-    const a = await t.check();
-    assert.equal(a.sent.length, 1);
-    assert.match(a.sent[0], /: host memory 95% in use; cresslet-abc at 93% of its memory limit$/);
+    assert.deepEqual(strip((await t.check()).sent), ["cresslet-abc at 93% of its memory limit"]);
+    t.meminfo(95);
+    assert.deepEqual(strip((await t.check()).sent), ["host memory 95% in use"]);
     t.meminfo(30);
     t.container("c1", "cresslet-abc", { mem: "10.00%" });
-    assert.match((await t.check()).sent[0], /recovered: host memory 95%/);
+    assert.deepEqual(strip((await t.check()).sent),
+      ["recovered: host memory 95% in use", "recovered: cresslet-abc at 93% of its memory limit"]);
 
     t.container("c1", "cresslet-abc", { restarts: 1 });
     assert.deepEqual((await t.check()).sent.map((s) => s.replace(/^[^:]+: /, "")),
