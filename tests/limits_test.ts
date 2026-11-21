@@ -123,6 +123,21 @@ test("new apps and pages per account per hour: create/delete loops get 429; rede
   }
 });
 
+test("a create that loses the last quota slot to a concurrent one doesn't spend the hourly allowance", async () => {
+  const t = await setup({ createsPerHour: 2, maxPagesPerAccount: 1 });
+  try {
+    const a = t.bearer(await t.account("a@b.co"));
+    const page = () => t.json("/v1/pages", { method: "POST", headers: a, body: JSON.stringify({ html: "<p>x</p>" }) });
+    const both = await Promise.all([page(), page()]);
+    assert.deepEqual(both.map((r) => r.status).sort(), [201, 403]);
+    const won = both.find((r) => r.status === 201)!;
+    assert.equal((await t.json(`/v1/pages/${won.body.page.name}`, { method: "DELETE", headers: a })).status, 200);
+    assert.equal((await page()).status, 201, "the 403 didn't count");
+  } finally {
+    await t.done();
+  }
+});
+
 test("hourly limits survive a restart", async () => {
   const t = await setup({ createsPerHour: 1, anonAppsPerHour: 1 }, { clientIpHeader: "cf-connecting-ip" });
   const tok = await t.account("a@b.co");
@@ -176,7 +191,14 @@ test("anonymous pool under saturation: live apps per client IP (IPv6 by /64), fr
 
 test("ipKey: IPv4 as is, IPv6 by its /64", () => {
   assert.equal(ipKey("1.2.3.4"), "1.2.3.4");
+  assert.equal(ipKey("1.2.3.4:5678"), "1.2.3.4");
+  assert.equal(ipKey("[2001:db8:1:2::1]:443"), "2001:db8:1:2::/64");
+  assert.equal(ipKey("[2001::2:3:4:5:6]:443"), "2001:0:0:2::/64");
+  assert.equal(ipKey("1.2.3.4:443") === ipKey("1.9.8.7:443"), false);
   assert.equal(ipKey("::ffff:1.2.3.4"), "1.2.3.4");
+  assert.equal(ipKey("::ffff:0102:0304"), "1.2.3.4", "hex IPv4-mapped");
+  assert.equal(ipKey("0:0:0:0:0:ffff:5.6.7.8"), "5.6.7.8");
+  assert.equal(ipKey("2001:0db8:0001:0002:0000:0000:0000:0001"), "2001:db8:1:2::/64", "fully expanded");
   assert.equal(ipKey("2001:DB8:0001:0002:aaaa::1"), "2001:db8:1:2::/64");
   assert.equal(ipKey("2001:db8:1:2::"), "2001:db8:1:2::/64");
   assert.equal(ipKey("2001:db8::1"), "2001:db8:0:0::/64");

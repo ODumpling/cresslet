@@ -614,24 +614,28 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
           throw new HttpError(429, "too many anonymous apps on this server right now: log in to deploy (cresslet login)", "rate_limited");
         }
       };
-      if (acct) {
-        checkAppQuota(acct);
-        takeCreate(acct);
-      } else {
-        anonCap();
-        if (!anonApps.take(client)) {
-          throw new HttpError(429, `too many new anonymous apps from your address (${cfg.limits.anonAppsPerHour} per hour): log in, or try later`, "rate_limited");
-        }
-      }
+      if (acct) checkAppQuota(acct);
+      else anonCap();
       const expires = acct ? null : Date.now() + cfg.limits.anonTtlMs;
-      // Checked again just before the insert: concurrent deploys can't share the last slot.
-      const created = await store.createApp(name, expires, acct?.id ?? null, () => acct ? checkAppQuota(acct) : anonCap(), client);
+      // Checked again just before the insert: concurrent deploys can't share the last slot. The hourly
+      // allowance is spent only there, so a request that loses the last slot doesn't use it up.
+      const created = await store.createApp(name, expires, acct?.id ?? null, () => {
+        if (acct) {
+          checkAppQuota(acct);
+          takeCreate(acct);
+        } else {
+          anonCap();
+          if (!anonApps.take(client)) {
+            throw new HttpError(429, `too many new anonymous apps from your address (${cfg.limits.anonAppsPerHour} per hour): log in, or try later`, "rate_limited");
+          }
+        }
+      }, client);
       target = created.app;
       createdKey = created.deployKey;
-      appDeploys.take(target.id);
     }
     let deploy;
     try {
+      if (createdKey) appDeploys.take(target.id);
       deploy = await writeDeploy(cfg, store, target, input);
     } catch (e) {
       if (createdKey) {
@@ -1169,12 +1173,14 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       retentionDays: input.retentionDays === undefined ? defaults.retentionDays : retention(input.retentionDays),
     };
     checkPageQuota(acct);
-    takeCreate(acct);
     // Unguessable: a link-only page's URL is all that protects it.
     let name = "";
     for (let i = 0; i < 5 && (!name || store.appByName(name, true)); i++) name = id("pg").replace("_", "-");
     if (store.appByName(name, true)) throw new HttpError(500, "could not allocate name");
-    const page = await store.createPage(name, acct.id, settings, () => checkPageQuota(acct));
+    const page = await store.createPage(name, acct.id, settings, () => {
+      checkPageQuota(acct);
+      takeCreate(acct); // spent only here, as for new apps (POST /deploys)
+    });
     try {
       await writePage(cfg, store, page, files, typeof input.source === "string" ? input.source : "api");
     } catch (e) {

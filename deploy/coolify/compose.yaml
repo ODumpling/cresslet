@@ -58,6 +58,8 @@ services:
       CRESSLET_MAX_APPS_PER_ACCOUNT: ${CRESSLET_MAX_APPS_PER_ACCOUNT:-10}
       CRESSLET_MAX_ANON_APPS: ${CRESSLET_MAX_ANON_APPS:-25}
       CRESSLET_ANON_APPS_PER_HOUR: ${CRESSLET_ANON_APPS_PER_HOUR:-5}
+      # Per client IP: with anonymous deploys on, set CRESSLET_CLIENT_IP_HEADER (e.g. cf-connecting-ip),
+      # or every client counts as the proxy's address and they share these 3 live apps.
       CRESSLET_MAX_ANON_APPS_PER_IP: ${CRESSLET_MAX_ANON_APPS_PER_IP:-3}
       CRESSLET_CREATES_PER_HOUR: ${CRESSLET_CREATES_PER_HOUR:-20}
       CRESSLET_DEPLOYS_PER_HOUR: ${CRESSLET_DEPLOYS_PER_HOUR:-120}
