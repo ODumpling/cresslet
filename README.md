@@ -32,6 +32,8 @@ Browser: open http://localhost:8787 → pick a template → the **AI builder** c
 
 Artifacts: deploy a static HTML file or folder (studio **Artifacts**, or `cresslet deploy report.html`; a folder with `--artifact`) and share it: private (you and people you invite), anyone with the link, or public; kept 30 days unless you or your account defaults say otherwise. Deploy it again to update the same URL; `--name` picks the address ([docs/api.md#artifacts](docs/api.md#artifacts)).
 
+Templates: `react`, `vanilla`, and `tanstack-start` (TanStack Start SSR + server functions, email/password auth with `db` + `kv` sessions; CLI only: `cresslet new my-app --template tanstack-start`).
+
 Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`. Raw API: [docs/api.md](docs/api.md). Server also serves `/llms.txt`.
 
 ## Docs

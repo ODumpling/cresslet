@@ -17,6 +17,20 @@ export function matchRoute(pattern: string, path: string): boolean {
   return path === pattern;
 }
 
+/**
+ * Whether a path goes to the app's server: it matches a `routes` pattern and no `!pattern` exclusion
+ * (`["/*", "!/assets/*"]`: everything but built assets, as SSR frameworks need).
+ */
+export function serverRoute(routes: string[] | undefined, path: string): boolean {
+  let hit = false;
+  for (const r of routes ?? ["/api/*"]) {
+    if (r.startsWith("!")) {
+      if (matchRoute(r.slice(1), path)) return false;
+    } else if (!hit) hit = matchRoute(r, path);
+  }
+  return hit;
+}
+
 async function isFile(p: string) {
   try {
     return (await stat(p)).isFile();
@@ -50,7 +64,7 @@ export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
     }
     const url = new URL(`${cfg.scheme}://${req.headers.host ?? appName}${target}`);
     const config = app ? JSON.parse(app.config) as { routes?: string[]; server?: boolean } : {};
-    if (!app?.current_deploy_id || !config.server || !(config.routes ?? ["/api/*"]).some((r) => matchRoute(r, url.pathname))) {
+    if (!app?.current_deploy_id || !config.server || !serverRoute(config.routes, url.pathname)) {
       socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
       return;
     }
@@ -175,7 +189,7 @@ export function host(cfg: Config, store: Store, runtime: Runtime) {
     const started = performance.now();
     const p = paths(cfg, app.id);
 
-    if (config.server && (config.routes ?? ["/api/*"]).some((r) => matchRoute(r, url.pathname))) {
+    if (config.server && serverRoute(config.routes, url.pathname)) {
       const res = await runtime.fetch(appSpec(cfg, store, app), req);
       runtime.logs.push(
         app.id,

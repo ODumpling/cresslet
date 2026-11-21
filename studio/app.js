@@ -1045,7 +1045,8 @@ const templateCard = (t) =>
 let templatesReq;
 function renderTemplates(into) {
   (templatesReq ??= api("/v1/templates")).then(({ templates }) => {
-    into.replaceChildren(...templates.map(templateCard));
+    // `studio: false`: a CLI-only template (its framework's build doesn't run in the browser runtime)
+    into.replaceChildren(...templates.filter((t) => t.studio !== false).map(templateCard));
   }).catch((e) => {
     templatesReq = null; // try again next time
     into.replaceChildren(el("p", { className: "error", textContent: `Could not load templates: ${e.message}` }));

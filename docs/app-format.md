@@ -21,6 +21,25 @@ server/index.ts      export default { fetch(req, env, ctx) }; bindings: import {
 4. `404.html` if present, else 404.
 
 Patterns: exact (`/hook`), prefix (`/api/*` matches `/api` and `/api/...`), or `/*` (everything → server; static is then never served).
+A pattern starting with `!` excludes: a path matching any `!pattern` never goes to the server, so `["/*", "!/assets/*", "!/favicon.svg"]`
+sends everything but built assets and public files to the server (what SSR frameworks need).
+
+## Framework apps (Vite: TanStack Start, …)
+
+Instead of `index.html` + `server/index.ts`, a project can build with its framework (template: `tanstack-start`, CLI only;
+needs cresslet ≥ 0.3.0):
+
+```json
+{
+  "routes": ["/*", "!/assets/*", "!/favicon.svg"],
+  "build": { "command": "vite build", "static": "dist/client", "server": "dist/server/server.js", "dev": "vite dev" }
+}
+```
+
+`cresslet build`/`deploy` run `command`, serve `static` as the deploy's static files, and bundle `server` (a module whose
+default export is `{ fetch }`, here TanStack Start's server entry) with all its imports into the one `server.js` the
+sandbox runs. `cresslet dev` runs `dev`; `cresslet/vite`'s `cresslet()` plugin gives server code under `vite dev` the same
+bindings (`.cresslet/dev/` data, `.env.cresslet` secrets). The studio doesn't run framework builds.
 
 ## Server Env
 
@@ -68,6 +87,7 @@ export default {
 | Binding | API |
 |---|---|
 | `db` | ``sql`…${v}` `` → a statement whose values are parameters (a nested `db.sql` is spliced in); `query(q)` → rows (or `await q`), `first(q)` → row \| null, `run(q)` → `{changes, lastInsertRowid}`; each also takes `(sql, ...params)` with `?`. `exec(sql)` (DDL, no params). `batch([q, "sql", {sql, params}, …])` → `{rows, changes, lastInsertRowid}[]`: one transaction (a savepoint), all or none, with no other statement in between; transaction control (`BEGIN`, `COMMIT`, `SAVEPOINT`, …) isn't allowed in it, nor are `PRAGMA`, `ATTACH` and `DETACH` (a rollback doesn't undo them). Each item is one statement: as with `query`/`run`, SQL after its first statement isn't run (use `exec` for scripts). Inside a transaction the app opened with `exec("BEGIN")`, a batch is part of it, and SQLite's `OR ROLLBACK` conflict clause rolls back that whole transaction. Per-app SQLite, SQLite SQL (`ATTACH`/`VACUUM INTO`, temp tables, `temp_store_directory`, `fts3_tokenizer` and the size/journal pragmas are refused; plain `VACUUM` works) |
+| `kv` | SDK only (cresslet ≥ 0.3.0, contract 1): `get(key)` → JSON value \| null, `set(key, value, { ttl })` (seconds), `delete(key)`, `incr(key, by = 1, { ttl })` (atomic; ttl applies when the counter starts), `list(prefix, { limit })` → `{key, value, expiresAt}[]`. Kept in the app's database (table `_cresslet_kv`), so it counts toward its size and moves with it |
 | `files` | `put(key, body, {contentType})`, `get(key) → Response \| null`, `delete(key)`, `list(prefix) → {key,size,contentType,updatedAt}[]` |
 | `secrets` | `get(name)` (throws, naming it, if unset), `optional(name) → string \| undefined`, record access (`secrets.NAME`, `Object.keys(secrets)`). Set via `cresslet secrets set` (claimed apps); `.env.cresslet` locally |
 | `app` | `{ id, name, url, deployId }` |
