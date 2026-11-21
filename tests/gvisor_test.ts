@@ -138,7 +138,7 @@ test("gVisor + per-app uid + cgroups: apps run, are capped and reaped", { skip }
   const cgroupDir = "/sys/fs/cgroup/cresslet-gv-test";
   const sockDir = "/tmp/cresslet-gv-sock";
   writeFileSync(join(dataDir, "instance"), "gvgvgvgv\n");
-  const srv = createServer(loadConfig({
+  const srv = await createServer(loadConfig({
     dataDir,
     domain: "test.local",
     publicPort: 80,
@@ -201,7 +201,7 @@ test("gVisor + per-app uid + cgroups: apps run, are capped and reaped", { skip }
     await new Promise((r) => setTimeout(r, 500));
     assert.ok(!existsSync(cg2) && !existsSync(root2) && !existsSync(root2.replace(/\.gv$/, "")));
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -236,16 +236,16 @@ test("gVisor: a crashed control plane's still-running sandbox is reaped before i
   // A runsc that can't confirm the sandbox is gone: its run dir and state stay for a later sweep.
   const fake = join(dataDir, "fake-runsc");
   writeFileSync(fake, '#!/bin/sh\n[ "$1" = --version ] && exit 0\nexit 1\n', { mode: 0o755 });
-  createServer(loadConfig({ dataDir, domain: "t", publicPort: 80, sockDir, sandbox: { uidBase: null, cgroupDir: null, cpuPercent: 100, pidsMax: 128, runsc: fake } })).close();
+  await (await createServer(loadConfig({ dataDir, domain: "t", publicPort: 80, sockDir, sandbox: { uidBase: null, cgroupDir: null, cpuPercent: 100, pidsMax: 128, runsc: fake } }))).close();
   assert.ok(existsSync(join(stale, "l")) && existsSync(stale + ".gv"), "kept when the reap can't be confirmed");
   assert.match(state(), /"status": "running"/);
-  const srv = createServer(loadConfig({ dataDir, domain: "t", publicPort: 80, sockDir, sandbox: { uidBase: null, cgroupDir: null, cpuPercent: 100, pidsMax: 128, runsc } }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "t", publicPort: 80, sockDir, sandbox: { uidBase: null, cgroupDir: null, cpuPercent: 100, pidsMax: 128, runsc } }));
   try {
     assert.ok(!existsSync(stale) && !existsSync(stale + ".gv"), "leftovers swept");
     assert.ok(existsSync(other));
     assert.deepEqual(procs((cmd) => cmd.includes(stale)), []);
   } finally {
-    srv.close();
+    await srv.close();
     await rm(other, { recursive: true, force: true });
     await rm(dataDir, { recursive: true, force: true });
   }

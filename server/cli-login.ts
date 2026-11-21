@@ -63,14 +63,14 @@ export function cliLogin(store: Store) {
       pending.delete(deviceCode);
       byUser.delete(p.userCode);
       const { accountId, tokenId } = p.approved;
-      const account = store.accountById(accountId);
+      const account = await store.accountById(accountId);
       // The approving token was revoked since (checked again after issuing, like POST /v1/me/tokens).
-      const live = () => store.tokens(accountId).some((t) => t.id === tokenId);
+      const live = async () => (await store.tokens(accountId)).some((t) => t.id === tokenId);
       const gone = () => new HttpError(400, "login expired, run login again", "expired_token");
-      if (!account || !live()) throw gone();
+      if (!account || !await live()) throw gone();
       const { token, info } = await store.issueToken(account.id, { name: "CLI (browser login)" });
-      if (!live()) {
-        store.revokeToken(accountId, info.id);
+      if (!await live()) {
+        await store.revokeToken(accountId, info.id);
         throw gone();
       }
       return { account, token };

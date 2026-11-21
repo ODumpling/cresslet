@@ -21,6 +21,27 @@ jobs:
       - run: npm run check
       - run: npm test
 
+  # The same tests with the metadata on Postgres (docs/database.md), plus its migration and copy tests.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 20
+    env:
+      CRESSLET_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:pg
+
   # The Linux-only isolation tests (per-app uids, cgroups, gVisor) need root and a writable cgroup2
   # mount: run them as the test files describe, in a privileged container on its own cgroup.
   isolation:

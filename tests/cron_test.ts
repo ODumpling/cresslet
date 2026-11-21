@@ -50,7 +50,7 @@ export default {
 
 test("crons run the scheduled() export of claimed apps", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-cron-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }));
   const call = (path: string, init: RequestInit & { host?: string } = {}) => {
     const headers = new Headers(init.headers);
     headers.set("host", init.host ?? "test.local");
@@ -93,7 +93,7 @@ test("crons run the scheduled() export of claimed apps", async () => {
     assert.equal(forged.status, 200);
     assert.ok(!(await forged.json()).some((r: { cron: string }) => r.cron === "forged"));
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -137,7 +137,7 @@ test("a cron that finished isn't skipped while another cron of the app is still 
 
 test("due crons of one app run one at a time with their own timeout; waitUntil failures count", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-cron-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", limits: { requestMs: 1500 } as never }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", limits: { requestMs: 1500 } as never }));
   srv.scheduler.stop();
   const call = (path: string, init: RequestInit & { host?: string } = {}) => {
     const headers = new Headers(init.headers);
@@ -193,7 +193,7 @@ test("due crons of one app run one at a time with their own timeout; waitUntil f
     const after = srv.runtime.logs.recent(d.app.id, 200).map((l) => l.msg);
     assert.equal(after.filter((m) => m.startsWith('cron "*/2')).length, 1); // only the 10:00 run
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });

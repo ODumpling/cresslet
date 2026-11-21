@@ -25,12 +25,12 @@ const COMPAT_DATE = "2026-11-01";
 export interface AppSpec {
   appId: string;
   /** Never-reused per-app number (store.uidSeq): uid = CRESSLET_SANDBOX_UID_BASE + seq. Only read with per-app uids. */
-  seq: () => number;
+  seq: () => Promise<number>;
   appName: string;
   appUrl: string;
   deployId: string;
   /** Read at sandbox start; served over the HOST binding, never written to disk. */
-  secrets: () => Record<string, string>;
+  secrets: () => Promise<Record<string, string>>;
   net: boolean;
   /** Outbound allowlist (only with `net`); null = any public host. */
   egress: string[] | null;
@@ -247,6 +247,8 @@ export class Runtime {
     // so a FIN alone doesn't close it: destroy it then (nothing has been sent yet).
     const gone = () => client.destroy();
     client.once("close", uncount).once("end", gone);
+    // The FIN may have come while the app was being looked up (an await on the database), before this listener.
+    if (client.readableEnded) gone();
     let proc: Proc;
     try {
       proc = await this.#get(spec);
@@ -453,7 +455,7 @@ export class Runtime {
       // Bindings socket: the sandbox's only way to its data. One per app, so identity = socket. Served
       // from the app's own thread: its SQL can't stall the control plane. If that thread dies, so does the sandbox.
       bindings = await serveBindings(p.data, hostSock, {
-        secrets: spec.secrets(),
+        secrets: await spec.secrets(),
         maxDbBytes: cfg.limits.appDbBytes,
         maxFilesBytes: cfg.limits.appFilesBytes,
       }, () => {
@@ -482,8 +484,9 @@ export class Runtime {
         fd = (lst as unknown as { _handle?: { fd?: number } })._handle?.fd;
         if (typeof fd !== "number" || fd < 0) throw new Error("can't get the listening socket's fd");
       }
+      const seq = cfg.sandbox.uidBase === null ? 0 : await spec.seq();
       if (this.#closed) throw new Error("shutting down");
-      j = jail(cfg, tag, spec.seq, run);
+      j = jail(cfg, tag, () => seq, run);
       const cmd = j.command(cfg.workerdPath, ["serve", join(run, "config.capnp"), ...(gvisor ? [] : ["--socket-fd", "http=3"])]);
       child = spawn(cmd.file, cmd.args, { cwd: run, stdio: ["ignore", "pipe", "pipe", ...(fd === undefined ? [] : [fd])], env: { HOME: run } });
       listener?.close();

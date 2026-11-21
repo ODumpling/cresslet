@@ -83,7 +83,9 @@ docker run --rm --init -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   apk add -q --no-cache sqlite tar >/dev/null
   mkdir /s
   cd /data
-  [ -f cresslet.db ] || { echo "no cresslet.db: not a Cresslet data volume?" >&2; exit 1; }
+  [ -f cresslet.db ] || [ -f instance ] || { echo "no cresslet.db: not a Cresslet data volume?" >&2; exit 1; }
+  # A server on Postgres (CRESSLET_DATABASE_URL) keeps its metadata there: this snapshot has the rest.
+  [ -f cresslet.db ] || echo "no cresslet.db: the metadata is in Postgres, back it up with pg_dump too (docs/database.md)" >&2
   # Everything except the databases and their sidecars (snapshotted below). A file changing or
   # vanishing mid-copy is tar status 1 (allowed: the server is running); anything worse fails.
   ex=""

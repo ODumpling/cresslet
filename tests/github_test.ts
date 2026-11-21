@@ -79,7 +79,7 @@ async function fakeGithub() {
 async function setup(overrides: Partial<Config> = {}) {
   const gh = await fakeGithub();
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-gh-test-"));
-  const srv = createServer(loadConfig({
+  const srv = await createServer(loadConfig({
     dataDir,
     domain: "test.local",
     publicPort: 80,
@@ -119,7 +119,7 @@ async function setup(overrides: Partial<Config> = {}) {
     json,
     webLogin,
     async dispose() {
-      srv.close();
+      await srv.close();
       await gh.close();
       await rm(dataDir, { recursive: true, force: true });
     },

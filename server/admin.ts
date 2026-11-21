@@ -19,7 +19,7 @@ export const isSiteAdmin = (cfg: Config, a: Account | undefined) =>
 
 /** Permanently removes an app: process, rows (deploys, secrets, domains cascade), logs, files. */
 export async function purgeApp(cfg: Config, store: Store, runtime: Runtime, a: App) {
-  store.deleteApp(a.id); // first: no new request starts its sandbox
+  await store.deleteApp(a.id); // first: no new request starts its sandbox
   try {
     await runtime.stopSettled(a.id);
   } finally {
@@ -78,16 +78,16 @@ export function adminRoutes(
     throw new HttpError(acct ? 403 : 401, "site admin only", acct ? "forbidden" : "unauthorized");
   };
 
-  const getSite = (name: string) => {
-    const a = store.appByName(name, true);
+  const getSite = async (name: string) => {
+    const a = await store.appByName(name, true);
     if (!a) throw new HttpError(404, `site not found: ${name}`, "not_found");
     return a;
   };
 
   const owners = new Map<string, Account | undefined>();
-  const owner = (id: string | null) => {
+  const owner = async (id: string | null) => {
     if (!id) return null;
-    if (!owners.has(id)) owners.set(id, store.accountById(id));
+    if (!owners.has(id)) owners.set(id, await store.accountById(id));
     const o = owners.get(id);
     return o ? { id: o.id, email: o.email, github: o.github_login } : null;
   };
@@ -97,7 +97,7 @@ export function adminRoutes(
     const config = JSON.parse(a.config) as { server?: boolean; crons?: string[] };
     const rt = runtime.status(a.id);
     const served = a.current_deploy_id ?? a.page_deploy_id;
-    const deploy = served ? store.deploy(served) : undefined;
+    const deploy = served ? await store.deploy(served) : undefined;
     return {
       id: a.id,
       name: a.name,
@@ -105,10 +105,10 @@ export function adminRoutes(
       ...(a.kind === "page" ? { visibility: a.visibility } : {}),
       url: appUrl(cfg, a.name),
       status: a.deleted_at ? "deleted" : rt.running ? "running" : served ? "idle" : "empty",
-      owner: owner(a.account_id),
+      owner: await owner(a.account_id),
       server: !!config.server,
       crons: config.crons?.length ?? 0,
-      domains: store.domains(a.id).filter((d) => d.verified_at).map((d) => d.domain),
+      domains: (await store.domains(a.id)).filter((d) => d.verified_at).map((d) => d.domain),
       currentDeploy: deploy
         ? { id: deploy.id, createdAt: iso(deploy.created_at), bytes: deploy.bytes, files: deploy.file_count, source: deploy.source }
         : null,
@@ -124,7 +124,7 @@ export function adminRoutes(
   app.get("/admin/sites", async (c) => {
     requireSiteAdmin(c);
     owners.clear();
-    const sites = await Promise.all(store.allApps().map(siteView));
+    const sites = await Promise.all((await store.allApps()).map(siteView));
     const sum = (k: "deploys" | "database" | "files" | "total") => sites.reduce((n, s) => n + s.usage[k], 0);
     return c.json({
       totals: {
@@ -143,12 +143,12 @@ export function adminRoutes(
   app.get("/admin/sites/:name", async (c) => {
     requireSiteAdmin(c);
     owners.clear();
-    const a = getSite(c.req.param("name"));
+    const a = await getSite(c.req.param("name"));
     // Site admin powers cover the site, not its data: the tables are only shown to whoever runs the app
     // (its owner, or an admin it invited).
     let database: { tables: { name: string; rows: number }[]; error: string | null; truncated?: true } | null = null;
     // requireSiteAdmin already demands a full-access token (admin role, every app).
-    const acct = c.get("account"), access = acct ? store.access(a, acct.id) : undefined;
+    const acct = c.get("account"), access = acct ? await store.access(a, acct.id) : undefined;
     if (access === "owner" || access === "admin") {
       database = { tables: [], error: null };
       try {
@@ -161,7 +161,7 @@ export function adminRoutes(
     }
     return c.json({
       site: await siteView(a),
-      deploys: store.deploys(a.id, 10).map((d) => ({
+      deploys: (await store.deploys(a.id, 10)).map((d) => ({
         id: d.id,
         createdAt: iso(d.created_at),
         bytes: d.bytes,
@@ -170,8 +170,8 @@ export function adminRoutes(
         source: d.source,
         current: d.id === (a.current_deploy_id ?? a.page_deploy_id),
       })),
-      domains: store.domains(a.id).map((d) => ({ domain: d.domain, verified: !!d.verified_at })),
-      secrets: store.secretKeys(a.id).length,
+      domains: (await store.domains(a.id)).map((d) => ({ domain: d.domain, verified: !!d.verified_at })),
+      secrets: (await store.secretKeys(a.id)).length,
       database,
       runtime: runtime.status(a.id),
     });
@@ -181,7 +181,7 @@ export function adminRoutes(
   // `?purge=1` deletes it permanently now.
   app.delete("/admin/sites/:name", async (c) => {
     const who = requireSiteAdmin(c);
-    const a = getSite(c.req.param("name"));
+    const a = await getSite(c.req.param("name"));
     if (c.req.query("purge") === "1") {
       await purgeApp(cfg, store, runtime, a);
       console.log(`cresslet: site ${a.name} purged by ${who}`);
@@ -189,20 +189,20 @@ export function adminRoutes(
     }
     if (!a.deleted_at) {
       runtime.stop(a.id);
-      store.setDeleted(a.id, Date.now());
+      await store.setDeleted(a.id, Date.now());
       runtime.logs.push(a.id, "system", `site deleted by site admin ${who}`);
     }
-    return c.json({ site: await siteView(store.appById(a.id, true)!) });
+    return c.json({ site: await siteView((await store.appById(a.id, true))!) });
   });
 
   app.post("/admin/sites/:name/restore", async (c) => {
     const who = requireSiteAdmin(c);
-    const a = getSite(c.req.param("name"));
+    const a = await getSite(c.req.param("name"));
     if (a.deleted_at) {
-      store.setDeleted(a.id, null);
+      await store.setDeleted(a.id, null);
       runtime.logs.push(a.id, "system", `site restored by site admin ${who}`);
     }
-    return c.json({ site: await siteView(store.appById(a.id)!) });
+    return c.json({ site: await siteView((await store.appById(a.id))!) });
   });
 
   // Grant / revoke the SiteAdmin role. Accounts listed in CRESSLET_SITE_ADMINS stay admins regardless.
@@ -210,10 +210,10 @@ export function adminRoutes(
     const who = requireSiteAdmin(c);
     const { email, role } = await body<{ email?: string; role?: string | null }>(c);
     if (role !== SITE_ADMIN && role !== null) throw new HttpError(400, `role must be "${SITE_ADMIN}" or null`);
-    const acct = email ? store.accountByEmail(email) : undefined;
+    const acct = email ? await store.accountByEmail(email) : undefined;
     if (!acct) throw new HttpError(404, "account not found", "not_found");
     if (role === null && acct.id === c.get("account")?.id) throw new HttpError(400, "you can't remove your own role");
-    store.setRole(acct.id, role);
+    await store.setRole(acct.id, role);
     console.log(`cresslet: ${acct.email} role ${role ?? "(none)"} set by ${who}`);
     return c.json({ account: { id: acct.id, email: acct.email, github: acct.github_login, role } });
   });
@@ -227,9 +227,9 @@ export function adminRoutes(
       throw new HttpError(400, "credits must be a non-zero number, to a thousandth (at most 10,000,000 either way)");
     }
     if (note !== undefined && (typeof note !== "string" || note.length > 200)) throw new HttpError(400, "note must be a string of at most 200 characters");
-    const acct = email ? store.accountByEmail(email) : undefined;
+    const acct = email ? await store.accountByEmail(email) : undefined;
     if (!acct) throw new HttpError(404, "account not found", "not_found");
-    const balance = store.grantAi(acct.id, Math.round(credits * 1000), { note: note ?? null, by: who });
+    const balance = await store.grantAi(acct.id, Math.round(credits * 1000), { note: note ?? null, by: who });
     console.log(`cresslet: ${credits} AI credits to ${acct.email} by ${who}`);
     return c.json({ account: { id: acct.id, email: acct.email, github: acct.github_login }, balance: balance / 1000 });
   });
@@ -248,16 +248,16 @@ export function adminRoutes(
   });
   const acctRef = (a: { id: string; email: string; github_login: string | null }) => ({ id: a.id, email: a.email, github: a.github_login });
 
-  app.get("/admin/credits", (c) => {
+  app.get("/admin/credits", async (c) => {
     requireSiteAdmin(c);
     const ai = cfg.ai;
     if (!ai) return c.json({ enabled: false });
     const now = Date.now(), since = periodStart(now), allowance = Math.round(ai.monthlyCredits * 1000);
-    const accounts = store.aiAccounts(period(now), since).map((r) => ({ ...acctRef(r), ...walletView(allowance, r) }));
-    const models = store.aiModels(since);
+    const accounts = (await store.aiAccounts(period(now), since)).map((r) => ({ ...acctRef(r), ...walletView(allowance, r) }));
+    const models = await store.aiModels(since);
     const today = Math.floor(now / DAY);
-    const byDay = new Map(store.aiDays((today - DAYS + 1) * DAY).map((d) => [d.day, d]));
-    const granted = store.aiGranted(since), held = store.aiOutstanding();
+    const byDay = new Map((await store.aiDays((today - DAYS + 1) * DAY)).map((d) => [d.day, d]));
+    const granted = await store.aiGranted(since), held = await store.aiOutstanding();
     const sum = (k: "used" | "requests" | "free" | "usd") => models.reduce((n, m) => n + m[k], 0);
     return c.json({
       enabled: true,
@@ -290,26 +290,26 @@ export function adminRoutes(
         outputTokens: m.output,
       })),
       accounts,
-      recent: store.aiLedgerAll(50).map((r) => ({ ...ledgerEntry(r, { admin: true }), account: acctRef({ ...r, id: r.account_id }) })),
+      recent: (await store.aiLedgerAll(50)).map((r) => ({ ...ledgerEntry(r, { admin: true }), account: acctRef({ ...r, id: r.account_id }) })),
     });
   });
 
   // One account's wallet and its latest 200 ledger rows.
-  app.get("/admin/credits/accounts/:id", (c) => {
+  app.get("/admin/credits/accounts/:id", async (c) => {
     requireSiteAdmin(c);
     const ai = cfg.ai;
     if (!ai) return c.json({ enabled: false });
-    const acct = store.accountById(c.req.param("id"));
+    const acct = await store.accountById(c.req.param("id"));
     if (!acct) throw new HttpError(404, "account not found", "not_found");
     const now = Date.now(), allowance = Math.round(ai.monthlyCredits * 1000);
-    const row = store.aiAccounts(period(now), periodStart(now), acct.id)[0] ??
+    const row = (await store.aiAccounts(period(now), periodStart(now), acct.id))[0] ??
       { ...acct, balance: 0, period_used: 0, used: 0, requests: 0, last_used_at: null };
     return c.json({
       enabled: true,
       monthlyCredits: ai.monthlyCredits,
       resetsAt: nextPeriod(now),
       account: { ...acctRef(acct), siteAdmin: isSiteAdmin(cfg, acct), ...walletView(allowance, row) },
-      history: store.aiLedger(acct.id, 200).map((r) => ledgerEntry(r, { admin: true })),
+      history: (await store.aiLedger(acct.id, 200)).map((r) => ledgerEntry(r, { admin: true })),
     });
   });
 }

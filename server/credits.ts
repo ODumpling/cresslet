@@ -213,26 +213,26 @@ export function aiRoutes(
 ) {
   const inflight = new Map<string, number>();
 
-  const wallet = (ai: AiConfig, acct: Account) => {
-    const w = store.aiWallet(acct.id, period());
+  const wallet = async (ai: AiConfig, acct: Account) => {
+    const w = await store.aiWallet(acct.id, period());
     const allowance = Math.round(ai.monthlyCredits * 1000);
     const monthly = Math.max(0, allowance - w.periodUsed);
     return { balance: w.balance, allowance, used: w.periodUsed, monthly, available: w.balance + monthly };
   };
 
   // The account's credits and recent usage (any whole-account token).
-  app.get("/me/credits", (c) => {
+  app.get("/me/credits", async (c) => {
     const acct = accountWide(c, "read");
     const ai = cfg.ai;
     if (!ai) return c.json({ enabled: false });
-    const w = wallet(ai, acct);
+    const w = await wallet(ai, acct);
     return c.json({
       enabled: true,
       creditsPerUsd: ai.creditsPerUsd,
       available: credits(w.available),
       balance: credits(w.balance),
       monthly: { allowance: credits(w.allowance), used: credits(w.used), remaining: credits(w.monthly), resetsAt: nextPeriod() },
-      history: store.aiLedger(acct.id, 50).map((r) => ledgerEntry(r)),
+      history: (await store.aiLedger(acct.id, 50)).map((r) => ledgerEntry(r)),
     });
   });
 
@@ -246,7 +246,7 @@ export function aiRoutes(
       if (e instanceof HttpError) return aiError(e.status, e.status === 401 ? "authentication_error" : "permission_error", e.message);
       throw e;
     }
-    if (wallet(ai, acct).available <= 0) {
+    if ((await wallet(ai, acct)).available <= 0) {
       return aiError(402, "credits_exhausted", "You're out of AI credits. Wait for next month's free credits, ask the operator for more, or use your own Anthropic API key.");
     }
     const betas = (c.req.header("anthropic-beta") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -323,7 +323,8 @@ export function aiRoutes(
     // so the charge is what Anthropic bills, not what the client chose to wait for).
     const meter = new Meter(req.model as string);
     let charged = false;
-    const charge = () => {
+    /** Settles once the charge is recorded (or failed: logged). */
+    const charge = async () => {
       if (charged) return;
       charged = true;
       clearTimeout(timer);
@@ -333,7 +334,7 @@ export function aiRoutes(
       const microUsd = usageCost(meter.model, u);
       const amount = toMillicredits(ai, microUsd);
       try {
-        store.chargeAi(acct.id, period(), Math.round(ai.monthlyCredits * 1000), amount, {
+        await store.chargeAi(acct.id, period(), Math.round(ai.monthlyCredits * 1000), amount, {
           model: meter.model,
           input: n(u.input_tokens),
           output: n(u.output_tokens),
@@ -355,14 +356,14 @@ export function aiRoutes(
           r = await reader.read();
         } catch (e) {
           if (!cancelled) {
-            charge();
+            await charge(); // recorded before the client sees the end
             ctrl.error(e);
           }
           return;
         }
         if (r.done) {
           if (!cancelled) {
-            charge();
+            await charge();
             ctrl.close();
           }
           return;
@@ -380,7 +381,7 @@ export function aiRoutes(
               meter.push(value);
             }
           } catch { /* cut off: charged for what arrived */ } finally {
-            charge();
+            await charge();
           }
         })();
       },

@@ -1,8 +1,10 @@
-import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { type Db, isUniqueViolation, openDb, SqliteDb } from "./db.ts";
+import { migrate } from "./migrations.ts";
 import { SecretBox } from "./secretbox.ts";
 import type { Visibility } from "./config.ts";
+
 
 const encodeHex = (b: ArrayBuffer | Uint8Array) => Buffer.from(b as ArrayBuffer).toString("hex");
 
@@ -146,170 +148,94 @@ export async function sha256(s: string): Promise<string> {
   return encodeHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
 }
 
-export class Store {
-  db: DatabaseSync;
+export interface DatabaseConfig {
+  /** Postgres connection string (CRESSLET_DATABASE_URL), or null: SQLite at <dataDir>/cresslet.db. */
+  url: string | null;
+  /** Postgres schema for Cresslet's tables (CRESSLET_DATABASE_SCHEMA). */
+  schema: string;
+}
+
+/** What rate limits persist through (limits.ts RateLimit). */
+export interface RateHits {
+  /** Records a hit unless `key` already has `max` since `since`; true if recorded. Atomic. */
+  takeRateHit(bucket: string, key: string, since: number, max: number, at: number, until: number): Promise<boolean>;
+}
+
+export class Store implements RateHits {
+  readonly db: Db;
   #box: SecretBox;
 
-  constructor(dataDir: string) {
-    mkdirSync(dataDir, { recursive: true });
-    this.db = new DatabaseSync(join(dataDir, "cresslet.db"));
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA foreign_keys = ON;
-      PRAGMA secure_delete = ON;
-      CREATE TABLE IF NOT EXISTS accounts (
-        id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS tokens (
-        hash TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-        created_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS apps (
-        id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL,
-        account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
-        deploy_key_hash TEXT NOT NULL, current_deploy_id TEXT, config TEXT NOT NULL DEFAULT '{}',
-        expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS deploys (
-        id TEXT PRIMARY KEY, app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-        created_at INTEGER NOT NULL, bytes INTEGER NOT NULL, file_count INTEGER NOT NULL,
-        has_server INTEGER NOT NULL, source TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS secrets (
-        app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE, key TEXT NOT NULL,
-        value TEXT NOT NULL, PRIMARY KEY (app_id, key));
-    `);
-    const cols = (this.db.prepare("PRAGMA table_info(accounts)").all() as { name: string }[]).map((c) => c.name);
-    if (!cols.includes("github_id")) {
-      this.db.exec("ALTER TABLE accounts ADD COLUMN github_id INTEGER; ALTER TABLE accounts ADD COLUMN github_login TEXT;");
-    }
-    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS accounts_github_id ON accounts (github_id)");
-    const appCols = (this.db.prepare("PRAGMA table_info(apps)").all() as { name: string }[]).map((c) => c.name);
-    if (!appCols.includes("egress")) this.db.exec("ALTER TABLE apps ADD COLUMN egress TEXT");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS domains (
-        domain TEXT NOT NULL, app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-        token TEXT NOT NULL, verified_at INTEGER, created_at INTEGER NOT NULL, PRIMARY KEY (domain, app_id));
-      CREATE UNIQUE INDEX IF NOT EXISTS domains_verified ON domains (domain) WHERE verified_at IS NOT NULL;
-    `);
-    if (!appCols.includes("uid_seq")) this.db.exec("ALTER TABLE apps ADD COLUMN uid_seq INTEGER");
-    if (!appCols.includes("deleted_at")) this.db.exec("ALTER TABLE apps ADD COLUMN deleted_at INTEGER");
-    if (!cols.includes("role")) this.db.exec("ALTER TABLE accounts ADD COLUMN role TEXT");
-    this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)");
-    // Named / scoped tokens. Tokens from before this keep working as full-access ("admin", all apps).
-    const tokCols = (this.db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((c) => c.name);
-    if (!tokCols.includes("id")) {
-      this.db.exec(`
-        BEGIN;
-        ALTER TABLE tokens ADD COLUMN id TEXT;
-        ALTER TABLE tokens ADD COLUMN name TEXT NOT NULL DEFAULT 'Token';
-        ALTER TABLE tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'admin';
-        ALTER TABLE tokens ADD COLUMN apps TEXT;
-        ALTER TABLE tokens ADD COLUMN last_used_at INTEGER;
-        UPDATE tokens SET name = 'Token (before named tokens)';
-        COMMIT;
-      `);
-    }
-    // Also tokens a pre-named-tokens server inserted (after a rollback).
-    this.db.exec("UPDATE tokens SET id = 'tok_' || lower(hex(randomblob(10))) WHERE id IS NULL");
-    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tokens_id ON tokens (id)");
-    // Collaborators (an older server ignores these tables: invited accounts just lose access).
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS collaborators (
-        app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-        role TEXT NOT NULL CHECK (role IN ('viewer', 'admin')), created_at INTEGER NOT NULL,
-        PRIMARY KEY (app_id, account_id));
-      CREATE INDEX IF NOT EXISTS collaborators_account ON collaborators (account_id);
-      CREATE TABLE IF NOT EXISTS invites (
-        id TEXT PRIMARY KEY, app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-        email TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('viewer', 'admin')),
-        invited_by TEXT REFERENCES accounts(id) ON DELETE SET NULL, created_at INTEGER NOT NULL,
-        UNIQUE (app_id, email));
-      CREATE INDEX IF NOT EXISTS invites_email ON invites (email);
-    `);
-    // Pages (an older server sees them as apps with nothing deployed: see App.page_deploy_id).
-    if (!appCols.includes("kind")) {
-      this.db.exec(`
-        BEGIN;
-        ALTER TABLE apps ADD COLUMN kind TEXT NOT NULL DEFAULT 'app';
-        ALTER TABLE apps ADD COLUMN visibility TEXT;
-        ALTER TABLE apps ADD COLUMN retention_days INTEGER;
-        ALTER TABLE apps ADD COLUMN title TEXT;
-        ALTER TABLE apps ADD COLUMN page_deploy_id TEXT;
-        COMMIT;
-      `);
-    }
-    if (!cols.includes("settings")) this.db.exec("ALTER TABLE accounts ADD COLUMN settings TEXT");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS page_sessions (
-        hash TEXT PRIMARY KEY, app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-        ticket INTEGER NOT NULL, expires_at INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS page_sessions_expiry ON page_sessions (expires_at);
-      CREATE TABLE IF NOT EXISTS rate_hits (
-        bucket TEXT NOT NULL, key TEXT NOT NULL, at INTEGER NOT NULL, until INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS rate_hits_key ON rate_hits (bucket, key, at);
-      CREATE INDEX IF NOT EXISTS rate_hits_until ON rate_hits (until);
-    `);
-    // The client (ipKey) that created an anonymous app, for the per-client cap; cleared on claim.
-    if (!(this.db.prepare("PRAGMA table_info(apps)").all() as { name: string }[]).some((c) => c.name === "anon_client")) {
-      this.db.exec("ALTER TABLE apps ADD COLUMN anon_client TEXT");
-    }
-    // AI credits (server/credits.ts), in millicredits. `balance`: granted credits left (can go below 0 by the last
-    // request); `period_used`: this month's free allowance used (`period` = "YYYY-MM", UTC; a new month starts at 0).
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS ai_wallets (
-        account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-        balance INTEGER NOT NULL DEFAULT 0, period TEXT, period_used INTEGER NOT NULL DEFAULT 0);
-      CREATE TABLE IF NOT EXISTS ai_ledger (
-        id INTEGER PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-        created_at INTEGER NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL, detail TEXT);
-      CREATE INDEX IF NOT EXISTS ai_ledger_account ON ai_ledger (account_id, id);
-      CREATE INDEX IF NOT EXISTS ai_ledger_created ON ai_ledger (created_at);
-    `);
-    this.#box = SecretBox.load(dataDir);
-    this.#sealSecrets();
+  private constructor(db: Db, box: SecretBox) {
+    this.db = db;
+    this.#box = box;
   }
 
-  close() {
-    this.db.close();
+  /** Opens the metadata database (Postgres if `database.url`), applying pending migrations. */
+  static async open(dataDir: string, database: DatabaseConfig = { url: null, schema: "public" }): Promise<Store> {
+    mkdirSync(dataDir, { recursive: true });
+    const db = openDb({ url: database.url, schema: database.schema, sqlitePath: join(dataDir, "cresslet.db") });
+    try {
+      if (db instanceof SqliteDb) {
+        // Not settable inside a transaction.
+        db.raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
+      }
+      const { unknown } = await migrate(db);
+      if (unknown.length) {
+        console.warn(`cresslet: the database has migrations this server doesn't know (${
+          unknown.map((m) => `${m.version} ${m.name}`).join(", ")
+        }): a newer release ran against it. Running anyway (migrations only add).`);
+      }
+      if (db instanceof SqliteDb) {
+        // Tokens a pre-named-tokens server inserted (after a rollback).
+        await db.exec("UPDATE tokens SET id = 'tok_' || lower(hex(randomblob(10))) WHERE id IS NULL");
+      }
+      const store = new Store(db, SecretBox.load(dataDir));
+      await store.#sealSecrets();
+      return store;
+    } catch (e) {
+      await db.close().catch(() => {});
+      throw e;
+    }
+  }
+
+  async close() {
+    await this.db.close();
   }
 
   /**
-   * Sealed values are stored as BLOBs, plaintext ones (older versions, incl. after a rollback) as
+   * SQLite: sealed values are stored as BLOBs, plaintext ones (older versions, incl. after a rollback) as
    * TEXT, so the storage class alone tells them apart. Seals plaintext rows and re-seals rows under
    * an old key. The first run also rebuilds the file: overwritten or deleted plaintext otherwise
-   * survives in free pages and the WAL.
+   * survives in free pages and the WAL. Postgres only ever holds sealed values (BYTEA).
    */
-  #sealSecrets() {
-    const rows = this.db.prepare("SELECT app_id, key, value FROM secrets").all() as {
-      app_id: string;
-      key: string;
-      value: string | Uint8Array;
-    }[];
-    const update = this.db.prepare("UPDATE secrets SET value = ? WHERE app_id = ? AND key = ?");
+  async #sealSecrets() {
     let plaintext = 0;
-    this.db.exec("BEGIN");
-    try {
+    await this.db.tx(async () => {
+      const rows = await this.db.all<{ app_id: string; key: string; value: string | Uint8Array }>(
+        "SELECT app_id, key, value FROM secrets",
+      );
+      const update = (r: { app_id: string; key: string }, value: string) =>
+        this.db.run("UPDATE secrets SET value = ? WHERE app_id = ? AND key = ?", this.#seal(r.app_id, r.key, value), r.app_id, r.key);
       for (const r of rows) {
         if (typeof r.value === "string") {
-          update.run(this.#seal(r.app_id, r.key, r.value), r.app_id, r.key);
+          await update(r, r.value);
           plaintext++;
         } else {
           const { value, stale } = this.#box.open(r.app_id, r.key, Buffer.from(r.value).toString());
-          if (stale) update.run(this.#seal(r.app_id, r.key, value), r.app_id, r.key);
+          if (stale) await update(r, value);
         }
       }
       // Cleanup pending until the rebuild below succeeds (retried next start if the checkpoint is busy).
-      if (plaintext) this.db.exec("PRAGMA user_version = 0");
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
-    const { user_version } = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+      if (plaintext && this.db.dialect === "sqlite") await this.db.exec("PRAGMA user_version = 0");
+    });
+    if (!(this.db instanceof SqliteDb)) return;
+    const raw = this.db.raw;
+    const { user_version } = raw.prepare("PRAGMA user_version").get() as { user_version: number };
     if (user_version < 1) {
-      this.db.exec("VACUUM");
-      const ck = this.db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy: number };
+      raw.exec("VACUUM");
+      const ck = raw.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy: number };
       // Only mark done once the old pages are really gone (busy = a reader kept the WAL pinned).
-      if (!ck.busy) this.db.exec("PRAGMA user_version = 1");
+      if (!ck.busy) raw.exec("PRAGMA user_version = 1");
     }
   }
 
@@ -317,8 +243,16 @@ export class Store {
     return Buffer.from(this.#box.seal(appId, key, value));
   }
 
+  /** Runs `fn` in a transaction holding `lock` (see Db.lock): check-then-write without races. */
+  serialized<T>(lock: string, fn: () => Promise<T>): Promise<T> {
+    return this.db.tx(async () => {
+      await this.db.lock(lock);
+      return fn();
+    });
+  }
+
   // ---- accounts
-  createAccount(email: string, github?: { id: number; login: string }): Account {
+  async createAccount(email: string, github?: { id: number; login: string }): Promise<Account> {
     const a: Account = {
       id: id("acct"),
       email: email.toLowerCase(),
@@ -328,36 +262,33 @@ export class Store {
       role: null,
       settings: null,
     };
-    this.db.prepare("INSERT INTO accounts (id, email, created_at, github_id, github_login) VALUES (?, ?, ?, ?, ?)")
-      .run(a.id, a.email, a.created_at, a.github_id, a.github_login);
+    await this.db.run("INSERT INTO accounts (id, email, created_at, github_id, github_login) VALUES (?, ?, ?, ?, ?)",
+      a.id, a.email, a.created_at, a.github_id, a.github_login);
     return a;
   }
-  accountByGithub(githubId: number): Account | undefined {
-    return this.db.prepare("SELECT * FROM accounts WHERE github_id = ?").get(githubId) as Account | undefined;
+  accountByGithub(githubId: number): Promise<Account | undefined> {
+    return this.db.get<Account>("SELECT * FROM accounts WHERE github_id = ?", githubId);
   }
-  linkGithub(accountId: string, github: { id: number; login: string }) {
-    this.db.prepare("UPDATE accounts SET github_id = ?, github_login = ? WHERE id = ?")
-      .run(github.id, github.login, accountId);
+  async linkGithub(accountId: string, github: { id: number; login: string }) {
+    await this.db.run("UPDATE accounts SET github_id = ?, github_login = ? WHERE id = ?", github.id, github.login, accountId);
   }
-  accountById(accountId: string): Account | undefined {
-    return this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId) as Account | undefined;
+  accountById(accountId: string): Promise<Account | undefined> {
+    return this.db.get<Account>("SELECT * FROM accounts WHERE id = ?", accountId);
   }
   settings(a: Account): AccountSettings {
     return a.settings ? JSON.parse(a.settings) : {};
   }
-  setSettings(accountId: string, settings: AccountSettings) {
-    this.db.prepare("UPDATE accounts SET settings = ? WHERE id = ?").run(JSON.stringify(settings), accountId);
+  async setSettings(accountId: string, settings: AccountSettings) {
+    await this.db.run("UPDATE accounts SET settings = ? WHERE id = ?", JSON.stringify(settings), accountId);
   }
-  setRole(accountId: string, role: string | null) {
-    this.db.prepare("UPDATE accounts SET role = ? WHERE id = ?").run(role, accountId);
+  async setRole(accountId: string, role: string | null) {
+    await this.db.run("UPDATE accounts SET role = ? WHERE id = ?", role, accountId);
   }
-  revokeTokens(accountId: string) {
-    this.db.prepare("DELETE FROM tokens WHERE account_id = ?").run(accountId);
+  async revokeTokens(accountId: string) {
+    await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
   }
-  accountByEmail(email: string): Account | undefined {
-    return this.db.prepare("SELECT * FROM accounts WHERE email = ?").get(email.toLowerCase()) as
-      | Account
-      | undefined;
+  accountByEmail(email: string): Promise<Account | undefined> {
+    return this.db.get<Account>("SELECT * FROM accounts WHERE email = ?", email.toLowerCase());
   }
   /** Returns the secret (shown once; only its hash is stored) and the token's metadata. */
   async issueToken(
@@ -377,417 +308,427 @@ export class Store {
       created_at: Date.now(),
       last_used_at: null,
     };
-    this.db.prepare(
+    await this.db.run(
       "INSERT INTO tokens (hash, id, account_id, name, role, apps, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(await sha256(token), info.id, accountId, info.name, info.role, info.apps, info.created_at);
+      await sha256(token), info.id, accountId, info.name, info.role, info.apps, info.created_at,
+    );
     return { token, info };
   }
   /** Looks up a token and records its use (at most once a minute, to spare writes). */
   async useToken(token: string): Promise<{ account: Account; token: Token } | undefined> {
     const hash = await sha256(token);
-    const t = this.db.prepare(
-      "SELECT id, account_id, name, role, apps, created_at, last_used_at FROM tokens WHERE hash = ?",
-    ).get(hash) as Token | undefined;
+    const t = await this.db.get<Token>(
+      "SELECT id, account_id, name, role, apps, created_at, last_used_at FROM tokens WHERE hash = ?", hash,
+    );
     if (!t) return undefined;
-    const account = this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(t.account_id) as Account | undefined;
+    const account = await this.db.get<Account>("SELECT * FROM accounts WHERE id = ?", t.account_id);
     if (!account) return undefined;
     const now = Date.now();
     if (!t.last_used_at || now - t.last_used_at > 60_000) {
-      this.db.prepare("UPDATE tokens SET last_used_at = ? WHERE hash = ?").run(now, hash);
+      await this.db.run("UPDATE tokens SET last_used_at = ? WHERE hash = ?", now, hash);
       t.last_used_at = now;
     }
     return { account, token: t };
   }
-  tokens(accountId: string): Token[] {
-    return this.db.prepare(
+  tokens(accountId: string): Promise<Token[]> {
+    return this.db.all<Token>(
       "SELECT id, account_id, name, role, apps, created_at, last_used_at FROM tokens WHERE account_id = ? ORDER BY created_at, rowid",
-    ).all(accountId) as unknown as Token[];
+      accountId,
+    );
   }
   /** False if there's no such token on this account. */
-  revokeToken(accountId: string, tokenId: string): boolean {
-    return this.db.prepare("DELETE FROM tokens WHERE account_id = ? AND id = ?").run(accountId, tokenId).changes > 0;
+  async revokeToken(accountId: string, tokenId: string): Promise<boolean> {
+    return (await this.db.run("DELETE FROM tokens WHERE account_id = ? AND id = ?", accountId, tokenId)).changes > 0;
   }
 
   // ---- apps
-  /** `check` runs right before the insert, with no await in between (quota checks can't race). */
-  /** `anonClient`: the client (ipKey) creating an anonymous app. */
-  async createApp(name: string, expiresAt: number | null, accountId: string | null, check?: () => void, anonClient?: string) {
+  /**
+   * `check` runs right before the insert, in its transaction, while holding the app-creation lock: quota
+   * checks can't race (also across servers sharing a Postgres database). It throws to refuse.
+   * `anonClient`: the client (ipKey) creating an anonymous app.
+   */
+  async createApp(name: string, expiresAt: number | null, accountId: string | null, check?: () => Promise<void>, anonClient?: string) {
     const deployKey = id("clv_app", 24);
     const keyHash = await sha256(deployKey);
-    check?.();
-    const now = Date.now();
-    const app: App = {
-      id: id("app"),
-      name,
-      account_id: accountId,
-      current_deploy_id: null,
-      config: "{}",
-      egress: null,
-      expires_at: expiresAt,
-      deleted_at: null,
-      created_at: now,
-      updated_at: now,
-      kind: "app",
-      visibility: null,
-      retention_days: null,
-      title: null,
-      page_deploy_id: null,
-    };
-    this.db.prepare(
-      `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at, anon_client)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(app.id, name, accountId, keyHash, "{}", expiresAt, now, now, accountId ? null : anonClient ?? null);
-    return { app, deployKey };
+    return this.serialized("cresslet:create-app", async () => {
+      await check?.();
+      const now = Date.now();
+      const app: App = {
+        id: id("app"),
+        name,
+        account_id: accountId,
+        current_deploy_id: null,
+        config: "{}",
+        egress: null,
+        expires_at: expiresAt,
+        deleted_at: null,
+        created_at: now,
+        updated_at: now,
+        kind: "app",
+        visibility: null,
+        retention_days: null,
+        title: null,
+        page_deploy_id: null,
+      };
+      await this.db.run(
+        `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at, anon_client)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        app.id, name, accountId, keyHash, "{}", expiresAt, now, now, accountId ? null : anonClient ?? null,
+      );
+      return { app, deployKey };
+    });
   }
   /** A page has no usable deploy key (only accounts change it). `check` as in createApp. */
   async createPage(
     name: string,
     accountId: string,
     p: { title: string | null; visibility: Visibility; retentionDays: number | null },
-    check?: () => void,
+    check?: () => Promise<void>,
   ): Promise<App> {
     const keyHash = await sha256(id("clv_none", 24)); // never handed out
-    check?.();
-    const now = Date.now();
-    const app: App = {
-      id: id("app"),
-      name,
-      account_id: accountId,
-      current_deploy_id: null,
-      config: "{}",
-      egress: null,
-      expires_at: p.retentionDays === null ? null : now + p.retentionDays * 86_400_000,
-      deleted_at: null,
-      created_at: now,
-      updated_at: now,
-      kind: "page",
-      visibility: p.visibility,
-      retention_days: p.retentionDays,
-      title: p.title,
-      page_deploy_id: null,
-    };
-    this.db.prepare(
-      `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at,
-         kind, visibility, retention_days, title)
-       VALUES (?, ?, ?, ?, '{}', ?, ?, ?, 'page', ?, ?, ?)`,
-    ).run(app.id, name, accountId, keyHash, app.expires_at, now, now, app.visibility, app.retention_days, app.title);
-    return app;
+    return this.serialized("cresslet:create-app", async () => {
+      await check?.();
+      const now = Date.now();
+      const app: App = {
+        id: id("app"),
+        name,
+        account_id: accountId,
+        current_deploy_id: null,
+        config: "{}",
+        egress: null,
+        expires_at: p.retentionDays === null ? null : now + p.retentionDays * 86_400_000,
+        deleted_at: null,
+        created_at: now,
+        updated_at: now,
+        kind: "page",
+        visibility: p.visibility,
+        retention_days: p.retentionDays,
+        title: p.title,
+        page_deploy_id: null,
+      };
+      await this.db.run(
+        `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at,
+           kind, visibility, retention_days, title)
+         VALUES (?, ?, ?, ?, '{}', ?, ?, ?, 'page', ?, ?, ?)`,
+        app.id, name, accountId, keyHash, app.expires_at, now, now, app.visibility, app.retention_days, app.title,
+      );
+      return app;
+    });
   }
-  setPageDeploy(appId: string, deployId: string) {
-    this.db.prepare("UPDATE apps SET page_deploy_id = ?, updated_at = ? WHERE id = ?").run(deployId, Date.now(), appId);
+  async setPageDeploy(appId: string, deployId: string) {
+    await this.db.run("UPDATE apps SET page_deploy_id = ?, updated_at = ? WHERE id = ?", deployId, Date.now(), appId);
   }
   /** Changes a page's settings; a new `retention_days` restarts its clock (`expires_at` from now). */
-  setPage(appId: string, p: { title?: string | null; visibility?: Visibility; retention_days?: number | null }) {
+  async setPage(appId: string, p: { title?: string | null; visibility?: Visibility; retention_days?: number | null }) {
     const now = Date.now();
-    if (p.title !== undefined) this.db.prepare("UPDATE apps SET title = ? WHERE id = ?").run(p.title, appId);
-    if (p.visibility !== undefined) this.db.prepare("UPDATE apps SET visibility = ? WHERE id = ?").run(p.visibility, appId);
-    if (p.retention_days !== undefined) {
-      this.db.prepare("UPDATE apps SET retention_days = ?, expires_at = ? WHERE id = ?")
-        .run(p.retention_days, p.retention_days === null ? null : now + p.retention_days * 86_400_000, appId);
-    }
-    this.db.prepare("UPDATE apps SET updated_at = ? WHERE id = ?").run(now, appId);
+    await this.db.tx(async () => {
+      if (p.title !== undefined) await this.db.run("UPDATE apps SET title = ? WHERE id = ?", p.title, appId);
+      if (p.visibility !== undefined) await this.db.run("UPDATE apps SET visibility = ? WHERE id = ?", p.visibility, appId);
+      if (p.retention_days !== undefined) {
+        await this.db.run("UPDATE apps SET retention_days = ?, expires_at = ? WHERE id = ?",
+          p.retention_days, p.retention_days === null ? null : now + p.retention_days * 86_400_000, appId);
+      }
+      await this.db.run("UPDATE apps SET updated_at = ? WHERE id = ?", now, appId);
+    });
   }
   /** Live apps only; `includeDeleted` also finds ones a site admin deleted (their name stays taken until purged). */
-  appByName(name: string, includeDeleted = false): App | undefined {
-    return this.db.prepare(`SELECT * FROM apps WHERE name = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`)
-      .get(name) as App | undefined;
+  appByName(name: string, includeDeleted = false): Promise<App | undefined> {
+    return this.db.get<App>(`SELECT * FROM apps WHERE name = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`, name);
   }
-  appById(appId: string, includeDeleted = false): App | undefined {
-    return this.db.prepare(`SELECT * FROM apps WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`)
-      .get(appId) as App | undefined;
+  appById(appId: string, includeDeleted = false): Promise<App | undefined> {
+    return this.db.get<App>(`SELECT * FROM apps WHERE id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`, appId);
   }
   /** Every app, deleted ones included (site admin view). */
-  allApps(): App[] {
-    return this.db.prepare("SELECT * FROM apps ORDER BY updated_at DESC").all() as unknown as App[];
+  allApps(): Promise<App[]> {
+    return this.db.all<App>("SELECT * FROM apps ORDER BY updated_at DESC");
   }
-  setDeleted(appId: string, deletedAt: number | null) {
-    this.db.prepare("UPDATE apps SET deleted_at = ? WHERE id = ?").run(deletedAt, appId);
+  async setDeleted(appId: string, deletedAt: number | null) {
+    await this.db.run("UPDATE apps SET deleted_at = ? WHERE id = ?", deletedAt, appId);
   }
   /** Deleted by a site admin before `before`: due to be purged. */
-  deletedBefore(before: number): App[] {
-    return this.db.prepare("SELECT * FROM apps WHERE deleted_at IS NOT NULL AND deleted_at < ?")
-      .all(before) as unknown as App[];
+  deletedBefore(before: number): Promise<App[]> {
+    return this.db.all<App>("SELECT * FROM apps WHERE deleted_at IS NOT NULL AND deleted_at < ?", before);
   }
   /** Claimed apps whose current deploy declares crons. */
-  appsWithCrons(): App[] {
-    return this.db.prepare(
-      "SELECT * FROM apps WHERE account_id IS NOT NULL AND deleted_at IS NULL AND json_array_length(config, '$.crons') > 0",
-    ).all() as unknown as App[];
+  appsWithCrons(): Promise<App[]> {
+    const crons = this.db.dialect === "postgres"
+      ? "json_typeof(config::json -> 'crons') = 'array' AND json_array_length(config::json -> 'crons') > 0"
+      : "json_array_length(config, '$.crons') > 0";
+    return this.db.all<App>(`SELECT * FROM apps WHERE account_id IS NOT NULL AND deleted_at IS NULL AND ${crons}`);
   }
   /**
    * Per-app number for sandbox uids, allocated on first use from a counter that never goes back
    * (not the rowid: SQLite reuses the highest one after a delete), so a uid is never reused.
    */
-  uidSeq(appId: string): number {
-    const row = this.db.prepare("SELECT uid_seq FROM apps WHERE id = ?").get(appId) as { uid_seq: number | null } | undefined;
+  async uidSeq(appId: string): Promise<number> {
+    const get = () => this.db.get<{ uid_seq: number | null }>("SELECT uid_seq FROM apps WHERE id = ?", appId);
+    const row = await get();
     if (!row) throw new Error(`no app ${appId}`);
     if (row.uid_seq !== null) return row.uid_seq;
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const n = ((this.db.prepare("SELECT value FROM meta WHERE key = 'uid_seq'").get() as { value: number } | undefined)?.value ?? 0) + 1;
-      this.db.prepare("INSERT INTO meta (key, value) VALUES ('uid_seq', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(n);
-      this.db.prepare("UPDATE apps SET uid_seq = ? WHERE id = ?").run(n, appId);
-      this.db.exec("COMMIT");
+    return this.serialized("cresslet:uid-seq", async () => {
+      const again = await get(); // another caller may have allocated it meanwhile
+      if (!again) throw new Error(`no app ${appId}`);
+      if (again.uid_seq !== null) return again.uid_seq;
+      const n = ((await this.db.get<{ value: number }>("SELECT value FROM meta WHERE key = 'uid_seq'"))?.value ?? 0) + 1;
+      await this.db.run("INSERT INTO meta (key, value) VALUES ('uid_seq', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", n);
+      await this.db.run("UPDATE apps SET uid_seq = ? WHERE id = ?", n, appId);
       return n;
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+    });
   }
-  appsByAccount(accountId: string, kind: AppKind = "app"): App[] {
-    return this.db.prepare("SELECT * FROM apps WHERE account_id = ? AND kind = ? AND deleted_at IS NULL ORDER BY updated_at DESC")
-      .all(accountId, kind) as unknown as App[];
+  appsByAccount(accountId: string, kind: AppKind = "app"): Promise<App[]> {
+    return this.db.all<App>(
+      "SELECT * FROM apps WHERE account_id = ? AND kind = ? AND deleted_at IS NULL ORDER BY updated_at DESC", accountId, kind,
+    );
   }
   /** Live apps (or pages) the account owns or collaborates on, with its access to each. */
-  appsFor(accountId: string, kind: AppKind = "app"): (App & { access: AppAccess })[] {
-    return this.db.prepare(
-      `SELECT a.*, CASE WHEN a.account_id = ?1 THEN 'owner' ELSE c.role END access
-       FROM apps a LEFT JOIN collaborators c ON c.app_id = a.id AND c.account_id = ?1
-       WHERE a.deleted_at IS NULL AND a.kind = ?2 AND (a.account_id = ?1 OR c.account_id IS NOT NULL)
+  appsFor(accountId: string, kind: AppKind = "app"): Promise<(App & { access: AppAccess })[]> {
+    return this.db.all<App & { access: AppAccess }>(
+      `SELECT a.*, CASE WHEN a.account_id = ? THEN 'owner' ELSE c.role END AS access
+       FROM apps a LEFT JOIN collaborators c ON c.app_id = a.id AND c.account_id = ?
+       WHERE a.deleted_at IS NULL AND a.kind = ? AND (a.account_id = ? OR c.account_id IS NOT NULL)
        ORDER BY a.updated_at DESC`,
-    ).all(accountId, kind) as unknown as (App & { access: AppAccess })[];
+      accountId, accountId, kind, accountId,
+    );
   }
   async checkDeployKey(appId: string, key: string): Promise<boolean> {
-    const row = this.db.prepare("SELECT deploy_key_hash h FROM apps WHERE id = ?").get(appId) as
-      | { h: string }
-      | undefined;
+    const row = await this.db.get<{ h: string }>("SELECT deploy_key_hash AS h FROM apps WHERE id = ?", appId);
     return !!row && row.h === await sha256(key);
   }
-  claimApp(appId: string, accountId: string) {
-    this.db.prepare("UPDATE apps SET account_id = ?, expires_at = NULL, anon_client = NULL, updated_at = ? WHERE id = ?")
-      .run(accountId, Date.now(), appId);
+  async claimApp(appId: string, accountId: string) {
+    await this.db.run("UPDATE apps SET account_id = ?, expires_at = NULL, anon_client = NULL, updated_at = ? WHERE id = ?",
+      accountId, Date.now(), appId);
   }
-  setCurrentDeploy(appId: string, deployId: string, config: unknown) {
-    this.db.prepare(
-      "UPDATE apps SET current_deploy_id = ?, config = ?, updated_at = ? WHERE id = ?",
-    ).run(deployId, JSON.stringify(config ?? {}), Date.now(), appId);
+  async setCurrentDeploy(appId: string, deployId: string, config: unknown) {
+    await this.db.run("UPDATE apps SET current_deploy_id = ?, config = ?, updated_at = ? WHERE id = ?",
+      deployId, JSON.stringify(config ?? {}), Date.now(), appId);
   }
-  setEgress(appId: string, allow: string[] | null) {
-    this.db.prepare("UPDATE apps SET egress = ?, updated_at = ? WHERE id = ?")
-      .run(allow ? JSON.stringify(allow) : null, Date.now(), appId);
+  async setEgress(appId: string, allow: string[] | null) {
+    await this.db.run("UPDATE apps SET egress = ?, updated_at = ? WHERE id = ?", allow ? JSON.stringify(allow) : null, Date.now(), appId);
   }
-  deleteApp(appId: string) {
-    this.db.prepare("DELETE FROM apps WHERE id = ?").run(appId);
+  async deleteApp(appId: string) {
+    await this.db.run("DELETE FROM apps WHERE id = ?", appId);
   }
   /** Live unclaimed apps (anonymous deploys) on the instance. */
-  anonAppCount(): number {
-    return (this.db.prepare("SELECT count(*) n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL").get() as { n: number }).n;
+  async anonAppCount(): Promise<number> {
+    return (await this.db.get<{ n: number }>("SELECT count(*) AS n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL"))!.n;
   }
   /** Live unclaimed apps one client (ipKey) created. */
-  anonAppCountBy(client: string): number {
-    return (this.db.prepare("SELECT count(*) n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL AND anon_client = ?")
-      .get(client) as { n: number }).n;
+  async anonAppCountBy(client: string): Promise<number> {
+    return (await this.db.get<{ n: number }>(
+      "SELECT count(*) AS n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL AND anon_client = ?", client,
+    ))!.n;
   }
-  // ---- rate-limit hits (limits.ts RateHits)
-  rateHitCount(bucket: string, key: string, since: number): number {
-    return (this.db.prepare("SELECT count(*) n FROM rate_hits WHERE bucket = ? AND key = ? AND at > ?")
-      .get(bucket, key, since) as { n: number }).n;
-  }
-  addRateHit(bucket: string, key: string, at: number, until: number) {
-    this.db.prepare("INSERT INTO rate_hits (bucket, key, at, until) VALUES (?, ?, ?, ?)").run(bucket, key, at, until);
+  // ---- rate-limit hits (limits.ts RateLimit)
+  takeRateHit(bucket: string, key: string, since: number, max: number, at: number, until: number): Promise<boolean> {
+    return this.serialized(`cresslet:rate:${bucket}:${key}`, async () => {
+      const { n } = (await this.db.get<{ n: number }>(
+        "SELECT count(*) AS n FROM rate_hits WHERE bucket = ? AND key = ? AND at > ?", bucket, key, since,
+      ))!;
+      if (n >= max) return false;
+      await this.db.run("INSERT INTO rate_hits (bucket, key, at, until) VALUES (?, ?, ?, ?)", bucket, key, at, until);
+      return true;
+    });
   }
   /** Drops rate-limit hits that have left their window. */
-  pruneRateHits(now = Date.now()) {
-    this.db.prepare("DELETE FROM rate_hits WHERE until <= ?").run(now);
+  async pruneRateHits(now = Date.now()) {
+    await this.db.run("DELETE FROM rate_hits WHERE until <= ?", now);
   }
-  expiredApps(now = Date.now()): App[] {
-    return this.db.prepare("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ? AND deleted_at IS NULL")
-      .all(now) as unknown as App[];
+  expiredApps(now = Date.now()): Promise<App[]> {
+    return this.db.all<App>("SELECT * FROM apps WHERE expires_at IS NOT NULL AND expires_at < ? AND deleted_at IS NULL", now);
   }
 
   // ---- private page sessions (see host.ts)
   /** A one-time ticket for `accountId` to open the page, good for `ttlMs`. */
   async pageTicket(appId: string, accountId: string, ttlMs: number): Promise<string> {
     const t = id("pvt", 24);
-    this.db.prepare("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at) VALUES (?, ?, ?, 1, ?)")
-      .run(await sha256(t), appId, accountId, Date.now() + ttlMs);
+    await this.db.run("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at) VALUES (?, ?, ?, 1, ?)",
+      await sha256(t), appId, accountId, Date.now() + ttlMs);
     return t;
   }
   /** Spends a ticket for this page: a session token good for `ttlMs`, or undefined. */
   async redeemPageTicket(appId: string, ticket: string, ttlMs: number): Promise<{ token: string; account_id: string } | undefined> {
     const hash = await sha256(ticket);
-    const row = this.db.prepare("DELETE FROM page_sessions WHERE hash = ? AND ticket = 1 RETURNING *").get(hash) as
-      | PageSession
-      | undefined;
+    const row = await this.db.get<PageSession>("DELETE FROM page_sessions WHERE hash = ? AND ticket = 1 RETURNING *", hash);
     if (!row || row.app_id !== appId || row.expires_at < Date.now()) return undefined;
     const token = id("pvs", 24);
-    this.db.prepare("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at) VALUES (?, ?, ?, 0, ?)")
-      .run(await sha256(token), appId, row.account_id, Date.now() + ttlMs);
+    await this.db.run("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at) VALUES (?, ?, ?, 0, ?)",
+      await sha256(token), appId, row.account_id, Date.now() + ttlMs);
     return { token, account_id: row.account_id };
   }
   /** The account a live session for this page belongs to. */
   async pageSession(appId: string, token: string): Promise<string | undefined> {
-    const row = this.db.prepare("SELECT * FROM page_sessions WHERE hash = ? AND ticket = 0").get(await sha256(token)) as
-      | PageSession
-      | undefined;
+    const row = await this.db.get<PageSession>("SELECT * FROM page_sessions WHERE hash = ? AND ticket = 0", await sha256(token));
     return row && row.app_id === appId && row.expires_at > Date.now() ? row.account_id : undefined;
   }
-  prunePageSessions(now = Date.now()) {
-    this.db.prepare("DELETE FROM page_sessions WHERE expires_at < ?").run(now);
+  async prunePageSessions(now = Date.now()) {
+    await this.db.run("DELETE FROM page_sessions WHERE expires_at < ?", now);
   }
 
   // ---- collaborators and invites
   /** The account's access to the app, or undefined if it has none. */
-  access(a: App, accountId: string): AppAccess | undefined {
+  async access(a: App, accountId: string): Promise<AppAccess | undefined> {
     if (a.account_id === accountId) return "owner";
-    const row = this.db.prepare("SELECT role FROM collaborators WHERE app_id = ? AND account_id = ?")
-      .get(a.id, accountId) as { role: Access } | undefined;
+    const row = await this.db.get<{ role: Access }>("SELECT role FROM collaborators WHERE app_id = ? AND account_id = ?", a.id, accountId);
     return row?.role;
   }
-  collaborators(appId: string): (Collaborator & { email: string; github_login: string | null })[] {
-    return this.db.prepare(
-      `SELECT c.*, ac.email, ac.github_login FROM collaborators c JOIN accounts ac ON ac.id = c.account_id
+  collaborators(appId: string): Promise<(Collaborator & { email: string; github_login: string | null })[]> {
+    return this.db.all<Collaborator & { email: string; github_login: string | null }>(
+      `SELECT c.app_id, c.account_id, c.role, c.created_at, ac.email, ac.github_login
+       FROM collaborators c JOIN accounts ac ON ac.id = c.account_id
        WHERE c.app_id = ? ORDER BY c.created_at, c.rowid`,
-    ).all(appId) as unknown as (Collaborator & { email: string; github_login: string | null })[];
+      appId,
+    );
   }
   /** False if the account isn't a collaborator on the app. */
-  setCollaboratorRole(appId: string, accountId: string, role: Access): boolean {
-    return this.db.prepare("UPDATE collaborators SET role = ? WHERE app_id = ? AND account_id = ?")
-      .run(role, appId, accountId).changes > 0;
+  async setCollaboratorRole(appId: string, accountId: string, role: Access): Promise<boolean> {
+    return (await this.db.run("UPDATE collaborators SET role = ? WHERE app_id = ? AND account_id = ?", role, appId, accountId)).changes > 0;
   }
-  removeCollaborator(appId: string, accountId: string): boolean {
-    return this.db.prepare("DELETE FROM collaborators WHERE app_id = ? AND account_id = ?").run(appId, accountId).changes > 0;
+  async removeCollaborator(appId: string, accountId: string): Promise<boolean> {
+    return (await this.db.run("DELETE FROM collaborators WHERE app_id = ? AND account_id = ?", appId, accountId)).changes > 0;
   }
-  invites(appId: string): Invite[] {
-    return this.db.prepare("SELECT * FROM invites WHERE app_id = ? ORDER BY created_at, rowid").all(appId) as unknown as Invite[];
+  invites(appId: string): Promise<Invite[]> {
+    return this.db.all<Invite>(`SELECT ${INVITE} FROM invites WHERE app_id = ? ORDER BY created_at, rowid`, appId);
   }
   /**
    * Creates the invite, or updates the inviter of a pending one for the same email. A new role makes it a new
    * invite (new id): an invitee accepting the old one, as shown to them, gets 404 instead of the other role.
    */
-  invite(appId: string, email: string, role: Access, invitedBy: string): { invite: Invite; created: boolean } {
+  invite(appId: string, email: string, role: Access, invitedBy: string): Promise<{ invite: Invite; created: boolean }> {
     email = email.toLowerCase();
-    const existing = this.db.prepare("SELECT * FROM invites WHERE app_id = ? AND email = ?").get(appId, email) as Invite | undefined;
-    if (existing) {
-      const inviteId = existing.role === role ? existing.id : id("inv");
-      this.db.prepare("UPDATE invites SET id = ?, role = ?, invited_by = ? WHERE id = ?").run(inviteId, role, invitedBy, existing.id);
-      return { invite: { ...existing, id: inviteId, role, invited_by: invitedBy }, created: false };
-    }
-    const inv: Invite = { id: id("inv"), app_id: appId, email, role, invited_by: invitedBy, created_at: Date.now() };
-    this.db.prepare("INSERT INTO invites (id, app_id, email, role, invited_by, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(inv.id, inv.app_id, inv.email, inv.role, inv.invited_by, inv.created_at);
-    return { invite: inv, created: true };
+    return this.serialized(inviteLock(appId), async () => {
+      const existing = await this.db.get<Invite>(`SELECT ${INVITE} FROM invites WHERE app_id = ? AND email = ?`, appId, email);
+      if (existing) {
+        const inviteId = existing.role === role ? existing.id : id("inv");
+        // Cancelled or declined meanwhile (those don't take the lock): a new invite then, below.
+        if ((await this.db.run("UPDATE invites SET id = ?, role = ?, invited_by = ? WHERE id = ?", inviteId, role, invitedBy, existing.id)).changes) {
+          return { invite: { ...existing, id: inviteId, role, invited_by: invitedBy }, created: false };
+        }
+      }
+      const inv: Invite = { id: id("inv"), app_id: appId, email, role, invited_by: invitedBy, created_at: Date.now() };
+      await this.db.run("INSERT INTO invites (id, app_id, email, role, invited_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        inv.id, inv.app_id, inv.email, inv.role, inv.invited_by, inv.created_at);
+      return { invite: inv, created: true };
+    });
   }
   /** Deletes a pending invite on the app; false if there was none. */
-  cancelInvite(appId: string, inviteId: string): boolean {
-    return this.db.prepare("DELETE FROM invites WHERE app_id = ? AND id = ?").run(appId, inviteId).changes > 0;
+  async cancelInvite(appId: string, inviteId: string): Promise<boolean> {
+    return (await this.db.run("DELETE FROM invites WHERE app_id = ? AND id = ?", appId, inviteId)).changes > 0;
   }
   /** Pending invites for this email on live apps. */
-  invitesFor(email: string): (Invite & { app_name: string })[] {
-    return this.db.prepare(
-      `SELECT i.*, a.name app_name FROM invites i JOIN apps a ON a.id = i.app_id
+  invitesFor(email: string): Promise<(Invite & { app_name: string })[]> {
+    return this.db.all<Invite & { app_name: string }>(
+      `SELECT i.id, i.app_id, i.email, i.role, i.invited_by, i.created_at, a.name AS app_name
+       FROM invites i JOIN apps a ON a.id = i.app_id
        WHERE i.email = ? AND a.deleted_at IS NULL ORDER BY i.created_at, i.rowid`,
-    ).all(email.toLowerCase()) as unknown as (Invite & { app_name: string })[];
+      email.toLowerCase(),
+    );
   }
-  inviteFor(email: string, inviteId: string): Invite | undefined {
-    return this.db.prepare("SELECT * FROM invites WHERE id = ? AND email = ?").get(inviteId, email.toLowerCase()) as
-      | Invite
-      | undefined;
+  inviteFor(email: string, inviteId: string): Promise<Invite | undefined> {
+    return this.db.get<Invite>(`SELECT ${INVITE} FROM invites WHERE id = ? AND email = ?`, inviteId, email.toLowerCase());
   }
-  /** The invite becomes a collaborator (unless the account owns the app) and is deleted, in one transaction. */
-  acceptInvite(inv: Invite, accountId: string) {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      if (this.db.prepare("DELETE FROM invites WHERE id = ?").run(inv.id).changes) {
-        this.db.prepare(
-          `INSERT INTO collaborators (app_id, account_id, role, created_at)
-           SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM apps WHERE id = ? AND account_id = ?)
-           ON CONFLICT (app_id, account_id) DO UPDATE SET role = excluded.role`,
-        ).run(inv.app_id, accountId, inv.role, Date.now(), inv.app_id, accountId);
-      }
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+  /**
+   * The invite becomes a collaborator (unless the account owns the app) and is deleted, in one transaction
+   * under the app's invite lock. False if it was already gone (accepted, cancelled, or resent as a new one).
+   */
+  acceptInvite(inv: Invite, accountId: string): Promise<boolean> {
+    return this.serialized(inviteLock(inv.app_id), async () => {
+      if (!(await this.db.run("DELETE FROM invites WHERE id = ?", inv.id)).changes) return false;
+      await this.db.run(
+        `INSERT INTO collaborators (app_id, account_id, role, created_at)
+         SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS BIGINT)
+         WHERE NOT EXISTS (SELECT 1 FROM apps WHERE id = ? AND account_id = ?)
+         ON CONFLICT (app_id, account_id) DO UPDATE SET role = excluded.role`,
+        inv.app_id, accountId, inv.role, Date.now(), inv.app_id, accountId,
+      );
+      return true;
+    });
   }
-  declineInvite(inviteId: string) {
-    this.db.prepare("DELETE FROM invites WHERE id = ?").run(inviteId);
+  async declineInvite(inviteId: string) {
+    await this.db.run("DELETE FROM invites WHERE id = ?", inviteId);
   }
 
   // ---- custom domains (pending until DNS-verified; one verified owner per domain)
-  domains(appId: string): Domain[] {
-    return this.db.prepare("SELECT * FROM domains WHERE app_id = ? ORDER BY domain").all(appId) as unknown as Domain[];
+  domains(appId: string): Promise<Domain[]> {
+    return this.db.all<Domain>("SELECT * FROM domains WHERE app_id = ? ORDER BY domain", appId);
   }
-  addDomain(appId: string, domain: string): Domain {
+  async addDomain(appId: string, domain: string): Promise<Domain> {
     const d: Domain = { domain, app_id: appId, token: id("cresslet-verify", 16), verified_at: null, created_at: Date.now() };
-    this.db.prepare("INSERT INTO domains (domain, app_id, token, verified_at, created_at) VALUES (?, ?, ?, NULL, ?)")
-      .run(d.domain, d.app_id, d.token, d.created_at);
+    await this.db.run("INSERT INTO domains (domain, app_id, token, verified_at, created_at) VALUES (?, ?, ?, NULL, ?)",
+      d.domain, d.app_id, d.token, d.created_at);
     return d;
   }
   /** Marks the row whose `token` was checked as verified: "gone" if it was deleted/re-added meanwhile. */
-  verifyDomain(appId: string, domain: string, token: string): "ok" | "taken" | "gone" {
+  async verifyDomain(appId: string, domain: string, token: string): Promise<"ok" | "taken" | "gone"> {
     try {
-      const r = this.db.prepare("UPDATE domains SET verified_at = ? WHERE app_id = ? AND domain = ? AND token = ?")
-        .run(Date.now(), appId, domain, token);
+      const r = await this.db.run("UPDATE domains SET verified_at = ? WHERE app_id = ? AND domain = ? AND token = ?",
+        Date.now(), appId, domain, token);
       return r.changes ? "ok" : "gone";
     } catch (e) {
-      if (/UNIQUE/.test((e as Error).message)) return "taken";
+      if (isUniqueViolation(e)) return "taken";
       throw e;
     }
   }
-  deleteDomain(appId: string, domain: string) {
-    this.db.prepare("DELETE FROM domains WHERE app_id = ? AND domain = ?").run(appId, domain);
+  async deleteDomain(appId: string, domain: string) {
+    await this.db.run("DELETE FROM domains WHERE app_id = ? AND domain = ?", appId, domain);
   }
-  appByDomain(domain: string): App | undefined {
-    return this.db.prepare(
+  appByDomain(domain: string): Promise<App | undefined> {
+    return this.db.get<App>(
       "SELECT a.* FROM domains d JOIN apps a ON a.id = d.app_id WHERE d.domain = ? AND d.verified_at IS NOT NULL AND a.deleted_at IS NULL",
-    ).get(domain) as App | undefined;
+      domain,
+    );
   }
 
   // ---- deploys
-  addDeploy(d: Deploy) {
-    this.db.prepare(
+  async addDeploy(d: Deploy) {
+    await this.db.run(
       `INSERT INTO deploys (id, app_id, created_at, bytes, file_count, has_server, source)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(d.id, d.app_id, d.created_at, d.bytes, d.file_count, d.has_server, d.source);
+      d.id, d.app_id, d.created_at, d.bytes, d.file_count, d.has_server, d.source,
+    );
   }
-  deploys(appId: string, limit = 20): Deploy[] {
-    return this.db.prepare("SELECT * FROM deploys WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
-      .all(appId, limit) as unknown as Deploy[];
+  deploys(appId: string, limit = 20): Promise<Deploy[]> {
+    return this.db.all<Deploy>(`SELECT ${DEPLOY} FROM deploys WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`, appId, limit);
   }
   /** A page's versions (pages only: an app's rollback breaks this order), newest upload first, which is the order a page served them (the clock can step back). */
-  pageVersions(appId: string): Deploy[] {
-    return this.db.prepare("SELECT * FROM deploys WHERE app_id = ? ORDER BY rowid DESC").all(appId) as unknown as Deploy[];
+  pageVersions(appId: string): Promise<Deploy[]> {
+    return this.db.all<Deploy>(`SELECT ${DEPLOY} FROM deploys WHERE app_id = ? ORDER BY rowid DESC`, appId);
   }
-  deploy(deployId: string): Deploy | undefined {
-    return this.db.prepare("SELECT * FROM deploys WHERE id = ?").get(deployId) as Deploy | undefined;
+  deploy(deployId: string): Promise<Deploy | undefined> {
+    return this.db.get<Deploy>(`SELECT ${DEPLOY} FROM deploys WHERE id = ?`, deployId);
   }
   /** Pages with deploys other than the one each serves. */
-  pagesWithOldVersions(): string[] {
-    return (this.db.prepare(`SELECT DISTINCT d.app_id FROM deploys d JOIN apps a ON a.id = d.app_id
-      WHERE a.kind = 'page' AND a.page_deploy_id IS NOT NULL AND d.id <> a.page_deploy_id`).all() as { app_id: string }[]).map((r) => r.app_id);
+  async pagesWithOldVersions(): Promise<string[]> {
+    return (await this.db.all<{ app_id: string }>(`SELECT DISTINCT d.app_id FROM deploys d JOIN apps a ON a.id = d.app_id
+      WHERE a.kind = 'page' AND a.page_deploy_id IS NOT NULL AND d.id <> a.page_deploy_id`)).map((r) => r.app_id);
   }
-  deleteDeploy(deployId: string) {
-    this.db.prepare("DELETE FROM deploys WHERE id = ?").run(deployId);
+  async deleteDeploy(deployId: string) {
+    await this.db.run("DELETE FROM deploys WHERE id = ?", deployId);
   }
 
   // ---- secrets (AES-GCM at rest, see secretbox.ts)
-  secretKeys(appId: string): string[] {
-    return (this.db.prepare("SELECT key FROM secrets WHERE app_id = ? ORDER BY key").all(appId) as { key: string }[])
-      .map((r) => r.key);
+  async secretKeys(appId: string): Promise<string[]> {
+    return (await this.db.all<{ key: string }>("SELECT key FROM secrets WHERE app_id = ? ORDER BY key", appId)).map((r) => r.key);
   }
-  secrets(appId: string): Record<string, string> {
-    const rows = this.db.prepare("SELECT key, value FROM secrets WHERE app_id = ?").all(appId) as {
-      key: string;
-      value: Uint8Array;
-    }[];
+  async secrets(appId: string): Promise<Record<string, string>> {
+    const rows = await this.db.all<{ key: string; value: Uint8Array }>("SELECT key, value FROM secrets WHERE app_id = ?", appId);
     return Object.fromEntries(rows.map((r) => [r.key, this.#box.open(appId, r.key, Buffer.from(r.value).toString()).value]));
   }
-  setSecret(appId: string, key: string, value: string) {
-    this.db.prepare(
+  async setSecret(appId: string, key: string, value: string) {
+    await this.db.run(
       "INSERT INTO secrets (app_id, key, value) VALUES (?, ?, ?) ON CONFLICT (app_id, key) DO UPDATE SET value = excluded.value",
-    ).run(appId, key, this.#seal(appId, key, value));
+      appId, key, this.#seal(appId, key, value),
+    );
   }
-  deleteSecret(appId: string, key: string) {
-    this.db.prepare("DELETE FROM secrets WHERE app_id = ? AND key = ?").run(appId, key);
+  async deleteSecret(appId: string, key: string) {
+    await this.db.run("DELETE FROM secrets WHERE app_id = ? AND key = ?", appId, key);
   }
 
   // ---- AI credits (millicredits; server/credits.ts)
   /** Granted credits left and this month's free allowance used (0 in a month with no use yet). */
-  aiWallet(accountId: string, period: string): { balance: number; periodUsed: number } {
-    const w = this.db.prepare("SELECT balance, period, period_used FROM ai_wallets WHERE account_id = ?").get(accountId) as
-      { balance: number; period: string | null; period_used: number } | undefined;
+  async aiWallet(accountId: string, period: string): Promise<{ balance: number; periodUsed: number }> {
+    const w = await this.db.get<{ balance: number; period: string | null; period_used: number }>(
+      "SELECT balance, period, period_used FROM ai_wallets WHERE account_id = ?", accountId,
+    );
     return { balance: w?.balance ?? 0, periodUsed: w && w.period === period ? w.period_used : 0 };
   }
 
@@ -796,51 +737,41 @@ export class Store {
    * may go below 0). One ledger row. Returns the wallet after.
    */
   chargeAi(accountId: string, period: string, allowance: number, amount: number, detail: unknown) {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const w = this.aiWallet(accountId, period);
+    return this.serialized(`cresslet:ai-wallet:${accountId}`, async () => {
+      const w = await this.aiWallet(accountId, period);
       const free = Math.max(0, Math.min(amount, allowance - w.periodUsed));
       const after = { balance: w.balance - (amount - free), periodUsed: w.periodUsed + free };
-      this.#putWallet(accountId, period, after);
-      this.db.prepare("INSERT INTO ai_ledger (account_id, created_at, kind, amount, detail) VALUES (?, ?, 'usage', ?, ?)")
-        .run(accountId, Date.now(), -amount, JSON.stringify({ ...(detail as object), free }));
-      this.db.exec("COMMIT");
+      await this.#putWallet(accountId, period, after);
+      await this.db.run("INSERT INTO ai_ledger (account_id, created_at, kind, amount, detail) VALUES (?, ?, 'usage', ?, ?)",
+        accountId, Date.now(), -amount, JSON.stringify({ ...(detail as object), free }));
       return after;
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+    });
   }
 
   /** Adds `amount` (negative: takes it back) to the balance. One ledger row. Returns the new balance. */
-  grantAi(accountId: string, amount: number, detail: { note?: string | null; by: string }): number {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.prepare("INSERT INTO ai_wallets (account_id, balance) VALUES (?, 0) ON CONFLICT (account_id) DO NOTHING").run(accountId);
-      this.db.prepare("UPDATE ai_wallets SET balance = balance + ? WHERE account_id = ?").run(amount, accountId);
-      this.db.prepare("INSERT INTO ai_ledger (account_id, created_at, kind, amount, detail) VALUES (?, ?, 'grant', ?, ?)")
-        .run(accountId, Date.now(), amount, JSON.stringify(detail));
-      const { balance } = this.db.prepare("SELECT balance FROM ai_wallets WHERE account_id = ?").get(accountId) as { balance: number };
-      this.db.exec("COMMIT");
-      return balance;
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+  grantAi(accountId: string, amount: number, detail: { note?: string | null; by: string }): Promise<number> {
+    return this.serialized(`cresslet:ai-wallet:${accountId}`, async () => {
+      await this.db.run("INSERT INTO ai_wallets (account_id, balance) VALUES (?, 0) ON CONFLICT (account_id) DO NOTHING", accountId);
+      await this.db.run("UPDATE ai_wallets SET balance = balance + ? WHERE account_id = ?", amount, accountId);
+      await this.db.run("INSERT INTO ai_ledger (account_id, created_at, kind, amount, detail) VALUES (?, ?, 'grant', ?, ?)",
+        accountId, Date.now(), amount, JSON.stringify(detail));
+      return (await this.db.get<{ balance: number }>("SELECT balance FROM ai_wallets WHERE account_id = ?", accountId))!.balance;
+    });
   }
 
   /** The account's latest ledger rows, newest first. */
-  aiLedger(accountId: string, limit = 50): AiLedgerRow[] {
-    return this.db.prepare("SELECT created_at, kind, amount, detail FROM ai_ledger WHERE account_id = ? ORDER BY id DESC LIMIT ?")
-      .all(accountId, limit) as unknown as AiLedgerRow[];
+  aiLedger(accountId: string, limit = 50): Promise<AiLedgerRow[]> {
+    return this.db.all<AiLedgerRow>(
+      "SELECT created_at, kind, amount, detail FROM ai_ledger WHERE account_id = ? ORDER BY id DESC LIMIT ?", accountId, limit,
+    );
   }
 
   /**
    * Site admin view: every account with a wallet (or just `accountId`'s), its wallet and its usage since `since` (ms), most used first.
    * `period_used` is 0 when the wallet's period isn't `period` (a new month).
    */
-  aiAccounts(period: string, since: number, accountId: string | null = null): AiAccountRow[] {
-    return this.db.prepare(
+  aiAccounts(period: string, since: number, accountId: string | null = null): Promise<AiAccountRow[]> {
+    return this.db.all<AiAccountRow>(
       `SELECT a.id, a.email, a.github_login, w.balance,
          CASE WHEN w.period = ? THEN w.period_used ELSE 0 END AS period_used,
          COALESCE(u.used, 0) AS used, COALESCE(u.requests, 0) AS requests,
@@ -848,57 +779,73 @@ export class Store {
        FROM ai_wallets w JOIN accounts a ON a.id = w.account_id
        LEFT JOIN (SELECT account_id, -SUM(amount) AS used, COUNT(*) AS requests FROM ai_ledger
          WHERE kind = 'usage' AND created_at >= ? GROUP BY account_id) u ON u.account_id = w.account_id
-       WHERE ? IS NULL OR w.account_id = ?
-       ORDER BY used DESC, last_used_at DESC, a.email`,
-    ).all(period, since, accountId, accountId) as unknown as AiAccountRow[];
+       WHERE CAST(? AS TEXT) IS NULL OR w.account_id = ?
+       ORDER BY used DESC, last_used_at DESC NULLS LAST, a.email`,
+      period, since, accountId, accountId,
+    );
   }
 
   /** Usage since `since` (ms) per model, most used first. Amounts are millicredits used (positive). */
-  aiModels(since: number): { model: string | null; used: number; requests: number; free: number; usd: number; input: number; output: number }[] {
-    return this.db.prepare(
-      `SELECT json_extract(detail, '$.model') AS model, -SUM(amount) AS used, COUNT(*) AS requests,
-         SUM(COALESCE(json_extract(detail, '$.free'), 0)) AS free, SUM(COALESCE(json_extract(detail, '$.usd'), 0)) AS usd,
-         SUM(COALESCE(json_extract(detail, '$.input'), 0) + COALESCE(json_extract(detail, '$.cacheRead'), 0) +
-           COALESCE(json_extract(detail, '$.cacheWrite'), 0)) AS input,
-         SUM(COALESCE(json_extract(detail, '$.output'), 0)) AS output
+  aiModels(since: number): Promise<{ model: string | null; used: number; requests: number; free: number; usd: number; input: number; output: number }[]> {
+    const f = this.db.dialect === "postgres"
+      ? (k: string) => `COALESCE((detail::jsonb ->> '${k}')::numeric, 0)`
+      : (k: string) => `COALESCE(json_extract(detail, '$.${k}'), 0)`;
+    const model = this.db.dialect === "postgres" ? "detail::jsonb ->> 'model'" : "json_extract(detail, '$.model')";
+    return this.db.all(
+      `SELECT ${model} AS model, -SUM(amount) AS used, COUNT(*) AS requests,
+         SUM(${f("free")}) AS free, SUM(${f("usd")}) AS usd,
+         SUM(${f("input")} + ${f("cacheRead")} + ${f("cacheWrite")}) AS input,
+         SUM(${f("output")}) AS output
        FROM ai_ledger WHERE kind = 'usage' AND created_at >= ? GROUP BY model ORDER BY used DESC`,
-    ).all(since) as { model: string | null; used: number; requests: number; free: number; usd: number; input: number; output: number }[];
+      since,
+    );
   }
 
   /** Usage since `since` (ms) per UTC day (`day`: days since the epoch), oldest first. */
-  aiDays(since: number): { day: number; used: number; requests: number }[] {
-    return this.db.prepare(
+  aiDays(since: number): Promise<{ day: number; used: number; requests: number }[]> {
+    return this.db.all(
       `SELECT created_at / 86400000 AS day, -SUM(amount) AS used, COUNT(*) AS requests
        FROM ai_ledger WHERE kind = 'usage' AND created_at >= ? GROUP BY day ORDER BY day`,
-    ).all(since) as { day: number; used: number; requests: number }[];
+      since,
+    );
   }
 
   /** Credits granted (net of take-backs) since `since` (ms), and how many grants. */
-  aiGranted(since: number): { amount: number; grants: number } {
-    const r = this.db.prepare("SELECT COALESCE(SUM(amount), 0) AS amount, COUNT(*) AS grants FROM ai_ledger WHERE kind = 'grant' AND created_at >= ?")
-      .get(since) as { amount: number; grants: number };
+  async aiGranted(since: number): Promise<{ amount: number; grants: number }> {
+    const r = (await this.db.get<{ amount: number; grants: number }>(
+      "SELECT COALESCE(SUM(amount), 0) AS amount, COUNT(*) AS grants FROM ai_ledger WHERE kind = 'grant' AND created_at >= ?", since,
+    ))!;
     return { amount: r.amount, grants: r.grants };
   }
 
   /** Granted credits left across every wallet (overdrawn ones count as 0), and the overdrawn total. */
-  aiOutstanding(): { balance: number; overdrawn: number } {
-    const r = this.db.prepare(
-      "SELECT COALESCE(SUM(MAX(balance, 0)), 0) AS balance, COALESCE(-SUM(MIN(balance, 0)), 0) AS overdrawn FROM ai_wallets",
-    ).get() as { balance: number; overdrawn: number };
+  async aiOutstanding(): Promise<{ balance: number; overdrawn: number }> {
+    const [max, min] = this.db.dialect === "postgres" ? ["GREATEST", "LEAST"] : ["MAX", "MIN"];
+    const r = (await this.db.get<{ balance: number; overdrawn: number }>(
+      `SELECT COALESCE(SUM(${max}(balance, 0)), 0) AS balance, COALESCE(-SUM(${min}(balance, 0)), 0) AS overdrawn FROM ai_wallets`,
+    ))!;
     return { balance: r.balance, overdrawn: r.overdrawn };
   }
 
   /** The latest ledger rows across every account, newest first, with the account. */
-  aiLedgerAll(limit = 100): (AiLedgerRow & { account_id: string; email: string; github_login: string | null })[] {
-    return this.db.prepare(
+  aiLedgerAll(limit = 100): Promise<(AiLedgerRow & { account_id: string; email: string; github_login: string | null })[]> {
+    return this.db.all(
       `SELECT l.account_id, l.created_at, l.kind, l.amount, l.detail, a.email, a.github_login
        FROM ai_ledger l JOIN accounts a ON a.id = l.account_id ORDER BY l.id DESC LIMIT ?`,
-    ).all(limit) as unknown as (AiLedgerRow & { account_id: string; email: string; github_login: string | null })[];
+      limit,
+    );
   }
 
-  #putWallet(accountId: string, period: string, w: { balance: number; periodUsed: number }) {
-    this.db.prepare(`INSERT INTO ai_wallets (account_id, balance, period, period_used) VALUES (?, ?, ?, ?)
-      ON CONFLICT (account_id) DO UPDATE SET balance = excluded.balance, period = excluded.period, period_used = excluded.period_used`)
-      .run(accountId, w.balance, period, w.periodUsed);
+  async #putWallet(accountId: string, period: string, w: { balance: number; periodUsed: number }) {
+    await this.db.run(`INSERT INTO ai_wallets (account_id, balance, period, period_used) VALUES (?, ?, ?, ?)
+      ON CONFLICT (account_id) DO UPDATE SET balance = excluded.balance, period = excluded.period, period_used = excluded.period_used`,
+      accountId, w.balance, period, w.periodUsed);
   }
 }
+
+/** Held while an app's invites are checked and written (api.ts checks its cap under it too). */
+export const inviteLock = (appId: string) => `cresslet:invite:${appId}`;
+
+/** Explicit columns where Postgres has a `rowid` column (SQLite's is implicit): rows look the same in both. */
+const DEPLOY = "id, app_id, created_at, bytes, file_count, has_server, source";
+const INVITE = "id, app_id, email, role, invited_by, created_at";

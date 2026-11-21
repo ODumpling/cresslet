@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { type Http2Bindings, type HttpBindings, serve } from "@hono/node-server";
 import { serveDir, serveFile } from "./static.ts";
 import { type Config, isolationWarnings, loadConfig, previewAppName, rootUrl } from "./config.ts";
-import { Store } from "./store.ts";
+import { type App, Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
 import { Logs } from "./logs.ts";
 import { api, normDomain } from "./api.ts";
@@ -60,23 +60,29 @@ const ISOLATION = {
 };
 
 /** `cluster`: which apps this node owns (docs/architecture.md#scaling-out); by default all of them. */
-export function createServer(cfg: Config = loadConfig(), cluster: Cluster = singleNode) {
-  const store = new Store(cfg.dataDir);
+export async function createServer(cfg: Config = loadConfig(), cluster: Cluster = singleNode) {
+  const store = await Store.open(cfg.dataDir, cfg.database);
   const logs = new Logs(cfg.limits.logLines);
-  const runtime = new Runtime(cfg, logs);
+  let runtime: Runtime;
+  try {
+    runtime = new Runtime(cfg, logs);
+  } catch (e) {
+    await store.close();
+    throw e;
+  }
   const control = api(cfg, store, runtime, cluster);
   const serveApp = host(cfg, store, runtime);
   const upgradeApp = upgrader(cfg, store, runtime);
   const suffix = "." + cfg.domain;
   const shadowed = previewAppName(cfg);
-  if ((shadowed && store.appByName(shadowed)) || store.appByDomain(cfg.previewHost)) {
+  if ((shadowed && await store.appByName(shadowed)) || await store.appByDomain(cfg.previewHost)) {
     console.warn(`cresslet: ${cfg.previewHost} is the studio preview host; the app using that name/domain is no longer reachable`);
   }
   let studioHtml: Promise<string> | undefined;
   // Each app's crons fire on the node that owns it (checked again at dispatch: runs queue).
   const run = scheduled(cfg, store, runtime);
   const scheduler = new Scheduler(
-    { appsWithCrons: () => store.appsWithCrons().filter((a) => cluster.local(a.id)) },
+    { appsWithCrons: async () => (await store.appsWithCrons()).filter((a) => cluster.local(a.id)) },
     async (appId, cron, at) => cluster.local(appId) ? run(appId, cron, at) : undefined,
   );
   scheduler.start();
@@ -86,18 +92,21 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
    * ago than the retention period (owned here), and pages' old versions.
    */
   async function reap() {
-    store.prunePageSessions();
-    store.pruneRateHits();
-    for (const a of [...store.expiredApps(), ...store.deletedBefore(Date.now() - cfg.limits.deletedRetentionMs)]) {
+    await store.prunePageSessions();
+    await store.pruneRateHits();
+    for (const a of [...await store.expiredApps(), ...await store.deletedBefore(Date.now() - cfg.limits.deletedRetentionMs)]) {
       if (cluster.local(a.id)) await purgeApp(cfg, store, runtime, a);
     }
     await pruneOldPageVersions(cfg, store, (id) => cluster.local(id));
   }
-  const reaper = setInterval(reap, 10 * 60_000);
+  // A failed pass (the database unreachable, say) is logged; the next one tries again.
+  const reaper = setInterval(() => void reap().catch((e) => console.error("cresslet: reaping failed:", e)), 10 * 60_000);
 
   /** An app host's request: served here, or by the node that owns the app. */
-  const appHost = (req: Request, name: string, app = store.appByName(name)) =>
-    app && !cluster.local(app.id) ? cluster.forward(app.id, req) : serveApp(req, name, app);
+  const appHost = async (req: Request, name: string, app?: App) => {
+    app ??= await store.appByName(name);
+    return app && !cluster.local(app.id) ? cluster.forward(app.id, req) : serveApp(req, name, app);
+  };
 
   /**
    * The studio's previews run on their own origin (cresslet-container `previewOrigin`), so preview
@@ -131,7 +140,7 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
       const sub = hostname.slice(0, -suffix.length);
       if (sub && !sub.includes(".")) return appHost(req, sub);
     } else if (hostname !== cfg.domain) {
-      const custom = store.appByDomain(hostname);
+      const custom = await store.appByDomain(hostname);
       if (custom) return appHost(req, custom.name, custom);
     }
     const url = new URL(req.url);
@@ -180,13 +189,15 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
     socket.on("error", () => socket.destroy());
     const hostname = normDomain((req.headers.host ?? "").replace(/:\d+$/, ""));
     if (hostname === cfg.previewHost) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
-    let name = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : "";
-    const custom = !name && hostname !== cfg.domain ? store.appByDomain(hostname) : undefined;
-    if (custom) name = custom.name;
-    if (!name || name.includes(".")) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
-    const app = custom ?? store.appByName(name);
-    if (app && !cluster.local(app.id)) return void cluster.forwardUpgrade(app.id, req, socket, head).catch(() => socket.destroy());
-    void upgradeApp(req, socket, head, name, app).catch(() => socket.destroy());
+    void (async () => {
+      let name = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : "";
+      const custom = !name && hostname !== cfg.domain ? await store.appByDomain(hostname) : undefined;
+      if (custom) name = custom.name;
+      if (!name || name.includes(".")) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+      const app = custom ?? await store.appByName(name);
+      if (app && !cluster.local(app.id)) return cluster.forwardUpgrade(app.id, req, socket, head);
+      await upgradeApp(req, socket, head, name, app);
+    })().catch(() => socket.destroy());
   }
 
   return {
@@ -197,23 +208,23 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
     scheduler,
     reap,
     handler,
-    close() {
+    async close() {
       clearInterval(reaper);
       scheduler.stop();
       runtime.close();
-      store.close();
+      await store.close();
     },
   };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const srv = createServer();
+  const srv = await createServer();
   for (const w of isolationWarnings(srv.cfg)) console.warn(w);
   const http = serve({ fetch: srv.handler, port: srv.cfg.port }, () =>
     console.log(`cresslet listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`));
   http.on("upgrade", srv.upgrade);
   const shutdown = async () => {
-    srv.close();
+    await srv.close().catch((e) => console.error("cresslet: closing the database:", e));
     http.close();
     await sandboxSettled(); // cgroup kills on older kernels finish on timers
     // Bindings threads finish the file writes they accepted (bounded: a runaway query never yields).

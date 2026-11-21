@@ -40,6 +40,7 @@ Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`
 - [HTTP API](docs/api.md)
 - [Architecture, isolation, roadmap](docs/architecture.md)
 - [Self-hosting](docs/self-hosting.md)
+- [Metadata database: SQLite or Postgres, migrations](docs/database.md)
 
 ## Develop
 

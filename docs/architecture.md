@@ -8,8 +8,8 @@
                        ┌─────────────────── cresslet server (Node) ───────────────────┐
                        │ main.ts   host routing: <app>.<domain> → host.ts, else /v1 │
                        │ api.ts    control plane (Hono)                              │
-                       │ store.ts  metadata SQLite: accounts, tokens, apps, deploys, │
-                       │           secrets                                           │
+                       │ store.ts  metadata (SQLite, or Postgres): accounts, tokens, │
+                       │           apps, deploys, secrets (db.ts, migrations.ts)     │
                        │ host.ts   static files from active deploy; routes → runtime │
                        │ runtime.ts one sandbox process per app, on demand, reaped   │
                        │ bindings.ts env.db / env.files backend (node:sqlite, disk), │
@@ -29,7 +29,7 @@
 ## Data layout
 
 ```
-data/cresslet.db                         metadata
+data/cresslet.db                         metadata (unless CRESSLET_DATABASE_URL: Postgres, docs/database.md)
 data/apps/<appId>/deploys/<depId>/     immutable: public/, server.js, deploy.json
 data/apps/<appId>/data/db.sqlite       app database (survives deploys)
 data/apps/<appId>/data/files/          app file storage
@@ -103,12 +103,12 @@ What is node-local today:
 
 | State | Where |
 |---|---|
-| Metadata (accounts, tokens, apps, deploys, secrets, domains) | `data/cresslet.db`, `Store` (synchronous `node:sqlite`; all its SQL is in `server/store.ts`) |
+| Metadata (accounts, tokens, apps, deploys, secrets, domains) | `data/cresslet.db`, or Postgres with `CRESSLET_DATABASE_URL` ([database.md](database.md)); `Store` (async; all its SQL is in `server/store.ts`) |
 | App files: deploys, `db.sqlite`, `files/` | `data/apps/<appId>/` |
 | Sandboxes | `Runtime`: one process per app on this host |
 | Logs | `Logs`: in-memory ring buffer per app |
 | Crons, reaping (expired and long-deleted apps) | timers in this process |
-| Hourly abuse limits (new apps and pages, deploys) | `rate_hits` in `data/cresslet.db` |
+| Hourly abuse limits (new apps and pages, deploys) | `rate_hits` in the metadata database |
 | CLI login limits, GitHub OAuth state and exchange codes | in memory |
 
 Design: app affinity. Each app has one owner node. The owner holds `data/apps/<appId>/`, runs the sandbox, keeps the app's logs, fires its crons and reaps it. Any node takes any request; one for an app it doesn't own goes to the owner unchanged, and the owner answers it with today's code. `Runtime`, `Logs`, `Scheduler` and `host.ts` stay node-local. Forwarding whole requests, rather than sandbox calls, keeps static files, logging and the per-app deploy limit on the owner, and avoids sending `AppSpec` (it carries closures over the store).
@@ -122,7 +122,7 @@ Design: app affinity. Each app has one owner node. The owner holds `data/apps/<a
 
 Left before a second node works:
 
-- Shared metadata. Every caller uses `Store` synchronously, on hot paths and inside `AppSpec` closures (`seq`, `secrets`). There are two ways to share it. Replicated SQLite (one writer, read replicas) keeps `Store` synchronous, but writes must reach the primary. A networked database makes `Store` async, and the quota checks inside `createApp` need its transactions.
+- Shared metadata: done. With `CRESSLET_DATABASE_URL` every node can use one Postgres database ([database.md](database.md)); `Store` is async, and its check-then-write paths (quota checks inside `createApp`, rate limits, AI wallets, uid numbers) run in transactions under advisory locks, so they hold across nodes.
 - Secrets key: every node needs the same `CRESSLET_SECRETS_KEY`, or a shared `secrets.key`. `data/instance` stays per node.
 - A real `Cluster`, with these pieces:
   - a node registry and health checks

@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
 
@@ -18,7 +17,7 @@ export default {
 
 async function setup() {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-collab-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["boss@b.co", "viewer@b.co"] }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["boss@b.co", "viewer@b.co"] }));
   const json = async (path: string, init: RequestInit & { host?: string } = {}) => {
     const headers = new Headers(init.headers);
     headers.set("host", init.host ?? "test.local");
@@ -166,7 +165,7 @@ test("collaborators: invite by email, accept, and each role gets what it allows"
     assert.equal((await t.deploy(adminTok, "shop")).status, 403);
     assert.equal((await t.send("DELETE", `/v1/apps/shop/collaborators/${adminId}`, owner)).status, 404);
   } finally {
-    t.srv.close();
+    await t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
   }
 });
@@ -214,15 +213,11 @@ test("invites: decline, cancel, cap, hidden while the app is deleted, gone with 
     // Deleting the app (owner only) removes its collaborators and invites.
     assert.equal((await t.send("DELETE", "/v1/apps/shop", bob)).status, 403);
     assert.equal((await t.send("DELETE", "/v1/apps/shop", owner)).status, 200);
-    const db = new DatabaseSync(join(t.dataDir, "cresslet.db"), { readOnly: true });
-    try {
-      assert.equal((db.prepare("SELECT count(*) n FROM collaborators").get() as { n: number }).n, 0);
-      assert.equal((db.prepare("SELECT count(*) n FROM invites").get() as { n: number }).n, 0);
-    } finally {
-      db.close();
-    }
+    const count = async (table: string) => (await t.srv.store.db.get<{ n: number }>(`SELECT count(*) AS n FROM ${table}`))!.n;
+    assert.equal(await count("collaborators"), 0);
+    assert.equal(await count("invites"), 0);
   } finally {
-    t.srv.close();
+    await t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
   }
 });
@@ -246,7 +241,7 @@ test("site admin view: an invited admin sees the app's database tables, a viewer
     assert.equal((await site(viewer)).body.database, null);
     assert.equal((await site("adm")).body.database, null);
   } finally {
-    t.srv.close();
+    await t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
   }
 });
@@ -340,7 +335,7 @@ test("revoked mid-request: no re-promotion while the body was in flight; follow 
       mock.timers.reset();
     }
   } finally {
-    t.srv.close();
+    await t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
   }
 });

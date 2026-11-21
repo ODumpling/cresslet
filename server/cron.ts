@@ -88,7 +88,7 @@ export class Scheduler {
     const arm = () => {
       this.#timer = setTimeout(() => {
         const due = this.due(Date.now());
-        if (due.length) void this.tick(due.map((m) => new Date(m)));
+        if (due.length) void this.tick(due.map((m) => new Date(m))).catch((e) => console.error("cresslet: cron tick failed:", e));
         arm();
       }, MINUTE - (Date.now() % MINUTE) + 50);
       this.#timer.unref?.();
@@ -116,7 +116,7 @@ export class Scheduler {
   async tick(at: Date | Date[]) {
     const minutes = Array.isArray(at) ? at : [at];
     const jobs: Promise<void>[] = [];
-    for (const app of this.#store.appsWithCrons()) {
+    for (const app of await this.#store.appsWithCrons()) {
       // One app's runs go in minute order (then cron order), as they would without a stall.
       const due: { m: Date; c: string }[] = [];
       for (const c of (JSON.parse(app.config) as { crons?: string[] }).crons ?? []) {

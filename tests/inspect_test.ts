@@ -13,7 +13,7 @@ const RUNAWAY = "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r)
 async function setup({ long = false } = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-inspect-"));
   const cfg = loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["own@b.co"] });
-  const srv = createServer(cfg);
+  const srv = await createServer(cfg);
   const json = async (method: string, path: string, token?: string, input?: unknown) => {
     const headers = new Headers({ host: "test.local" });
     if (token) headers.set("authorization", `Bearer ${token}`);
@@ -37,7 +37,7 @@ async function setup({ long = false } = {}) {
   if (long) db.exec("CREATE TABLE long (t TEXT); INSERT INTO long VALUES (replace(hex(zeroblob(50000000)), '0', char(1)))");
   db.close();
   const done = async () => {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   };
   return { json, owner, done };
@@ -149,9 +149,13 @@ test("db inspection: normal queries, row and byte caps, sql errors, busy", async
 
     // Too many at once: the per-app cap answers 429 instead of queueing processes.
     const timeoutMs = INSPECT_LIMITS.timeoutMs;
-    INSPECT_LIMITS.timeoutMs = 1000;
+    INSPECT_LIMITS.timeoutMs = 2000;
     try {
-      const all = await Promise.all([q(RUNAWAY), q(RUNAWAY), q("SELECT 1")]);
+      // The two runaways take the app's slots first (each request reads the database before it gets one;
+      // 300 ms is plenty for that, and leaves them well over a second to run).
+      const runaways = [q(RUNAWAY), q(RUNAWAY)];
+      await new Promise((r) => setTimeout(r, 300));
+      const all = await Promise.all([...runaways, q("SELECT 1")]);
       assert.deepEqual(all.map((r) => r.status), [504, 504, 429]);
     } finally {
       INSPECT_LIMITS.timeoutMs = timeoutMs;

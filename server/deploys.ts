@@ -194,16 +194,19 @@ export async function writeDeploy(cfg: Config, store: Store, app: App, input: De
     throw e;
   }
 
-  store.addDeploy({
-    id: deployId,
-    app_id: app.id,
-    created_at: Date.now(),
-    bytes: bytes + sources.bytes,
-    file_count: decoded.length,
-    has_server: server ? 1 : 0,
-    source: String(input.source ?? "api").slice(0, 20),
+  // Row and pointer together, under the lock a prune chooses under: it never sees this deploy unserved.
+  await store.serialized(deploysLock(app.id), async () => {
+    await store.addDeploy({
+      id: deployId,
+      app_id: app.id,
+      created_at: Date.now(),
+      bytes: bytes + sources.bytes,
+      file_count: decoded.length,
+      has_server: server ? 1 : 0,
+      source: String(input.source ?? "api").slice(0, 20),
+    });
+    await store.setCurrentDeploy(app.id, deployId, config);
   });
-  store.setCurrentDeploy(app.id, deployId, config);
   await pruneDeploys(cfg, store, app.id, deployId);
   return { id: deployId, bytes, files: decoded.length, server: !!server, ...(warning ? { warning } : {}) };
 }
@@ -231,26 +234,38 @@ export async function writePage(cfg: Config, store: Store, app: App, files: Depl
     await rm(dir, { recursive: true, force: true });
     throw e;
   }
-  store.addDeploy({
-    id: deployId,
-    app_id: app.id,
-    created_at: Date.now(),
-    bytes,
-    file_count: decoded.length,
-    has_server: 0,
-    source: String(source).slice(0, 20),
+  // Row and pointer together, under the page's lock: a prune never sees the new version unserved.
+  await store.serialized(pageLock(app.id), async () => {
+    await store.addDeploy({
+      id: deployId,
+      app_id: app.id,
+      created_at: Date.now(),
+      bytes,
+      file_count: decoded.length,
+      has_server: 0,
+      source: String(source).slice(0, 20),
+    });
+    const previous = (await store.appById(app.id, true))?.page_deploy_id;
+    await store.setPageDeploy(app.id, deployId);
+    if (previous) replacedAt.set(previous, performance.now());
   });
-  const previous = store.appById(app.id, true)?.page_deploy_id;
-  store.setPageDeploy(app.id, deployId);
-  if (previous) replacedAt.set(previous, performance.now());
   await prunePage(cfg, store, app.id);
   return { id: deployId, bytes, files: decoded.length };
 }
 
-/** Keep `keep` and the `keepCount - 1` most recent others (10 in all for an app's rollback). */
+/** Held while choosing an app's deploys to prune, and by a rollback while it checks and swaps (api.ts). */
+export const deploysLock = (appId: string) => `cresslet:deploys:${appId}`;
+const pageLock = (appId: string) => `cresslet:page:${appId}`;
+
+/** Keep `keep`, the current deploy, and the most recent others: `keepCount` in all (10, for an app's rollback). */
 async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = 10) {
-  const others = store.deploys(appId, 1000).filter((d) => d.id !== keep);
-  await removeDeploys(cfg, store, others.slice(keepCount - 1));
+  const todo = await selectForRemoval(store, deploysLock(appId), async () => {
+    const current = (await store.appById(appId, true))?.current_deploy_id; // a rollback may have swapped it meanwhile
+    // Ones another prune is already removing don't count as kept.
+    const others = (await store.deploys(appId, 1000)).filter((d) => d.id !== keep && d.id !== current && !removing.has(d.id));
+    return others.slice(keepCount - (current && current !== keep ? 2 : 1));
+  });
+  await removeDeploys(cfg, store, todo);
 }
 
 /** A replaced page version stays this long, so a request that read the old pointer can finish. */
@@ -269,19 +284,23 @@ const replacedAt = new Map<string, number>();
  * `graceMs` ago (or they're past MAX_PAGE_VERSIONS). After an upload, and by the reaper.
  */
 async function prunePage(cfg: Config, store: Store, appId: string, graceMs = PAGE_GRACE_MS) {
-  const served = store.appById(appId, true)?.page_deploy_id; // a deleted page only needs the version a restore serves
-  if (!served) return;
-  const cutoff = performance.now() - graceMs;
-  const old = store.pageVersions(appId).filter((d, i) =>
-    d.id !== served && (i >= MAX_PAGE_VERSIONS || (replacedAt.get(d.id) ?? -Infinity) <= cutoff));
-  for (const d of old) replacedAt.delete(d.id);
-  await removeDeploys(cfg, store, old);
+  // The pointer and the versions read together, under the lock an upload publishes under.
+  const todo = await selectForRemoval(store, pageLock(appId), async () => {
+    const served = (await store.appById(appId, true))?.page_deploy_id; // a deleted page only needs the version a restore serves
+    if (!served) return [];
+    const cutoff = performance.now() - graceMs;
+    const old = (await store.pageVersions(appId)).filter((d, i) =>
+      d.id !== served && (i >= MAX_PAGE_VERSIONS || (replacedAt.get(d.id) ?? -Infinity) <= cutoff));
+    for (const d of old) replacedAt.delete(d.id);
+    return old;
+  });
+  await removeDeploys(cfg, store, todo);
 }
 
 /** The reaper's pass: pages (owned here) with versions they don't serve, kept by prunePage or an older server. */
 export async function pruneOldPageVersions(cfg: Config, store: Store, local: (appId: string) => boolean, graceMs = PAGE_GRACE_MS) {
   for (const [id, at] of replacedAt) if (at <= performance.now() - PAGE_GRACE_MS) replacedAt.delete(id); // e.g. purged pages
-  for (const appId of store.pagesWithOldVersions()) {
+  for (const appId of await store.pagesWithOldVersions()) {
     if (local(appId)) await prunePage(cfg, store, appId, graceMs);
   }
 }
@@ -291,13 +310,29 @@ const removing = new Set<string>();
 export const beingRemoved = (deployId: string) => removing.has(deployId);
 
 /**
- * Marked at once (before any await; ones another prune is removing are left to it). The directory is
- * first renamed aside, in one step, so nothing (a rollback, even after a restart) finds a half-removed
- * deploy; then removed, then the row. If removal fails, the row stays and the next prune tries again.
+ * Chooses deploys to remove under `lock` and marks them before it's released (ones another prune is
+ * removing are left to it). If the transaction fails, the marks go too.
  */
-async function removeDeploys(cfg: Config, store: Store, deploys: Pick<Deploy, "id" | "app_id">[]) {
-  const todo = deploys.filter((d) => !removing.has(d.id));
-  for (const d of todo) removing.add(d.id);
+async function selectForRemoval(store: Store, lock: string, choose: () => Promise<Pick<Deploy, "id" | "app_id">[]>) {
+  let marked: Pick<Deploy, "id" | "app_id">[] = [];
+  try {
+    return await store.serialized(lock, async () => {
+      marked = (await choose()).filter((d) => !removing.has(d.id));
+      for (const d of marked) removing.add(d.id);
+      return marked;
+    });
+  } catch (e) {
+    for (const d of marked) removing.delete(d.id);
+    throw e;
+  }
+}
+
+/**
+ * Removes deploys `selectForRemoval` marked. The directory is first renamed aside, in one step, so nothing
+ * (a rollback, even after a restart) finds a half-removed deploy; then removed, then the row. If removal
+ * fails, the row stays and the next prune tries again.
+ */
+async function removeDeploys(cfg: Config, store: Store, todo: Pick<Deploy, "id" | "app_id">[]) {
   for (const d of todo) {
     const dir = paths(cfg, d.app_id).deploy(d.id);
     try {
@@ -305,7 +340,7 @@ async function removeDeploys(cfg: Config, store: Store, deploys: Pick<Deploy, "i
         if (e?.code !== "ENOENT") throw e; // already moved aside by a removal that failed later
       });
       await rm(`${dir}.removing`, { recursive: true, force: true });
-      store.deleteDeploy(d.id);
+      await store.deleteDeploy(d.id);
     } catch (e) {
       console.error(`cresslet: couldn't remove deploy ${d.id}:`, e);
     } finally {

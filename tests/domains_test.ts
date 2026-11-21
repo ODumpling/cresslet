@@ -10,7 +10,7 @@ test("custom domains: DNS-verified, first verifier wins, routed, TLS ask endpoin
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-dom-"));
   const txt = new Map<string, string[][]>();
   let duringLookup: (() => Promise<void>) | undefined;
-  const srv = createServer(loadConfig({
+  const srv = await createServer(loadConfig({
     dataDir,
     domain: "test.local",
     publicPort: 80,
@@ -50,6 +50,15 @@ test("custom domains: DNS-verified, first verifier wins, routed, TLS ask endpoin
       assert.equal((await json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: JSON.stringify({ domain: bad }) })).status, 400, bad);
     }
     assert.equal((await json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: mallory, body: '{"domain":"x.com"}' })).status, 403);
+
+    // At once: a repeat finds the first (not a 500), and the cap of 10 holds.
+    const carol = { authorization: `Bearer ${await token("c@b.co")}` };
+    const cApp = await deploy(carol, "carol");
+    const add = (domain: string) => json(`/v1/apps/${cApp.name}/domains`, { method: "POST", headers: carol, body: JSON.stringify({ domain }) });
+    const tries = await Promise.all([...Array.from({ length: 12 }, (_, i) => `d${i}.carol.example`), ..."xxx"].map((d) => add(d === "x" ? "same.carol.example" : d)));
+    assert.deepEqual(tries.map((r) => r.status).filter((st) => st !== 201 && st !== 200 && st !== 400), []);
+    assert.equal(tries.filter((r) => r.status === 201).length, 10);
+    assert.equal((await json(`/v1/apps/${cApp.name}/domains`, { headers: carol })).body.domains.length, 10);
 
     // Both may add it (pending); only the one who proves DNS ownership gets it.
     const added = await json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: '{"domain":"Shop.Example.com."}' });
@@ -111,29 +120,29 @@ test("custom domains: DNS-verified, first verifier wins, routed, TLS ask endpoin
     assert.ok(!(await (await call("/", { host: "shop.example.com" })).text()).includes("alice"));
     assert.equal((await call("/v1/domains/check?domain=shop.example.com")).status, 404);
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
 
 test("TLS ask endpoint: a preview host outside the wildcard needs its own certificate", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-dom-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", previewHost: "preview.other.example" }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", previewHost: "preview.other.example" }));
   const check = (d: string) => srv.handler(new Request(`http://cresslet:8787/v1/domains/check?domain=${d}`, { headers: { host: "cresslet:8787" } }));
   try {
     assert.equal((await check("preview.other.example")).status, 200);
     assert.equal((await check("other.example")).status, 404);
     assert.equal((await check("preview.test.local")).status, 404);
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
 
 test("CRESSLET_CUSTOM_DOMAINS=false: adding and verifying refused, reported in GET /v1, earlier domains keep routing", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-dom-"));
-  const start = (customDomains: boolean) => {
-    const srv = createServer(loadConfig({
+  const start = async (customDomains: boolean) => {
+    const srv = await createServer(loadConfig({
       dataDir,
       domain: "test.local",
       publicPort: 80,
@@ -151,7 +160,7 @@ test("CRESSLET_CUSTOM_DOMAINS=false: adding and verifying refused, reported in G
     return { srv, json };
   };
   let token = "";
-  let on = start(true);
+  let on = await start(true);
   try {
     // While on: a domain gets added and verified.
     const alice = { authorization: `Bearer ${JSON.parse((await on.json("/v1/accounts", { method: "POST", headers: { authorization: "Bearer adm" }, body: '{"email":"a@b.co"}' })).text).token}` };
@@ -160,10 +169,10 @@ test("CRESSLET_CUSTOM_DOMAINS=false: adding and verifying refused, reported in G
     token = added.domain.dns.find((r: { type: string }) => r.type === "TXT").value;
     assert.equal((await on.json(`/v1/apps/${a.name}/domains/old.example.com/verify`, { method: "POST", headers: alice })).status, 200);
     assert.equal((await on.json(`/v1/apps/${a.name}/domains`, { method: "POST", headers: alice, body: '{"domain":"pending.example.com"}' })).status, 201);
-    on.srv.close();
+    await on.srv.close();
 
     // Turned off: the server says so, and refuses new domains and verification with a clear error.
-    on = start(false);
+    on = await start(false);
     assert.equal(JSON.parse((await on.json("/v1")).text).customDomains, false);
     for (const [path, body] of [[`/v1/apps/${a.name}/domains`, '{"domain":"new.example.com"}'], [`/v1/apps/${a.name}/domains/pending.example.com/verify`, undefined]] as const) {
       const r = await on.json(path, { method: "POST", headers: alice, body });
@@ -191,7 +200,7 @@ test("CRESSLET_CUSTOM_DOMAINS=false: adding and verifying refused, reported in G
     assert.equal((await on.json("/v1/domains/check?domain=pending.example.com")).status, 404);
     assert.equal((await on.json(`/v1/apps/${a.name}/domains/pending.example.com`, { method: "DELETE", headers: alice })).status, 200);
   } finally {
-    on.srv.close();
+    await on.srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });

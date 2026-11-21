@@ -48,7 +48,7 @@ test("per-app uid and cgroup limits", { skip: !usable && "needs linux + root + c
   mkdirSync(join(sockDir, "aaaaaaaa-app_dead-00beef"), { recursive: true });
   mkdirSync(join(cgroupDir, "aaaaaaaa-app_dead-00beef"), { recursive: true });
   mkdirSync(join(sockDir, "bbbbbbbb-app_dead-00beef"), { recursive: true });
-  const srv = createServer(loadConfig({
+  const srv = await createServer(loadConfig({
     dataDir,
     domain: "test.local",
     publicPort: 80,
@@ -135,7 +135,7 @@ test("per-app uid and cgroup limits", { skip: !usable && "needs linux + root + c
     const uidC = uidOf(srv.runtime.status(c2.id).pid!);
     assert.ok(uidC !== uidA && uidC !== uidB, `reused uid ${uidC}`);
   } finally {
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -146,7 +146,7 @@ test("per-app uids refuse an untrusted socket dir", { skip: !usable && "needs li
   mkdirSync(sockDir, { recursive: true });
   spawnSync("chown", ["65534", sockDir]);
   try {
-    assert.throws(
+    await assert.rejects(
       () => createServer(loadConfig({ dataDir, domain: "t", publicPort: 80, sockDir, sandbox: { uidBase: 200000, cgroupDir: null, cpuPercent: 100, pidsMax: 128 } })),
       /must be a directory owned by root/,
     );
@@ -186,16 +186,16 @@ test("per-app uids don't create dirs under an untrusted parent", { skip: !usable
     symlinkSync(untrusted, join(links, "hop"));
     symlinkSync(`${untrusted}/../${trustedDir.split("/").pop()}`, join(links, "through"));
     const opts = (sockDir: string) => loadConfig({ dataDir, domain: "t", publicPort: 80, sockDir, sandbox: { uidBase: 200000, cgroupDir: null, cpuPercent: 100, pidsMax: 128 } });
-    assert.throws(() => createServer(opts(join(untrusted, "x/sock"))), /must be root-owned/);
+    await assert.rejects(() => createServer(opts(join(untrusted, "x/sock"))), /must be root-owned/);
     assert.ok(!existsSync(join(untrusted, "x")));
-    assert.throws(() => createServer(opts(join(links, "hop/y/sock"))), /must be root-owned/);
+    await assert.rejects(() => createServer(opts(join(links, "hop/y/sock"))), /must be root-owned/);
     assert.ok(!existsSync(join(untrusted, "y")));
-    assert.throws(() => createServer(opts(join(links, "through/sock"))), /must be root-owned/);
+    await assert.rejects(() => createServer(opts(join(links, "through/sock"))), /must be root-owned/);
     assert.ok(!existsSync(join(trustedDir, "sock")));
     // A (root-owned) regular file can't be traversed, even when followed by `..` in a link target.
     writeFileSync(join(trustedDir, "file"), "");
     symlinkSync(`${trustedDir}/file/..`, join(links, "viaFile"));
-    assert.throws(() => createServer(opts(join(links, "viaFile/sock"))), /not a directory/);
+    await assert.rejects(() => createServer(opts(join(links, "viaFile/sock"))), /not a directory/);
     assert.ok(!existsSync(join(trustedDir, "sock")));
   } finally {
     for (const d of made) await rm(d, { recursive: true, force: true });

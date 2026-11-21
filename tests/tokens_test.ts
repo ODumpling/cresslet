@@ -10,7 +10,7 @@ import { sha256 } from "../server/store.ts";
 
 async function setup(dataDir?: string, adminToken = "adm") {
   dataDir ??= await mkdtemp(join(tmpdir(), "cresslet-tok-"));
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken, siteAdmins: ["boss@b.co"] }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken, siteAdmins: ["boss@b.co"] }));
   const json = async (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
     headers.set("host", "test.local");
@@ -100,7 +100,7 @@ test("named tokens: create, list (no secrets), last used, revoke one", async () 
     const theirs = (await t.deploy(other)).body.app.name;
     assert.equal((await t.mint(root, { name: "x", apps: [theirs] })).status, 400);
   } finally {
-    t.srv.close();
+    await t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
   }
 });
@@ -174,7 +174,7 @@ test("scoped tokens: roles and app limits are enforced", async () => {
     const listed = (await t.json("/v1/me/tokens", { headers: t.bearer(root) })).body.tokens;
     assert.deepEqual(listed.find((x: { name: string }) => x.name === "ci").apps, []);
   } finally {
-    t.srv.close();
+    await t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
   }
 });
@@ -191,7 +191,7 @@ test("site admin routes need a full-access token", async () => {
       assert.equal((await t.json(`/v1/admin/sites/${app}`, { method: "DELETE", headers: t.bearer(tok) })).status, 403, input.name);
     }
   } finally {
-    t.srv.close();
+    await t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });
   }
   // An operator token that happens to look like an account token still works as the operator's.
@@ -200,12 +200,15 @@ test("site admin routes need a full-access token", async () => {
     assert.ok(await op.account("x@b.co"));
     assert.equal((await op.json("/v1/admin/sites", { headers: op.bearer("clv_scoped_operator") })).status, 200);
   } finally {
-    op.srv.close();
+    await op.srv.close();
     await rm(op.dataDir, { recursive: true, force: true });
   }
 });
 
-test("tokens from before named tokens keep full access", async () => {
+// Upgrading a SQLite database from an older release; a Postgres database starts at the current schema.
+const onPostgres = process.env.CRESSLET_DATABASE_URL ? "SQLite upgrade path (CRESSLET_DATABASE_URL is set)" : false;
+
+test("tokens from before named tokens keep full access", { skip: onPostgres }, async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-tok-mig-"));
   try {
     // The previous schema, with one account and one token.
@@ -235,7 +238,7 @@ test("tokens from before named tokens keep full access", async () => {
       assert.equal((await t.deploy(legacy)).status, 201);
       assert.equal((await t.mint(legacy, { name: "new" })).status, 201);
     } finally {
-      t.srv.close();
+      await t.srv.close();
     }
     // Rolled back, the old server inserts a token without an id; upgrading again gives it one.
     const db2 = new DatabaseSync(join(dataDir, "cresslet.db"));
@@ -248,7 +251,7 @@ test("tokens from before named tokens keep full access", async () => {
       assert.ok(ids.every((x: string) => /^tok_/.test(x)));
       assert.equal(new Set(ids).size, 4);
     } finally {
-      t2.srv.close();
+      await t2.srv.close();
     }
   } finally {
     await rm(dataDir, { recursive: true, force: true });

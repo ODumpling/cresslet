@@ -38,7 +38,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function setup(limits: Partial<Config["limits"]>, apps: string[]) {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-cap-"));
   const base = loadConfig();
-  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, limits: { ...base.limits, requestMs: 5000, ...limits } }));
+  const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, limits: { ...base.limits, requestMs: 5000, ...limits } }));
   const http = serve({ fetch: srv.handler, port: 0 });
   http.on("upgrade", srv.upgrade);
   await new Promise((r) => http.once("listening", r));
@@ -97,7 +97,7 @@ async function setup(limits: Partial<Config["limits"]>, apps: string[]) {
   const t0 = (name: string) => srv.runtime.procs.get(ids[name])?.inflight;
   const done = async () => {
     http.close();
-    srv.close();
+    await srv.close();
     await rm(dataDir, { recursive: true, force: true });
   };
   return { srv, ids, port, get, running, logs, ws, echo, closed, settled, done };
