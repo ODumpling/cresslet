@@ -13,6 +13,7 @@ services:
       CRESSLET_DOMAIN: ${CRESSLET_DOMAIN:?set CRESSLET_DOMAIN in .env}
       CRESSLET_SCHEME: https
       CRESSLET_PUBLIC_PORT: 443
+      CRESSLET_CLIENT_IP_HEADER: x-cresslet-client-ip # set by Caddy (caddy/Caddyfile), for the per-IP limits
     volumes:
       - cresslet_data:/data
     expose: ["8787"] # only Caddy reaches it

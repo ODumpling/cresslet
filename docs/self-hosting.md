@@ -256,7 +256,7 @@ On a clean host (or the same one), as root, with Docker and rclone (from rclone.
 | `CRESSLET_PAGE_RETENTION_DAYS` | 30 | days a new page is kept after its last upload (`0` = forever); each account can set its own |
 | `CRESSLET_MAX_PAGES_PER_ACCOUNT` | 200 | live pages an account may own (403 `quota`; site admins exempt) |
 | `CRESSLET_APP_DB_MB` / `CRESSLET_APP_FILES_MB` | 512 / 1024 | per-app database size (SQLite `max_page_count`; apps can't change it) / total size of its files |
-| `CRESSLET_CLIENT_IP_HEADER` | — | header with the real client IP for per-IP limits, e.g. `cf-connecting-ip` behind Cloudflare. Without it the TCP peer is used (behind a proxy that's the proxy, so every client shares one allowance). The proxy must set it to the one client address (Cloudflare does for `cf-connecting-ip`); a request that reaches the server some other way can send any value, so set it only if every request comes through that proxy |
+| `CRESSLET_CLIENT_IP_HEADER` | — | header with the real client IP for per-IP limits, e.g. `cf-connecting-ip` behind Cloudflare (the [Caddy setup](#production) sets `x-cresslet-client-ip`). Without it the TCP peer is used (behind a proxy that's the proxy, so every client shares one allowance). The proxy must set it to the one client address (Cloudflare does for `cf-connecting-ip`); a request that reaches the server some other way can send any value, so set it only if every request comes through that proxy |
 
 Closed instance (`CRESSLET_OPEN_SIGNUP=false CRESSLET_ANON_DEPLOYS=false`): pre-create accounts with the admin token; users then log in with GitHub using that (verified) email. Without GitHub configured, hand out the returned token (`CRESSLET_TOKEN` / `cresslet login --token`).
 
