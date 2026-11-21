@@ -76,7 +76,7 @@ export default {
 `secrets` (a plain record) and `app`.
 
 Same API in three runtimes: platform sandbox (workerd), `cresslet dev` (Node), studio preview (browser worker, sql.js).
-The studio preview runs SQLite as sql.js, which binds whole numbers that fit in 32 bits as INTEGER (so `${3} / 2` is `1` there, `1.5` on the platform, where JS numbers bind as REAL; write `${3.0}` or `CAST(… AS REAL)` when it matters), reads TEXT only up to an embedded NUL, binds integers beyond 32 bits as REAL (exact up to 2^53: stored as
+The studio preview runs SQLite as sql.js, which binds whole numbers that fit in 32 bits as INTEGER (so `${3} / 2` is `1` there, `1.5` on the platform, where JS numbers bind as REAL; write `CAST(${x} AS REAL)` when it matters), reads TEXT only up to an embedded NUL, binds integers beyond 32 bits as REAL (exact up to 2^53: stored as
 INTEGER in an `INTEGER` column, but integer division and `typeof()` on the parameter itself differ) and refuses
 bigints past ±2^53; the platform and `cresslet dev` bind 64-bit integers. It also saves the database by reopening it (300 ms after a write), so connection state such as SQL's own `last_insert_rowid()` starts over after a save there (`lastInsertRowid` in results is kept). Studio builds resolve `"cresslet"` to the SDK the studio ships (`studio/vendor/cresslet-sdk.js`), not the project's
 `node_modules/cresslet`.
