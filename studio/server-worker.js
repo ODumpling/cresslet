@@ -164,6 +164,8 @@ function files(op, payload, transfer = []) {
 function createDb(SQL, bytes) {
   const db = bytes ? new SQL.Database(bytes) : new SQL.Database();
   let timer;
+  let savedRowid = 0;
+  let reopened = false;
   const persist = () => {
     clearTimeout(timer);
     timer = setTimeout(() => {
@@ -174,7 +176,9 @@ function createDb(SQL, bytes) {
       } catch {
         return persist(); // in a transaction: try again later
       }
+      savedRowid = Number(one("SELECT last_insert_rowid()"));
       const out = db.export();
+      reopened = true; // last_insert_rowid() is 0 on the new connection until its next insert
       db.exec("PRAGMA foreign_keys = ON;");
       postMessage({ type: "db", bytes: out }, [out.buffer]);
     }, 300);
@@ -200,12 +204,15 @@ function createDb(SQL, bytes) {
     }
   };
   const one = (sql) => db.exec(sql)[0]?.values[0][0] ?? 0;
-  // last_insert_rowid(), kept across snapshots (export() reopens the connection, which resets it to 0)
-  let lastRowid = 0;
+  // last_insert_rowid(), kept across snapshots: export() reopens the connection, which resets it to 0
   const rowid = () => {
     const v = Number(one("SELECT last_insert_rowid()"));
-    if (v !== 0) lastRowid = v;
-    return lastRowid;
+    if (!reopened) return v;
+    if (v !== 0) {
+      reopened = false; // an insert on the new connection
+      return v;
+    }
+    return savedRowid;
   };
   // Statements that may change the database without changing total_changes() (DDL, PRAGMA, …): not a plain read.
   const mayWrite = (sql) => !/^(?:select|values|explain)\b/i.test(sql.replace(/^(?:[\s;(]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, ""));
@@ -248,9 +255,12 @@ function createDb(SQL, bytes) {
   // query/first can write too (INSERT … RETURNING): save when they changed anything
   const reading = (sql, params) => {
     const before = one("SELECT total_changes()");
-    const rows = all(sql, params);
-    if (one("SELECT total_changes()") !== before || mayWrite(sql)) persist();
-    return rows;
+    try {
+      return all(sql, params);
+    } finally {
+      // a statement that failed part-way may still have written (INSERT OR FAIL … RETURNING)
+      if (one("SELECT total_changes()") !== before || mayWrite(sql)) persist();
+    }
   };
   return {
     batch: async (statements) => batch(statements),

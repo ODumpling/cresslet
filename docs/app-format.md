@@ -76,7 +76,9 @@ export default {
 `secrets` (a plain record) and `app`.
 
 Same API in three runtimes: platform sandbox (workerd), `cresslet dev` (Node), studio preview (browser worker, sql.js).
-Studio builds resolve `"cresslet"` to the SDK the studio ships (`studio/vendor/cresslet-sdk.js`), not the project's
+The studio preview runs SQLite as sql.js, which binds integers beyond 32 bits as REAL (exact up to 2^53: stored as
+INTEGER in an `INTEGER` column, but integer division and `typeof()` on the parameter itself differ) and refuses
+bigints past ±2^53; the platform and `cresslet dev` bind 64-bit integers. Studio builds resolve `"cresslet"` to the SDK the studio ships (`studio/vendor/cresslet-sdk.js`), not the project's
 `node_modules/cresslet`.
 
 Bindings exist once a handler runs: in the sandbox they load on the first request or cron run. Using the SDK at module

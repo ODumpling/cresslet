@@ -129,14 +129,28 @@ export default { async fetch(req) {
   if (p === "/ins") return json(await db.run(db.sql\`CREATE TABLE IF NOT EXISTS t (v); \`).then(() => db.run(db.sql\`INSERT INTO t VALUES (\${"x"})\`)));
   if (p === "/ddl") return json(await db.sql\`CREATE TABLE ddl_only (x)\`);
   if (p === "/rowid") return json((await db.batch(["SELECT 1"]))[0].lastInsertRowid);
+  if (p === "/ret") return json(await db.first(db.sql\`INSERT INTO t VALUES (\${"r"}) RETURNING rowid AS id\`));
+  if (p === "/zero") return json((await db.batch(["INSERT INTO t (rowid, v) VALUES (0, 'z')"]))[0].lastInsertRowid);
+  if (p === "/partial") {
+    await db.exec("CREATE TABLE IF NOT EXISTS u (k INTEGER PRIMARY KEY)");
+    return db.query("INSERT OR FAIL INTO u VALUES (1), (2), (1) RETURNING k").then(() => json("no error"), (e) => json(e.message));
+  }
   if (p === "/big") return db.batch([db.sql\`SELECT \${9007199254740993n}\`]).then(() => json("stored"), (e) => json(e.message));
   if (p === "/safe") return json(await db.first(db.sql\`SELECT \${5n} AS x\`));
 } };`));
   try {
+    assert.ok((await w.get("/ins")).json.lastInsertRowid > 0);
+    assert.equal((await w.get("/zero")).json, 0); // rowid 0 is a rowid
     const ins = (await w.get("/ins")).json;
-    assert.ok(ins.lastInsertRowid > 0);
     await w.saved(); // a save reopens sql.js's connection
     assert.equal((await w.get("/rowid")).json, ins.lastInsertRowid);
+    // an insert through first, then a save: still its rowid
+    const ret = (await w.get("/ret")).json;
+    await w.saved();
+    assert.equal((await w.get("/rowid")).json, ret.id);
+    // a query that failed part-way: SQLite kept the rows it wrote, and so does the save
+    assert.match((await w.get("/partial")).json, /UNIQUE constraint failed/);
+    assert.deepEqual((await w.saved()).exec("SELECT k FROM u ORDER BY k")[0].values, [[1], [2]]);
     await w.saved();
     await w.get("/ddl");
     assert.equal((await w.saved()).exec("SELECT name FROM sqlite_master WHERE name = 'ddl_only'").length, 1);
