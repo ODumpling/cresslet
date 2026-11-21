@@ -5,17 +5,32 @@ import type { Context, Hono } from "hono";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { appUrl, type Config, paths } from "./config.ts";
-import { type Account, type AiAccountRow, type App, SITE_ADMIN, type Store, type Token } from "./store.ts";
+import { type Account, type AiAccountRow, type App, ORG_ROLES, type OrgRole, SITE_ADMIN, type Store, type Token } from "./store.ts";
 import { credits as toCredits, ledgerEntry, nextPeriod, period, periodStart } from "./credits.ts";
 import type { Runtime } from "./runtime.ts";
 import { inspect } from "./inspect.ts";
 import { HttpError, removeAppFiles } from "./deploys.ts";
 
-type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
+export type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
+
+/** Listed in CRESSLET_SITE_ADMINS (by email or GitHub login): a site admin whatever its role says. */
+export const isEnvSiteAdmin = (cfg: Config, a: Account) =>
+  cfg.siteAdmins.includes((a.disabled_email ?? a.email).toLowerCase()) ||
+  (!!a.github_login && cfg.siteAdmins.includes(a.github_login.toLowerCase()));
 
 export const isSiteAdmin = (cfg: Config, a: Account | undefined) =>
-  !!a && (a.role === SITE_ADMIN || cfg.siteAdmins.includes(a.email) ||
-    (!!a.github_login && cfg.siteAdmins.includes(a.github_login.toLowerCase())));
+  !!a && !a.disabled_at && (a.role === SITE_ADMIN || isEnvSiteAdmin(cfg, a));
+
+/**
+ * Who is acting as site admin, for log lines (`id`: their account, null for the operator token), or null if the
+ * request isn't. Only with a full-access token: a site admin's scoped token (read, deploy, some apps) doesn't count.
+ */
+export function siteAdminActor(cfg: Config, c: Context<Env>, isAdminToken: (bearer?: string) => boolean) {
+  const acct = c.get("account"), t = c.get("token");
+  if (isSiteAdmin(cfg, acct) && t?.role === "admin" && !t.apps) return { who: acct!.github_login ?? acct!.email, id: acct!.id };
+  if (isAdminToken(c.get("bearer"))) return { who: "operator", id: null };
+  return null;
+}
 
 /** Permanently removes an app: process, rows (deploys, secrets, domains cascade), logs, files. */
 export async function purgeApp(cfg: Config, store: Store, runtime: Runtime, a: App) {
@@ -72,10 +87,9 @@ export function adminRoutes(
 ) {
   /** Who is acting, for log lines; throws unless a site admin. */
   const requireSiteAdmin = (c: Context<Env>) => {
-    const acct = c.get("account"), t = c.get("token");
-    // Only with a full-access token: a site admin's scoped token (read, deploy, some apps) doesn't count.
-    if (isSiteAdmin(cfg, acct) && t?.role === "admin" && !t.apps) return acct!.github_login ?? acct!.email;
-    if (isAdminToken(c.get("bearer"))) return "operator";
+    const actor = siteAdminActor(cfg, c, isAdminToken);
+    if (actor) return actor.who;
+    const acct = c.get("account");
     throw new HttpError(acct ? 403 : 401, "site admin only", acct ? "forbidden" : "unauthorized");
   };
 
@@ -107,6 +121,7 @@ export function adminRoutes(
       url: appUrl(cfg, a.name),
       status: a.deleted_at ? "deleted" : rt.running ? "running" : served ? "idle" : "empty",
       owner: await owner(a.account_id),
+      org: a.org_id ? await store.orgById(a.org_id).then((o) => (o ? { name: o.name, title: o.title } : null)) : null,
       server: !!config.server,
       crons: config.crons?.length ?? 0,
       domains: (await store.domains(a.id)).filter((d) => d.verified_at).map((d) => d.domain),
@@ -206,7 +221,121 @@ export function adminRoutes(
     return c.json({ site: await siteView((await store.appById(a.id))!) });
   });
 
-  // Grant / revoke the SiteAdmin role. Accounts listed in CRESSLET_SITE_ADMINS stay admins regardless.
+  // ---- accounts: every account on the server; invite (set one up before they sign in), disable, site admin role.
+  const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+  /** Invited: set up by a site admin, not signed in yet. */
+  const accountStatus = (a: Account) => (a.disabled_at ? "disabled" : a.invited_at ? "invited" : "active");
+  const accountRow = async (a: Account & { last_used_at: number | null; tokens: number; apps: number }) => ({
+    id: a.id,
+    email: a.disabled_email ?? a.email,
+    github: a.github_login,
+    status: accountStatus(a),
+    siteAdmin: a.role === SITE_ADMIN || isEnvSiteAdmin(cfg, a),
+    // Listed in CRESSLET_SITE_ADMINS: a site admin whatever its role, changed in the server's config only.
+    siteAdminFromConfig: isEnvSiteAdmin(cfg, a),
+    apps: a.apps,
+    orgs: (await store.orgsFor(a.id)).map((o) => ({ name: o.name, title: o.title, role: o.role })),
+    invitedBy: await owner(a.invited_by),
+    createdAt: iso(a.created_at),
+    lastActiveAt: iso(a.last_used_at),
+    disabledAt: iso(a.disabled_at),
+  });
+  const accountRowById = async (id: string) => {
+    const a = (await store.allAccounts()).find((x) => x.id === id);
+    if (!a) throw new HttpError(404, "account not found", "not_found");
+    return accountRow(a);
+  };
+  const getAccount = async (id: string) => {
+    const a = await store.accountById(id);
+    if (!a) throw new HttpError(404, "account not found", "not_found");
+    return a;
+  };
+  /** Role and disabling: not your own account (no locking yourself out), not one the server's config makes an admin. */
+  const changeable = (c: Context<Env>, a: Account, what: string) => {
+    if (a.id === c.get("account")?.id) throw new HttpError(400, `you can't ${what} your own account`);
+    if (isEnvSiteAdmin(cfg, a)) throw new HttpError(400, `${a.disabled_email ?? a.email} is a site admin in the server's config (CRESSLET_SITE_ADMINS): change it there`, "config_admin");
+  };
+  const setSiteAdmin = async (c: Context<Env>, who: string, a: Account, on: boolean) => {
+    if (!on) changeable(c, a, "remove the site admin role from");
+    await store.setRole(a.id, on ? SITE_ADMIN : null);
+    console.log(`cresslet: ${a.disabled_email ?? a.email} role ${on ? SITE_ADMIN : "(none)"} set by ${who}`);
+  };
+
+  app.get("/admin/accounts", async (c) => {
+    requireSiteAdmin(c);
+    owners.clear();
+    const accounts = await Promise.all((await store.allAccounts()).map(accountRow));
+    const count = (s: string) => accounts.filter((a) => a.status === s).length;
+    return c.json({
+      totals: { accounts: accounts.length, active: count("active"), invited: count("invited"), disabled: count("disabled"), siteAdmins: accounts.filter((a) => a.siteAdmin).length },
+      openSignup: cfg.openSignup,
+      accounts,
+    });
+  });
+
+  // Invite: sets up an account for this email. They sign in with GitHub (any verified email on their GitHub
+  // account matching), also while signup is closed. No email is sent. `org`, `orgRole`: add it to an organization.
+  app.post("/admin/accounts", async (c) => {
+    const who = requireSiteAdmin(c);
+    const input = await body<{ email?: unknown; siteAdmin?: unknown; org?: unknown; orgRole?: unknown } | null>(c) ?? {};
+    const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
+    if (!EMAIL_RE.test(email) || email.length > 254) throw new HttpError(400, "valid email required");
+    if (input.siteAdmin !== undefined && typeof input.siteAdmin !== "boolean") throw new HttpError(400, "siteAdmin must be true or false");
+    let org: { id: string; name: string } | undefined, orgRole: OrgRole = "member";
+    if (input.org != null) {
+      org = typeof input.org === "string" ? await store.orgByName(input.org) : undefined;
+      if (!org) throw new HttpError(404, `organization not found: ${String(input.org)}`, "not_found");
+      if (input.orgRole !== undefined && !ORG_ROLES.includes(input.orgRole as OrgRole)) throw new HttpError(400, `orgRole must be one of ${ORG_ROLES.join(", ")}`);
+      orgRole = (input.orgRole as OrgRole | undefined) ?? "member";
+    }
+    const acct = await store.serialized("cresslet:invite-account", async () => {
+      if (await store.accountByEmail(email) || await store.disabledAccount({ emails: [email] })) {
+        throw new HttpError(409, `${email} already has an account`, "conflict");
+      }
+      const a = await store.createAccount(email, undefined, { by: c.get("account")?.id ?? null });
+      if (input.siteAdmin === true) await store.setRole(a.id, SITE_ADMIN);
+      if (org) await store.setOrgMember(org.id, a.id, orgRole);
+      return a;
+    });
+    console.log(`cresslet: ${email} invited by ${who}${input.siteAdmin === true ? " as site admin" : ""}${org ? `, ${orgRole} of org ${org.name}` : ""}`);
+    owners.clear();
+    return c.json({ account: await accountRowById(acct.id) }, 201);
+  });
+
+  // `siteAdmin`: grant or remove the role. `disabled`: true signs it out everywhere and blocks login, tokens and
+  // its personal apps' deploy keys (its sites keep serving: delete them separately); false lets it sign in again.
+  app.patch("/admin/accounts/:id", async (c) => {
+    const who = requireSiteAdmin(c);
+    const a = await getAccount(c.req.param("id"));
+    const input = await body<{ siteAdmin?: unknown; disabled?: unknown } | null>(c) ?? {};
+    if (input.siteAdmin !== undefined && typeof input.siteAdmin !== "boolean") throw new HttpError(400, "siteAdmin must be true or false");
+    if (input.disabled !== undefined && typeof input.disabled !== "boolean") throw new HttpError(400, "disabled must be true or false");
+    if (input.disabled === true) changeable(c, a, "disable");
+    if (input.siteAdmin !== undefined) await setSiteAdmin(c, who, a, input.siteAdmin);
+    if (input.disabled === true && await store.disableAccount(a.id)) {
+      console.log(`cresslet: ${a.email} disabled by ${who}`);
+    } else if (input.disabled === false && a.disabled_at) {
+      if (await store.enableAccount(a.id) === "taken") {
+        throw new HttpError(409, `another account now has ${a.disabled_email ?? a.email} or its GitHub login: change that one first`, "conflict");
+      }
+      console.log(`cresslet: ${a.disabled_email} enabled by ${who}`);
+    }
+    owners.clear();
+    return c.json({ account: await accountRowById(a.id) });
+  });
+
+  // Withdraws an invite: deletes an account that never signed in and owns nothing. Real accounts are disabled instead.
+  app.delete("/admin/accounts/:id", async (c) => {
+    const who = requireSiteAdmin(c);
+    const a = await getAccount(c.req.param("id"));
+    if (!await store.deleteInvitedAccount(a.id)) {
+      throw new HttpError(409, "only an invited account that hasn't signed in yet can be deleted: disable it instead", "not_invited");
+    }
+    console.log(`cresslet: invite for ${a.email} withdrawn by ${who}`);
+    return c.json({ deleted: a.id });
+  });
+
+  // Grant / revoke the SiteAdmin role by email (older API; PATCH /admin/accounts/:id does the same).
   app.put("/admin/accounts/role", async (c) => {
     const who = requireSiteAdmin(c);
     const { email, role } = await body<{ email?: string; role?: string | null }>(c);
@@ -214,8 +343,7 @@ export function adminRoutes(
     const acct = email ? await store.accountByEmail(email) : undefined;
     if (!acct) throw new HttpError(404, "account not found", "not_found");
     if (role === null && acct.id === c.get("account")?.id) throw new HttpError(400, "you can't remove your own role");
-    await store.setRole(acct.id, role);
-    console.log(`cresslet: ${acct.email} role ${role ?? "(none)"} set by ${who}`);
+    await setSiteAdmin(c, who, acct, role === SITE_ADMIN);
     return c.json({ account: { id: acct.id, email: acct.email, github: acct.github_login, role } });
   });
 

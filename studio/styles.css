@@ -542,6 +542,10 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .day-table summary { cursor: pointer; color: var(--text-2); }
 .day-table .table { margin-top: 8px; }
 .grant-form { align-self: start; }
+/* admin: users */
+.table td.orgs { white-space: normal; min-width: 7rem; }
+.table td.actions.multi { white-space: normal; min-width: 11rem; }
+.table td.actions.multi > * { margin: 2px 0 2px 4px; }
 .detail-grid .table-wrap .table td, .detail-grid .table-wrap .table th { padding: 10px 16px; }
 .day-chart { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding-top: 4px; border-bottom: 1px solid var(--line); }
 .day-chart span { flex: 1; min-width: 0; background: var(--accent-text); border-radius: 3px 3px 0 0; }

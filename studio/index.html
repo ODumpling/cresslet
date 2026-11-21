@@ -65,6 +65,7 @@
           <ul aria-labelledby="nav-workspace">
             <li><a href="#/" data-nav="home"><svg class="icon" aria-hidden="true"><use href="#i-folder" /></svg>Projects</a></li>
             <li id="nav-pages-item"><a href="#/artifacts" data-nav="pages"><svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>Artifacts</a></li>
+            <li id="nav-orgs-item" hidden><a href="#/orgs" data-nav="orgs"><svg class="icon" aria-hidden="true"><use href="#i-users" /></svg>Organizations</a></li>
             <li id="nav-settings-item" hidden><a href="#/settings" data-nav="settings"><svg class="icon" aria-hidden="true"><use href="#i-settings" /></svg>Settings</a></li>
           </ul>
           <div id="recent-wrap" hidden>
@@ -75,6 +76,8 @@
             <p class="nav-label" id="nav-admin">Site Administrator</p>
             <ul aria-labelledby="nav-admin">
               <li><a href="#/admin" id="admin-link" data-nav="admin"><svg class="icon" aria-hidden="true"><use href="#i-server" /></svg>Sites</a></li>
+              <li><a href="#/admin-users" data-nav="admin-users"><svg class="icon" aria-hidden="true"><use href="#i-users" /></svg>Users</a></li>
+              <li><a href="#/admin-orgs" data-nav="admin-orgs"><svg class="icon" aria-hidden="true"><use href="#i-shield" /></svg>Organizations</a></li>
               <li id="admin-credits-item" hidden><a href="#/admin-credits" id="admin-credits-link" data-nav="admin-credits"><svg class="icon" aria-hidden="true"><use href="#i-sparkles" /></svg>AI credits</a></li>
             </ul>
           </div>
@@ -494,6 +497,17 @@
           <section class="block" aria-labelledby="people-title">
             <div class="block-head"><h2 id="people-title" tabindex="-1">People with access</h2></div>
             <ul class="list" id="people" aria-labelledby="people-title"></ul>
+          </section>
+          <section class="block" id="org-block" hidden aria-labelledby="org-block-title">
+            <form id="org-form" class="panel form" aria-labelledby="org-block-title">
+              <h2 id="org-block-title">Organization</h2>
+              <p class="muted small" id="org-form-text"></p>
+              <div class="field">
+                <label for="org-select">Belongs to</label>
+                <select class="input" id="org-select" aria-describedby="org-form-text"></select>
+              </div>
+              <div class="row start"><button class="btn" id="org-move" type="submit">Move</button></div>
+            </form>
           </section>
           <section class="block" aria-labelledby="invite-form-title">
             <form id="invite-form" class="panel form" aria-labelledby="invite-form-title">

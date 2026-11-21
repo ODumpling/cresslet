@@ -18,6 +18,15 @@ export interface Account {
   role: string | null;
   /** JSON AccountSettings, or null = the server's defaults. */
   settings: string | null;
+  /** Set when a site admin disabled it: no login, no tokens. */
+  disabled_at: number | null;
+  /** Set while it's an invite (a site admin set it up, it hasn't signed in yet). */
+  invited_at: number | null;
+  /** The site admin who invited it, if one did. */
+  invited_by: string | null;
+  /** While disabled: its real email and GitHub id (`email` is a placeholder and `github_id` null meanwhile). */
+  disabled_email: string | null;
+  disabled_github_id: number | null;
 }
 
 /** An account's own defaults; a key left out uses the server's (Config.pages). */
@@ -53,6 +62,8 @@ export interface App {
    * (after a rollback) serves none of them: it would ignore their visibility.
    */
   page_deploy_id: string | null;
+  /** The organization it belongs to: its admins and members get access (see Store.access). */
+  org_id: string | null;
 }
 
 export type AppKind = "app" | "page";
@@ -90,11 +101,28 @@ export interface Token {
   last_used_at: number | null;
 }
 
+/** Organization roles: admins manage members and own the org's apps; members get admin access to them. */
+export const ORG_ROLES = ["admin", "member"] as const;
+export type OrgRole = (typeof ORG_ROLES)[number];
+
+export interface Org {
+  id: string;
+  name: string;
+  title: string | null;
+  created_at: number;
+  created_by: string | null;
+}
+
 /** An invited account's access to an app. The owner is the app's `account_id`, not a collaborator. */
 export const ACCESS = ["viewer", "admin"] as const;
 export type Access = (typeof ACCESS)[number];
 /** The caller's access to an app: its owner, or a collaborator's role. */
 export type AppAccess = "owner" | Access;
+
+const ACCESS_RANK: AppAccess[] = ["viewer", "admin", "owner"];
+/** The higher of two access levels. */
+export const maxAccess = (x?: AppAccess, y?: AppAccess): AppAccess | undefined =>
+  !x ? y : !y ? x : ACCESS_RANK.indexOf(x) >= ACCESS_RANK.indexOf(y) ? x : y;
 
 export interface Collaborator {
   app_id: string;
@@ -252,7 +280,8 @@ export class Store implements RateHits {
   }
 
   // ---- accounts
-  async createAccount(email: string, github?: { id: number; login: string }): Promise<Account> {
+  /** `invite`: a site admin invites it (it signs in with GitHub later, by email); `by`: their account. */
+  async createAccount(email: string, github?: { id: number; login: string }, invite?: { by: string | null }): Promise<Account> {
     const a: Account = {
       id: id("acct"),
       email: email.toLowerCase(),
@@ -261,10 +290,88 @@ export class Store implements RateHits {
       github_login: github?.login ?? null,
       role: null,
       settings: null,
+      disabled_at: null,
+      invited_at: invite ? Date.now() : null,
+      invited_by: invite?.by ?? null,
+      disabled_email: null,
+      disabled_github_id: null,
     };
-    await this.db.run("INSERT INTO accounts (id, email, created_at, github_id, github_login) VALUES (?, ?, ?, ?, ?)",
-      a.id, a.email, a.created_at, a.github_id, a.github_login);
+    await this.db.run(
+      "INSERT INTO accounts (id, email, created_at, github_id, github_login, invited_at, invited_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      a.id, a.email, a.created_at, a.github_id, a.github_login, a.invited_at, a.invited_by,
+    );
     return a;
+  }
+  /** Every account, oldest first, with when one of its tokens was last used, and how many live apps it owns. */
+  allAccounts(): Promise<(Account & { last_used_at: number | null; tokens: number; apps: number })[]> {
+    return this.db.all(
+      `SELECT ac.*, (SELECT MAX(last_used_at) FROM tokens t WHERE t.account_id = ac.id) AS last_used_at,
+         (SELECT count(*) FROM tokens t WHERE t.account_id = ac.id) AS tokens,
+         (SELECT count(*) FROM apps a WHERE a.account_id = ac.id AND a.deleted_at IS NULL) AS apps
+       FROM accounts ac ORDER BY ac.created_at, ac.id`,
+    );
+  }
+  /**
+   * Disables an account: deletes its tokens and private-page sessions, and moves its email and GitHub id aside
+   * (`disabled_email`, `disabled_github_id`; `email` becomes a placeholder), so no login finds it, not even a
+   * server from before disabling existed (after a rollback). Under the account's lock, which token issuing takes
+   * too: nothing issued meanwhile survives. Its org apps go to another org admin (reassignOrgApps).
+   */
+  disableAccount(accountId: string): Promise<boolean> {
+    return this.serialized(accountLock(accountId), async () => {
+      const r = await this.db.run(
+        `UPDATE accounts SET disabled_at = ?, disabled_email = email, disabled_github_id = github_id,
+           email = 'disabled+' || id || '@invalid', github_id = NULL
+         WHERE id = ? AND disabled_at IS NULL`,
+        Date.now(), accountId,
+      );
+      await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+      await this.db.run("DELETE FROM page_sessions WHERE account_id = ?", accountId);
+      for (const o of await this.orgsFor(accountId)) await this.reassignOrgApps(o.id, accountId);
+      return r.changes > 0;
+    });
+  }
+  /**
+   * Re-enables it, putting its email and GitHub id back: "taken" if another account has either now (that
+   * account has to change or go first).
+   */
+  enableAccount(accountId: string): Promise<"ok" | "taken"> {
+    return this.serialized(accountLock(accountId), async () => {
+      const a = await this.accountById(accountId);
+      if (!a?.disabled_at) return "ok";
+      const email = a.disabled_email ?? a.email;
+      const other = await this.db.get<{ id: string }>(
+        "SELECT id FROM accounts WHERE id <> ? AND (email = ? OR (CAST(? AS BIGINT) IS NOT NULL AND github_id = ?))",
+        accountId, email, a.disabled_github_id, a.disabled_github_id,
+      );
+      if (other) return "taken";
+      await this.db.run(
+        `UPDATE accounts SET disabled_at = NULL, email = ?, github_id = ?, disabled_email = NULL, disabled_github_id = NULL
+         WHERE id = ?`,
+        email, a.disabled_github_id, accountId,
+      );
+      return "ok";
+    });
+  }
+  /** A disabled account that signed in with this GitHub id, or has this email. */
+  disabledAccount(match: { githubId?: number; emails?: string[] }): Promise<Account | undefined> {
+    const emails = (match.emails ?? []).map((e) => e.toLowerCase());
+    return this.db.get<Account>(
+      `SELECT * FROM accounts WHERE disabled_at IS NOT NULL AND (disabled_github_id = ?${
+        emails.length ? ` OR disabled_email IN (${emails.map(() => "?").join(", ")})` : ""
+      }) LIMIT 1`,
+      match.githubId ?? -1, ...emails,
+    );
+  }
+  /** Deletes an account that's still an invite (never signed in) and owns nothing. False if it isn't (any more). */
+  deleteInvitedAccount(accountId: string): Promise<boolean> {
+    return this.serialized(accountLock(accountId), async () =>
+      (await this.db.run(
+        `DELETE FROM accounts WHERE id = ? AND invited_at IS NOT NULL AND github_id IS NULL AND disabled_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM tokens WHERE account_id = accounts.id)
+           AND NOT EXISTS (SELECT 1 FROM apps WHERE account_id = accounts.id)`,
+        accountId,
+      )).changes > 0);
   }
   accountByGithub(githubId: number): Promise<Account | undefined> {
     return this.db.get<Account>("SELECT * FROM accounts WHERE github_id = ?", githubId);
@@ -308,10 +415,17 @@ export class Store implements RateHits {
       created_at: Date.now(),
       last_used_at: null,
     };
-    await this.db.run(
-      "INSERT INTO tokens (hash, id, account_id, name, role, apps, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      await sha256(token), info.id, accountId, info.name, info.role, info.apps, info.created_at,
-    );
+    const hash = await sha256(token);
+    await this.serialized(accountLock(accountId), async () => {
+      // Disabled meanwhile (a login in flight): no token. The insert refuses it in the same statement.
+      const r = await this.db.run(
+        `INSERT INTO tokens (hash, id, account_id, name, role, apps, created_at)
+         SELECT ?, ?, id, ?, ?, ?, ? FROM accounts WHERE id = ? AND disabled_at IS NULL`,
+        hash, info.id, info.name, info.role, info.apps, info.created_at, accountId,
+      );
+      if (!r.changes) throw new AccountDisabledError();
+      await this.db.run("UPDATE accounts SET invited_at = NULL WHERE id = ? AND invited_at IS NOT NULL", accountId);
+    });
     return { token, info };
   }
   /** Looks up a token and records its use (at most once a minute, to spare writes). */
@@ -322,7 +436,7 @@ export class Store implements RateHits {
     );
     if (!t) return undefined;
     const account = await this.db.get<Account>("SELECT * FROM accounts WHERE id = ?", t.account_id);
-    if (!account) return undefined;
+    if (!account || account.disabled_at) return undefined;
     const now = Date.now();
     if (!t.last_used_at || now - t.last_used_at > 60_000) {
       await this.db.run("UPDATE tokens SET last_used_at = ? WHERE hash = ?", now, hash);
@@ -369,6 +483,7 @@ export class Store implements RateHits {
         retention_days: null,
         title: null,
         page_deploy_id: null,
+        org_id: null,
       };
       await this.db.run(
         `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at, anon_client)
@@ -405,6 +520,7 @@ export class Store implements RateHits {
         retention_days: p.retentionDays,
         title: p.title,
         page_deploy_id: null,
+        org_id: null,
       };
       await this.db.run(
         `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at,
@@ -475,20 +591,29 @@ export class Store implements RateHits {
       return n;
     });
   }
+  /** Live personal apps (or pages) of the account: not ones in an organization. For quotas. */
   appsByAccount(accountId: string, kind: AppKind = "app"): Promise<App[]> {
     return this.db.all<App>(
-      "SELECT * FROM apps WHERE account_id = ? AND kind = ? AND deleted_at IS NULL ORDER BY updated_at DESC", accountId, kind,
+      "SELECT * FROM apps WHERE account_id = ? AND kind = ? AND org_id IS NULL AND deleted_at IS NULL ORDER BY updated_at DESC",
+      accountId, kind,
     );
   }
-  /** Live apps (or pages) the account owns or collaborates on, with its access to each. */
-  appsFor(accountId: string, kind: AppKind = "app"): Promise<(App & { access: AppAccess })[]> {
-    return this.db.all<App & { access: AppAccess }>(
-      `SELECT a.*, CASE WHEN a.account_id = ? THEN 'owner' ELSE c.role END AS access
+  /** Live apps (or pages) the account owns, collaborates on or reaches through an organization, with its access to each. */
+  async appsFor(accountId: string, kind: AppKind = "app"): Promise<(App & { access: AppAccess })[]> {
+    const rows = await this.db.all<App & { collab: Access | null; org_role: OrgRole | null }>(
+      `SELECT a.*, c.role AS collab, m.role AS org_role
        FROM apps a LEFT JOIN collaborators c ON c.app_id = a.id AND c.account_id = ?
-       WHERE a.deleted_at IS NULL AND a.kind = ? AND (a.account_id = ? OR c.account_id IS NOT NULL)
+       LEFT JOIN org_members m ON m.org_id = a.org_id AND m.account_id = ?
+       WHERE a.deleted_at IS NULL AND a.kind = ?
+         AND ((a.org_id IS NULL AND a.account_id = ?) OR c.account_id IS NOT NULL OR m.account_id IS NOT NULL)
        ORDER BY a.updated_at DESC`,
       accountId, accountId, kind, accountId,
     );
+    return rows.map(({ collab, org_role, ...a }) => {
+      const own: AppAccess | undefined = !a.org_id && a.account_id === accountId ? "owner"
+        : org_role === "admin" ? "owner" : org_role === "member" ? "admin" : undefined;
+      return { ...a, access: maxAccess(own, collab ?? undefined)! };
+    });
   }
   async checkDeployKey(appId: string, key: string): Promise<boolean> {
     const row = await this.db.get<{ h: string }>("SELECT deploy_key_hash AS h FROM apps WHERE id = ?", appId);
@@ -565,11 +690,23 @@ export class Store implements RateHits {
   }
 
   // ---- collaborators and invites
-  /** The account's access to the app, or undefined if it has none. */
+  /**
+   * The account's access to the app, or undefined if it has none (always for a disabled account). An app in an
+   * organization belongs to the organization: its admins are owners, its members admins (`account_id` alone
+   * doesn't count, so a removed member loses the apps they created there); a collaborator role can add to that.
+   */
   async access(a: App, accountId: string): Promise<AppAccess | undefined> {
-    if (a.account_id === accountId) return "owner";
-    const row = await this.db.get<{ role: Access }>("SELECT role FROM collaborators WHERE app_id = ? AND account_id = ?", a.id, accountId);
-    return row?.role;
+    const row = await this.db.get<{ disabled: number; collab: Access | null; org: OrgRole | null }>(
+      `SELECT ac.disabled_at IS NOT NULL AS disabled,
+         (SELECT role FROM collaborators WHERE app_id = ? AND account_id = ac.id) AS collab,
+         (SELECT role FROM org_members WHERE org_id = ? AND account_id = ac.id) AS org
+       FROM accounts ac WHERE ac.id = ?`,
+      a.id, a.org_id, accountId,
+    );
+    if (!row || row.disabled) return undefined;
+    if (!a.org_id && a.account_id === accountId) return "owner";
+    const fromOrg: AppAccess | undefined = row.org === "admin" ? "owner" : row.org === "member" ? "admin" : undefined;
+    return maxAccess(fromOrg, row.collab ?? undefined);
   }
   collaborators(appId: string): Promise<(Collaborator & { email: string; github_login: string | null })[]> {
     return this.db.all<Collaborator & { email: string; github_login: string | null }>(
@@ -636,7 +773,7 @@ export class Store implements RateHits {
       await this.db.run(
         `INSERT INTO collaborators (app_id, account_id, role, created_at)
          SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS BIGINT)
-         WHERE NOT EXISTS (SELECT 1 FROM apps WHERE id = ? AND account_id = ?)
+         WHERE NOT EXISTS (SELECT 1 FROM apps WHERE id = ? AND account_id = ? AND org_id IS NULL)
          ON CONFLICT (app_id, account_id) DO UPDATE SET role = excluded.role`,
         inv.app_id, accountId, inv.role, Date.now(), inv.app_id, accountId,
       );
@@ -645,6 +782,96 @@ export class Store implements RateHits {
   }
   async declineInvite(inviteId: string) {
     await this.db.run("DELETE FROM invites WHERE id = ?", inviteId);
+  }
+
+  // ---- organizations (created by site admins; see docs/api.md#organizations)
+  async createOrg(name: string, title: string | null, createdBy: string | null): Promise<Org> {
+    const o: Org = { id: id("org"), name, title, created_at: Date.now(), created_by: createdBy };
+    await this.db.run("INSERT INTO orgs (id, name, title, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+      o.id, o.name, o.title, o.created_at, o.created_by);
+    return o;
+  }
+  orgByName(name: string): Promise<Org | undefined> {
+    return this.db.get<Org>("SELECT * FROM orgs WHERE name = ?", name);
+  }
+  orgById(orgId: string): Promise<Org | undefined> {
+    return this.db.get<Org>("SELECT * FROM orgs WHERE id = ?", orgId);
+  }
+  /** Every organization, with how many members and live apps (site admin view). */
+  allOrgs(): Promise<(Org & { members: number; apps: number })[]> {
+    return this.db.all(
+      `SELECT o.*, (SELECT count(*) FROM org_members m WHERE m.org_id = o.id) AS members,
+         (SELECT count(*) FROM apps a WHERE a.org_id = o.id AND a.deleted_at IS NULL) AS apps
+       FROM orgs o ORDER BY o.name`,
+    );
+  }
+  /** The organizations an account belongs to, with its role in each. */
+  orgsFor(accountId: string): Promise<(Org & { role: OrgRole })[]> {
+    return this.db.all(
+      `SELECT o.*, m.role FROM org_members m JOIN orgs o ON o.id = m.org_id WHERE m.account_id = ? ORDER BY o.name`, accountId,
+    );
+  }
+  async setOrgTitle(orgId: string, title: string | null) {
+    await this.db.run("UPDATE orgs SET title = ? WHERE id = ?", title, orgId);
+  }
+  /** Deletes it; its apps stay, back with their `account_id` owners (ON DELETE SET NULL). */
+  async deleteOrg(orgId: string) {
+    await this.db.run("DELETE FROM orgs WHERE id = ?", orgId);
+  }
+  orgRole(orgId: string, accountId: string): Promise<OrgRole | undefined> {
+    return this.db.get<{ role: OrgRole }>("SELECT role FROM org_members WHERE org_id = ? AND account_id = ?", orgId, accountId)
+      .then((r) => r?.role);
+  }
+  orgMembers(orgId: string): Promise<{ account_id: string; role: OrgRole; created_at: number; email: string; github_login: string | null; disabled_at: number | null }[]> {
+    return this.db.all(
+      `SELECT m.account_id, m.role, m.created_at, ac.email, ac.github_login, ac.disabled_at
+       FROM org_members m JOIN accounts ac ON ac.id = m.account_id WHERE m.org_id = ? ORDER BY m.created_at, m.rowid`,
+      orgId,
+    );
+  }
+  /** Adds the account or changes its role. */
+  async setOrgMember(orgId: string, accountId: string, role: OrgRole) {
+    await this.db.run(
+      `INSERT INTO org_members (org_id, account_id, role, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (org_id, account_id) DO UPDATE SET role = excluded.role`,
+      orgId, accountId, role, Date.now(),
+    );
+  }
+  async removeOrgMember(orgId: string, accountId: string): Promise<boolean> {
+    return (await this.db.run("DELETE FROM org_members WHERE org_id = ? AND account_id = ?", orgId, accountId)).changes > 0;
+  }
+  /** Enabled admins of the organization. */
+  async orgAdminCount(orgId: string): Promise<number> {
+    return (await this.db.get<{ n: number }>(
+      `SELECT count(*) AS n FROM org_members m JOIN accounts ac ON ac.id = m.account_id
+       WHERE m.org_id = ? AND m.role = 'admin' AND ac.disabled_at IS NULL`, orgId,
+    ))!.n;
+  }
+  /**
+   * Gives the organization's apps held by `fromAccount` (their `account_id`, which a server from before
+   * organizations treats as the owner) to another enabled org admin, if there is one: run when that account
+   * leaves or is removed, or is disabled.
+   */
+  async reassignOrgApps(orgId: string, fromAccount: string) {
+    const to = await this.db.get<{ account_id: string }>(
+      `SELECT m.account_id FROM org_members m JOIN accounts ac ON ac.id = m.account_id
+       WHERE m.org_id = ? AND m.role = 'admin' AND ac.disabled_at IS NULL AND m.account_id <> ?
+       ORDER BY m.created_at, m.account_id LIMIT 1`,
+      orgId, fromAccount,
+    );
+    if (to) await this.db.run("UPDATE apps SET account_id = ? WHERE org_id = ? AND account_id = ?", to.account_id, orgId, fromAccount);
+  }
+  /** Apps and artifacts in the organization, deleted ones included. */
+  async orgAppCount(orgId: string): Promise<number> {
+    return (await this.db.get<{ n: number }>("SELECT count(*) AS n FROM apps WHERE org_id = ?", orgId))!.n;
+  }
+  /** Live apps and artifacts in the organization. */
+  orgApps(orgId: string): Promise<App[]> {
+    return this.db.all<App>("SELECT * FROM apps WHERE org_id = ? AND deleted_at IS NULL ORDER BY kind, name", orgId);
+  }
+  /** Moves an app into an organization, or out of one (`orgId` null) to `accountId` as its owner. */
+  async setAppOrg(appId: string, orgId: string | null, accountId: string) {
+    await this.db.run("UPDATE apps SET org_id = ?, account_id = ?, updated_at = ? WHERE id = ?", orgId, accountId, Date.now(), appId);
   }
 
   // ---- custom domains (pending until DNS-verified; one verified owner per domain)
@@ -840,6 +1067,18 @@ export class Store implements RateHits {
     await this.db.run(`INSERT INTO ai_wallets (account_id, balance, period, period_used) VALUES (?, ?, ?, ?)
       ON CONFLICT (account_id) DO UPDATE SET balance = excluded.balance, period = excluded.period, period_used = excluded.period_used`,
       accountId, w.balance, period, w.periodUsed);
+  }
+}
+
+/** Held while an account's tokens are issued, and while it's disabled. */
+export const accountLock = (accountId: string) => `cresslet:account:${accountId}`;
+/** Held while an organization's members change (the last admin can't leave). */
+export const orgLock = (orgId: string) => `cresslet:org:${orgId}`;
+
+/** issueToken for a disabled (or deleted) account. */
+export class AccountDisabledError extends Error {
+  constructor() {
+    super("account disabled");
   }
 }
 
