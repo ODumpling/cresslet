@@ -4,7 +4,7 @@ import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWith
 import { FitAddon, Terminal } from "./vendor/terminal.js";
 import { auth, fromTree, ignored, migrateDeployKeys, projects, toTree } from "./store.js";
 import { createCresslet } from "./cresslet-plugin.js";
-import { anthropicClient, apiKey, createAgent, createTools } from "./builder.js";
+import { anthropicClient, apiKey, createAgent, createTools, creditsClient, errorText } from "./builder.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, { dataset, ...props } = {}, ...children) => {
@@ -209,7 +209,7 @@ function logOut() {
           after = sessionStorage.getItem("cresslet.afterLogin");
           sessionStorage.removeItem("cresslet.afterLogin");
         } catch { /* storage blocked */ }
-        if (after?.startsWith("#/view/") || after === "#/cli") {
+        if (after?.startsWith("#/view/") || after?.startsWith("#/p/") || after === "#/cli") {
           location.hash = after;
           return;
         }
@@ -230,6 +230,8 @@ function showOnly(id) {
   $("project-title").hidden = true;
   $("deploy-btn").hidden = true;
   $("deploy-link").hidden = true;
+  $("view-switch").hidden = true;
+  $("drawer-btn").hidden = true;
   for (const a of document.querySelectorAll("[data-nav]")) {
     if (a.dataset.nav === id) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
@@ -267,6 +269,7 @@ function renderSettings() {
     else toast(`Could not load account: ${e.message}`);
   });
   renderTokens();
+  renderCredits();
   renderPageDefaults();
   api("/v1/apps").then(({ apps }) => {
     $("token-apps").replaceChildren(...(apps.length ? apps.map((a) =>
@@ -276,6 +279,45 @@ function renderSettings() {
 }
 
 const when = (iso) => iso ? new Date(iso).toLocaleString() : "never";
+
+// AI credits (when the server offers them): what's left, this month's free credits, and recent use.
+async function renderCredits() {
+  const on = !!(await meta).ai?.credits;
+  $("credits-section").hidden = !on;
+  if (!on) return;
+  let r;
+  try {
+    r = await api("/v1/me/credits");
+  } catch (e) {
+    $("credits-history").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load AI credits: ${e.message}` }));
+    return;
+  }
+  if (!r.enabled) return void ($("credits-section").hidden = true);
+  const num = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+  const tokens = new Intl.NumberFormat();
+  const amount = (x) => `${num.format(x)} ${num.format(x) === "1" ? "credit" : "credits"}`;
+  $("credits-available").textContent = amount(Math.max(0, r.available));
+  $("credits-monthly").textContent = r.monthly.allowance
+    ? `${num.format(r.monthly.remaining)} of ${num.format(r.monthly.allowance)} left, renews ${new Date(r.monthly.resetsAt).toLocaleDateString()}`
+    : "None on this server";
+  $("credits-balance").textContent = `${amount(r.balance)}${r.balance < 0 ? " (the last request went over)" : ""}`;
+  if (!r.history.length) {
+    $("credits-history").replaceChildren(el("li", { className: "list-row muted", textContent: "No AI credits used yet." }));
+    return;
+  }
+  $("credits-history").replaceChildren(...r.history.map((h) =>
+    el("li", { className: "list-row" },
+      el("div", { className: "tok" },
+        el("strong", { textContent: h.kind === "usage" ? `AI builder (${h.model ?? "Claude"})` : h.credits > 0 ? "Credits added" : "Credits removed" }),
+        el("span", {
+          className: "meta",
+          textContent: h.kind === "usage"
+            ? `${tokens.format(h.inputTokens + h.cacheReadTokens + h.cacheWriteTokens)} tokens in, ${tokens.format(h.outputTokens)} out${h.estimated ? " (estimated: the reply was cut off)" : ""}`
+            : h.note ?? "by the operator",
+        })),
+      el("span", { className: "meta", textContent: when(h.at) }),
+      el("span", { className: "credit-delta", textContent: `${h.credits > 0 ? "+" : "−"}${num.format(Math.abs(h.credits))}` }))));
+}
 
 async function renderTokens() {
   let tokens;
@@ -1411,6 +1453,54 @@ async function createProject(template) {
 // ------------------------------------------------------------------ workspace
 let booted = false;
 
+// Chat first: the AI builder beside the app's preview, the code (files + editor) when asked for, and the terminal and
+// deploy log in a drawer under them. What was last shown is remembered in this browser.
+const LAYOUT = "cresslet.workspace";
+const layoutPrefs = () => {
+  try {
+    return JSON.parse(localStorage.getItem(LAYOUT)) ?? {};
+  } catch {
+    return {};
+  }
+};
+const saveLayout = (p) => {
+  try {
+    localStorage.setItem(LAYOUT, JSON.stringify({ ...layoutPrefs(), ...p }));
+  } catch { /* storage blocked: not remembered */ }
+};
+
+/** The view switch (Preview | Code) and the drawer. `onCode`: the code was shown; `onDrawer`: the drawer was opened. */
+function mountLayout({ onCode, onDrawer }) {
+  const ws = $("workspace");
+  const switches = [...$("view-switch").querySelectorAll("button")];
+  function setView(v) {
+    ws.dataset.view = v;
+    $("files-pane").hidden = $("editor-pane").hidden = v !== "code";
+    $("preview-pane").hidden = v !== "preview";
+    for (const b of switches) b.setAttribute("aria-pressed", String(b.dataset.view === v));
+    saveLayout({ view: v });
+    if (v === "code") onCode();
+  }
+  function setDrawer(open, { focus = false } = {}) {
+    const had = $("drawer").contains(document.activeElement);
+    $("drawer").hidden = !open;
+    ws.dataset.drawer = open ? "open" : "";
+    $("drawer-btn").setAttribute("aria-expanded", String(open));
+    saveLayout({ drawer: open });
+    if (open) onDrawer();
+    if (!open && (focus || had)) $("drawer-btn").focus();
+  }
+  for (const b of switches) b.onclick = () => setView(b.dataset.view);
+  $("drawer-btn").onclick = () => setDrawer($("drawer").hidden);
+  $("drawer-close").onclick = () => setDrawer(false, { focus: true });
+  $("view-switch").hidden = false;
+  $("drawer-btn").hidden = false;
+  const prefs = layoutPrefs();
+  setView(prefs.view === "code" ? "code" : "preview");
+  setDrawer(prefs.drawer === true);
+  return { setView, setDrawer };
+}
+
 async function openProject(id, gen) {
   const project = await projects.get(id);
   if (gen !== routeGen) return; // navigated elsewhere while it loaded
@@ -1424,7 +1514,7 @@ async function openProject(id, gen) {
     return;
   }
   booted = true;
-  $("workspace-title").textContent = `${project.name}: editor and preview`;
+  $("workspace-title").textContent = `${project.name}: AI builder, preview and code`;
   showOnly("workspace");
   $("project-title").hidden = false;
   $("deploy-btn").hidden = false;
@@ -1437,7 +1527,7 @@ async function openProject(id, gen) {
     project.name = e.target.value.trim() || project.name;
     e.target.value = project.name;
     document.title = `${project.name} · Cresslet Studio`;
-    $("workspace-title").textContent = `${project.name}: editor and preview`;
+    $("workspace-title").textContent = `${project.name}: AI builder, preview and code`;
     await projects.rename(project.id, project.name);
   };
 
@@ -1473,8 +1563,16 @@ async function openProject(id, gen) {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
-  term.open($("terminal"));
-  term.textarea?.setAttribute("aria-describedby", "terminal-help");
+  // Opened the first time the drawer shows (xterm measures its cells on open); output before that is kept.
+  let termOpen = false;
+  const openTerm = () => {
+    if (termOpen) return;
+    termOpen = true;
+    term.open($("terminal"));
+    term.textarea?.setAttribute("aria-describedby", "terminal-help");
+    fit.fit();
+    new ResizeObserver(() => fit.fit()).observe($("terminal"));
+  };
   // xterm sends Tab to the shell; Esc then Tab (or Shift+Tab) moves focus out instead, like the editor.
   let escaped = false;
   term.attachCustomKeyEventHandler((e) => {
@@ -1486,8 +1584,8 @@ async function openProject(id, gen) {
     escaped = e.key === "Escape";
     return true;
   });
-  fit.fit();
-  new ResizeObserver(() => fit.fit()).observe($("terminal"));
+  let showCode = () => {}; // the editor measures itself once it's created and shown
+  const layout = mountLayout({ onCode: () => showCode(), onDrawer: openTerm });
 
   setStatus("Booting");
   let c;
@@ -1583,6 +1681,7 @@ async function openProject(id, gen) {
       ],
     }),
   });
+  showCode = () => view.requestMeasure();
   const langFor = (p) =>
     /\.(ts|tsx)$/.test(p) ? javascript({ typescript: true, jsx: p.endsWith("x") })
     : /\.(js|jsx|mjs)$/.test(p) ? javascript({ jsx: true })
@@ -1765,6 +1864,7 @@ async function openProject(id, gen) {
     $("deploy-btn-label").textContent = "Deploying…";
     const log = $("deploy-log");
     log.textContent = "";
+    layout.setDrawer(true);
     selectTab("deploy-log");
     if (document.activeElement === btn) log.focus(); // the disabled button would drop focus to <body>
     try {
@@ -1818,23 +1918,59 @@ function mountBuilder({ c, devLog, onChange }) {
     return node;
   }
 
+  // Where Claude is reached: "key" (the user's own Anthropic API key, from this browser), "credits" (this server, on
+  // the account's AI credits; when it offers them and the user is logged in), or null (set one up first).
+  let creditsOn = false, wantKey = false; // wantKey: entering an own key though credits are available
+  const source = () => (apiKey.get() ? "key" : creditsOn && auth.token && !wantKey ? "credits" : null);
   function showView() {
-    const has = !!apiKey.get();
-    $("builder-key-form").hidden = has;
-    $("builder-chat").hidden = !has;
-    return has;
+    const src = source();
+    $("builder-setup").hidden = !!src;
+    $("builder-chat").hidden = !src;
+    $("builder-credits-offer").hidden = !creditsOn || !!auth.token;
+    $("builder-key-cancel").hidden = !(creditsOn && auth.token);
+    $("builder-forget").hidden = src !== "key";
+    $("builder-own-key").hidden = src !== "credits";
+    $("builder-credits").hidden = src !== "credits";
+    $("builder-key-help").firstChild.textContent = creditsOn && auth.token
+      ? "Kept in this browser and sent only to Anthropic. Usage is billed to your Anthropic account, not your AI credits. "
+      : "Kept in this browser and sent only to Anthropic. Usage is billed to your Anthropic account. ";
+    return !!src;
   }
+  const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+  async function refreshCredits() {
+    if (source() !== "credits") return;
+    const r = await api("/v1/me/credits").catch(() => null);
+    if (!r) return;
+    if (!r.enabled) {
+      creditsOn = false;
+      return void showView();
+    }
+    const left = Math.max(0, r.available);
+    const label = $("builder-credits");
+    const unit = fmt.format(left) === "1" ? "credit" : "credits";
+    label.textContent = `${fmt.format(left)} ${unit}`;
+    label.title = `${fmt.format(left)} AI ${unit} left`;
+    if (left <= 0) label.dataset.low = "";
+    else delete label.dataset.low;
+  }
+  meta.then((m) => {
+    creditsOn = !!m.ai?.credits;
+    showView();
+    refreshCredits();
+  });
   // Where focus goes in the chat: the message field, or the heading while it's locked (a disabled field can't take it).
   const chatFocus = () => (locked ? $("builder-title") : input).focus();
-  function setOpen(open, { focus = true } = {}) {
+  const setupFocus = () => ($("builder-credits-offer").hidden ? $("builder-key") : $("builder-login")).focus();
+  function setOpen(open, { focus = true, remember = true } = {}) {
     pane.hidden = !open;
     btn.setAttribute("aria-expanded", String(open));
     $("workspace").dataset.builder = open ? "open" : "";
+    if (remember) saveLayout({ chat: open });
     const chat = showView();
     if (!focus) return;
     if (!open) btn.focus();
     else if (chat) chatFocus();
-    else $("builder-key").focus();
+    else setupFocus();
   }
   btn.onclick = () => setOpen(pane.hidden);
   $("builder-close").onclick = () => setOpen(false);
@@ -1843,11 +1979,19 @@ function mountBuilder({ c, devLog, onChange }) {
     $("builder-send").disabled = busy || locked;
     $("builder-stop").hidden = !busy;
     $("builder-new").disabled = busy;
+    $("builder-own-key").disabled = busy;
+    $("builder-forget").disabled = busy;
     input.disabled = locked;
     $("builder-locked").hidden = !locked;
     input.setAttribute("aria-describedby", locked ? "builder-locked builder-hint" : "builder-hint");
   }
 
+  $("builder-login").onclick = () => {
+    try {
+      sessionStorage.setItem("cresslet.afterLogin", location.hash); // back to this project
+    } catch { /* storage blocked: back to the home page */ }
+    logIn();
+  };
   $("builder-key-form").onsubmit = (e) => {
     e.preventDefault();
     const v = $("builder-key").value.trim();
@@ -1858,16 +2002,35 @@ function mountBuilder({ c, devLog, onChange }) {
     }
     $("builder-key").value = "";
     $("builder-key-error").textContent = "";
+    wantKey = false;
     showView();
     chatFocus();
   };
   $("builder-key").oninput = () => ($("builder-key-error").textContent = "");
-  $("builder-forget").onclick = () => {
-    agent?.stop();
-    apiKey.set(null);
+  $("builder-key-cancel").onclick = () => {
+    wantKey = false;
+    $("builder-key-error").textContent = "";
+    showView();
+    refreshCredits();
+    chatFocus();
+  };
+  $("builder-own-key").onclick = () => {
+    if (busy) return;
+    wantKey = true;
     showView();
     $("builder-key").focus();
-    announce("API key removed from this browser");
+  };
+  $("builder-forget").onclick = () => {
+    if (busy) return;
+    apiKey.set(null);
+    if (showView()) {
+      refreshCredits();
+      chatFocus();
+      announce("API key removed from this browser. Using your AI credits.");
+    } else {
+      setupFocus();
+      announce("API key removed from this browser");
+    }
   };
   $("builder-new").onclick = () => {
     if (busy) return;
@@ -1932,9 +2095,14 @@ function mountBuilder({ c, devLog, onChange }) {
     e.preventDefault();
     const text = input.value.trim();
     if (!text || busy || locked) return;
-    const key = apiKey.get();
-    if (!key) return void showView();
-    agent ??= createAgent({ client: () => anthropicClient(apiKey.get()), tools, on });
+    if (!source()) return void showView();
+    // Each request goes the way chosen when it's sent (the key can be forgotten or entered mid-chat).
+    agent ??= createAgent({
+      client: () => (source() === "key" ? anthropicClient(apiKey.get()) : creditsClient(auth.token)),
+      errorText: (e) => errorText(e, { credits: source() !== "key" }),
+      tools,
+      on,
+    });
     add(el("li", { className: "msg user", textContent: text }));
     log.scrollTop = log.scrollHeight;
     input.value = "";
@@ -1958,6 +2126,7 @@ function mountBuilder({ c, devLog, onChange }) {
       render();
       if (replied) announce(`Claude: ${replied}${failed ? ` (${failed})` : ""}`);
       else if (!failed) announce("Claude finished");
+      refreshCredits();
     }
   };
   input.addEventListener("keydown", (e) => {
@@ -2000,6 +2169,7 @@ function mountBuilder({ c, devLog, onChange }) {
   }
 
   render();
+  setOpen(layoutPrefs().chat !== false, { focus: false, remember: false });
   return {
     approve,
     running: () => tools.running > 0,

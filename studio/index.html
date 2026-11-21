@@ -101,10 +101,18 @@
             <input id="project-name" aria-label="Project name" spellcheck="false" autocomplete="off" />
             <span class="status" id="status" data-state="idle" role="status"><span class="status-dot" aria-hidden="true"></span><span id="status-text">Idle</span></span>
           </div>
+          <!-- What the main area shows next to the chat: the running app, or its code. -->
+          <div class="view-switch" id="view-switch" role="group" aria-label="Show" hidden>
+            <button type="button" id="view-preview" data-view="preview" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-window" /></svg>Preview</button>
+            <button type="button" id="view-code" data-view="code" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-code" /></svg>Code</button>
+          </div>
           <div class="spacer"></div>
           <a class="deploy-link" id="deploy-link" target="_blank" rel="noopener" hidden></a>
           <button class="btn" id="builder-btn" type="button" aria-expanded="false" aria-controls="builder" hidden>
             <svg class="icon" aria-hidden="true"><use href="#i-sparkles" /></svg>AI builder
+          </button>
+          <button class="btn" id="drawer-btn" type="button" aria-expanded="false" aria-controls="drawer" hidden>
+            <svg class="icon" aria-hidden="true"><use href="#i-terminal" /></svg>Terminal
           </button>
           <button class="btn primary" id="deploy-btn" type="button" hidden>
             <svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg><span id="deploy-btn-label">Deploy</span>
@@ -409,6 +417,19 @@
               <dt>Email</dt><dd id="set-email">—</dd>
             </dl>
           </section>
+          <section class="block" id="credits-section" hidden aria-labelledby="credits-title">
+            <div class="block-head">
+              <h2 id="credits-title">AI credits</h2>
+              <p class="muted small" id="credits-hint">The AI builder spends credits on what Claude reads and writes. This month's free credits go first.</p>
+            </div>
+            <dl class="panel kv credits-kv">
+              <dt>Available</dt><dd id="credits-available">—</dd>
+              <dt>Free this month</dt><dd id="credits-monthly">—</dd>
+              <dt>Granted</dt><dd id="credits-balance">—</dd>
+            </dl>
+            <h3 class="sub-title" id="credits-history-title">Recent use</h3>
+            <ul class="list" id="credits-history" aria-labelledby="credits-history-title"></ul>
+          </section>
           <section class="block" aria-labelledby="tokens-title">
             <div class="block-head">
               <h2 id="tokens-title" tabindex="-1">API tokens</h2>
@@ -563,7 +584,59 @@
 
         <main id="workspace" class="workspace" hidden aria-labelledby="workspace-title">
           <h1 class="sr-only" id="workspace-title" tabindex="-1">Project</h1>
-          <section class="pane files" aria-labelledby="files-title">
+          <!-- AI builder: Claude, through this server with the account's AI credits, or called from this browser with
+               the user's own Anthropic API key (studio/builder.js). Open by default: the studio is chat first. -->
+          <section class="pane builder-pane" id="builder" aria-labelledby="builder-title" hidden>
+            <div class="pane-head">
+              <h2 id="builder-title" class="pane-title" tabindex="-1">AI builder</h2>
+              <button class="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat">
+                <svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg>
+              </button>
+              <span class="credits" id="builder-credits" hidden></span>
+              <button class="icon-btn" id="builder-close" type="button" aria-label="Close AI builder" title="Close AI builder">
+                <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
+              </button>
+            </div>
+            <!-- outside the views it reports on, so it's never hidden when it speaks -->
+            <p class="sr-only" id="builder-status" role="status"></p>
+            <div id="builder-setup" class="builder-setup" hidden>
+              <p>Ask Claude to change this project. It edits files, runs commands in this tab's terminal and, when you ask, deploys with your session, like the CLI.</p>
+              <div id="builder-credits-offer" class="builder-offer" hidden>
+                <p id="builder-credits-text">Log in to use AI credits: no API key needed.</p>
+                <div class="row start"><button class="btn primary" id="builder-login" type="button"><svg class="icon" aria-hidden="true"><use href="#i-github" /></svg>Log in</button></div>
+                <p class="muted small or" id="builder-or">Or use your own Anthropic API key:</p>
+              </div>
+              <form id="builder-key-form">
+                <div class="field">
+                  <label for="builder-key">Anthropic API key</label>
+                  <input id="builder-key" class="input mono" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" required aria-describedby="builder-key-help builder-key-error" />
+                </div>
+                <p class="muted small" id="builder-key-help">Kept in this browser and sent only to Anthropic. Usage is billed to your Anthropic account. <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">Create a key<span class="sr-only"> (opens in a new tab)</span></a></p>
+                <p class="error small" id="builder-key-error" role="alert"></p>
+                <div class="row start">
+                  <button class="btn primary" type="submit">Save key</button>
+                  <button class="btn" id="builder-key-cancel" type="button" hidden>Use AI credits instead</button>
+                </div>
+              </form>
+            </div>
+            <div id="builder-chat" class="builder-chat" hidden>
+              <ol id="builder-log" class="builder-log" aria-labelledby="builder-title" tabindex="0"></ol>
+              <div class="working" id="builder-working" hidden><span class="spinner" aria-hidden="true"></span><span id="builder-working-text">Working…</span></div>
+              <form id="builder-form" class="builder-form">
+                <label class="sr-only" for="builder-input">Message to Claude</label>
+                <p class="muted small" id="builder-locked" hidden>Run the project first (see the preview): the AI builder unlocks with the terminal and Deploy.</p>
+                <textarea id="builder-input" class="input" rows="3" placeholder="Describe a change…" aria-describedby="builder-hint"></textarea>
+                <div class="builder-actions">
+                  <p class="muted small" id="builder-hint"><kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line.</p>
+                  <button class="btn sm" id="builder-forget" type="button" hidden>Forget key</button>
+                  <button class="btn sm" id="builder-own-key" type="button" hidden>Use own key</button>
+                  <button class="btn sm" id="builder-stop" type="button" hidden>Stop</button>
+                  <button class="btn primary sm" id="builder-send" type="submit">Send</button>
+                </div>
+              </form>
+            </div>
+          </section>
+          <section class="pane files" id="files-pane" aria-labelledby="files-title">
             <div class="pane-head">
               <h2 id="files-title" class="pane-title">Files</h2>
               <button class="icon-btn" id="new-file" type="button" aria-label="New file" title="New file">
@@ -572,7 +645,7 @@
             </div>
             <nav id="tree" class="tree" aria-labelledby="files-title"></nav>
           </section>
-          <section class="pane editor-pane" aria-labelledby="editor-title">
+          <section class="pane editor-pane" id="editor-pane" aria-labelledby="editor-title">
             <div class="pane-head">
               <h2 class="sr-only" id="editor-title">Code editor</h2>
               <svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>
@@ -581,7 +654,7 @@
             <div id="editor" class="editor"></div>
             <p class="pane-foot" id="editor-help">Tab indents. Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the editor.</p>
           </section>
-          <section class="pane preview-pane" aria-labelledby="preview-title">
+          <section class="pane preview-pane" id="preview-pane" aria-labelledby="preview-title">
             <div class="pane-head">
               <h2 class="sr-only" id="preview-title">Preview</h2>
               <button class="icon-btn" id="preview-reload" type="button" aria-label="Reload preview" title="Reload preview">
@@ -605,52 +678,18 @@
               </div>
             </div>
           </section>
-          <!-- AI builder: Claude, called from this browser with the user's own Anthropic API key (studio/builder.js). -->
-          <section class="pane builder-pane" id="builder" aria-labelledby="builder-title" hidden>
-            <div class="pane-head">
-              <h2 id="builder-title" class="pane-title" tabindex="-1">AI builder</h2>
-              <button class="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat">
-                <svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg>
-              </button>
-              <button class="icon-btn" id="builder-close" type="button" aria-label="Close AI builder" title="Close AI builder">
-                <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
-              </button>
-            </div>
-            <!-- outside the views it reports on, so it's never hidden when it speaks -->
-            <p class="sr-only" id="builder-status" role="status"></p>
-            <form id="builder-key-form" class="builder-setup" hidden>
-              <p>Ask Claude to change this project. It edits files, runs commands in this tab's terminal and, when you ask, deploys with your session, like the CLI.</p>
-              <div class="field">
-                <label for="builder-key">Anthropic API key</label>
-                <input id="builder-key" class="input mono" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" required aria-describedby="builder-key-help builder-key-error" />
+          <section class="pane bottom-pane" id="drawer" aria-label="Output" hidden>
+            <div class="pane-head drawer-head">
+              <div class="tabs" role="tablist" aria-label="Output">
+                <button role="tab" class="tab" id="tab-terminal" type="button" aria-selected="true" aria-controls="terminal" data-tab="terminal">
+                  <svg class="icon" aria-hidden="true"><use href="#i-terminal" /></svg>Terminal
+                </button>
+                <button role="tab" class="tab" id="tab-deploy-log" type="button" aria-selected="false" aria-controls="deploy-log" data-tab="deploy-log" tabindex="-1">
+                  <svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Deploy log
+                </button>
               </div>
-              <p class="muted small" id="builder-key-help">Kept in this browser and sent only to Anthropic. Usage is billed to your Anthropic account. <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">Create a key<span class="sr-only"> (opens in a new tab)</span></a></p>
-              <p class="error small" id="builder-key-error" role="alert"></p>
-              <div class="row start"><button class="btn primary" type="submit">Save key</button></div>
-            </form>
-            <div id="builder-chat" class="builder-chat" hidden>
-              <ol id="builder-log" class="builder-log" aria-labelledby="builder-title" tabindex="0"></ol>
-              <div class="working" id="builder-working" hidden><span class="spinner" aria-hidden="true"></span><span id="builder-working-text">Working…</span></div>
-              <form id="builder-form" class="builder-form">
-                <label class="sr-only" for="builder-input">Message to Claude</label>
-                <p class="muted small" id="builder-locked" hidden>Run the project first (see the preview): the AI builder unlocks with the terminal and Deploy.</p>
-                <textarea id="builder-input" class="input" rows="3" placeholder="Describe a change…" aria-describedby="builder-hint"></textarea>
-                <div class="builder-actions">
-                  <p class="muted small" id="builder-hint"><kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line.</p>
-                  <button class="btn sm" id="builder-forget" type="button">Forget key</button>
-                  <button class="btn sm" id="builder-stop" type="button" hidden>Stop</button>
-                  <button class="btn primary sm" id="builder-send" type="submit">Send</button>
-                </div>
-              </form>
-            </div>
-          </section>
-          <section class="pane bottom-pane" aria-label="Output">
-            <div class="pane-head tabs" role="tablist" aria-label="Output">
-              <button role="tab" class="tab" id="tab-terminal" type="button" aria-selected="true" aria-controls="terminal" data-tab="terminal">
-                <svg class="icon" aria-hidden="true"><use href="#i-terminal" /></svg>Terminal
-              </button>
-              <button role="tab" class="tab" id="tab-deploy-log" type="button" aria-selected="false" aria-controls="deploy-log" data-tab="deploy-log" tabindex="-1">
-                <svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Deploy log
+              <button class="icon-btn" id="drawer-close" type="button" aria-label="Close terminal" title="Close terminal">
+                <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
               </button>
             </div>
             <div id="terminal" class="terminal" data-panel="terminal" role="tabpanel" aria-labelledby="tab-terminal" aria-describedby="terminal-help"></div>

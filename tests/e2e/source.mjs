@@ -31,8 +31,11 @@ try {
   const row = home.locator(".list-row", { hasText: app });
   await row.getByRole("button", { name: "Open source" }).click();
   await home.waitForURL(/#\/p\//);
+  await home.getByRole("button", { name: "Code", exact: true }).click();
+  await home.getByRole("button", { name: "Terminal", exact: true }).click();
   await home.locator("#tree").getByText("App.tsx").waitFor({ timeout: 30000 });
   // Imported code doesn't run until the user says so.
+  await home.getByRole("button", { name: "Preview", exact: true }).click(); // Run it is in the preview
   await home.getByRole("button", { name: "Run it" }).waitFor({ timeout: 30000 });
   await home.waitForTimeout(1500);
   const termText = await home.locator(".xterm-rows").innerText(); // must be readable

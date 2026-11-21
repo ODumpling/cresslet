@@ -28,7 +28,7 @@ npx cresslet logs -f
 npx cresslet auth login && npx cresslet claim   # keep it (browser login, if GitHub login is configured): no expiry, outbound fetch, secrets
 ```
 
-Browser: open http://localhost:8787 → pick a template → edits, `npm install`, dev server and preview all run in-browser on cresslet-container → **Deploy**. Or open **AI builder** and ask Claude for the change (your own Anthropic API key, called straight from the browser; [docs/architecture.md#ai-builder](docs/architecture.md#ai-builder)).
+Browser: open http://localhost:8787 → pick a template → the **AI builder** chat opens beside the live preview: ask Claude for a change, or switch to **Code** to edit it yourself. `npm install`, the dev server and the preview all run in-browser on cresslet-container → **Deploy**. Claude runs on the account's AI credits when the server has an Anthropic key (`CRESSLET_ANTHROPIC_API_KEY`, metered per token: [docs/api.md#ai-credits](docs/api.md#ai-credits)), or on your own Anthropic API key, called straight from the browser ([docs/architecture.md#ai-builder](docs/architecture.md#ai-builder)).
 
 Pages: upload a static HTML file or folder (studio Pages, or `cresslet page upload report.html`) and share it: private (you and people you invite), anyone with the link, or public; kept 30 days unless you or your account defaults say otherwise ([docs/api.md#pages](docs/api.md#pages)).
 

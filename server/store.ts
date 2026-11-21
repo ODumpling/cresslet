@@ -232,6 +232,17 @@ export class Store {
     if (!(this.db.prepare("PRAGMA table_info(apps)").all() as { name: string }[]).some((c) => c.name === "anon_client")) {
       this.db.exec("ALTER TABLE apps ADD COLUMN anon_client TEXT");
     }
+    // AI credits (server/credits.ts), in millicredits. `balance`: granted credits left (can go below 0 by the last
+    // request); `period_used`: this month's free allowance used (`period` = "YYYY-MM", UTC; a new month starts at 0).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ai_wallets (
+        account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        balance INTEGER NOT NULL DEFAULT 0, period TEXT, period_used INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS ai_ledger (
+        id INTEGER PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL, detail TEXT);
+      CREATE INDEX IF NOT EXISTS ai_ledger_account ON ai_ledger (account_id, id);
+    `);
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
   }
@@ -749,5 +760,63 @@ export class Store {
   }
   deleteSecret(appId: string, key: string) {
     this.db.prepare("DELETE FROM secrets WHERE app_id = ? AND key = ?").run(appId, key);
+  }
+
+  // ---- AI credits (millicredits; server/credits.ts)
+  /** Granted credits left and this month's free allowance used (0 in a month with no use yet). */
+  aiWallet(accountId: string, period: string): { balance: number; periodUsed: number } {
+    const w = this.db.prepare("SELECT balance, period, period_used FROM ai_wallets WHERE account_id = ?").get(accountId) as
+      { balance: number; period: string | null; period_used: number } | undefined;
+    return { balance: w?.balance ?? 0, periodUsed: w && w.period === period ? w.period_used : 0 };
+  }
+
+  /**
+   * Charges `amount` for one request: from this month's free `allowance` first, the rest from the balance (which
+   * may go below 0). One ledger row. Returns the wallet after.
+   */
+  chargeAi(accountId: string, period: string, allowance: number, amount: number, detail: unknown) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const w = this.aiWallet(accountId, period);
+      const free = Math.max(0, Math.min(amount, allowance - w.periodUsed));
+      const after = { balance: w.balance - (amount - free), periodUsed: w.periodUsed + free };
+      this.#putWallet(accountId, period, after);
+      this.db.prepare("INSERT INTO ai_ledger (account_id, created_at, kind, amount, detail) VALUES (?, ?, 'usage', ?, ?)")
+        .run(accountId, Date.now(), -amount, JSON.stringify({ ...(detail as object), free }));
+      this.db.exec("COMMIT");
+      return after;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** Adds `amount` (negative: takes it back) to the balance. One ledger row. Returns the new balance. */
+  grantAi(accountId: string, amount: number, detail: { note?: string | null; by: string }): number {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("INSERT INTO ai_wallets (account_id, balance) VALUES (?, 0) ON CONFLICT (account_id) DO NOTHING").run(accountId);
+      this.db.prepare("UPDATE ai_wallets SET balance = balance + ? WHERE account_id = ?").run(amount, accountId);
+      this.db.prepare("INSERT INTO ai_ledger (account_id, created_at, kind, amount, detail) VALUES (?, ?, 'grant', ?, ?)")
+        .run(accountId, Date.now(), amount, JSON.stringify(detail));
+      const { balance } = this.db.prepare("SELECT balance FROM ai_wallets WHERE account_id = ?").get(accountId) as { balance: number };
+      this.db.exec("COMMIT");
+      return balance;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** The account's latest ledger rows, newest first. */
+  aiLedger(accountId: string, limit = 50): { created_at: number; kind: string; amount: number; detail: string | null }[] {
+    return this.db.prepare("SELECT created_at, kind, amount, detail FROM ai_ledger WHERE account_id = ? ORDER BY id DESC LIMIT ?")
+      .all(accountId, limit) as { created_at: number; kind: string; amount: number; detail: string | null }[];
+  }
+
+  #putWallet(accountId: string, period: string, w: { balance: number; periodUsed: number }) {
+    this.db.prepare(`INSERT INTO ai_wallets (account_id, balance, period, period_used) VALUES (?, ?, ?, ?)
+      ON CONFLICT (account_id) DO UPDATE SET balance = excluded.balance, period = excluded.period, period_used = excluded.period_used`)
+      .run(accountId, w.balance, period, w.periodUsed);
   }
 }

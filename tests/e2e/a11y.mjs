@@ -142,6 +142,11 @@ try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /react/ }).click();
   await page.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
+  // Chat first: the AI builder and the preview; code and terminal on request, and the toggles say what they show.
+  assert(await page.locator("#builder").isVisible() && await page.locator("#editor").isHidden() && await page.locator("#drawer").isHidden(), "workspace didn't open chat first");
+  const terminalBtn = page.getByRole("button", { name: "Terminal", exact: true });
+  await terminalBtn.click();
+  assert(await terminalBtn.getAttribute("aria-expanded") === "true", "Terminal toggle not expanded");
   // Dim terminal output (request logs) uses the muted text color, not 50% opacity.
   // ("fetching N packages…" from npm install is always dim)
   const dim = await page.evaluate(() => {
@@ -160,6 +165,9 @@ try {
   await page.keyboard.press("Escape");
   await page.keyboard.press("Tab");
   assert(!(await page.evaluate(() => !!document.activeElement.closest(".xterm"))), "Esc, Tab didn't leave the terminal");
+  const codeBtn = page.getByRole("button", { name: "Code", exact: true });
+  await codeBtn.click();
+  assert(await codeBtn.getAttribute("aria-pressed") === "true" && await page.locator("#preview-pane").isHidden(), "Code didn't replace the preview");
   // The editor's focus ring must be painted (CodeMirror's layers can cover it): the editor's bottom-left
   // edge (gutter, away from the active line) looks different focused and unfocused.
   const box = await page.locator("#editor").boundingBox();
@@ -172,6 +180,7 @@ try {
   await page.keyboard.press("Escape");
   await page.keyboard.press("Tab");
   assert(!(await page.evaluate(() => !!document.activeElement.closest(".cm-editor"))), "Esc, Tab didn't leave the editor");
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await page.locator("#preview-path").fill("");
   await page.locator("#preview-path").pressSequentially("/abc");
   assert(await page.locator("#preview-path").inputValue() === "/abc", "can't type in the preview path");
@@ -184,9 +193,13 @@ try {
   await page.locator("#deploy-link").waitFor({ state: "visible", timeout: 60000 });
   console.log("deploy focus ok");
 
-  // Short viewport: editor and preview keep usable height.
+  // Short viewport: preview, chat and editor keep usable height (the drawer is open since Deploy).
   await page.setViewportSize({ width: 1000, height: 300 });
-  const h = await page.evaluate(() => ["editor", "preview"].map((id) => document.getElementById(id).getBoundingClientRect().height));
+  const tall = (id) => page.evaluate((i) => document.getElementById(i).getBoundingClientRect().height, id);
+  const h = [await tall("preview"), await tall("builder")];
+  await page.getByRole("button", { name: "Code", exact: true }).click();
+  h.push(await tall("editor"));
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   assert(h.every((x) => x > 100), `panes collapsed at 300px tall: ${h}`);
   console.log("short viewport ok", h);
 

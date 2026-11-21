@@ -215,4 +215,20 @@ export function adminRoutes(
     console.log(`cresslet: ${acct.email} role ${role ?? "(none)"} set by ${who}`);
     return c.json({ account: { id: acct.id, email: acct.email, github: acct.github_login, role } });
   });
+
+  // Give an account AI credits (negative: take some back). Needs AI credits on (CRESSLET_ANTHROPIC_API_KEY).
+  app.post("/admin/accounts/credits", async (c) => {
+    const who = requireSiteAdmin(c);
+    if (!cfg.ai) throw new HttpError(409, "AI credits aren't enabled on this server (CRESSLET_ANTHROPIC_API_KEY)", "ai_disabled");
+    const { email, credits, note } = await body<{ email?: string; credits?: number; note?: string }>(c);
+    if (typeof credits !== "number" || !Number.isFinite(credits) || credits === 0 || Math.abs(credits) > 10_000_000) {
+      throw new HttpError(400, "credits must be a non-zero number (at most 10,000,000 either way)");
+    }
+    if (note !== undefined && (typeof note !== "string" || note.length > 200)) throw new HttpError(400, "note must be a string of at most 200 characters");
+    const acct = email ? store.accountByEmail(email) : undefined;
+    if (!acct) throw new HttpError(404, "account not found", "not_found");
+    const balance = store.grantAi(acct.id, Math.round(credits * 1000), { note: note ?? null, by: who });
+    console.log(`cresslet: ${credits} AI credits to ${acct.email} by ${who}`);
+    return c.json({ account: { id: acct.id, email: acct.email, github: acct.github_login }, balance: balance / 1000 });
+  });
 }

@@ -25,7 +25,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/v1` | server info, limits, app URL template, `customDomains` (whether apps can add custom domains), `auth: {github, cli}` (`cli`: the browser login below) |
+| GET | `/v1` | server info, limits, app URL template, `customDomains` (whether apps can add custom domains), `auth: {github, cli}` (`cli`: the browser login below), `ai: {credits, monthlyCredits}` ([AI credits](#ai-credits)) |
 | POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it) |
 | GET | `/v1/me` | `{account: {id, email, github, role}, tokenInfo}` (`github` = login or null; `role` = `"SiteAdmin"` or null); `tokenInfo: {id, name, role, apps, createdAt, lastUsedAt}` for the calling token (any scope) |
 | GET | `/v1/me/tokens` | `{tokens: [{id, name, role, apps, createdAt, lastUsedAt, current}]}`; never the secret |
@@ -83,6 +83,9 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | DELETE | `/v1/admin/sites/:name` | **site admin**: soft delete. Offline at once (not served, no crons, 404 to its owner, name stays taken) and restorable until purged after `CRESSLET_DELETED_RETENTION_DAYS`. `?purge=1` deletes it and its data permanently now |
 | POST | `/v1/admin/sites/:name/restore` | **site admin**: undo a soft delete |
 | PUT | `/v1/admin/accounts/role` | **site admin**: `{email, role: "SiteAdmin" \| null}` grant/revoke (not your own) |
+| GET | `/v1/me/credits` | token with `read` or more over the whole account: `{enabled: false}`, or `{enabled: true, available, balance, monthly: {allowance, used, remaining, resetsAt}, creditsPerUsd, history: [{at, kind: usage\|grant, credits, model?, inputTokens?, outputTokens?, cacheReadTokens?, cacheWriteTokens?, estimated?, note?}]}` (last 50) |
+| POST | `/v1/ai/v1/messages` | `deploy` token over the whole account: a streamed Anthropic Messages request, on [AI credits](#ai-credits) |
+| POST | `/v1/admin/accounts/credits` | **site admin**: `{email, credits, note?}` adds credits to the account (negative: takes some back) → `{account, balance}`. 409 `ai_disabled` without AI credits |
 
 ## Pages
 
@@ -104,6 +107,15 @@ curl -X POST $CRESSLET/v1/pages -H "authorization: Bearer $CRESSLET_TOKEN" -H "c
   -d '{"html":"<h1>Report</h1>","visibility":"link","retentionDays":7}'
 # → {"page":{"name":"pg-…","url":"https://pg-….example.com","visibility":"link","retentionDays":7,"expiresAt":"…",…}}
 ```
+
+## AI credits
+
+With `CRESSLET_ANTHROPIC_API_KEY` set ([self-hosting](self-hosting.md#configuration)), the studio's AI builder calls Claude through the server instead of with each user's own Anthropic key: `POST /v1/ai/v1/messages` takes an [Anthropic Messages](https://platform.claude.com/docs/en/api/messages) request, sends it with the operator's key, streams the reply back unchanged, and charges the account for the tokens the reply used. An Anthropic SDK points at it with `baseURL: "<server>/v1/ai"` and the Cresslet token as `authToken` (it never reaches Anthropic).
+
+- **Price**: Anthropic's list price for the model that answered (cache reads and writes included; every attempt of a server-side fallback), × `CRESSLET_AI_CREDITS_PER_USD` (default 100: a credit is a cent at cost). Rounded up to a thousandth of a credit.
+- **Where credits come from**: `CRESSLET_AI_MONTHLY_CREDITS` free each calendar month (UTC; used first, unused ones don't carry over), then credits a site admin grants (`POST /v1/admin/accounts/credits`). A request needs some left (else 402 `credits_exhausted`); the request that crosses zero is charged in full, so the balance can end slightly below 0. At most `CRESSLET_AI_MAX_CONCURRENT` requests per account at once (429), which bounds that.
+- **What can be sent**: streamed requests (`stream: true`) for a listed Claude model, with `max_tokens` up to 128000, client tools only (no server tools such as web search), `output_config` `effort`/`format`, and the `server-side-fallback-2026-07-01` beta. Anything else is a 400 before it reaches Anthropic. Errors use the Messages API shape (`{type: "error", error: {type, message}}`).
+- **A reply the client stops** is still read to its end and charged for what Claude generated; one cut off upstream is charged for what streamed, with the output estimated (`estimated: true` in the history).
 
 ## POST /v1/deploys
 
