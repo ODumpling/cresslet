@@ -335,6 +335,13 @@ test("pages keep only the version they serve on disk; apps keep 10 for rollback"
     assert.deepEqual(rows(row.id), [v4]);
     assert.deepEqual(await onDisk(row.id), [v4]);
     assert.equal(await (await t.visit(page.name)).text(), "v4");
+    // A clock stepped back: the served version sorts below the one it replaced, which still goes.
+    const v5 = await put("v5");
+    store.db.prepare("UPDATE deploys SET created_at = ? WHERE id = ?").run(Date.now() - 200_000, v5);
+    assert.deepEqual(rows(row.id), [v4, v5]);
+    await t.srv.reap();
+    assert.deepEqual(rows(row.id), [v5]);
+    assert.deepEqual(await onDisk(row.id), [v5]);
 
     // An app keeps its last 10 deploys (rollback), files and rows alike; the reaper leaves them alone.
     for (let i = 0; i < 12; i++) {

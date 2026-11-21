@@ -242,8 +242,9 @@ export async function writePage(cfg: Config, store: Store, app: App, files: Depl
 
 /** Keep `keep` and the `keepCount - 1` most recent others (10 in all for an app's rollback). */
 async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = 10) {
+  const live = store.appById(appId, true)?.current_deploy_id; // a rollback may have moved it
   const others = store.deploys(appId, 1000).filter((d) => d.id !== keep);
-  for (const d of others.slice(keepCount - 1)) await removeDeploy(cfg, store, d);
+  await removeDeploys(cfg, store, others.slice(keepCount - 1).filter((d) => d.id !== live));
 }
 
 /** A replaced page version stays this long, so a request that read the old pointer can finish. */
@@ -256,13 +257,14 @@ const MAX_PAGE_VERSIONS = 3;
  * `graceMs` ago (or they're past MAX_PAGE_VERSIONS). After an upload, and by the reaper.
  */
 async function prunePage(cfg: Config, store: Store, appId: string, graceMs = PAGE_GRACE_MS) {
-  const served = store.appById(appId)?.page_deploy_id;
+  const app = store.appById(appId, true); // a deleted page only needs the version a restore serves
+  const served = app?.page_deploy_id;
   if (!served) return;
   const all = store.deploys(appId, 1000); // newest first: each was replaced when the one before it came
+  const servedAt = all.find((d) => d.id === served)?.created_at ?? 0;
   const cutoff = Date.now() - graceMs;
-  for (let i = 1; i < all.length; i++) {
-    if (all[i].id !== served && (i >= MAX_PAGE_VERSIONS || all[i - 1].created_at <= cutoff)) await removeDeploy(cfg, store, all[i]);
-  }
+  await removeDeploys(cfg, store, all.filter((d, i) =>
+    d.id !== served && (i >= MAX_PAGE_VERSIONS || (i ? all[i - 1].created_at : servedAt) <= cutoff)));
 }
 
 /** The reaper's pass: pages (owned here) with versions they don't serve, kept by prunePage or an older server. */
@@ -272,13 +274,25 @@ export async function pruneOldPageVersions(cfg: Config, store: Store, local: (ap
   }
 }
 
-/** Files first: if removing them fails, the row stays, so the next prune tries again. */
-async function removeDeploy(cfg: Config, store: Store, d: Pick<Deploy, "id" | "app_id">) {
-  try {
-    await rm(paths(cfg, d.app_id).deploy(d.id), { recursive: true, force: true });
-    store.deleteDeploy(d.id);
-  } catch (e) {
-    console.error(`cresslet: couldn't remove deploy ${d.id}:`, e);
+/** Deploys a prune has picked to remove (this node owns their apps): rollback refuses them. */
+const removing = new Set<string>();
+export const beingRemoved = (deployId: string) => removing.has(deployId);
+
+/**
+ * Marked at once (before any await), then removed files first: if that fails, the row stays, so the
+ * next prune tries again.
+ */
+async function removeDeploys(cfg: Config, store: Store, deploys: Pick<Deploy, "id" | "app_id">[]) {
+  for (const d of deploys) removing.add(d.id);
+  for (const d of deploys) {
+    try {
+      await rm(paths(cfg, d.app_id).deploy(d.id), { recursive: true, force: true });
+      store.deleteDeploy(d.id);
+    } catch (e) {
+      console.error(`cresslet: couldn't remove deploy ${d.id}:`, e);
+    } finally {
+      removing.delete(d.id);
+    }
   }
 }
 

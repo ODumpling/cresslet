@@ -88,10 +88,10 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
   async function reap() {
     store.prunePageSessions();
     store.pruneRateHits();
-    await pruneOldPageVersions(cfg, store, (id) => cluster.local(id));
     for (const a of [...store.expiredApps(), ...store.deletedBefore(Date.now() - cfg.limits.deletedRetentionMs)]) {
       if (cluster.local(a.id)) await purgeApp(cfg, store, runtime, a);
     }
+    await pruneOldPageVersions(cfg, store, (id) => cluster.local(id));
   }
   const reaper = setInterval(reap, 10 * 60_000);
 
