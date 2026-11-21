@@ -530,7 +530,10 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .section-title { font-size: 14px; margin: 28px 0 12px; }
 .section-title.flush { margin: 0; }
 .toolbar-title { font-size: 14px; margin-right: 8px; }
-.table .credit-delta.plus, .credit-delta.plus { color: var(--success); }
+.credit-delta.plus { color: var(--success); }
+.day-table { margin-top: 12px; font-size: 13px; }
+.day-table summary { cursor: pointer; color: var(--text-2); }
+.day-table .table { margin-top: 8px; }
 .grant-form { align-self: start; }
 .detail-grid .table-wrap .table td, .detail-grid .table-wrap .table th { padding: 10px 16px; }
 .day-chart { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding-top: 4px; border-bottom: 1px solid var(--line); }

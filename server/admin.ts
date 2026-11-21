@@ -246,14 +246,14 @@ export function adminRoutes(
     requests: r.requests,
     lastUsedAt: iso(r.last_used_at),
   });
-  const who = (a: { id: string; email: string; github_login: string | null }) => ({ id: a.id, email: a.email, github: a.github_login });
+  const acctRef = (a: { id: string; email: string; github_login: string | null }) => ({ id: a.id, email: a.email, github: a.github_login });
 
   app.get("/admin/credits", (c) => {
     requireSiteAdmin(c);
     const ai = cfg.ai;
     if (!ai) return c.json({ enabled: false });
     const now = Date.now(), since = periodStart(now), allowance = Math.round(ai.monthlyCredits * 1000);
-    const accounts = store.aiAccounts(period(now), since).map((r) => ({ ...who(r), ...walletView(allowance, r) }));
+    const accounts = store.aiAccounts(period(now), since).map((r) => ({ ...acctRef(r), ...walletView(allowance, r) }));
     const models = store.aiModels(since);
     const today = Math.floor(now / DAY);
     const byDay = new Map(store.aiDays((today - DAYS + 1) * DAY).map((d) => [d.day, d]));
@@ -290,7 +290,7 @@ export function adminRoutes(
         outputTokens: m.output,
       })),
       accounts,
-      recent: store.aiLedgerAll(50).map((r) => ({ ...ledgerEntry(r, { admin: true }), account: who({ ...r, id: r.account_id }) })),
+      recent: store.aiLedgerAll(50).map((r) => ({ ...ledgerEntry(r, { admin: true }), account: acctRef({ ...r, id: r.account_id }) })),
     });
   });
 
@@ -308,7 +308,7 @@ export function adminRoutes(
       enabled: true,
       monthlyCredits: ai.monthlyCredits,
       resetsAt: nextPeriod(now),
-      account: { ...who(acct), siteAdmin: isSiteAdmin(cfg, acct), ...walletView(allowance, row) },
+      account: { ...acctRef(acct), siteAdmin: isSiteAdmin(cfg, acct), ...walletView(allowance, row) },
       history: store.aiLedger(acct.id, 200).map((r) => ledgerEntry(r, { admin: true })),
     });
   });

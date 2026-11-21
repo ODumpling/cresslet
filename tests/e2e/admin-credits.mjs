@@ -55,6 +55,8 @@ try {
   const cells = await row.locator("td").allTextContents();
   if (cells[1] !== "0" || cells[2] !== "-3.04" || cells[3] !== "1 / 1" || cells[4] !== "4.04" || cells[5] !== "1") fail(`row: ${cells}`);
   await page.locator(".day-chart").waitFor();
+  await page.getByText("Days with use").click();
+  await page.locator(".day-table tbody tr").first().waitFor();
   await page.getByRole("cell", { name: "claude-opus-5-5", exact: true }).waitFor();
   await page.screenshot({ path: `${out}/admin-credits.png`, fullPage: true });
 
@@ -75,6 +77,12 @@ try {
   await page.getByRole("button", { name: "Give credits", exact: true }).click();
   await page.getByRole("alert").filter({ hasText: "No account with the email" }).waitFor();
 
+  // Less than the server's precision (a thousandth): refused here, not sent as a 0 grant.
+  await page.getByLabel("Account email").fill(user);
+  await page.getByLabel("Credits", { exact: true }).fill("0.0004");
+  await page.getByRole("button", { name: "Give credits", exact: true }).click();
+  await page.getByRole("alert").filter({ hasText: "other than 0" }).waitFor();
+
   // One account: its ledger, and taking credits back (confirmed).
   await row.getByRole("link", { name: user, exact: true }).click();
   await page.waitForURL(/#\/admin-credits\/acct_/);
@@ -88,6 +96,16 @@ try {
   const me = await call("/v1/me/credits", u.token);
   if (me.balance !== 40) fail(`balance via API: ${me.balance}`);
   await page.screenshot({ path: `${out}/admin-credits-account.png`, fullPage: true });
+
+  // Reflow: no horizontal page scroll at 320 CSS px, on both pages.
+  await page.setViewportSize({ width: 320, height: 640 });
+  for (const h of [new URL(page.url()).hash, "#/admin-credits"]) {
+    await page.goto(`${base}/${h}`);
+    await page.reload();
+    await page.locator(".stats").waitFor();
+    const w = await page.evaluate(() => document.documentElement.scrollWidth);
+    if (w > 320) fail(`${h}: page scrolls sideways at 320px (${w})`);
+  }
 
   // Not for other accounts: the API refuses, the link isn't shown.
   const plain = await browser.newPage();

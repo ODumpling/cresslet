@@ -529,7 +529,8 @@ async function renderAdmin(name, { credits = false } = {}) {
     location.hash = "#/";
     return false;
   }
-  $("admin-title").replaceChildren(name ? (credits ? "AI credits" : name) : credits ? "AI credits" : "Sites"); // before showOnly() focuses it
+  $("admin-title").replaceChildren(credits ? "AI credits" : name || "Sites"); // before showOnly() focuses it
+  $("admin-sub").textContent = "";
   showOnly("admin");
   if (credits) {
     $("admin-link").removeAttribute("aria-current");
@@ -685,7 +686,7 @@ async function renderAdminSite(name) {
 }
 
 // ------------------------------------------------------------------ admin: AI credits (#/admin-credits[/<account id>])
-const creditNum = (x) => new Intl.NumberFormat(undefined, { maximumFractionDigits: Math.abs(x) < 1 && x !== 0 ? 3 : 2 }).format(x);
+const creditNum = (x) => new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(x); // millicredits: exact
 const creditsText = (x) => `${creditNum(x)} ${creditNum(x) === "1" ? "credit" : "credits"}`;
 const signed = (x) => `${x > 0 ? "+" : x < 0 ? "−" : ""}${creditNum(Math.abs(x))}`;
 const usd = (x) => new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: x && Math.abs(x) < 1 ? 4 : 2 }).format(x);
@@ -695,22 +696,22 @@ const ledgerWhat = (h) => h.kind === "usage"
     `${tokenNum.format(h.inputTokens + h.cacheReadTokens + h.cacheWriteTokens)} in · ${tokenNum.format(h.outputTokens)} out${h.usd != null ? ` · ${usd(h.usd)}` : ""}${h.free ? ` · ${creditNum(h.free)} free` : ""}${h.estimated ? " · estimated (cut off)" : ""}`]
   : [h.credits > 0 ? "Credits given" : "Credits taken back", [h.by && `by ${h.by}`, h.note].filter(Boolean).join(": ") || "by the operator"];
 
+let grantBusy = false;
 /** Give (or, negative, take back) credits. `email` fixed: for one account's page; else typed, with `emails` suggested. */
 function grantForm({ email = null, emails = [], after }) {
-  const n = ++grantForm.n;
   const field = (label, input, hint) => el("div", { className: "field" },
     el("label", { htmlFor: input.id, textContent: label }), input, hint && el("p", { className: "muted small", id: `${input.id}-hint`, textContent: hint }));
-  const err = el("p", { className: "error small", id: `grant-error-${n}`, role: "alert", hidden: true });
+  const err = el("p", { className: "error small", role: "alert", hidden: true });
   const to = el("input", { className: "input", id: "grant-email", type: "email", required: true, autocomplete: "off", spellcheck: false, placeholder: "name@example.com" });
-  to.setAttribute("list", `grant-emails-${n}`);
+  to.setAttribute("list", "grant-emails");
   const amount = el("input", { className: "input", id: "grant-credits", type: "number", required: true, step: "any", placeholder: "100" });
   amount.setAttribute("aria-describedby", "grant-credits-hint");
   const note = el("input", { className: "input", id: "grant-note", maxLength: 200, autocomplete: "off", placeholder: "Beta tester" });
   const submit = el("button", { className: "btn primary", type: "submit" }, icon("plus"), "Give credits");
-  const form = el("form", { className: "panel form grant-form", ariaLabel: email ? `Give credits to ${email}` : "Give credits", noValidate: false },
+  const form = el("form", { className: "panel form grant-form", ariaLabel: email ? `Give credits to ${email}` : "Give credits" },
     el("h2", { textContent: email ? "Give credits" : "Give credits to an account" }),
     email ? null : field("Account email", to),
-    email ? null : el("datalist", { id: `grant-emails-${n}` }, ...emails.map((e) => el("option", { value: e }))),
+    email ? null : el("datalist", { id: "grant-emails" }, ...emails.map((e) => el("option", { value: e }))),
     field("Credits", amount, "A negative number takes credits back."),
     field("Note (optional)", note),
     err,
@@ -718,17 +719,18 @@ function grantForm({ email = null, emails = [], after }) {
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const who = email ?? to.value.trim();
-    const credits = Number(amount.value);
+    const credits = Math.round(Number(amount.value) * 1000) / 1000; // the server keeps millicredits
     err.hidden = true;
     if (!who) return void to.focus();
+    if (grantBusy) return; // a grant from before a Refresh is still being sent
     if (!Number.isFinite(credits) || credits === 0) {
-      err.textContent = "Enter a number of credits other than 0.";
+      err.textContent = "Enter a number of credits other than 0 (at most 3 decimal places).";
       err.hidden = false;
       return void amount.focus();
     }
     if (credits < 0 && !confirm(`Take ${creditsText(-credits)} back from ${who}?`)) return;
     const gen = routeGen;
-    submit.disabled = true;
+    submit.disabled = grantBusy = true;
     try {
       const r = await api("/v1/admin/accounts/credits", { method: "POST", body: JSON.stringify({ email: who, credits, ...(note.value.trim() ? { note: note.value.trim() } : {}) }) });
       toast(`${credits > 0 ? "Gave" : "Took back"} ${creditsText(Math.abs(credits))} ${credits > 0 ? "to" : "from"} ${r.account.email}. Granted balance: ${creditNum(r.balance)}.`);
@@ -738,12 +740,13 @@ function grantForm({ email = null, emails = [], after }) {
       err.textContent = x.status === 404 ? `No account with the email ${who}.` : `Could not give credits: ${x.message}`;
       err.hidden = false;
       submit.disabled = false;
-      (x.status === 404 ? to : amount).focus();
+      (x.status === 404 && !email ? to : amount).focus();
+    } finally {
+      grantBusy = false;
     }
   });
   return Object.assign(form, { fill: (e) => { to.value = e; amount.focus(); } });
 }
-grantForm.n = 0;
 
 /** Credits used per day: bars, named by a summary (and each bar's own title). */
 function dayChart(days) {
@@ -762,7 +765,15 @@ function dayChart(days) {
         return b;
       })),
     el("div", { className: "day-axis", ariaHidden: "true" },
-      el("span", { textContent: fmt(days[0].date) }), el("span", { textContent: max ? `peak ${creditNum(max)}` : "" }), el("span", { textContent: "Today" })));
+      el("span", { textContent: fmt(days[0].date) }), el("span", { textContent: max ? `peak ${creditNum(max)}` : "" }), el("span", { textContent: "Today" })),
+    // Each day's numbers, for keyboards, touch and screen readers (the bars' titles need a pointer).
+    max ? el("details", { className: "day-table" }, el("summary", { textContent: "Days with use" }),
+      el("table", { className: "table" },
+        el("thead", {}, el("tr", {}, ...["Day", "Credits", "Requests"].map((h, i) => el("th", { scope: "col", className: i ? "num" : "", textContent: h })))),
+        el("tbody", {}, ...days.filter((d) => d.requests).reverse().map((d) => el("tr", {},
+          el("td", { textContent: fmt(d.date) }),
+          el("td", { className: "num", textContent: creditNum(d.credits) }),
+          el("td", { className: "num", textContent: d.requests.toLocaleString() })))))) : null);
 }
 
 const ledgerTable = (rows, { account = false } = {}) =>
@@ -780,9 +791,12 @@ const ledgerTable = (rows, { account = false } = {}) =>
           el("td", { className: `num credit-delta${h.credits > 0 ? " plus" : ""}`, textContent: signed(h.credits) }));
       }) : [el("tr", {}, el("td", { colSpan: account ? 4 : 3, className: "empty", textContent: "No credit activity yet." }))]))));
 
-const creditsOff = () => $("admin-body").replaceChildren(el("div", { className: "empty-state" },
-  el("strong", { textContent: "AI credits are off on this server" }),
-  el("span", { textContent: "Set CRESSLET_ANTHROPIC_API_KEY to let accounts use the AI builder on the server's key, metered in credits." })));
+function creditsOff() {
+  $("admin-title").replaceChildren("AI credits");
+  $("admin-body").replaceChildren(el("div", { className: "empty-state" },
+    el("strong", { textContent: "AI credits are off on this server" }),
+    el("span", { textContent: "Set CRESSLET_ANTHROPIC_API_KEY to let accounts use the AI builder on the server's key, metered in credits." })));
+}
 
 const adminCreditsView = { q: "" };
 
@@ -805,7 +819,7 @@ async function renderAdminCredits() {
   const stats = el("div", { className: "stats" },
     stat("Used this month", [creditNum(t.used)], `${usd(t.usd)} at list price · ${t.requests.toLocaleString()} request${t.requests === 1 ? "" : "s"}`),
     stat("From free credits", [creditNum(t.free)], d.monthlyCredits ? `${creditNum(d.monthlyCredits)} free per account a month · renews ${resets}` : "No free credits on this server"),
-    stat("Granted this month", [signed(t.granted) || "0"], `${t.grants} grant${t.grants === 1 ? "" : "s"} · ${creditNum(t.balance)} granted left${t.overdrawn ? ` · ${creditNum(t.overdrawn)} overdrawn` : ""}`),
+    stat("Granted this month", [signed(t.granted)], `${t.grants} grant${t.grants === 1 ? "" : "s"} · ${creditNum(t.balance)} granted left${t.overdrawn ? ` · ${creditNum(t.overdrawn)} overdrawn` : ""}`),
     stat("Accounts", [String(t.active), el("small", { textContent: `of ${t.accounts}` })], "Used AI this month, of those with credits"));
 
   const form = grantForm({ emails: d.accounts.map((a) => a.email), after: again });
@@ -850,7 +864,7 @@ async function renderAdminCredits() {
 
   $("admin-body").replaceChildren(stats,
     el("div", { className: "detail-grid" }, el("div", { className: "stack" }, chart, models), form),
-    el("div", { className: "toolbar" }, el("h2", { className: "toolbar-title", id: "credit-accounts-title", textContent: "Accounts" }),
+    el("div", { className: "toolbar" }, el("h2", { className: "toolbar-title", textContent: "Accounts" }),
       el("div", { className: "search" }, icon("search"), search), shown),
     el("div", { className: "table-wrap", tabIndex: 0, role: "region", ariaLabel: "Accounts table" },
       el("table", { className: "table" },
@@ -864,6 +878,7 @@ async function renderAdminCredits() {
 }
 
 async function renderAdminCreditsAccount(id) {
+  document.title = "AI credits · Admin · Cresslet Studio";
   $("admin-title").replaceChildren(el("a", { href: "#/admin-credits", textContent: "AI credits" }), " / …");
   const gen = adminView.gen, route = routeGen;
   const d = await api(`/v1/admin/credits/accounts/${encodeURIComponent(id)}`);
@@ -881,7 +896,7 @@ async function renderAdminCreditsAccount(id) {
   const resets = new Date(d.resetsAt).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
   const stats = el("div", { className: "stats" },
     stat("Available", [creditNum(Math.max(0, a.available))], a.available <= 0 ? "Out of credits: AI requests are refused" : "Free credits left plus granted credits"),
-    stat("Granted left", [creditNum(a.balance)], a.balance < 0 ? "Overdrawn by the last request" : "Doesn't expire"),
+    stat("Granted left", [creditNum(a.balance)], a.balance < 0 ? "Overdrawn" : "Doesn't expire"),
     stat("Free this month", [creditNum(Math.max(0, d.monthlyCredits - a.monthlyUsed)), el("small", { textContent: `of ${creditNum(d.monthlyCredits)}` })], `Renews ${resets}`),
     stat("Used this month", [creditNum(a.used)], `${a.requests.toLocaleString()} request${a.requests === 1 ? "" : "s"} · last ${a.lastUsedAt ? ago(a.lastUsedAt) : "never"}`));
   $("admin-body").replaceChildren(stats,
