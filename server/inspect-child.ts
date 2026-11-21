@@ -7,7 +7,9 @@ import type { Job } from "./inspect.ts";
 process.once("message", ({ path, job, maxBytes }: { path: string; job: Job; maxBytes: number }) => {
   try {
     const db = confine(new DatabaseSync(path, { readOnly: true }));
-    db.limits.length = maxBytes; // no single value bigger than the whole reply
+    // A query builds no value bigger than the whole reply (stored ones, which the listing reads, are
+    // bounded by the app's database cap). `limits` is Node ≥ 24.15; before, only the deadline bounds it.
+    if (job.kind === "query" && db.limits) db.limits.length = maxBytes;
     let bytes = 0;
     /** Rows (JSON-safe) until `max` rows or the shared byte budget runs out. */
     const take = (sql: string, params: SQLInputValue[], max: number) => {
@@ -16,7 +18,9 @@ process.once("message", ({ path, job, maxBytes }: { path: string; job: Job; maxB
         if (rows.length >= max) return { rows, truncated: true };
         const s = JSON.stringify(row, (_k, x) =>
           typeof x === "bigint" ? Number(x) : x instanceof Uint8Array ? { $bytes: Buffer.from(x).toString("base64") } : x);
-        if ((bytes += s.length) > maxBytes) return { rows, truncated: true };
+        const len = Buffer.byteLength(s);
+        if (bytes + len > maxBytes) return { rows, truncated: true };
+        bytes += len;
         rows.push(JSON.parse(s));
       }
       return { rows, truncated: false };

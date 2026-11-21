@@ -54,10 +54,15 @@ export async function inspect<T>(appId: string, path: string, job: Job): Promise
         reject(new HttpError(504, `query took longer than ${timeoutMs / 1000}s and was stopped`, "query_timeout"))), timeoutMs);
       child.once("message", (m: { result?: T; error?: string }) =>
         finish(() => (m.error !== undefined ? reject(new HttpError(400, m.error, "sql_error")) : resolve(m.result as T))));
-      child.once("error", (e) => finish(() => reject(new HttpError(500, `database inspection failed: ${e.message}`))));
-      child.once("exit", (code, signal) => finish(() =>
+      child.on("error", (e) => finish(() => reject(new HttpError(500, `database inspection failed: ${e.message}`))));
+      // "close", not "exit": a reply still in the IPC channel lands first.
+      child.once("close", (code, signal) => finish(() =>
         reject(new HttpError(500, `database inspection failed (${signal ?? code})`))));
-      child.send({ path, job, maxBytes });
+      try {
+        child.send({ path, job, maxBytes });
+      } catch (e) {
+        finish(() => reject(e));
+      }
     });
   } finally {
     running--;
