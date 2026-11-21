@@ -168,8 +168,9 @@ report disk "$p"
 # Firewall: failed closed (firewall.sh's marker; it removes it itself once its rules apply and
 # Cresslet runs again), and failing. One check per outcome, so a change is a new alert.
 stopped="" unstopped=""
-if [ -f "$FW" ]; then
-  m=$(cat "$FW")
+# Read once, without -f first: firewall.sh may remove it at any moment.
+m=$(cat "$FW" 2>/dev/null) || m=""
+if [ -n "$m" ]; then
   case $m in
     *" stopped") stopped="cresslet-firewall couldn't apply its rules and stopped Cresslet at ${m%% *}; start it again once fixed" ;;
     *) unstopped="cresslet-firewall couldn't apply its rules or stop${m##*:} at ${m%% *}: they run unfirewalled" ;;
