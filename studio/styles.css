@@ -827,7 +827,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 /* pages (artifacts) */
 .page-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 16px; }
 .file-btn { cursor: pointer; }
-.file-btn:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.file-btn:has(:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .dropzone {

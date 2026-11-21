@@ -1674,7 +1674,15 @@ function rowMenu(id, label, items) {
   menu.setAttribute("popover", "");
   const btn = el("button", { className: "icon-btn row-more", type: "button", title: "More actions", ariaLabel: `More actions for ${label}` }, icon("more"));
   btn.setAttribute("popovertarget", id);
-  const hide = () => menu.hidePopover();
+  const unlisten = () => {
+    removeEventListener("scroll", hide, true);
+    removeEventListener("resize", hide);
+  };
+  // A list re-render can remove an open menu without a toggle event: its listeners go then.
+  function hide() {
+    if (menu.isConnected && menu.matches(":popover-open")) menu.hidePopover();
+    else unlisten();
+  }
   // Placed before it shows (under the button, right edges lined up), flipped above if there's no room below.
   menu.addEventListener("beforetoggle", (e) => {
     if (e.newState !== "open") return;
@@ -1683,11 +1691,7 @@ function rowMenu(id, label, items) {
     menu.style.top = `${r.bottom + 4}px`;
   });
   menu.addEventListener("toggle", (e) => {
-    if (e.newState !== "open") {
-      removeEventListener("scroll", hide, true);
-      removeEventListener("resize", hide);
-      return;
-    }
+    if (e.newState !== "open") return unlisten();
     const r = btn.getBoundingClientRect();
     if (r.bottom + 4 + menu.offsetHeight > innerHeight) menu.style.top = `${Math.max(8, r.top - 4 - menu.offsetHeight)}px`;
     addEventListener("scroll", hide, true); // placed once: it closes rather than drift away from its row
@@ -1835,9 +1839,10 @@ const folderBody = async (files) =>
 $("page-dir").addEventListener("change", () => {
   $("page-file").value = "";
   const { dir, files } = folderFiles($("page-dir").files);
-  pagePick = files.length ? { title: dir, files } : null;
+  const noIndex = files.length && !files.some((x) => x.path === "index.html");
+  pagePick = files.length && !noIndex ? { title: dir, files } : null;
   showPick(...(files.length ? [`${dir}/`, `${files.length} file${files.length === 1 ? "" : "s"}`] : NO_PICK));
-  pageError(files.length && !files.some((x) => x.path === "index.html") ? "That folder has no index.html at its top level." : "");
+  pageError(noIndex ? "That folder has no index.html at its top level." : "");
 });
 // Dropping a file: an HTML file is picked; a folder needs the Folder button (a dropped folder can't be read as one here).
 const drop = $("page-drop");
