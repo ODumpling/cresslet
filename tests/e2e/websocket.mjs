@@ -1,4 +1,4 @@
-// Browser e2e: an app's WebSocket server (WebSocketPair) in the studio preview. Text, binary, subprotocol, closes
+// Browser e2e: an app's WebSocket server (WebSocketPair) in the studio preview. Origin, text, binary, subprotocol, closes
 // both ways, a refused upgrade; saving a server file closes open sockets (1012), even with the old server stuck in a
 // loop, fails its pending requests (503), and clients can reconnect.
 // Run: start the server (npm run dev), then: cd tests/e2e && node websocket.mjs [screenshot dir]
@@ -20,6 +20,8 @@ export default {
       req.headers.set("x-edit", "1");
       const copy = req.clone();
       console.log("clone sees upgrade " + copy.headers.get("upgrade") + " edit " + copy.headers.get("x-edit"));
+      // the preview page's Origin reads as the app's own, as on the platform (apps check it against CSWSH)
+      console.log("origin is own " + (req.headers.get("origin") === url.origin));
       class Mine extends Response {}
       console.log("plain is Mine " + (new Response("x") instanceof Mine) + ", Mine is Response " + (new Mine("x") instanceof Response));
       server.send("welcome " + boot + " " + url.search);
@@ -114,6 +116,7 @@ try {
   await waitFor(async () => /after close\(\) readyState 2[\s\S]*\[server\] server saw close 4000 bye yourself/.test(await term.innerText()), "the server end's own close, after close() returned");
   assert(/\[server\] clone sees upgrade websocket edit 1/.test(await term.innerText()), "req.clone() keeps the handshake headers and edits");
   assert(/\[server\] 101 ok false clones no/.test(await term.innerText()), "a 101 is not ok and can't be cloned");
+  assert(/\[server\] origin is own true/.test(await term.innerText()), "the handshake's Origin matches the app's own origin");
   assert(/\[server\] plain is Mine false, Mine is Response true/.test(await term.innerText()), "app Response subclasses keep the usual instanceof");
   console.log("round trip:", JSON.stringify(roundTrip));
 

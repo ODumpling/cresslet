@@ -403,10 +403,14 @@ export function createCresslet(c, opts) {
       if (!w) return unavailable();
       const appUrl = new URL(path + url.search, cfg.name ? `https://${cfg.name}.preview` : location.origin);
       // A WebSocket's `req.headers` (from cresslet-container) has Upgrade and the Sec-WebSocket-* headers.
+      // The preview page's own Origin reads as the app's, as it does deployed, so `Origin === new URL(req.url).origin`
+      // checks (against cross-site WebSocket hijacking) pass here too.
+      const page = c.previewOrigin ?? location.origin; // where preview pages run
+      const headers = [...req.headers].map(([k, v]) => (k.toLowerCase() === "origin" && v === page ? [k, appUrl.origin] : [k, v]));
       const res = await new Promise((resolve) => {
         waiting.set(id, { w, done: resolve });
         w.postMessage(
-          { type: "request", id, url: appUrl.href, method: req.method, headers: [...req.headers], body },
+          { type: "request", id, url: appUrl.href, method: req.method, headers, body },
           body ? [body] : [],
         );
       });
