@@ -10,6 +10,10 @@ import initSqlJs from "https://esm.sh/sql.js@1.13.0";
 const SQL_WASM = "https://cdn.jsdelivr.net/npm/sql.js@1.13.0/dist/sql-wasm.wasm";
 let handler;
 let env;
+// Where the `cresslet` SDK (`import { db } from "cresslet"`, cresslet-cli sdk/index.js) finds the env: published once
+// the app's module has loaded (bindings exist only once a handler runs). Contract: runtime/cresslet-runtime.js.
+const runtime = { contract: 1, runtime: "studio preview", paramStyle: "?", env: null };
+globalThis[Symbol.for("cresslet.runtime")] = runtime;
 
 const fmt = (args) =>
   args.map((a) => (typeof a === "string" ? a : a instanceof Error ? (a.stack ?? a.message) : safeJson(a))).join(" ");
@@ -179,8 +183,35 @@ function createDb(SQL, bytes) {
       stmt.free();
     }
   };
+  const one = (sql) => db.exec(sql)[0]?.values[0][0] ?? 0;
+  // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).
+  const batch = (statements) => {
+    if (!Array.isArray(statements)) throw new TypeError("batch takes an array of { sql, params }");
+    db.exec("SAVEPOINT cresslet_batch");
+    try {
+      const out = statements.map(({ sql, params = [] } = {}, i) => {
+        try {
+          if (typeof sql !== "string") throw new TypeError("sql required");
+          const before = one("SELECT total_changes()");
+          const rows = all(sql, params);
+          const changed = one("SELECT total_changes()") !== before;
+          return { rows, changes: changed ? db.getRowsModified() : 0, lastInsertRowid: Number(one("SELECT last_insert_rowid()")) };
+        } catch (e) {
+          throw new Error(`batch statement ${i + 1}: ${e?.message ?? e}`);
+        }
+      });
+      db.exec("RELEASE cresslet_batch");
+      return out;
+    } catch (e) {
+      db.exec("ROLLBACK TO cresslet_batch; RELEASE cresslet_batch");
+      throw e;
+    } finally {
+      persist();
+    }
+  };
   db.exec("PRAGMA foreign_keys = ON;");
   return {
+    batch: async (statements) => batch(statements),
     query: async (sql, ...params) => all(sql, params),
     first: async (sql, ...params) => all(sql, params)[0] ?? null,
     run: async (sql, ...params) => {
@@ -230,8 +261,13 @@ onmessage = async ({ data: m, ports }) => {
         app: Object.freeze(m.app),
       };
       const url = URL.createObjectURL(new Blob([m.code], { type: "text/javascript" }));
-      const mod = await import(url);
-      URL.revokeObjectURL(url);
+      let mod;
+      try {
+        mod = await import(url);
+      } finally {
+        URL.revokeObjectURL(url);
+        runtime.env = env; // after the module's top level, as on the platform
+      }
       const exp = mod.default ?? mod;
       handler = typeof exp === "function" ? exp : exp?.fetch?.bind(exp);
       if (!handler) throw new Error("server/index must `export default { fetch(req, env) {} }`");

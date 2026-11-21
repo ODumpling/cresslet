@@ -46,6 +46,31 @@ export function publicDotenv(text) {
   return out.join("\n");
 }
 
+/**
+ * `import ... from "cresslet"` in server code: the SDK the studio ships (vendor/cresslet-sdk.js, `npm run vendor:sdk`),
+ * as a virtual module, not the project's node_modules/cresslet (the CLI package: esbuild & co., maybe not installed
+ * yet, maybe another version than this studio's preview and platform).
+ */
+let sdkSource;
+const sdkPlugin = {
+  name: "cresslet-sdk",
+  setup(b) {
+    b.onResolve({ filter: /^cresslet$/ }, () => ({ path: "cresslet", namespace: "cresslet-sdk" }));
+    b.onLoad({ filter: /.*/, namespace: "cresslet-sdk" }, async () => {
+      sdkSource ??= fetch(new URL("./vendor/cresslet-sdk.js", import.meta.url)).then((r) => {
+        if (!r.ok) throw new Error(`cresslet SDK: ${r.status}`);
+        return r.text();
+      });
+      try {
+        return { contents: await sdkSource, loader: "js" };
+      } catch (e) {
+        sdkSource = undefined; // retry on the next build
+        throw e;
+      }
+    });
+  },
+};
+
 function toBase64(bytes) {
   if (bytes.toBase64) return bytes.toBase64();
   let s = "";
@@ -103,6 +128,7 @@ export function createCresslet(c, opts) {
       external: ["node:*"],
       outfile: p(".cresslet/build/server.js"),
       write: false,
+      plugins: [sdkPlugin],
     });
     const out = r.outputFiles.find((f) => f.path.endsWith(".js")) ?? r.outputFiles[0];
     return out.text ?? dec.decode(out.contents);

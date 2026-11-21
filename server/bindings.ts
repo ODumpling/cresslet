@@ -101,6 +101,38 @@ export function createDb(path: string, maxBytes?: number) {
       guard(sql, () => db.exec(sql));
       return null;
     },
+    /**
+     * The statements in one transaction (a savepoint, so it also nests in one the app opened with exec), all run
+     * before anything else on this thread: atomic, and no other request's statement in between. Each result: rows
+     * (statements that return any), changes, lastInsertRowid. Same in cresslet-cli lib/bindings.js and
+     * studio/server-worker.js.
+     */
+    batch(statements: { sql: string; params?: SQLInputValue[] }[]) {
+      const total = db.prepare("SELECT total_changes() n");
+      const counts = db.prepare("SELECT changes() changes, last_insert_rowid() id");
+      db.exec("SAVEPOINT cresslet_batch");
+      try {
+        const out = statements.map(({ sql, params = [] }, i) => {
+          try {
+            return guard(sql, () => {
+              const stmt = db.prepare(sql);
+              const before = (total.get() as { n: number }).n;
+              const rows = stmt.columns().length ? stmt.all(...params) : (stmt.run(...params), []);
+              const c = counts.get() as { changes: number; id: number | bigint };
+              return { rows, changes: (total.get() as { n: number }).n === before ? 0 : num(c.changes), lastInsertRowid: num(c.id) };
+            });
+          } catch (e) {
+            (e as Error).message = `batch statement ${i + 1}: ${(e as Error).message}`;
+            throw e;
+          }
+        });
+        db.exec("RELEASE cresslet_batch");
+        return out;
+      } catch (e) {
+        db.exec("ROLLBACK TO cresslet_batch; RELEASE cresslet_batch");
+        throw e;
+      }
+    },
     close: () => db.close(),
   };
 }
@@ -316,13 +348,23 @@ export function createBindings(
       if (req.method === "GET" && url.pathname === "/secrets") return Response.json(secrets);
       if (req.method === "POST" && url.pathname.startsWith("/db/")) {
         const op = url.pathname.slice(4);
-        const { sql, params = [] } = JSON.parse(await req.text(), reviver) as {
+        const body = JSON.parse(await req.text(), reviver) as {
           sql: string;
           params?: SQLInputValue[];
+          statements?: { sql: string; params?: SQLInputValue[] }[];
         };
-        if (typeof sql !== "string") return text("sql required", 400);
+        const { sql, params = [] } = body;
         let result: unknown;
-        if (op === "query") result = db.query(sql, ...params);
+        if (op === "batch") {
+          const list = body.statements;
+          if (!Array.isArray(list)) return text("statements required", 400);
+          for (const [i, s] of list.entries()) {
+            if (typeof s?.sql !== "string") return text(`batch statement ${i + 1}: sql required`, 400);
+            if (s.params !== undefined && !Array.isArray(s.params)) return text(`batch statement ${i + 1}: params must be an array`, 400);
+          }
+          result = db.batch(list);
+        } else if (typeof sql !== "string") return text("sql required", 400);
+        else if (op === "query") result = db.query(sql, ...params);
         else if (op === "first") result = db.first(sql, ...params);
         else if (op === "run") result = db.run(sql, ...params);
         else if (op === "exec") result = db.exec(sql);
