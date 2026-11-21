@@ -48,6 +48,7 @@ import {
   type DeployInput,
   HttpError,
   randomName,
+  reservedName,
   removeAppFiles,
   validName,
   writeDeploy,
@@ -198,13 +199,14 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       return undefined; // unreadable: the route answers 400
     });
     c.set("deployBytes", bytes);
-    let input: { app?: unknown } | null | undefined;
+    let input: { app?: unknown; create?: unknown } | null | undefined;
     try {
       if (bytes) input = JSON.parse(new TextDecoder().decode(bytes));
     } catch { /* the route answers 400 */ }
     c.set("deploy", input);
     const a = typeof input?.app === "string" ? store.appByName(input.app) : undefined;
-    if (!a || cluster.local(a.id)) return next();
+    // Create-only (`create: true`) for a name that exists: the route answers 409 here, whoever owns the app.
+    if (!a || cluster.local(a.id) || input?.create === true) return next();
     return forwardDeploy(c, a.id);
   });
   /** The deploy request as sent (bytes cached by the middleware above). */
@@ -587,8 +589,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       raw = await body(c, deployBodyLimit);
     }
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new HttpError(400, "invalid JSON body", "bad_request");
-    const input = raw as DeployInput & { app?: string };
+    const input = raw as DeployInput & { app?: string; create?: boolean };
     let target = input.app ? store.appByName(input.app) : undefined;
+    // `create`: a new app only (the studio's address picker), never a deploy over one that took the name meanwhile.
+    if (target && input.create === true) throw new HttpError(409, `app name unavailable: ${target.name}`, "conflict");
     if (target && !cluster.local(target.id)) return forwardDeploy(c, target.id); // created on another node meanwhile
     let createdKey: string | undefined;
     if (target) {
@@ -605,9 +609,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       }
       const name = input.app ?? uniqueName();
       if (store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict");
-      if (!validName(name, cfg)) {
-        throw new HttpError(400, "app name must be 1-40 chars of a-z, 0-9 and single dashes", "invalid_name");
-      }
+      if (!validName(name, cfg)) throw new HttpError(400, `app name must be ${NAME_RULES}`, "invalid_name");
       const client = ipKey(clientIp(c));
       const anonCap = () => {
         if (store.anonAppCountBy(client) >= cfg.limits.maxAnonAppsPerIp) {
@@ -664,6 +666,42 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     }
     throw new HttpError(500, "could not allocate name");
   }
+  /** Unguessable: a link-only page's URL is all that protects it. */
+  function uniquePageName() {
+    let name = "";
+    for (let i = 0; i < 5 && (!name || store.appByName(name, true)); i++) name = id("pg").replace("_", "-");
+    if (store.appByName(name, true)) throw new HttpError(500, "could not allocate name");
+    return name;
+  }
+  const NAME_RULES = "1-40 chars of a-z, 0-9 and single dashes, not starting or ending with one";
+  /** Why a new app or page can't have this name, or null if it's free. Deleted apps keep theirs until purged. */
+  const nameProblem = (name: string): "invalid" | "reserved" | "taken" | null =>
+    reservedName(name, cfg) ? "reserved" : !validName(name, cfg) ? "invalid" : store.appByName(name, true) ? "taken" : null;
+
+  // ---- names: pick a new app's or page's subdomain before deploying (docs/api.md#names)
+  const nameChecks = new RateLimit(120, 60_000);
+  const checkNames = (c: Context<Env>) => {
+    if (!nameChecks.take(ipKey(clientIp(c)))) throw new HttpError(429, "too many name checks, wait a minute", "rate_limited");
+  };
+  app.get("/names", (c) => {
+    checkNames(c);
+    const kind = c.req.query("kind") ?? "app";
+    if (kind !== "app" && kind !== "page") throw new HttpError(400, "kind must be app or page");
+    const name = kind === "page" ? uniquePageName() : uniqueName();
+    return c.json({ name, url: appUrl(cfg, name) });
+  });
+  app.get("/names/:name", (c) => {
+    checkNames(c);
+    const name = c.req.param("name");
+    const problem = nameProblem(name);
+    return c.json({
+      name,
+      available: !problem,
+      ...(problem
+        ? { reason: problem, message: problem === "invalid" ? `a name must be ${NAME_RULES}` : `${name} is ${problem}` }
+        : { url: appUrl(cfg, name) }),
+    });
+  });
 
   // ---- apps
   app.get("/apps", (c) => {
@@ -1095,7 +1133,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (typeof v !== "string" || v.trim().length > 200) throw new HttpError(400, "title must be a string of at most 200 characters, or null");
     return v.trim() || null;
   };
-  type PageInput = { html?: unknown; files?: unknown; title?: unknown; visibility?: unknown; retentionDays?: unknown; source?: unknown };
+  type PageInput = { name?: unknown; html?: unknown; files?: unknown; title?: unknown; visibility?: unknown; retentionDays?: unknown; source?: unknown };
   /** `html`: a single-file page (its index.html); `files`: a static site with an index.html at the root. */
   const pageFiles = (input: PageInput): DeployFile[] => {
     if (typeof input.html === "string") {
@@ -1184,12 +1222,15 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       visibility: input.visibility === undefined ? defaults.visibility : visibility(input.visibility),
       retentionDays: input.retentionDays === undefined ? defaults.retentionDays : retention(input.retentionDays),
     };
+    // A name of the owner's choosing, or a generated unguessable one.
+    if (input.name !== undefined && typeof input.name !== "string") throw new HttpError(400, "name must be a string");
+    const name = input.name ?? uniquePageName();
+    const problem = nameProblem(name);
+    if (problem === "taken") throw new HttpError(409, `page name unavailable: ${name}`, "conflict");
+    if (problem) throw new HttpError(400, problem === "reserved" ? `${name} is reserved` : `page name must be ${NAME_RULES}`, "invalid_name");
     checkPageQuota(acct);
-    // Unguessable: a link-only page's URL is all that protects it.
-    let name = "";
-    for (let i = 0; i < 5 && (!name || store.appByName(name, true)); i++) name = id("pg").replace("_", "-");
-    if (store.appByName(name, true)) throw new HttpError(500, "could not allocate name");
     const page = await store.createPage(name, acct.id, settings, () => {
+      if (store.appByName(name, true)) throw new HttpError(409, `page name unavailable: ${name}`, "conflict"); // taken meanwhile
       checkPageQuota(acct);
       takeCreate(acct); // spent only here, as for new apps (POST /deploys)
     });

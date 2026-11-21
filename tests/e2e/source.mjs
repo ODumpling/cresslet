@@ -15,7 +15,9 @@ try {
   await page.getByRole("button", { name: /react/ }).click();
   await page.waitForURL(/#\/p\//);
   await page.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
-  await page.getByRole("button", { name: "Deploy" }).click();
+  await page.locator("#deploy-btn").click();
+  await page.locator("#deploy-name-status", { hasText: "is available" }).waitFor(); // keep the generated address
+  await page.locator("#deploy-confirm").click();
   await page.locator("#deploy-link").waitFor({ state: "visible", timeout: 60000 });
   const app = new URL(await page.locator("#deploy-link").getAttribute("href")).hostname.split(".")[0];
   console.log("deployed", app);

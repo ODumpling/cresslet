@@ -63,6 +63,11 @@ export class HttpError extends Error {
 const NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const RESERVED = new Set(["www", "api", "studio", "admin", "app", "apps", "docs", "status", "mail", "preview"]);
 
+/** Well-formed, but kept for the platform (or the studio preview host). */
+export function reservedName(name: string, cfg?: Config) {
+  return NAME_RE.test(name) && !name.includes("--") && !validName(name, cfg);
+}
+
 export function validName(name: string, cfg?: Config) {
   if (cfg && name === previewAppName(cfg)) return false; // the studio preview host
   return NAME_RE.test(name) && !RESERVED.has(name) && !name.includes("--");

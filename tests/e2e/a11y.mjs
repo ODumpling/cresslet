@@ -187,8 +187,17 @@ try {
   await page.keyboard.press("Tab");
   assert(await focused(page) !== "preview-path", "Tab didn't leave the preview path");
   console.log("no keyboard traps; tabs ok");
+  // First deploy asks for the address: focus starts in it, Escape cancels back to Deploy, Enter deploys.
   await page.locator("#deploy-btn").focus();
   await page.keyboard.press("Enter");
+  await page.locator("#deploy-name-status", { hasText: "is available" }).waitFor();
+  assert(await focused(page) === "deploy-name", `the deploy dialog focused ${await focused(page)}, not the address`);
+  await page.keyboard.press("Escape");
+  assert(await focused(page) === "deploy-btn", `cancelling the deploy dialog left focus on ${await focused(page)}`);
+  await page.keyboard.press("Enter");
+  await page.locator("#deploy-name-status", { hasText: "is available" }).waitFor();
+  await page.keyboard.press("Enter");
+  await page.locator("#deploy-dialog").waitFor({ state: "hidden" });
   assert(await focused(page) === "deploy-log", `Deploy moved focus to ${await focused(page)}, not the log`);
   await page.locator("#deploy-link").waitFor({ state: "visible", timeout: 60000 });
   console.log("deploy focus ok");
