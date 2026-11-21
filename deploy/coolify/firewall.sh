@@ -12,11 +12,13 @@
 # One network per host: the chains (CRESSLET-FWD, CRESSLET-IN) have fixed names.
 # Needs root. Docker names a user-defined bridge br-<first 12 chars of the network id>.
 # Every iptables call waits for the xtables lock (-w): Docker and ufw take it too, at boot especially.
+# When it fails closed it leaves <state dir>/<network>.stopped for deploy/coolify/alerts.sh.
 set -eu
 NET=${1:?usage: firewall.sh <docker network> [--remove|--install]}
 MODE=${2:-apply}
 FWD=CRESSLET-FWD IN=CRESSLET-IN
-STATE=/var/lib/cresslet-firewall/$NET.bridge
+DIR=${CRESSLET_FIREWALL_STATE:-/var/lib/cresslet-firewall}
+STATE=$DIR/$NET.bridge
 
 if [ "$MODE" = --install ]; then
   install -m 0755 "$0" /usr/local/sbin/cresslet-firewall
@@ -70,7 +72,7 @@ if [ "$MODE" = --remove ]; then
     for c in $FWD $FWD.n; do unhook $t DOCKER-USER $c; done
     for c in $IN $IN.n; do unhook $t INPUT $c; done
   done
-  rm -f "$STATE"
+  rm -f "$STATE" "$DIR/$NET.stopped"
   exit 0
 fi
 
@@ -83,6 +85,8 @@ stop_all() {
     done
     [ -z "$failed" ] || echo "cresslet-firewall: couldn't stop:$failed" >&2
   }
+  # After the stops: alerts.sh reads it as "stopped, not started again yet".
+  mkdir -p "$DIR" && date -u +%Y-%m-%dT%H:%M:%SZ > "$DIR/$NET.stopped" || true
 }
 
 if [ "$MODE" = --boot ]; then
