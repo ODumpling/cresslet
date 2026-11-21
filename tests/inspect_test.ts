@@ -10,7 +10,7 @@ import { INSPECT_LIMITS } from "../server/inspect.ts";
 
 const RUNAWAY = "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r) SELECT count(*) n FROM r";
 
-async function setup() {
+async function setup({ long = false } = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-inspect-"));
   const cfg = loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["own@b.co"] });
   const srv = createServer(cfg);
@@ -32,8 +32,9 @@ async function setup() {
     WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 1500) INSERT INTO small SELECT x FROM r;
     CREATE TABLE wide (b TEXT);
     WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 10) INSERT INTO wide SELECT printf('%.*c', 1000000, 'a') FROM r;
-    CREATE TABLE blob (b BLOB); INSERT INTO blob VALUES (zeroblob(6000000));
-    CREATE TABLE long (t TEXT); INSERT INTO long VALUES (replace(hex(zeroblob(50000000)), '0', char(1)));`);
+    CREATE TABLE blob (b BLOB); INSERT INTO blob VALUES (zeroblob(6000000));`);
+  // 100 MB of \u0001: 600 MB escaped, too long for a string.
+  if (long) db.exec("CREATE TABLE long (t TEXT); INSERT INTO long VALUES (replace(hex(zeroblob(50000000)), '0', char(1)))");
   db.close();
   const done = async () => {
     srv.close();
@@ -73,7 +74,7 @@ test("db inspection: a runaway recursive CTE times out cleanly without blocking 
 });
 
 test("db inspection: normal queries, row and byte caps, sql errors, busy", async () => {
-  const t = await setup();
+  const t = await setup({ long: true });
   try {
     const q = (sql: string, params?: unknown[]) => t.json("POST", "/v1/apps/shop/db/query", t.owner, { sql, params });
     assert.deepEqual((await q("SELECT x FROM small WHERE x <= ? ORDER BY x", [2])).body, { rows: [{ x: 1 }, { x: 2 }] });
@@ -121,7 +122,7 @@ test("db inspection: normal queries, row and byte caps, sql errors, busy", async
     assert.equal(tables.small.rows.length, 1000);
     assert.equal(tables.wide.count, 10);
     assert.equal(tables.wide.truncated, true);
-    // A stored value bigger than the reply cap doesn't break the listing (100 MB of \u0001, 600 MB escaped: too long for a string).
+    // A stored value bigger than the reply cap doesn't break the listing.
     assert.deepEqual([tables.blob.count, tables.blob.rows.length, tables.blob.truncated], [1, 0, true]);
     assert.deepEqual([tables.long.count, tables.long.rows.length, tables.long.truncated], [1, 0, true]);
     assert.equal((await t.json("GET", "/v1/apps/shop/db?limit=-1", t.owner)).body.tables.small.rows.length, 0);
