@@ -243,12 +243,15 @@ export class Runtime {
       if (n > 0) this.#ws.set(spec.appId, n);
       else this.#ws.delete(spec.appId);
     };
-    // A client gone during a cold start frees its slot right away.
-    client.once("close", uncount);
+    // A client gone during a cold start frees its slot right away. Upgraded sockets allow half-open,
+    // so a FIN alone doesn't close it: destroy it then (nothing has been sent yet).
+    const gone = () => client.destroy();
+    client.once("close", uncount).once("end", gone);
     let proc: Proc;
     try {
       proc = await this.#get(spec);
     } catch (e) {
+      client.off("end", gone);
       uncount();
       if (e instanceof SandboxesBusy) {
         client.end(BUSY_RAW);
@@ -258,6 +261,7 @@ export class Runtime {
       client.end("HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
       return 502;
     }
+    client.off("end", gone);
     if (client.destroyed) {
       uncount();
       proc.inflight--;

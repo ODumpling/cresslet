@@ -7,7 +7,7 @@ import { request } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Socket } from "node:net";
+import { connect, type Socket } from "node:net";
 import { serve } from "@hono/node-server";
 import { createServer } from "../server/main.ts";
 import { type Config, loadConfig } from "../server/config.ts";
@@ -100,7 +100,7 @@ async function setup(limits: Partial<Config["limits"]>, apps: string[]) {
     srv.close();
     await rm(dataDir, { recursive: true, force: true });
   };
-  return { srv, ids, get, running, logs, ws, echo, closed, settled, done };
+  return { srv, ids, port, get, running, logs, ws, echo, closed, settled, done };
 }
 
 test("sandbox cap: a new app evicts the least recently used idle sandbox", async () => {
@@ -232,6 +232,26 @@ test("websocket caps: an upgrade answered with a normal response frees its slot 
     const open = await t.ws("a9");
     assert.equal(open.status, 101);
     open.socket!.destroy();
+  } finally {
+    await t.done();
+  }
+});
+
+test("websocket caps: a client that hangs up (FIN) during a cold start frees its slot", async () => {
+  const t = await setup({ maxWebSocketsPerApp: 1 }, ["a10"]);
+  try {
+    // Raw socket: send the upgrade, then half-close at once, while the sandbox is still starting.
+    const raw = connect(t.port, "127.0.0.1");
+    await new Promise((r) => raw.once("connect", r));
+    raw.on("data", () => {}).on("error", () => {});
+    raw.end(`GET /api/ws HTTP/1.1\r\nhost: a10.test.local\r\nupgrade: websocket\r\nconnection: Upgrade\r\n` +
+      `sec-websocket-key: ${randomBytes(16).toString("base64")}\r\nsec-websocket-version: 13\r\n\r\n`);
+    for (let i = 0; i < 300 && !t.srv.runtime.status(t.ids.a10).running; i++) await sleep(10);
+    await t.settled("a10");
+    const open = await t.ws("a10");
+    assert.equal(open.status, 101, "the abandoned handshake doesn't hold the app's one slot");
+    open.socket!.destroy();
+    raw.destroy();
   } finally {
     await t.done();
   }
