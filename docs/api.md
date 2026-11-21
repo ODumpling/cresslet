@@ -58,6 +58,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/apps/:name/claim` | account auth + `{deployKey}` → no expiry, net + secrets |
 | POST | `/v1/apps/:name/rollback` | `{deployId?}` (default: previous) |
 | GET | `/v1/apps/:name/source?deploy=` | `{app, deployId, files: [{path, data, encoding}]}` source uploaded with the current (or given) deploy; 404 `no_source` if none |
+| GET | `/v1/apps/:name/metrics` | the dashboard's numbers: `{since, bucketMs, totals: {requests, errors, clientErrors, avgMs, maxMs}, series: [{t, requests, errors, avgMs}], usage: {deploys, database, files, total}, database: {tables: [{name, rows}], error}, domains}`. Requests are counted in memory over the last 24 h in 5-minute buckets (`since`: when counting started, at server start); `avgMs`/`maxMs` time server routes only |
 | GET | `/v1/apps/:name/logs?n=200&follow=1` | NDJSON `{t, kind: stdout\|stderr\|system\|request, msg}`; `follow` streams |
 | GET | `/v1/apps/:name/secrets` | `{keys}` (values are write-only) |
 | PUT | `/v1/apps/:name/secrets` | `{KEY: "value" \| null}` merge; claimed apps only |

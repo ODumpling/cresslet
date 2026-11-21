@@ -331,7 +331,7 @@ function logOut() {
 // ------------------------------------------------------------------ settings
 let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
 function showOnly(id) {
-  for (const m of ["landing", "home", "pages", "settings", "share", "view", "cli-login", "admin", "workspace"]) $(m).hidden = m !== id;
+  for (const m of ["landing", "home", "pages", "settings", "share", "view", "cli-login", "admin", "site", "workspace"]) $(m).hidden = m !== id;
   $("app").dataset.view = id;
   $("topbar").hidden = id !== "workspace";
   $("site-nav").hidden = id !== "landing";
@@ -790,6 +790,487 @@ async function renderAdminSite(name) {
     el("div", { className: "detail-grid" }, info, el("div", { className: "stack" }, deploys)));
 }
 
+// ------------------------------------------------------------------ app dashboard (#/apps/<name>[/<tab>[/<table>]])
+// One deployed app: status, requests, storage, deploys (with rollback), its database, secrets and logs.
+// Viewers see it all read only; the owner and admins can roll back and change secrets.
+const SITE_TABS = [["", "Overview", "server"], ["database", "Database", "database"], ["secrets", "Secrets", "key"], ["logs", "Logs", "terminal"]];
+/** `stop`: ends the open logs stream (set by the Logs tab, called on every route). */
+const appDash = { gen: 0, stop: null, page: {} };
+const siteHref = (name, ...rest) => `#/apps/${[name, ...rest].map(encodeURIComponent).join("/")}`;
+const appPath = (name, rest = "") => `/v1/apps/${encodeURIComponent(name)}${rest}`;
+const canManage = (access) => access === "owner" || access === "admin";
+const plural = (n, one, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+/** Resolves true if this render is still current (no later route or re-render), so callers may move focus. */
+async function renderSite(name, tab = "", arg = "") {
+  if (!auth.token) {
+    location.hash = "#/";
+    return false;
+  }
+  const gen = ++appDash.gen, route = routeGen;
+  const current = () => gen === appDash.gen && route === routeGen;
+  $("site-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", name);
+  $("site-sub").textContent = "";
+  $("site-actions").replaceChildren();
+  $("site-tabs").replaceChildren(...SITE_TABS.map(([k, label, ico]) => {
+    const a = el("a", { className: "site-tab", href: k ? siteHref(name, k) : siteHref(name) }, icon(ico), label);
+    if (k === tab) a.setAttribute("aria-current", "page");
+    return a;
+  }));
+  $("site-body").replaceChildren(el("p", { className: "muted", textContent: "Loading…" }));
+  document.title = `${name} · Cresslet Studio`;
+  showOnly("site");
+  try {
+    const d = await api(appPath(name));
+    if (!current()) return false;
+    const a = d.app;
+    $("site-sub").textContent = [ACCESS_LABEL[a.access] ? `You're ${a.access === "owner" ? "the owner" : `${a.access === "admin" ? "an" : "a"} ${a.access}`}` : null,
+      a.config?.server ? "Server app" : "Static site", a.claimed ? null : `Unclaimed${a.expiresAt ? `, expires ${ago(a.expiresAt)}` : ""}`].filter(Boolean).join(" · ");
+    const refresh = el("button", {
+      className: "btn", type: "button", title: "Refresh",
+      onclick: () => renderSite(name, tab, arg).then((ok) => ok && refocus($("site-actions").querySelector("button"))),
+    }, icon("refresh"), srOnly("Refresh"));
+    $("site-actions").replaceChildren(
+      extLink(a.url, "Visit", "btn"),
+      el("button", { className: "btn", type: "button", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) }, icon("download"), "Open source"),
+      canManage(a.access) ? el("a", { className: "btn", href: `#/share/${encodeURIComponent(name)}` }, icon("users"), "Share") : null,
+      refresh);
+    if (tab === "database") await siteDatabase(name, arg, current);
+    else if (tab === "secrets") siteSecrets(name, d, current);
+    else if (tab === "logs") siteLogs(name, current);
+    else await siteOverview(name, d, current);
+  } catch (e) {
+    if (!current()) return false;
+    $("site-body").replaceChildren(el("p", {
+      className: "error",
+      textContent: e.status === 404 || e.status === 403 ? `There's no app named ${name} that you can see.` : `Could not load: ${e.message}`,
+    }));
+    if (e.status !== 404 && e.status !== 403) {
+      const retry = el("button", { className: "btn", type: "button", onclick: () => renderSite(name, tab, arg).then((ok) => ok && refocus($("site-actions").querySelector("button"))) }, icon("refresh"), "Retry");
+      $("site-actions").replaceChildren(retry);
+      refocus(retry);
+    }
+  }
+  return current();
+}
+
+/** Requests per hour over the last 24 hours (the 5-minute buckets summed), errors shown at the foot of each bar. */
+function requestChart(series, bucketMs) {
+  const per = Math.max(1, Math.round(3_600_000 / bucketMs));
+  const hours = [];
+  for (let i = 0; i < series.length; i += per) {
+    const part = series.slice(i, i + per);
+    hours.push({ t: part[0].t, requests: part.reduce((n, b) => n + b.requests, 0), errors: part.reduce((n, b) => n + b.errors, 0) });
+  }
+  const max = Math.max(...hours.map((h) => h.requests));
+  const total = hours.reduce((n, h) => n + h.requests, 0), errors = hours.reduce((n, h) => n + h.errors, 0);
+  const fmt = (iso) => new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const peak = hours.reduce((a, h) => (h.requests > a.requests ? h : a), hours[0]);
+  const label = max
+    ? `Requests per hour over the last 24 hours: ${plural(total, "request")}, ${plural(errors, "server error")}; busiest hour from ${fmt(peak.t)} (${peak.requests.toLocaleString()})`
+    : "No requests in the last 24 hours";
+  return el("div", {},
+    el("div", { className: "day-chart req-chart", role: "img", ariaLabel: label },
+      ...hours.map((h) => {
+        const b = el("span", { title: `${fmt(h.t)}: ${plural(h.requests, "request")}${h.errors ? `, ${plural(h.errors, "server error")}` : ""}` });
+        b.style.height = max ? `${Math.max(h.requests ? 3 : 0, (h.requests / max) * 100)}%` : "0";
+        if (h.errors) {
+          const e = el("i", { className: "err" });
+          e.style.height = `${Math.max(8, (h.errors / h.requests) * 100)}%`;
+          b.append(e);
+        }
+        return b;
+      })),
+    el("div", { className: "day-axis", ariaHidden: "true" },
+      el("span", { textContent: "24 hours ago" }), el("span", { textContent: max ? `peak ${peak.requests.toLocaleString()}/h` : "" }), el("span", { textContent: "Now" })));
+}
+
+const kvList = (pairs) => el("dl", { className: "kv" }, ...pairs.filter(Boolean).flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
+
+async function siteOverview(name, d, current) {
+  const m = await api(appPath(name, "/metrics"));
+  if (!current()) return;
+  const a = d.app, rt = d.runtime, dep = d.deploys.find((x) => x.current);
+  const status = rt.running ? "running" : a.currentDeployId ? "idle" : "empty";
+  const manage = canManage(a.access);
+  const db = m.database;
+  const rows = db.tables.reduce((n, t) => n + t.rows, 0);
+
+  const banner = dep
+    ? el("div", { className: "banner" }, statusPill("live", "Live"),
+      el("span", {}, el("span", { className: "mono", textContent: dep.id }), ` deployed ${ago(dep.createdAt)} via ${dep.source}`))
+    : el("div", { className: "banner" }, "Nothing deployed yet.");
+
+  const t = m.totals;
+  const stats = el("div", { className: "stats" },
+    stat("Status", [STATUS[status]], rt.running ? `pid ${rt.pid}` : a.config?.server ? "Starts on the next request" : "Static site",
+      el("i", { className: "dot", ariaHidden: "true", dataset: { s: status } })),
+    stat("Requests", [t.requests.toLocaleString(), el("small", { textContent: "24h" })],
+      `${plural(t.errors, "server error")} · ${t.requests ? Math.round((t.errors / t.requests) * 1000) / 10 : 0}% · ${t.clientErrors.toLocaleString()} 4xx`),
+    stat("Response time", [t.avgMs === null ? "—" : `${t.avgMs.toLocaleString()} ms`],
+      t.maxMs === null ? (a.config?.server ? "No server requests yet" : "Static files only") : `Average · slowest ${t.maxMs.toLocaleString()} ms`),
+    stat("Storage", [fmtBytes(m.usage.total)],
+      db.error ? "Database couldn't be read" : db.tables.length ? `Database ${fmtBytes(m.usage.database)} · ${plural(db.tables.length, "table")}` : "No database yet"));
+
+  const sinceRestart = Date.now() - new Date(m.since) < 86_400_000;
+  const traffic = el("div", { className: "panel" },
+    el("div", { className: "panel-head" }, el("h2", { textContent: "Requests" }),
+      el("span", { className: "muted small", textContent: sinceRestart ? `Counted since the server started ${ago(m.since)}` : "Last 24 hours" })),
+    requestChart(m.series, m.bucketMs));
+
+  const domains = m.domains.filter((x) => x.verified);
+  const info = el("div", { className: "panel" }, el("h2", { textContent: "Overview" }), kvList([
+    ["URL", extLink(a.url, a.url.replace(/^https?:\/\//, ""))],
+    ["Domains", domains.length ? el("span", {}, ...domains.flatMap((x, i) => [i ? ", " : null, extLink(`https://${x.domain}`, x.domain)])) : "—"],
+    ["Server", a.config?.server ? `Yes${a.config.crons?.length ? ` · ${plural(a.config.crons.length, "cron")}` : ""}` : "Static only"],
+    ["Secrets", el("a", { href: siteHref(name, "secrets"), textContent: d.secrets.length ? plural(d.secrets.length, "secret") : "None" })],
+    ["Egress", a.egress === null ? "Any public host" : a.egress.length ? a.egress.join(", ") : "None"],
+    a.expiresAt ? ["Expires", ago(a.expiresAt)] : null,
+    ["Created", new Date(a.createdAt).toLocaleString()],
+    ["App ID", el("span", { className: "mono", textContent: a.id })],
+  ]), el("h2", { className: "mt", textContent: "Storage" }), usageBar(m.usage));
+
+  const tablesPanel = el("div", { className: "panel" },
+    el("div", { className: "panel-head" }, el("h2", { textContent: "Database tables" }),
+      db.tables.length ? el("a", { className: "small", href: siteHref(name, "database"), textContent: "Explore" }) : null),
+    db.error ? el("p", { className: "error small", textContent: db.error })
+      : db.tables.length
+      ? el("div", { className: "scroll-x", tabIndex: 0, role: "region", ariaLabel: "Database tables" }, el("table", { className: "table" },
+        el("thead", {}, el("tr", {}, el("th", { scope: "col", textContent: "Table" }), el("th", { scope: "col", className: "num", textContent: "Rows" }))),
+        el("tbody", {}, ...db.tables.map((x) => el("tr", {},
+          el("td", {}, el("a", { className: "mono", href: siteHref(name, "database", x.name), textContent: x.name })),
+          el("td", { className: "num", textContent: x.rows.toLocaleString() })))),
+        el("tfoot", {}, el("tr", {}, el("td", { className: "muted", textContent: "Total" }), el("td", { className: "num muted", textContent: rows.toLocaleString() })))))
+      : el("p", { className: "muted small", textContent: a.config?.server ? "No database yet: it's made the first time the server uses env.db." : "Static sites have no database." }));
+
+  const deploys = el("div", { className: "panel" },
+    el("div", { className: "panel-head" }, el("h2", { id: "deploys-title", textContent: "Deploys" }),
+      el("span", { className: "muted small", textContent: `${plural(d.deploys.length, "deploy")} kept` })),
+    d.deploys.length
+      ? el("div", { className: "scroll-x", tabIndex: 0, role: "region", ariaLabel: "Deploys" }, el("table", { className: "table" },
+        el("thead", {}, el("tr", {}, ...["Deploy", "Actions"].map((h, i) =>
+          el("th", { scope: "col", className: i ? "actions" : "" }, i ? srOnly(h) : h)))),
+        el("tbody", {}, ...d.deploys.map((x) => el("tr", {},
+          el("td", {}, el("span", { className: "mono", textContent: x.id }),
+            x.current ? el("span", { className: "badge", textContent: "live" }) : null,
+            el("span", { className: "sub" }, timeAgo(x.createdAt), ` · ${fmtBytes(x.bytes)} · ${plural(x.files, "file")} · via ${x.source}`)),
+          el("td", { className: "actions" }, manage && !x.current
+            ? el("button", { className: "btn sm", type: "button", id: `rollback-${x.id}`, ariaLabel: `Roll back to ${x.id}`, onclick: (e) => rollback(name, x, e.currentTarget) }, "Roll back")
+            : null))))))
+      : el("p", { className: "muted small", textContent: "No deploys." }));
+
+  $("site-body").replaceChildren(banner, stats, traffic,
+    el("div", { className: "detail-grid mt" }, info, el("div", { className: "stack" }, tablesPanel, deploys)));
+}
+
+async function rollback(name, dep, btn) {
+  if (!confirm(`Roll ${name} back to ${dep.id} (deployed ${ago(dep.createdAt)})?\n\nIt serves that deploy's files and server from the next request. Its database, files and secrets stay as they are.`)) return;
+  const gen = routeGen;
+  btn.disabled = true;
+  try {
+    await api(appPath(name, "/rollback"), { method: "POST", body: JSON.stringify({ deployId: dep.id }) });
+    toast(`${name} rolled back to ${dep.id}`);
+    if (gen === routeGen) renderSite(name).then((ok) => ok && refocus($("deploys-title")));
+  } catch (e) {
+    toast(`Could not roll back: ${e.message}`);
+    if (gen === routeGen && btn.isConnected) {
+      btn.disabled = false;
+      btn.focus();
+    }
+  }
+}
+
+// ---- database explorer
+const DB_PAGE = 50;
+const quoteIdent = (n) => `"${n.replace(/"/g, '""')}"`;
+
+/** A cell's value: NULL, a blob's size, or the text (long text cut, the whole value in its title). */
+function cellValue(v) {
+  if (v === null || v === undefined) return el("span", { className: "null", textContent: "NULL" });
+  if (typeof v === "object" && typeof v.$bytes === "string") {
+    return el("span", { className: "null", textContent: `BLOB ${fmtBytes(Math.floor((v.$bytes.length * 3) / 4) - (v.$bytes.match(/=*$/)[0].length))}` });
+  }
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s.length > 120 ? el("span", { title: s.slice(0, 4000), textContent: `${s.slice(0, 120)}…` }) : s;
+}
+
+function resultTable(rows, label, columns = null) {
+  const cols = columns ?? [...new Set(rows.flatMap((r) => Object.keys(r)))];
+  if (!cols.length) return el("p", { className: "muted small", textContent: "No rows." });
+  return el("div", { className: "table-wrap result", tabIndex: 0, role: "region", ariaLabel: label },
+    el("table", { className: "table data" },
+      el("thead", {}, el("tr", {}, ...cols.map((c) => el("th", { scope: "col", textContent: typeof c === "string" ? c : c.name, className: /INT|REAL|FLOA|DOUB|NUM|DEC/i.test(c.type ?? "") ? "num" : "" },
+        typeof c === "object" && (c.pk || c.type) ? el("span", { className: "col-type", textContent: [c.pk ? "PK" : null, c.type].filter(Boolean).join(" ") }) : null)))),
+      el("tbody", {}, ...(rows.length
+        ? rows.map((r) => el("tr", {}, ...cols.map((c) => {
+          const v = r[typeof c === "string" ? c : c.name];
+          return el("td", { className: typeof v === "number" ? "num" : "" }, cellValue(v));
+        })))
+        : [el("tr", {}, el("td", { colSpan: cols.length, className: "empty", textContent: "No rows." }))]))));
+}
+
+async function siteDatabase(name, table, current) {
+  const db = await api(appPath(name, "/db?limit=0"));
+  if (!current()) return;
+  const tables = Object.entries(db.tables).map(([n, t]) => ({ name: n, ...t }));
+  if (!tables.length) {
+    $("site-body").replaceChildren(emptyState("No database yet", "It's made the first time the app's server uses env.db."));
+    return;
+  }
+  const sel = tables.find((t) => t.name === table) ?? tables[0];
+  const list = el("nav", { className: "db-tables panel", ariaLabel: "Tables" },
+    el("h2", { textContent: "Tables" }),
+    el("ul", {}, ...tables.map((t) => {
+      const a = el("a", { href: siteHref(name, "database", t.name) }, el("span", { className: "mono", textContent: t.name }), el("span", { className: "muted", textContent: t.count.toLocaleString() }));
+      if (t === sel) a.setAttribute("aria-current", "page");
+      return el("li", {}, a);
+    })),
+    db.truncated ? el("p", { className: "muted small", textContent: "Some tables aren't listed (too many)." }) : null);
+
+  // Browse: the selected table, a page at a time.
+  const key = `${name}\n${sel.name}`;
+  const grid = el("div", {}, el("p", { className: "muted small", textContent: "Loading rows…" }));
+  const pagerStatus = el("span", { className: "muted small", role: "status" });
+  const pager = el("div", { className: "row start pager" }, pagerStatus);
+  let columns = null;
+  async function page(offset, moved = false) {
+    appDash.page[key] = offset;
+    const gen = appDash.gen;
+    try {
+      const [cols, r] = await Promise.all([
+        columns ?? api(appPath(name, "/db/query"), { method: "POST", body: JSON.stringify({ sql: "SELECT name, type, pk FROM pragma_table_info(?) ORDER BY cid", params: [sel.name] }) }).then((x) => x.rows),
+        api(appPath(name, "/db/query"), { method: "POST", body: JSON.stringify({ sql: `SELECT * FROM ${quoteIdent(sel.name)} LIMIT ? OFFSET ?`, params: [DB_PAGE, offset] }) }),
+      ]);
+      if (gen !== appDash.gen || !grid.isConnected) return;
+      columns = cols;
+      grid.replaceChildren(resultTable(r.rows, `${sel.name} rows`, columns.length ? columns : null));
+      const last = Math.min(offset + r.rows.length, sel.count);
+      const prev = el("button", { className: "btn sm", type: "button", id: "db-prev", disabled: offset === 0, onclick: () => page(Math.max(0, offset - DB_PAGE), true) }, "Previous");
+      const next = el("button", { className: "btn sm", type: "button", id: "db-next", disabled: offset + DB_PAGE >= sel.count, onclick: () => page(offset + DB_PAGE, true) }, "Next");
+      pagerStatus.textContent = sel.count ? `Rows ${(offset + 1).toLocaleString()}–${last.toLocaleString()} of ${sel.count.toLocaleString()}` : "No rows";
+      pager.replaceChildren(pagerStatus, prev, next);
+      if (moved) refocus();
+    } catch (e) {
+      if (gen === appDash.gen && grid.isConnected) grid.replaceChildren(el("p", { className: "error small", textContent: `Could not read ${sel.name}: ${e.message}` }));
+    }
+  }
+  const browse = el("div", { className: "panel" },
+    el("div", { className: "panel-head" },
+      el("h2", { className: "mono", textContent: sel.name }),
+      el("span", { className: "muted small", textContent: plural(sel.count, "row") })),
+    sel.schema ? el("details", { className: "schema" }, el("summary", { textContent: "Schema" }), el("pre", { className: "mono", textContent: sel.schema })) : null,
+    grid, pager);
+
+  // Query: any read-only SQL.
+  const sql = el("textarea", {
+    className: "input mono sql", id: "db-sql", rows: 4, spellcheck: false, ariaLabel: "SQL",
+    value: `SELECT * FROM ${quoteIdent(sel.name)} LIMIT 100`,
+  });
+  const out = el("div", { className: "query-out", role: "status" });
+  const run = el("button", { className: "btn primary", type: "submit" }, icon("zap"), "Run");
+  const form = el("form", {
+    className: "query",
+    onsubmit: async (e) => {
+      e.preventDefault();
+      if (!sql.value.trim()) return;
+      const gen = appDash.gen, started = performance.now();
+      run.disabled = true;
+      out.replaceChildren(el("p", { className: "muted small", textContent: "Running…" }));
+      try {
+        const r = await api(appPath(name, "/db/query"), { method: "POST", body: JSON.stringify({ sql: sql.value }) });
+        if (gen !== appDash.gen) return;
+        out.replaceChildren(
+          el("p", { className: "muted small", textContent: `${plural(r.rows.length, "row")}${r.truncated ? " (cut off: at most 1,000 rows or 4 MB)" : ""} in ${Math.round(performance.now() - started)} ms` }),
+          r.rows.length ? resultTable(r.rows, "Query result") : null);
+      } catch (err) {
+        if (gen === appDash.gen) out.replaceChildren(el("p", { className: "error small", textContent: err.message }));
+      } finally {
+        run.disabled = false;
+      }
+    },
+  },
+  sql,
+  el("div", { className: "row start" }, run, el("span", { className: "muted small", textContent: "Read only · ⌘/Ctrl + Enter runs it · at most 1,000 rows, 5 seconds" })));
+  sql.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  const query = el("div", { className: "panel" }, el("h2", { textContent: "Query" }), form, out);
+
+  $("site-body").replaceChildren(el("div", { className: "db-grid" }, list, el("div", { className: "stack" }, browse, query)));
+  await page(appDash.page[key] ?? 0);
+}
+
+// ---- secrets (values are write-only: they can be replaced, never read back)
+const SECRET_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
+const labelled = (node, id) => (node.setAttribute("aria-labelledby", id), node);
+
+function siteSecrets(name, d) {
+  const a = d.app, manage = canManage(a.access) && a.claimed;
+  let keys = d.secrets;
+  const tbody = el("tbody");
+  const status = el("p", { className: "sr-only", role: "status" });
+  const keyIn = el("input", { className: "input mono", id: "secret-key", name: "key", required: true, autocomplete: "off", spellcheck: false, placeholder: "STRIPE_KEY", maxLength: 64 });
+  const valIn = el("textarea", { className: "input mono", id: "secret-value", name: "value", rows: 2, autocomplete: "off", spellcheck: false, placeholder: "Value", maxLength: 32768 });
+  const save = el("button", { className: "btn primary", type: "submit" }, "Add secret");
+  const err = el("p", { className: "error small", role: "alert" });
+  const formTitle = el("h2", { id: "secret-form-title", textContent: "Add a secret" });
+  const setMode = () => {
+    const k = keyIn.value.trim().toUpperCase();
+    const exists = keys.includes(k);
+    save.textContent = exists ? "Replace value" : "Add secret";
+    formTitle.textContent = exists ? `Replace ${k}` : "Add a secret";
+  };
+  keyIn.addEventListener("input", () => {
+    err.textContent = "";
+    setMode();
+  });
+
+  async function put(body, msg) {
+    const r = await api(appPath(name, "/secrets"), { method: "PUT", body: JSON.stringify(body) });
+    keys = r.keys;
+    draw();
+    status.textContent = msg;
+    toast(msg);
+  }
+
+  function draw() {
+    tbody.replaceChildren(...(keys.length ? keys.map((k) => el("tr", {},
+      el("td", {}, el("span", { className: "mono", textContent: k })),
+      el("td", { className: "muted mono", ariaHidden: "true", textContent: "••••••••" }),
+      el("td", { className: "actions" }, ...(manage ? [
+        el("button", { className: "btn sm", type: "button", id: `replace-${k}`, ariaLabel: `Replace ${k}`, onclick: () => {
+          keyIn.value = k;
+          valIn.value = "";
+          setMode();
+          valIn.focus();
+        } }, "Replace"),
+        el("button", { className: "btn sm danger", type: "button", id: `delete-${k}`, ariaLabel: `Delete ${k}`, onclick: async (e) => {
+          if (!confirm(`Delete secret ${k} from ${name}? The app restarts without it.`)) return;
+          const b = e.currentTarget;
+          b.disabled = true;
+          try {
+            await api(appPath(name, `/secrets/${encodeURIComponent(k)}`), { method: "DELETE" });
+            keys = keys.filter((x) => x !== k);
+            draw();
+            setMode();
+            status.textContent = `${k} deleted`;
+            toast(`${k} deleted`);
+            refocus($("secrets-title"));
+          } catch (e2) {
+            b.disabled = false;
+            toast(`Could not delete ${k}: ${e2.message}`);
+          }
+        } }, icon("trash"), "Delete"),
+      ] : []))))
+      : [el("tr", {}, el("td", { colSpan: 3, className: "empty", textContent: "No secrets yet." }))]));
+  }
+  draw();
+
+  const form = manage && el("form", {
+    className: "panel secret-form",
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const k = keyIn.value.trim().toUpperCase();
+      if (!SECRET_RE.test(k)) {
+        err.textContent = "Use UPPER_SNAKE_CASE: letters, digits and underscores, starting with a letter or underscore (at most 64).";
+        keyIn.focus();
+        return;
+      }
+      const replacing = keys.includes(k);
+      save.disabled = true;
+      try {
+        await put({ [k]: valIn.value }, replacing ? `${k} replaced` : `${k} added`);
+        keyIn.value = valIn.value = "";
+        setMode();
+        keyIn.focus();
+      } catch (e2) {
+        err.textContent = `Could not save: ${e2.message}`;
+      } finally {
+        save.disabled = false;
+      }
+    },
+  },
+  formTitle,
+  el("div", { className: "field" }, el("label", { htmlFor: "secret-key", textContent: "Name" }), keyIn),
+  el("div", { className: "field" }, el("label", { htmlFor: "secret-value", textContent: "Value" }), valIn),
+  err,
+  el("div", { className: "row start" }, save, el("span", { className: "muted small", textContent: "Saving restarts the app with the new value." })));
+
+  const note = !a.claimed
+    ? el("p", { className: "muted small", textContent: "Secrets need a claimed app: run cresslet claim, or deploy it while logged in." })
+    : !canManage(a.access) ? el("p", { className: "muted small", textContent: "Only the owner and admins can change secrets." }) : null;
+
+  $("site-body").replaceChildren(...[
+    el("p", { className: "muted lead" }, "Your server reads these with ", el("code", { textContent: 'secrets.get("NAME")' }),
+      " (import { secrets } from \"cresslet\"). Values are write-only: you can replace or delete one, never read it back."),
+    note,
+    el("div", { className: manage ? "detail-grid" : "" },
+      el("div", { className: "panel" },
+        el("h2", { id: "secrets-title", tabIndex: -1, textContent: "Secrets" }),
+        el("div", { className: "scroll-x" }, labelled(el("table", { className: "table" },
+          el("thead", {}, el("tr", {}, el("th", { scope: "col", textContent: "Name" }), el("th", { scope: "col", textContent: "Value" }), el("th", { scope: "col", className: "actions" }, srOnly("Actions")))),
+          tbody), "secrets-title"))),
+      form ? labelled(form, "secret-form-title") : null),
+    status].filter(Boolean));
+}
+
+// ---- logs: the last 200 lines, then live
+function siteLogs(name, current) {
+  const list = el("ol", { className: "log-lines mono", ariaLabel: "Log lines", tabIndex: 0 });
+  const state = el("span", { className: "muted small", role: "status", textContent: "Connecting…" });
+  const kinds = { all: "All", request: "Requests", app: "App output", system: "System" };
+  let filter = "all";
+  const seg = el("div", { className: "seg", role: "group", ariaLabel: "Show" },
+    ...Object.entries(kinds).map(([k, l]) => el("button", { type: "button", textContent: l, dataset: { k }, onclick: () => {
+      filter = k;
+      for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === k));
+      list.dataset.filter = k;
+    } })));
+  for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === filter));
+  list.dataset.filter = filter;
+  const clear = el("button", { className: "btn sm", type: "button", onclick: () => list.replaceChildren() }, "Clear");
+  $("site-body").replaceChildren(el("div", { className: "toolbar flush" }, seg, clear, state), el("div", { className: "panel log-panel" }, list));
+
+  const ctrl = new AbortController();
+  appDash.stop = () => ctrl.abort();
+  const add = (l) => {
+    const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+    const kind = l.kind === "stdout" || l.kind === "stderr" ? "app" : l.kind;
+    list.append(el("li", { dataset: { kind, k: l.kind } },
+      el("time", { dateTime: new Date(l.t).toISOString(), textContent: new Date(l.t).toLocaleTimeString() }),
+      el("span", { className: "kind", textContent: l.kind }),
+      el("span", { className: "msg", textContent: l.msg })));
+    while (list.children.length > 1000) list.firstChild.remove();
+    if (atEnd) list.scrollTop = list.scrollHeight;
+  };
+  (async () => {
+    try {
+      const res = await fetch(appPath(name, "/logs?n=200&follow=1"), { headers: { authorization: `Bearer ${auth.token}` }, signal: ctrl.signal });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message ?? `${res.status}`);
+      if (current()) state.textContent = "Live";
+      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += value;
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i);
+          buf = buf.slice(i + 1);
+          if (line) add(JSON.parse(line));
+        }
+      }
+      if (current()) state.textContent = "Disconnected";
+    } catch (e) {
+      if (!ctrl.signal.aborted && current()) state.textContent = `Disconnected: ${e.message}`;
+    }
+  })();
+}
+
 // ------------------------------------------------------------------ admin: AI credits (#/admin-credits[/<account id>])
 const creditNum = (x) => new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(x); // millicredits: exact
 const creditsText = (x) => `${creditNum(x)} ${creditNum(x) === "1" ? "credit" : "credits"}`;
@@ -1108,10 +1589,11 @@ function renderApps() {
         el("tr", { className: "list-row" },
           el("td", {}, el("div", { className: "name-cell" },
             el("span", { className: "file-ico" }, icon("globe")),
-            el("div", {}, extLink(a.url, a.name), el("span", { className: "sub", textContent: a.url.replace(/^https?:\/\//, "") })))),
+            el("div", {}, el("a", { href: siteHref(a.name), textContent: a.name }), el("span", { className: "sub", textContent: a.url.replace(/^https?:\/\//, "") })))),
           el("td", { className: "muted", textContent: ACCESS_LABEL[a.access] ?? "" }),
           el("td", { className: "muted" }, timeAgo(a.updatedAt)),
           el("td", { className: "actions" },
+            el("a", { className: "btn sm", href: a.url, target: "_blank", rel: "noopener" }, icon("external"), "Visit", srOnly(` ${a.name} (opens in a new tab)`)),
             el("button", { className: "btn sm", type: "button", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) },
               icon("download"), "Open source"),
             a.access === "viewer" ? null
@@ -2606,6 +3088,8 @@ for (const t of tabs) {
 let routeGen = 0;
 function route() {
   const gen = ++routeGen;
+  appDash.stop?.(); // a Logs tab's stream
+  appDash.stop = null;
   const m = location.hash.match(/^#\/p\/([\w-]+)/);
   if (m) openProject(m[1], gen);
   else if (booted) reloadForRoute();
@@ -2618,6 +3102,10 @@ function route() {
     renderView(decodeURIComponent(n), new URLSearchParams(q ?? "").get("path") ?? "/");
   }
   else if (location.hash === "#/cli") renderCli();
+  else if (location.hash.startsWith("#/apps/")) {
+    const [n, tab = "", arg = ""] = location.hash.slice("#/apps/".length).split("/").map(decodeURIComponent);
+    renderSite(n, tab, arg);
+  }
   else if (location.hash.startsWith("#/admin-credits")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin-credits/".length)), { credits: true });
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();

@@ -24,6 +24,7 @@ export async function purgeApp(cfg: Config, store: Store, runtime: Runtime, a: A
     await runtime.stopSettled(a.id);
   } finally {
     runtime.logs.drop(a.id);
+    runtime.metrics.drop(a.id);
     await removeAppFiles(cfg, a.id); // no row is left to retry from
   }
 }

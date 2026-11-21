@@ -40,7 +40,7 @@ import { github } from "./github.ts";
 import { cliLogin } from "./cli-login.ts";
 import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
-import { adminRoutes, isSiteAdmin, purgeApp } from "./admin.ts";
+import { adminRoutes, isSiteAdmin, purgeApp, usage } from "./admin.ts";
 import { aiRoutes } from "./credits.ts";
 import { ipKey, RateLimit } from "./limits.ts";
 import {
@@ -733,6 +733,27 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       })),
       runtime: runtime.status(a.id),
       secrets: await store.secretKeys(a.id),
+    });
+  });
+
+  // The app dashboard: requests over the last 24h (in memory, since `metrics.since`), disk use, its database's tables.
+  app.get("/apps/:name/metrics", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    notPage(a);
+    await authorize(c, a, "read");
+    const database: { tables: { name: string; rows: number }[]; error: string | null; truncated?: true } = { tables: [], error: null };
+    try {
+      const r = await inspect<{ tables: { name: string; rows: number }[]; truncated: boolean }>(a.id, paths(cfg, a.id).db, { kind: "counts" });
+      database.tables = r?.tables ?? [];
+      if (r?.truncated) database.truncated = true;
+    } catch (e) {
+      database.error = (e as Error).message;
+    }
+    return c.json({
+      ...runtime.metrics.view(a.id),
+      usage: await usage(cfg, a.id),
+      database,
+      domains: (await store.domains(a.id)).map((d) => ({ domain: d.domain, verified: !!d.verified_at })),
     });
   });
 

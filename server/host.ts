@@ -196,13 +196,17 @@ export function host(cfg: Config, store: Store, runtime: Runtime) {
         "request",
         `${req.method} ${url.pathname} ${res.status} ${Math.round(performance.now() - started)}ms`,
       );
+      runtime.metrics.record(app.id, res.status, performance.now() - started);
       return res;
     }
 
     if (req.method !== "GET" && req.method !== "HEAD") {
+      runtime.metrics.record(app.id, 405);
       return new Response("Method Not Allowed", { status: 405 });
     }
-    return serveStatic(req, join(p.deploy(app.current_deploy_id), "public"), url);
+    const res = await serveStatic(req, join(p.deploy(app.current_deploy_id), "public"), url);
+    runtime.metrics.record(app.id, res.status);
+    return res;
   };
 }
 
