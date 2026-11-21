@@ -98,7 +98,7 @@ deploy/backup.sh <volume> --install    # daily at 03:30 (systemd timer)
 
 A snapshot on the same disk doesn't survive losing that disk. With [rclone](https://rclone.org/install/) installed and set up for root, `CRESSLET_BACKUP_RCLONE` gets a copy of each snapshot and `CRESSLET_BACKUP_KEY_RCLONE` gets the keys. Make them two remotes with their own credentials, on two buckets, so a leaked bucket or token holds the data or the key, never both (the host holds both tokens, as it holds the volume). Any S3-compatible storage works (Cloudflare R2, Backblaze B2, AWS S3, …).
 
-Install rclone from rclone.org, not the distro. For R2, older rclone (Ubuntu 26.04's `v1.60.1-DEV`) follows each upload with a check R2 rejects (`501 NotImplemented`): the file is up and rclone's retry passes, but every upload logs a failed attempt. 1.76.0 runs clean.
+Install rclone from rclone.org, not the distro. For R2, older rclone (Ubuntu 26.04's `v1.60.1-DEV`) follows each upload with a check R2 rejects (`501 NotImplemented`): the file is up and rclone's retry passes, but every upload logs a failed attempt. `v1.76.0` runs clean.
 
 For R2: two buckets and two API tokens (Object Read & Write, each limited to its bucket), in `/root/.config/rclone/rclone.conf` (mode 0600; or `rclone config`, which asks for the same fields, to keep the tokens out of shell history):
 
@@ -123,6 +123,8 @@ rclone lsf keys:cresslet-keys
 rclone lsf snaps:cresslet-keys
 rclone lsf keys:cresslet-snapshots
 ```
+
+Then:
 
 ```sh
 CRESSLET_BACKUP_RCLONE=snaps:cresslet-snapshots CRESSLET_BACKUP_KEY_RCLONE=keys:cresslet-keys \
