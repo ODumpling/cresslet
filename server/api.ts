@@ -843,7 +843,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   });
   /**
    * `adding`: adding or verifying, which need the server to route and certify the hostname
-   * (`CRESSLET_CUSTOM_DOMAINS`). Checked before the claim, so an unclaimed app isn't told to claim for nothing.
+   * (`CRESSLET_CUSTOM_DOMAINS`). Checked after access, before the claim, so an unclaimed app isn't told to claim for nothing.
    */
   const claimed = async (c: Context<Env>, role: Role, adding = false) => {
     const a = getApp(c.req.param("name")!);
