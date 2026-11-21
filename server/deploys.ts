@@ -280,7 +280,7 @@ export const beingRemoved = (deployId: string) => removing.has(deployId);
 
 /**
  * Marked at once (before any await), then removed files first: if that fails, the row stays, so the
- * next prune tries again.
+ * next prune tries again, and the mark stays too.
  */
 async function removeDeploys(cfg: Config, store: Store, deploys: Pick<Deploy, "id" | "app_id">[]) {
   for (const d of deploys) removing.add(d.id);
@@ -288,10 +288,9 @@ async function removeDeploys(cfg: Config, store: Store, deploys: Pick<Deploy, "i
     try {
       await rm(paths(cfg, d.app_id).deploy(d.id), { recursive: true, force: true });
       store.deleteDeploy(d.id);
-    } catch (e) {
-      console.error(`cresslet: couldn't remove deploy ${d.id}:`, e);
-    } finally {
       removing.delete(d.id);
+    } catch (e) {
+      console.error(`cresslet: couldn't remove deploy ${d.id}:`, e); // stays marked: its files may be half gone
     }
   }
 }
