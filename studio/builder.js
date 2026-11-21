@@ -75,11 +75,13 @@ const tail = (s, n = MAX_OUTPUT) => (s.length > n ? `[… ${s.length - n} earlie
 /**
  * The tools, over a cresslet-container (`c.fs`, `c.spawn`, `c.workdir`).
  * `devLog()`: the studio terminal's output so far; `onChange(path)`: after a file was written or deleted.
- * Commands run with CRESSLET_AI_BUILDER=1, so `cresslet deploy` asks the user first (cresslet-plugin.js), however
- * it was started (directly, an npm script, `sh -c`).
+ * `cresslet deploy` asks the user first while one of these commands runs (`running`; cresslet-plugin.js), however it
+ * was started (directly, an npm script, `sh -c`). Commands also get CRESSLET_AI_BUILDER=1, for one left in the
+ * background. `paused()`: true while the user is being asked; that time doesn't count toward the timeout.
  */
-export function createTools(c, { devLog = () => "", onChange = () => {}, timeoutMs = COMMAND_TIMEOUT_MS } = {}) {
+export function createTools(c, { devLog = () => "", onChange = () => {}, timeoutMs = COMMAND_TIMEOUT_MS, paused = () => false } = {}) {
   const wd = c.workdir;
+  let running = 0;
   const abs = (rel) => (rel ? `${wd}/${rel}` : wd);
 
   async function list(dir, out = []) {
@@ -119,6 +121,15 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
   }
 
   async function run(command, signal) {
+    running++;
+    try {
+      return await runOne(command, signal);
+    } finally {
+      running--;
+    }
+  }
+
+  async function runOne(command, signal) {
     const proc = await c.spawn("jsh", ["-c", command], { cwd: wd, env: { CRESSLET_AI_BUILDER: "1" } });
     let out = "", dropped = 0; // only the tail is kept
     const reading = proc.output.pipeTo(new WritableStream({ write: (d) => {
@@ -131,7 +142,13 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     await proc.input.close().catch(() => {}); // no stdin: a command that waits for input gets EOF
     let timer, stop;
     const stopped = new Promise((r) => {
-      timer = setTimeout(() => r("timeout"), timeoutMs);
+      let left = timeoutMs;
+      const tick = () => {
+        if (!paused()) left -= 250;
+        if (left <= 0) r("timeout");
+        else timer = setTimeout(tick, 250);
+      };
+      timer = setTimeout(tick, 250);
       stop = () => r("stopped");
       if (signal?.aborted) stop();
       else signal?.addEventListener("abort", stop, { once: true });
@@ -145,7 +162,8 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     }
     await Promise.race([reading, new Promise((r) => setTimeout(r, 200))]);
     const shown = plain(out).trimEnd();
-    const text = dropped ? `[… ${dropped} earlier characters not shown]\n${tail(shown)}` : tail(shown);
+    const cut = dropped + Math.max(0, shown.length - MAX_OUTPUT);
+    const text = cut ? `[… ${cut} earlier characters not shown]\n${shown.slice(-MAX_OUTPUT)}` : shown;
     if (code === "timeout") return { error: true, text: `stopped after ${timeoutMs / 1000}s (still running)\n${text}` };
     if (code === "stopped") return { error: true, text: `stopped by the user (anything it had already sent, such as a deploy upload, may still have gone through)\n${text}` };
     return { error: code !== 0, text: `exit code ${code}\n${text}` };
@@ -207,7 +225,13 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     return { error: true, text: `unknown tool: ${name}`, summary: `unknown tool: ${name}` };
   }
 
-  return { execute };
+  return {
+    execute,
+    /** Builder commands running now. */
+    get running() {
+      return running;
+    },
+  };
 }
 
 /**
@@ -300,11 +324,15 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL }) {
           on({ type: "notice", text: "Claude declined this request.", error: true });
           return;
         }
-        if (!msg.content.length) return; // an empty message would make every later request fail
+        const cut = CUT_OFF[msg.stop_reason] ?? (["end_turn", "tool_use", "stop_sequence", "pause_turn"].includes(msg.stop_reason) ? null : `The reply stopped early (${msg.stop_reason})`);
+        if (!msg.content.length) {
+          // an empty message would make every later request fail: not kept
+          if (cut) on({ type: "notice", text: `${cut}.`, error: true });
+          return;
+        }
         messages.push({ role: "assistant", content: msg.content });
         if (msg.stop_reason === "pause_turn") continue;
         const calls = msg.content.filter((b) => b.type === "tool_use");
-        const cut = CUT_OFF[msg.stop_reason] ?? (msg.stop_reason === "end_turn" || msg.stop_reason === "tool_use" || msg.stop_reason === "stop_sequence" ? null : `The reply stopped early (${msg.stop_reason})`);
         if (cut) {
           // A cut-off tool input can still look valid: don't run it (the next message answers it as not run).
           on({ type: "notice", text: calls.length ? `${cut} before its tool calls were complete; they weren't run.` : `${cut}.`, error: true });

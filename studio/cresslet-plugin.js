@@ -56,9 +56,10 @@ function toBase64(bytes) {
 /**
  * @param {import("./vendor/cresslet-container/index").Container} c
  * @param {{ auth: () => { token?: string|null }, project: () => any, onDeployed?: (r: any) => void,
- *   approveDeploy?: (signal: AbortSignal) => Promise<boolean> }} opts
- *   approveDeploy: asked before `cresslet deploy` runs in a command the AI builder started (CRESSLET_AI_BUILDER set);
- *   without it, such deploys are refused.
+ *   builderRunning?: () => boolean, approveDeploy?: (target: string|null, signal: AbortSignal) => Promise<boolean> }} opts
+ *   approveDeploy: asked before `cresslet deploy` runs while the AI builder runs a command (builderRunning), or in a
+ *   process it started (CRESSLET_AI_BUILDER set); without it, such deploys are refused. target: the app it deploys
+ *   to, null for a new one.
  */
 export function createCresslet(c, opts) {
   const wd = c.workdir;
@@ -418,7 +419,8 @@ export function createCresslet(c, opts) {
       }
       if (sub === "deploy") {
         // Started by the AI builder (directly or through a script): the user approves each deploy.
-        if (ctx.env.CRESSLET_AI_BUILDER && !(await opts.approveDeploy?.(ctx.signal))) {
+        // (Its own running count, not just the env var: a command can unset that.)
+        if ((opts.builderRunning?.() || ctx.env.CRESSLET_AI_BUILDER) && !(await opts.approveDeploy?.(opts.project()?.deploy?.name ?? ((await config()).name || null), ctx.signal))) {
           err("deploy not approved by the user");
           return 1;
         }

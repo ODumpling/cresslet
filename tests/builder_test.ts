@@ -182,6 +182,27 @@ test("run_command returns exit code and output; a command that keeps running is 
   assert.equal((await t.execute("read_dev_log", {})).text, "error TS2304");
 });
 
+test("run_command: counts as running (deploys then need approval); time spent asking the user doesn't time out", async () => {
+  let asking = true;
+  const c = fakeContainer({}, { "cresslet deploy": { out: "", hang: true } });
+  const t = createTools(c, { timeoutMs: 300, paused: () => asking });
+  assert.equal(t.running, 0);
+  const p = t.execute("run_command", { command: "cresslet deploy" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(t.running, 1);
+  let done = false;
+  p.then(() => (done = true));
+  await new Promise((r) => setTimeout(r, 700)); // well past the timeout, but the user is still being asked
+  assert.equal(done, false);
+  asking = false;
+  assert.match((await p).text, /stopped after 0.3s/);
+  assert.equal(t.running, 0);
+  // long output: one note for everything left out
+  const big = createTools(fakeContainer({}, { "yes": { out: "y\n".repeat(30_000) } }));
+  const text = (await big.execute("run_command", { command: "yes" })).text;
+  assert.equal(text.match(/earlier characters not shown/g)?.length, 1);
+});
+
 test("agent: runs tool calls until Claude ends its turn, with the history append-only", async () => {
   const c = fakeContainer({ "src/App.tsx": "<h1>Todos</h1>" });
   const api = fakeClient([
@@ -263,6 +284,7 @@ test("agent: refused, cut-off or malformed tool calls don't run; a declined mess
     { content: [toolUse("r", "delete_file", { path: "a.txt" })], stop_reason: "max_tokens" },
     { content: [{ type: "text", text: "fine" }], stop_reason: "end_turn" },
     { content: [], stop_reason: "refusal" },
+    { content: [], stop_reason: "max_tokens" },
     { content: [toolUse("w", "write_file", { path: "a.txt", content: "y" })], stop_reason: "model_context_window_exceeded" },
     // the tolerant parser made `content` shorter than what the model wrote
     { content: [toolUse("j", "write_file", { path: "a.txt", content: "trunc" })], raw: { j: '{"path":"a.txt","content":"trunc"ated"}' }, stop_reason: "tool_use" },
@@ -283,12 +305,14 @@ test("agent: refused, cut-off or malformed tool calls don't run; a declined mess
   assert.equal(events.at(-1).text, "Claude declined this request.");
   assert.equal(agent.messages.length, before); // neither the request nor an (empty) reply
 
+  await agent.send("empty and cut off");
+  assert.match(events.at(-1).text, /length limit\.$/); // said, not silently "finished"
   await agent.send("write it");
   assert.equal(c.files.get("/project/a.txt"), "x");
   assert.match(events.at(-1).text, /too long for Claude/);
   await agent.send("write it again");
   assert.equal(c.files.get("/project/a.txt"), "x"); // invalid JSON: not run
-  const results = api.calls[5].params.messages.at(-1).content;
+  const results = api.calls[6].params.messages.at(-1).content;
   assert.equal(results[0].tool_use_id, "j");
   assert.match(results[0].content, /INVALID_JSON/);
   for (const call of api.calls) for (const m of call.params.messages) assert.ok(typeof m.content === "string" || m.content.length, "no empty message");

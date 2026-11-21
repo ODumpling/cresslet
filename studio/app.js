@@ -1556,7 +1556,8 @@ async function openProject(id, gen) {
       showDeployLink(project.deploy);
     },
     // `cresslet deploy` in a command the AI builder started: the user says yes first.
-    approveDeploy: (signal) => builder.approve(`Claude wants to deploy ${project.deploy?.name ?? "this project as a new app"}. It goes live at once.`, signal),
+    builderRunning: () => builder.running(),
+    approveDeploy: (target, signal) => builder.approve(`Claude wants to deploy ${target ? `to ${target}` : "this project as a new app"}. It goes live at once.`, signal),
   });
 
   // editor
@@ -1670,6 +1671,8 @@ async function openProject(id, gen) {
     treeTimer = setTimeout(() => {
       renderTree();
       save();
+      // the open file removed (a command, the AI builder): openFile clears the editor
+      if (current) c.fs.exists(`${wd}/${current}`).then((ok) => ok || openFile(current), () => {});
     }, 300);
   });
 
@@ -1793,8 +1796,10 @@ const runningText = (name, input) => ({
 
 function mountBuilder({ c, devLog, onChange }) {
   const btn = $("builder-btn"), pane = $("builder"), log = $("builder-log"), input = $("builder-input");
-  const tools = createTools(c, { devLog, onChange });
+  const approvals = new Set(); // decline functions of the deploy approvals waiting for the user
+  const tools = createTools(c, { devLog, onChange, paused: () => approvals.size > 0 });
   let agent = null, locked = false, busy = false;
+  let approved = false, stopped = false; // this request: a deploy was approved; the user pressed Stop
   let bubble = null, step = null; // the assistant text and the tool step being written
   let replied = "", failed = ""; // this request's latest reply text (read out when it ends), and its error
   btn.hidden = false;
@@ -1839,6 +1844,7 @@ function mountBuilder({ c, devLog, onChange }) {
     $("builder-new").disabled = busy;
     input.disabled = locked;
     $("builder-locked").hidden = !locked;
+    input.setAttribute("aria-describedby", locked ? "builder-locked builder-hint" : "builder-hint");
   }
 
   $("builder-key-form").onsubmit = (e) => {
@@ -1870,6 +1876,7 @@ function mountBuilder({ c, devLog, onChange }) {
     chatFocus();
   };
   $("builder-stop").onclick = () => {
+    stopped = true;
     agent?.stop();
     input.focus(); // the Stop button hides
   };
@@ -1929,6 +1936,7 @@ function mountBuilder({ c, devLog, onChange }) {
     input.value = "";
     replied = "";
     failed = "";
+    approved = stopped = false;
     const fromSend = document.activeElement === $("builder-send");
     busy = true;
     render();
@@ -1938,6 +1946,8 @@ function mountBuilder({ c, devLog, onChange }) {
     try {
       await agent.send(text);
     } finally {
+      for (const decline of approvals) decline(); // its command is gone (stopped, timed out, or left running)
+      if (approved && stopped) add(el("li", { className: "notice", dataset: { error: "" }, textContent: "If the deploy had started uploading, it may still go live: check the app." }));
       busy = false;
       bubble = step = null;
       working("");
@@ -1959,6 +1969,8 @@ function mountBuilder({ c, devLog, onChange }) {
       if (signal?.aborted) return resolve(false);
       if (pane.hidden) setOpen(true, { focus: false });
       const done = (ok) => {
+        if (!approvals.delete(stop)) return; // already answered
+        approved ||= ok;
         signal?.removeEventListener("abort", stop);
         const hadFocus = row.contains(document.activeElement);
         row.className = "step";
@@ -1976,6 +1988,7 @@ function mountBuilder({ c, devLog, onChange }) {
         el("div", { className: "row start" },
           el("button", { type: "button", className: "btn primary sm", textContent: "Approve deploy", onclick: () => done(true) }),
           el("button", { type: "button", className: "btn sm", textContent: "Decline", onclick: () => done(false) }))));
+      approvals.add(stop);
       signal?.addEventListener("abort", stop, { once: true });
       working("Waiting for your approval…");
       announce(`${text} Approve or decline it in the AI builder.`);
@@ -1985,6 +1998,7 @@ function mountBuilder({ c, devLog, onChange }) {
   render();
   return {
     approve,
+    running: () => tools.running > 0,
     lock(on) {
       locked = on;
       render();

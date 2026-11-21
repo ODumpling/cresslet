@@ -31,6 +31,8 @@ function sse(content, stopReason) {
 const replies = [
   [[{ type: "text", text: "I'll rename the heading." }, { type: "tool_use", id: "t1", name: "edit_file", input: { path: "src/App.tsx", old_text: "<h1>Todos</h1>", new_text: "<h1>Tasks</h1>" } }], "tool_use"],
   [[{ type: "tool_use", id: "t2", name: "run_command", input: { command: "ls src" } }, { type: "tool_use", id: "t3", name: "read_file", input: { path: ".env.cresslet" } }], "tool_use"],
+  // clearing the marker variable doesn't skip the approval
+  [[{ type: "tool_use", id: "t5", name: "run_command", input: { command: "unset CRESSLET_AI_BUILDER; cresslet deploy" } }], "tool_use"],
   [[{ type: "tool_use", id: "t4", name: "run_command", input: { command: "cresslet deploy" } }], "tool_use"],
   [[{ type: "text", text: "Renamed the heading to Tasks and deployed it." }], "end_turn"],
 ];
@@ -73,6 +75,7 @@ try {
   await page.locator("#builder-stop").waitFor({ state: "visible" });
   console.log("working");
   // `cresslet deploy` from the builder waits for the user; focus isn't moved onto the approve button.
+  await page.getByRole("button", { name: "Decline" }).click({ timeout: 90000 });
   const approveBtn = page.getByRole("button", { name: "Approve deploy" });
   await approveBtn.waitFor({ timeout: 90000 });
   if (await approveBtn.evaluate((e) => e === document.activeElement)) fail("approval took focus");
@@ -84,15 +87,15 @@ try {
   console.log("preview shows the edit");
   const steps = await page.locator("#builder-log .step").allInnerTexts();
   console.log("steps:", JSON.stringify(steps));
-  const want = ["Edited src/App.tsx", "Ran ls src", /^read_file: .env.cresslet is a local secrets file/, "Ran cresslet deploy", "Deploy approved"];
+  const want = ["Edited src/App.tsx", "Ran ls src", /^read_file: .env.cresslet is a local secrets file/, "Ran unset CRESSLET_AI_BUILDER; cresslet deploy", "Deploy not approved", "Ran cresslet deploy", "Deploy approved"];
   want.forEach((w, i) => (typeof w === "string" ? steps[i]?.startsWith(w) : w.test(steps[i] ?? "")) || fail(`step ${i}: ${steps[i]}`));
-  if ((await page.locator("#builder-log .step[data-state=error]").count()) !== 1) fail("expected exactly one failed step (the secrets file)");
+  if ((await page.locator("#builder-log .step[data-state=error]").count()) !== 3) fail("expected three failed steps (the secrets file, the declined deploy and its command)");
   if (!(await page.locator("#builder-stop").isHidden())) fail("Stop still shown");
   if ((await page.locator("#open-file").textContent()) === "src/App.tsx" && !(await page.locator(".cm-content").innerText()).includes("<h1>Tasks</h1>")) fail("editor shows the old file");
 
   // The requests: the user's key, straight from the browser, the model and tools; each tool result sent back.
-  if (requests.length !== 4) fail(`${requests.length} requests`);
-  const [r1, r2, r3, r4] = requests;
+  if (requests.length !== 5) fail(`${requests.length} requests`);
+  const [r1, r2, r3, r5, r4] = requests;
   if (r1.headers.authorization !== "Bearer sk-ant-e2e-test") fail(`key not sent: ${JSON.stringify(r1.headers)}`); // SDK 1.x: API keys go as Bearer
   if (r1.headers["anthropic-dangerous-direct-browser-access"] !== "true") fail("not a browser request");
   if (r1.body.model !== "claude-opus-5-5" || !r1.body.stream || r1.body.tools.length !== 7) fail(`request: ${JSON.stringify(r1.body).slice(0, 300)}`);
@@ -102,6 +105,7 @@ try {
   const [ls, secret] = results(r3);
   if (!/exit code 0\n[\s\S]*App\.tsx/.test(ls.content)) fail(`ls result: ${ls.content}`);
   if (!secret.is_error || /=/.test(secret.content)) fail(`secret result: ${JSON.stringify(secret)}`);
+  if (!/deploy not approved by the user/.test(results(r5)[0].content)) fail(`declined deploy: ${results(r5)[0].content}`);
   const deployed = results(r4)[0];
   console.log("deploy result:", deployed.content.split("\n").slice(0, 4).join(" | "));
   const url = /deployed \S+ → (\S+)/.exec(deployed.content)?.[1] ?? fail("no deploy URL in the tool result");
