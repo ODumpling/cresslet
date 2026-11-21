@@ -8,26 +8,16 @@
 	}
 }
 
-# The client's address for the per-IP limits (CRESSLET_CLIENT_IP_HEADER in compose.yaml), always
-# overwritten, so a client can't send its own.
-(client_ip) {
-	header_up X-Cresslet-Client-Ip {remote_host}
-}
-
 {$CRESSLET_DOMAIN}, *.{$CRESSLET_DOMAIN} {
 	tls {
 		import dns.caddy
 	}
-	reverse_proxy cresslet:8787 {
-		import client_ip
-	}
+	reverse_proxy cresslet:8787
 }
 
 https:// {
 	tls {
 		on_demand
 	}
-	reverse_proxy cresslet:8787 {
-		import client_ip
-	}
+	reverse_proxy cresslet:8787
 }
