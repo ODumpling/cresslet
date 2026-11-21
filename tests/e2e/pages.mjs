@@ -60,8 +60,15 @@ try {
   await dialog.waitFor();
   await o.getByRole("button", { name: "Cancel" }).click();
   await dialog.waitFor({ state: "hidden" });
+  // Its Settings link leaves the page, and the dialog doesn't come along.
   await o.getByRole("button", { name: "New artifact" }).first().click();
-  await o.waitForFunction(() => document.getElementById("page-retention").value === "7");
+  await dialog.getByRole("link", { name: "Settings" }).click();
+  await o.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+  assert(!await dialog.isVisible(), "dialog stayed open over Settings");
+  await o.goto(base + "/#/artifacts");
+  await o.getByRole("button", { name: "New artifact" }).first().click();
+  await dialog.waitFor();
+  assert(await o.locator("#page-retention").inputValue() === "7", "dialog opened before the account's defaults");
   assert(await o.getByLabel("Who can open it").inputValue() === "link", "form default visibility");
   await o.getByRole("button", { name: "Deploy" }).click();
   await o.getByText("Choose an HTML file or a folder first.").waitFor();
@@ -83,6 +90,7 @@ try {
 
   // A folder, overriding the defaults: public, forever. Hidden files stay behind.
   await o.getByRole("button", { name: "New artifact" }).click();
+  await dialog.waitFor();
   await o.locator("#page-dir").setInputFiles(join(dir, "site"));
   await o.getByText("site/", { exact: true }).waitFor();
   await o.getByText("2 files", { exact: true }).waitFor();
@@ -108,6 +116,7 @@ try {
   assert(site && site.visibility === "public" && site.retentionDays === null && site.files === 2, `upload 2 ${JSON.stringify(site)}`);
   assert((await fetch(site.url + "/img/dot.svg")).status === 200, "folder asset serves");
   await o.getByRole("button", { name: "New artifact" }).click();
+  await dialog.waitFor();
   assert(await o.getByLabel("Who can open it").inputValue() === "link", "form back to defaults after upload");
   assert(await o.getByText("Nothing chosen").isVisible(), "no file picked in a new dialog");
   await o.keyboard.press("Escape");

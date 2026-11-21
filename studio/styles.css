@@ -843,7 +843,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .dropzone-text strong { font-weight: 500; }
 .dropzone-btns { display: flex; gap: 8px; flex-wrap: wrap; }
 
-/* One artifact per row: name and address | who can open it, how long it's kept | copy, more. Below ~40rem the
+/* One artifact per row: name and address | who can open it, how long it's kept | copy, more. Below ~48rem the
    controls drop to a line of their own, and on a phone the copy button keeps only its icon. */
 .art-list { container-type: inline-size; }
 .list > .art-row {
@@ -864,16 +864,16 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .art-controls .role-select { width: auto; min-height: 30px; padding: 3px 8px; font-size: 13px; }
 .art-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
 .art-actions .btn.sm { min-height: 30px; }
-@container (max-width: 40rem) {
+@container (max-width: 48rem) {
   .list > .art-row { grid-template-columns: minmax(0, 1fr) auto; }
   .art-controls { grid-column: 1 / -1; grid-row: 2; padding-left: 40px; }
 }
 @container (max-width: 26rem) {
   .art-controls { padding-left: 0; }
-  .art-controls .role-select { flex: 1 1 0; min-width: 0; }
+  .art-controls { flex-wrap: wrap; }
+  .art-controls .role-select { flex: 1 1 8rem; max-width: none; }
   .art-actions .lbl { display: none; }
   .art-actions .btn.sm { width: 30px; padding: 0; }
-  .art-text .sub > :last-child, .art-text .sub > [aria-hidden] { display: none; }
 }
 
 /* A row's "more" menu (a native popover, placed by rowMenu). */

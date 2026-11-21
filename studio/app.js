@@ -1655,17 +1655,16 @@ $("pages-login-btn").addEventListener("click", () => {
   logIn();
 });
 
-let pageDefaults = null; // the account's defaults for new artifacts, from the last GET /v1/pages
+let pageUploading = false; // the dialog stays open (Escape, Cancel, × do nothing) while a deploy is in flight
 const pageSlug = slugField($("page-name"), "page");
 function renderPages() {
-  return api("/v1/pages").then(({ pages, defaults }) => {
-    pageDefaults = defaults;
+  return api("/v1/pages").then(({ pages }) => {
     $("page-list").replaceChildren(pages.length
       ? el("ul", { className: "list art-list", ariaLabel: "Your artifacts" }, ...pages.map(pageRow))
       : el("div", { className: "empty-state" },
         el("strong", { textContent: "No artifacts yet" }),
         el("span", {}, "Deploy an HTML file or a folder, or run ", el("code", { textContent: "npx cresslet@latest deploy report.html" }), "."),
-        el("button", { className: "btn primary sm", type: "button", onclick: openPageDialog }, icon("plus"), "New artifact")));
+        el("button", { className: "btn primary sm", type: "button", ariaHasPopup: "dialog", onclick: openPageDialog }, icon("plus"), "New artifact")));
   }).catch((e) => $("page-list").replaceChildren(el("p", { className: "error", textContent: `Could not load artifacts: ${e.message}` })));
 }
 
@@ -1680,7 +1679,7 @@ function rowMenu(id, label, items) {
   menu.addEventListener("beforetoggle", (e) => {
     if (e.newState !== "open") return;
     const r = btn.getBoundingClientRect();
-    menu.style.right = `${Math.max(8, innerWidth - r.right)}px`;
+    menu.style.right = `${Math.max(8, document.documentElement.clientWidth - r.right)}px`;
     menu.style.top = `${r.bottom + 4}px`;
   });
   menu.addEventListener("toggle", (e) => {
@@ -1697,6 +1696,8 @@ function rowMenu(id, label, items) {
   });
   // Closed before the item acts, so a confirm() or a file picker isn't drawn over an open menu.
   menu.addEventListener("click", (e) => e.target.closest("button, a") && hide(), true);
+  // Tabbing out of it closes it too, so it doesn't sit over the rows focus moved on to.
+  menu.addEventListener("focusout", (e) => e.relatedTarget && !menu.contains(e.relatedTarget) && e.relatedTarget !== btn && hide());
   return [btn, menu];
 }
 const menuItem = (iconName, text, srText, attrs = {}) =>
@@ -1712,7 +1713,7 @@ function pageRow(p) {
     : el("span", { className: "muted small", textContent: VIS_LABEL[p.visibility] });
   const keep = manage
     ? keepSelect({ id: `keep-${p.id}`, title: "Keep for", ariaLabel: `Keep ${label} for`, onchange: () => changePage(p, { retentionDays: keepParse(keep.value) }, keep, until) }, p.retentionDays)
-    : null;
+    : el("span", { className: "muted small", textContent: keepText(p.retentionDays) });
   const replace = el("input", { type: "file", hidden: true, accept: ".html,.htm,text/html", onchange: () => replacePage(p, replace) });
   const replaceDir = el("input", { type: "file", hidden: true, webkitdirectory: true, multiple: true, onchange: () => replacePage(p, replaceDir) });
   const items = [
@@ -1856,26 +1857,39 @@ drop.addEventListener("drop", (e) => {
   pickHtml(f);
 });
 
-/** Opens the new-artifact dialog at the account's defaults, with a new generated address. */
+/** Opens the new-artifact dialog at the account's defaults (asked for each time, so a change in Settings or
+ * elsewhere counts, and it never starts at the first option), with a new generated address. */
+let pageDialogOpening = false;
 async function openPageDialog() {
   const dlg = $("page-dialog");
-  if (dlg.open) return;
+  if (dlg.open || pageDialogOpening) return;
+  pageDialogOpening = true;
+  let defaults;
+  try {
+    defaults = (await api("/v1/me/settings")).pages;
+  } catch (e) {
+    return toast(`Could not load your artifact defaults: ${e.message}`);
+  } finally {
+    pageDialogOpening = false;
+  }
+  if (dlg.open || location.hash !== "#/artifacts") return; // left the page meanwhile
   $("page-form").reset();
   pagePick = null;
   showPick(...NO_PICK);
   pageError("");
   $("page-upload").disabled = false;
   $("page-name").value = "";
-  if (pageDefaults) {
-    $("page-visibility").value = pageDefaults.visibility;
-    setKeep($("page-retention"), pageDefaults.retentionDays);
-  }
+  $("page-visibility").value = defaults.visibility;
+  setKeep($("page-retention"), defaults.retentionDays);
   showVisHint();
   dlg.showModal();
   pageSlug.suggest();
 }
 $("page-new").addEventListener("click", openPageDialog);
-for (const id of ["page-cancel", "page-close"]) $(id).addEventListener("click", () => $("page-dialog").close());
+for (const id of ["page-cancel", "page-close"]) $(id).addEventListener("click", () => !pageUploading && $("page-dialog").close());
+$("page-dialog").addEventListener("cancel", (e) => pageUploading && e.preventDefault());
+// A file dropped anywhere in the dialog but the drop zone would make the browser open it, leaving the studio.
+for (const type of ["dragover", "drop"]) $("page-dialog").addEventListener(type, (e) => e.preventDefault());
 
 $("page-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1885,8 +1899,9 @@ $("page-form").addEventListener("submit", async (e) => {
     return;
   }
   pageError("");
-  $("page-upload").disabled = true;
   const dlg = $("page-dialog");
+  pageUploading = true;
+  for (const id of ["page-upload", "page-cancel", "page-close"]) $(id).disabled = true;
   try {
     const name = await pageSlug.value();
     if (!name) {
@@ -1908,15 +1923,19 @@ $("page-form").addEventListener("submit", async (e) => {
       }),
     });
     pagePick = null;
+    pageUploading = false;
     dlg.close();
     await renderPages();
+    refocus($("page-new")); // from the empty state's button, which the list replaced
     toast(el("span", {}, `Deployed ${pageName(page)}: `, extLink(page.url, page.url.replace(/^https?:\/\//, "")), " ",
       el("button", { className: "btn sm", type: "button", onclick: () => copyLink(page.url) }, icon("copy"), "Copy link")));
   } catch (err) {
     if (dlg.open) pageError(`Could not deploy: ${err.message}`);
-    else toast(`Could not deploy: ${err.message}`);
+    else toast(`Could not deploy: ${err.message}`); // closed by leaving the page meanwhile
   } finally {
-    $("page-upload").disabled = false;
+    pageUploading = false;
+    for (const id of ["page-upload", "page-cancel", "page-close"]) $(id).disabled = false;
+    if (dlg.open && !dlg.contains(document.activeElement)) $("page-upload").focus(); // disabling Deploy dropped focus
   }
 });
 
@@ -3174,6 +3193,9 @@ for (const t of tabs) {
 let routeGen = 0;
 function route() {
   const gen = ++routeGen;
+  // A link inside the new-artifact dialog or a row's menu (Settings, Share) leaves the page: they don't come along.
+  if ($("page-dialog").open) $("page-dialog").close();
+  for (const m of document.querySelectorAll(".menu:popover-open")) m.hidePopover();
   appDash.stop?.(); // a Logs tab's stream
   appDash.stop = null;
   const m = location.hash.match(/^#\/p\/([\w-]+)/);
