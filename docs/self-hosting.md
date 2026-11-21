@@ -246,6 +246,9 @@ On a clean host (or the same one), as root, with Docker and rclone (from rclone.
 | `CRESSLET_MAX_APPS_PER_ACCOUNT` | 50 | live apps an account may own (new apps and claims past it: 403 `quota`; site admins exempt) |
 | `CRESSLET_MAX_ANON_APPS` / `CRESSLET_ANON_APPS_PER_HOUR` | 200 / 10 | live unclaimed apps on the instance / new ones per client IP per hour (429 `rate_limited`) |
 | `CRESSLET_DEPLOYS_PER_HOUR` | 120 | deploys per app per hour (429) |
+| `CRESSLET_PAGE_VISIBILITY` | private | default for new [pages](api.md#pages) (`private`, `link` or `public`); each account can set its own |
+| `CRESSLET_PAGE_RETENTION_DAYS` | 30 | days a new page is kept after its last upload (`0` = forever); each account can set its own |
+| `CRESSLET_MAX_PAGES_PER_ACCOUNT` | 200 | live pages an account may own (403 `quota`; site admins exempt) |
 | `CRESSLET_APP_DB_MB` / `CRESSLET_APP_FILES_MB` | 512 / 1024 | per-app database size (SQLite `max_page_count`; apps can't change it) / total size of its files |
 | `CRESSLET_CLIENT_IP_HEADER` | — | header with the real client IP for per-IP limits, e.g. `cf-connecting-ip` behind Cloudflare. Without it the TCP peer is used (behind a proxy that's the proxy, so every client shares one allowance). The proxy must set it to the one client address (Cloudflare does for `cf-connecting-ip`); a request that reaches the server some other way can send any value, so set it only if every request comes through that proxy |
 

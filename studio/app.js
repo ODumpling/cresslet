@@ -192,6 +192,16 @@ function logOut() {
     else {
       api("/v1/auth/exchange", { method: "POST", body: JSON.stringify({ code }) }).then((r) => {
         setAccount(r);
+        // Back to what needed the login (a private page).
+        let after = null;
+        try {
+          after = sessionStorage.getItem("cresslet.afterLogin");
+          sessionStorage.removeItem("cresslet.afterLogin");
+        } catch { /* storage blocked */ }
+        if (after?.startsWith("#/view/")) {
+          location.hash = after;
+          return;
+        }
         if (!$("home").hidden || !$("landing").hidden) renderHome();
         toast(`Logged in as ${auth.email}`);
       }, (e) => toast(`GitHub login failed: ${e.message}`));
@@ -202,7 +212,7 @@ function logOut() {
 // ------------------------------------------------------------------ settings
 let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
 function showOnly(id) {
-  for (const m of ["landing", "home", "settings", "share", "admin", "workspace"]) $(m).hidden = m !== id;
+  for (const m of ["landing", "home", "settings", "share", "view", "admin", "workspace"]) $(m).hidden = m !== id;
   $("app").dataset.view = id;
   $("topbar").hidden = id !== "workspace";
   $("site-nav").hidden = id !== "landing";
@@ -246,6 +256,7 @@ function renderSettings() {
     else toast(`Could not load account: ${e.message}`);
   });
   renderTokens();
+  renderPageDefaults();
   api("/v1/apps").then(({ apps }) => {
     $("token-apps").replaceChildren(...(apps.length ? apps.map((a) =>
       el("label", { className: "check" }, el("input", { type: "checkbox", value: a.name }), el("span", { textContent: a.name }))
@@ -656,9 +667,11 @@ async function renderHome() {
   await renderProjects();
 
   $("apps-section").hidden = !auth.token;
+  $("pages-section").hidden = !auth.token;
   $("invites-section").hidden = true;
   if (auth.token) {
     renderApps();
+    renderPages();
     renderInvites();
   }
 }
@@ -711,6 +724,300 @@ function renderApps() {
               : el("button", { className: "btn sm danger", type: "button", id: `leave-${a.id}`, ariaLabel: `Leave ${a.name}`, onclick: () => leaveApp(a) }, "Leave")))))
       : emptyState("Nothing deployed yet", "Open a project and press Deploy, or run cresslet deploy."));
   }).catch((e) => $("apps").replaceChildren(el("p", { className: "error", textContent: `Could not load apps: ${e.message}` })));
+}
+
+// ------------------------------------------------------------------ pages (uploaded static HTML)
+const VIS_LABEL = { private: "Private", link: "Anyone with the link", public: "Public" };
+const keepText = (d) => (d === null ? "Forever" : d === 365 ? "1 year" : `${d} day${d === 1 ? "" : "s"}`);
+const keepValue = (d) => (d === null ? "forever" : String(d));
+const keepParse = (v) => (v === "forever" ? null : Number(v));
+/** Selects `days`, adding an option for a value set elsewhere (CLI or API), in order. */
+function setKeep(select, days) {
+  const v = keepValue(days);
+  if (![...select.options].some((o) => o.value === v)) {
+    const after = [...select.options].find((o) => o.value === "forever" || Number(o.value) > days);
+    select.add(new Option(keepText(days), v), after ?? null);
+  }
+  select.value = v;
+}
+const keepSelect = (attrs, days) => {
+  const s = el("select", { className: "input role-select", ...attrs },
+    ...["1", "7", "30", "90", "365", "forever"].map((v) => el("option", { value: v, textContent: keepText(keepParse(v)) })));
+  setKeep(s, days);
+  return s;
+};
+const visSelect = (attrs, value) =>
+  el("select", { className: "input role-select", ...attrs },
+    ...Object.entries(VIS_LABEL).map(([v, t]) => el("option", { value: v, textContent: t, selected: v === value })));
+const pageName = (p) => p.title ?? p.name;
+const untilText = (p) => (p.expiresAt ? `until ${new Date(p.expiresAt).toLocaleDateString()}` : "no expiry");
+
+async function copyLink(url) {
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("Link copied");
+  } catch {
+    toast(`Copy failed: ${url}`);
+  }
+}
+
+let pageFormTouched = false; // the upload form keeps a choice made before the list (re)loads
+function renderPages() {
+  return api("/v1/pages").then(({ pages, defaults }) => {
+    if (!pageFormTouched) {
+      $("page-visibility").value = defaults.visibility;
+      setKeep($("page-retention"), defaults.retentionDays);
+    }
+    $("pages").replaceChildren(pages.length
+      ? dataTable("pages-title", [["Page"], ["Who can open it"], ["Keep for"], ["Actions", "actions", true]], pages.map(pageRow))
+      : emptyState("No pages yet", "Upload an HTML file above, or run cresslet page upload <file>."));
+  }).catch((e) => $("pages").replaceChildren(el("p", { className: "error", textContent: `Could not load pages: ${e.message}` })));
+}
+
+function pageRow(p) {
+  const manage = p.access === "owner" || p.access === "admin";
+  const label = pageName(p);
+  const until = el("span", { className: "sub", textContent: untilText(p) });
+  const ico = el("span", { className: "file-ico" }, icon(p.visibility === "private" ? "shield" : "globe"));
+  const vis = manage
+    ? visSelect({ id: `vis-${p.id}`, ariaLabel: `Who can open ${label}`, onchange: () => changePage(p, { visibility: vis.value }, vis, until, ico) }, p.visibility)
+    : el("span", { className: "muted", textContent: VIS_LABEL[p.visibility] });
+  const keep = manage
+    ? keepSelect({ id: `keep-${p.id}`, ariaLabel: `Keep ${label} for`, onchange: () => changePage(p, { retentionDays: keepParse(keep.value) }, keep, until) }, p.retentionDays)
+    : el("span", { className: "muted", textContent: keepText(p.retentionDays) });
+  const replace = el("input", { type: "file", className: "sr-only", accept: ".html,.htm,text/html", onchange: () => replacePage(p, replace) });
+  const replaceDir = el("input", { type: "file", className: "sr-only", webkitdirectory: true, multiple: true, onchange: () => replacePage(p, replaceDir) });
+  return el("tr", { className: "list-row" },
+    el("td", {}, el("div", { className: "name-cell" },
+      ico,
+      el("div", {}, extLink(p.url, label), el("span", { className: "sub", textContent: p.url.replace(/^https?:\/\//, "") })))),
+    el("td", {}, vis),
+    el("td", {}, el("div", { className: "keep-cell" }, keep, until)),
+    el("td", { className: "actions" },
+      el("button", { className: "btn sm", type: "button", ariaLabel: `Copy link to ${label}`, onclick: () => copyLink(p.url) }, icon("copy"), "Copy link"),
+      p.access === "viewer" ? null
+        : el("label", { className: "icon-btn file-btn", title: "Replace with an HTML file (same link)" }, replace, icon("refresh"), srOnly(`Replace ${label} with an HTML file`)),
+      p.access === "viewer" ? null
+        : el("label", { className: "icon-btn file-btn", title: "Replace with a folder (same link)" }, replaceDir, icon("folder"), srOnly(`Replace ${label} with a folder`)),
+      manage ? el("a", { className: "icon-btn", href: `#/share/${encodeURIComponent(p.name)}`, title: "Share" }, icon("users"), srOnly(`Share ${label}`)) : null,
+      p.access === "owner"
+        ? el("button", { className: "icon-btn danger", type: "button", id: `delete-page-${p.id}`, title: "Delete page", ariaLabel: `Delete ${label}`, onclick: () => deletePage(p) }, icon("trash"))
+        : null));
+}
+
+async function changePage(p, change, select, until, ico) {
+  select.disabled = true;
+  try {
+    const { page } = await api(`/v1/pages/${encodeURIComponent(p.name)}`, { method: "PATCH", body: JSON.stringify(change) });
+    Object.assign(p, page);
+    until.textContent = untilText(page);
+    ico?.replaceChildren(icon(page.visibility === "private" ? "shield" : "globe"));
+    toast(change.visibility
+      ? `${pageName(page)}: ${VIS_LABEL[page.visibility].toLowerCase()}`
+      : `${pageName(page)} is kept ${page.retentionDays === null ? "forever" : untilText(page)}`);
+  } catch (e) {
+    toast(`Could not change ${pageName(p)}: ${e.message}`);
+    if (change.visibility) select.value = p.visibility;
+    else setKeep(select, p.retentionDays);
+  } finally {
+    select.disabled = false;
+  }
+}
+
+/** New files at the same link: one HTML file, or a folder (all of the page's files are replaced). */
+async function replacePage(p, input) {
+  if (!input.files.length) return;
+  try {
+    let content;
+    if (input.webkitdirectory) {
+      const { files } = folderFiles(input.files);
+      if (!files.some((x) => x.path === "index.html")) throw new Error("that folder has no index.html at its top level");
+      content = await folderBody(files);
+    } else content = { html: await input.files[0].text() };
+    await api(`/v1/pages/${encodeURIComponent(p.name)}`, { method: "PUT", body: JSON.stringify({ ...content, source: "studio" }) });
+    toast(`Replaced ${pageName(p)} (same link)`);
+  } catch (e) {
+    toast(`Could not replace ${pageName(p)}: ${e.message}`);
+  }
+  input.value = "";
+  await renderPages();
+  refocus($("pages-title"));
+}
+
+async function deletePage(p) {
+  if (!confirm(`Delete ${pageName(p)}? Its link stops working.`)) return;
+  try {
+    await api(`/v1/pages/${encodeURIComponent(p.name)}`, { method: "DELETE" });
+  } catch (e) {
+    toast(`Could not delete ${pageName(p)}: ${e.message}`);
+    return;
+  }
+  toast(`Deleted ${pageName(p)}`);
+  await renderPages();
+  refocus($("pages-title"));
+}
+
+/** What the upload form will send: one HTML file, or a folder's files (its top directory stripped). */
+let pagePick = null;
+const b64 = async (file) => {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+function pageError(text) {
+  $("page-error").textContent = text;
+  $("page-error").hidden = !text;
+}
+$("page-file").addEventListener("change", () => {
+  const f = $("page-file").files[0];
+  $("page-dir").value = "";
+  pagePick = f ? { title: f.name.replace(/\.html?$/i, ""), html: f } : null;
+  $("page-picked").textContent = f ? f.name : "Nothing chosen";
+  pageError("");
+});
+/** A picked folder's files, its top directory stripped; hidden files and folders (.git, .DS_Store) stay behind. */
+function folderFiles(list) {
+  const files = [...list]
+    .map((f) => ({ f, path: f.webkitRelativePath.split("/").slice(1).join("/") }))
+    .filter(({ path }) => path && !path.split("/").some((seg) => seg.startsWith(".")));
+  return { dir: list[0]?.webkitRelativePath.split("/")[0] ?? null, files };
+}
+const folderBody = async (files) =>
+  ({ files: await Promise.all(files.map(async ({ f, path }) => ({ path, data: await b64(f), encoding: "base64" }))) });
+$("page-dir").addEventListener("change", () => {
+  $("page-file").value = "";
+  const { dir, files } = folderFiles($("page-dir").files);
+  pagePick = files.length ? { title: dir, files } : null;
+  $("page-picked").textContent = files.length ? `${dir}/ (${files.length} file${files.length === 1 ? "" : "s"})` : "Nothing chosen";
+  pageError(files.length && !files.some((x) => x.path === "index.html") ? "That folder has no index.html at its top level." : "");
+});
+for (const id of ["page-visibility", "page-retention"]) $(id).addEventListener("change", () => (pageFormTouched = true));
+
+$("page-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!pagePick) {
+    pageError("Choose an HTML file or a folder first.");
+    $("page-file").focus();
+    return;
+  }
+  pageError("");
+  $("page-upload").disabled = true;
+  try {
+    const content = pagePick.html
+      ? { html: await pagePick.html.text() }
+      : await folderBody(pagePick.files);
+    const { page } = await api("/v1/pages", {
+      method: "POST",
+      body: JSON.stringify({
+        ...content,
+        title: pagePick.title,
+        visibility: $("page-visibility").value,
+        retentionDays: keepParse($("page-retention").value),
+        source: "studio",
+      }),
+    });
+    pagePick = null;
+    pageFormTouched = false;
+    $("page-form").reset();
+    $("page-picked").textContent = "Nothing chosen";
+    await renderPages();
+    toast(el("span", {}, `Uploaded ${pageName(page)}: `, extLink(page.url, page.url.replace(/^https?:\/\//, "")), " ",
+      el("button", { className: "btn sm", type: "button", onclick: () => copyLink(page.url) }, icon("copy"), "Copy link")));
+  } catch (err) {
+    pageError(`Could not upload: ${err.message}`);
+  } finally {
+    $("page-upload").disabled = false;
+    if (document.activeElement === document.body) $("page-upload").focus();
+  }
+});
+
+// Settings: the account's defaults for new pages.
+function pageDefaultsError(text) {
+  $("page-defaults-error").textContent = text;
+  $("page-defaults-error").hidden = !text;
+}
+function showPageDefaults({ pages, defaults }) {
+  $("def-visibility").value = pages.visibility;
+  setKeep($("def-retention"), pages.retentionDays);
+  $("def-server").textContent = `${VIS_LABEL[defaults.pages.visibility].toLowerCase()}, kept ${defaults.pages.retentionDays === null ? "forever" : `for ${keepText(defaults.pages.retentionDays).toLowerCase()}`}`;
+}
+function renderPageDefaults() {
+  pageDefaultsError("");
+  api("/v1/me/settings").then(showPageDefaults, (e) => pageDefaultsError(`Could not load your page defaults: ${e.message}`));
+}
+async function savePageDefaults(pages, done) {
+  pageDefaultsError("");
+  $("page-defaults-save").disabled = $("page-defaults-reset").disabled = true;
+  try {
+    showPageDefaults(await api("/v1/me/settings", { method: "PUT", body: JSON.stringify({ pages }) }));
+    toast(done);
+  } catch (e) {
+    pageDefaultsError(`Could not save: ${e.message}`);
+  } finally {
+    $("page-defaults-save").disabled = $("page-defaults-reset").disabled = false;
+  }
+}
+$("page-defaults-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  savePageDefaults({ visibility: $("def-visibility").value, retentionDays: keepParse($("def-retention").value) }, "Page defaults saved");
+});
+$("page-defaults-reset").addEventListener("click", () => savePageDefaults(null, "Using the server's page defaults"));
+
+/**
+ * #/view/<page>?path=…: where a private page sends a visitor without a session. Asks the server for a
+ * one-time sign-in link to the page (owner and collaborators only) and goes there.
+ */
+async function renderView(name, path) {
+  showOnly("view");
+  document.title = "Private page · Cresslet Studio";
+  const text = (t) => ($("view-text").textContent = t);
+  $("view-actions").replaceChildren();
+  if (!auth.token) {
+    text("This page is private. Log in to open it, if its owner shared it with you.");
+    $("view-actions").replaceChildren(el("button", {
+      className: "btn primary",
+      type: "button",
+      onclick: () => {
+        try {
+          sessionStorage.setItem("cresslet.afterLogin", location.hash);
+        } catch { /* storage blocked: login lands on the home page */ }
+        logIn();
+      },
+    }, icon("github"), "Log in with GitHub"));
+    return;
+  }
+  // A browser that drops the page's cookie would bounce between here and the page forever.
+  const key = `cresslet.view.${name}`;
+  let tries = [];
+  try {
+    tries = JSON.parse(sessionStorage.getItem(key) ?? "[]").filter((t) => Date.now() - t < 60_000);
+    sessionStorage.setItem(key, JSON.stringify([...tries, Date.now()]));
+  } catch { /* storage blocked */ }
+  if (tries.length >= 3) {
+    text("Your browser didn't keep this page's sign-in. Allow cookies for it, then try again.");
+    $("view-actions").replaceChildren(el("button", {
+      className: "btn",
+      type: "button",
+      onclick: () => {
+        try {
+          sessionStorage.removeItem(key);
+        } catch { /* storage blocked */ }
+        renderView(name, path);
+      },
+    }, icon("refresh"), "Try again"));
+    return;
+  }
+  text("Opening…");
+  try {
+    const { url } = await api(`/v1/pages/${encodeURIComponent(name)}/view`, { method: "POST", body: JSON.stringify({ path }) });
+    location.replace(url);
+  } catch (e) {
+    text(e.status === 404 ? "This page doesn't exist, or it expired."
+      : e.status === 403 ? `You don't have access to this page (logged in as ${auth.email}). Ask its owner to share it with you.`
+      : `Could not open the page: ${e.message}`);
+    $("view-actions").replaceChildren(el("a", { className: "btn", href: "#/" }, "Go to Projects"));
+  }
 }
 
 // ------------------------------------------------------------------ sharing (collaborators and invites)
@@ -778,6 +1085,13 @@ async function renderShare(name) {
   showOnly("share");
   document.title = `Share ${name} · Cresslet Studio`;
   $("share-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", `Share ${name}`);
+  $("share-sub").textContent = "Invite accounts to this app. Viewers see it; admins can also change it.";
+  // A page: its title, and what sharing means for it.
+  api(`/v1/pages/${encodeURIComponent(name)}`).then(({ page }) => {
+    if (shareApp !== name) return;
+    $("share-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", `Share ${pageName(page)}`);
+    $("share-sub").textContent = "Invite accounts to this page. Viewers can open it even when it's private; admins can also change it.";
+  }, () => {});
   $("invite-form").reset();
   $("invite-form").hidden = true; // until the list loads: only the owner and admins may share
   $("invite-send").disabled = false; // an invite still in flight from another app's page doesn't hold this one
@@ -1398,6 +1712,10 @@ function route() {
   else if (booted) reloadForRoute();
   else if (location.hash === "#/settings") renderSettings();
   else if (location.hash.startsWith("#/share/")) renderShare(decodeURIComponent(location.hash.slice("#/share/".length)));
+  else if (location.hash.startsWith("#/view/")) {
+    const [n, q] = location.hash.slice("#/view/".length).split("?");
+    renderView(decodeURIComponent(n), new URLSearchParams(q ?? "").get("path") ?? "/");
+  }
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();
 }

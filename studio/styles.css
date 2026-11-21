@@ -682,3 +682,12 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   .nav a[aria-current="page"] .icon, .tree li > button[aria-current="true"] .icon { color: inherit; }
   :focus-visible, .editor:focus-within::after, .terminal:focus-within { outline-color: Highlight; }
 }
+
+/* pages */
+.page-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 16px; }
+.page-fields > fieldset { grid-column: 1 / -1; }
+.file-btn { cursor: pointer; }
+.file-btn:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pages-list { margin-top: 12px; }
+.pages-list .role-select { width: auto; min-height: 28px; padding: 3px 8px; max-width: 13rem; }
+.keep-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }

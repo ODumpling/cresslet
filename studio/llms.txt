@@ -13,6 +13,10 @@
 - Reuse: same body + "app":"<name>" + header X-Cresslet-Deploy-Key.
 - GET /v1/apps/<name>/logs, GET /v1/apps/<name>/db
 
+## Share a static HTML page (account token)
+- POST /v1/pages {"html":"<h1>hi</h1>","visibility":"private|link|public","retentionDays":30|null} → {page.url}
+- CLI: `npx cresslet page upload report.html --visibility link --keep 7`
+
 ## Docs
 - [App format](https://github.com/ODumpling/cresslet/blob/main/docs/app-format.md)
 - [API](https://github.com/ODumpling/cresslet/blob/main/docs/api.md)

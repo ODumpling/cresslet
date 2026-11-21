@@ -326,6 +326,49 @@
             </div>
             <div id="apps"></div>
           </section>
+          <section class="block" id="pages-section" hidden aria-labelledby="pages-title">
+            <div class="block-head">
+              <h2 id="pages-title" tabindex="-1">Pages</h2>
+              <p class="muted small">Static HTML you upload and share: one file, or a folder with an index.html</p>
+            </div>
+            <form id="page-form" class="panel form page-form" aria-labelledby="page-form-title">
+              <h3 id="page-form-title">Upload a page</h3>
+              <div class="page-fields">
+                <fieldset class="field">
+                  <legend>Files</legend>
+                  <div class="row start">
+                    <label class="btn sm file-btn"><input type="file" id="page-file" class="sr-only" accept=".html,.htm,text/html" /><svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>HTML file</label>
+                    <label class="btn sm file-btn"><input type="file" id="page-dir" class="sr-only" webkitdirectory multiple /><svg class="icon" aria-hidden="true"><use href="#i-folder" /></svg>Folder</label>
+                    <span class="muted small" id="page-picked" aria-live="polite">Nothing chosen</span>
+                  </div>
+                </fieldset>
+                <div class="field">
+                  <label for="page-visibility">Who can open it</label>
+                  <select class="input" id="page-visibility" aria-describedby="vis-hint">
+                  <option value="private">Private</option>
+                  <option value="link">Anyone with the link</option>
+                  <option value="public">Public</option>
+                  </select>
+                  <p class="muted small" id="vis-hint">Private: you and people you share it with, logged in. Anyone with the link: not listed by search engines. Public: anyone, search engines too.</p>
+                </div>
+                <div class="field">
+                  <label for="page-retention">Keep for</label>
+                  <select class="input" id="page-retention" aria-describedby="page-retention-hint">
+                  <option value="1">1 day</option>
+                  <option value="7">7 days</option>
+                  <option value="30">30 days</option>
+                  <option value="90">90 days</option>
+                  <option value="365">1 year</option>
+                  <option value="forever">Forever</option>
+                  </select>
+                  <p class="muted small" id="page-retention-hint">Counted from each upload or change. Your defaults are in <a href="#/settings">Settings</a>.</p>
+                </div>
+              </div>
+              <p class="error small" id="page-error" role="alert" hidden></p>
+              <div class="row start"><button class="btn primary" id="page-upload" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Upload</button></div>
+            </form>
+            <div id="pages" class="pages-list"></div>
+          </section>
           <section class="block" aria-labelledby="cli-label">
             <div class="panel split cli-panel">
               <div>
@@ -394,6 +437,40 @@
               <div class="row start"><button class="btn primary" id="token-create" type="submit">Create token</button></div>
             </form>
           </section>
+          <section class="block" aria-labelledby="page-defaults-title">
+            <div class="block-head">
+              <h2 id="page-defaults-title">Page defaults</h2>
+              <p class="muted small">Used for new pages unless you pick something else when you upload. Change any page later.</p>
+            </div>
+            <form id="page-defaults-form" class="panel form" aria-labelledby="page-defaults-title">
+              <div class="field">
+                <label for="def-visibility">Who can open new pages</label>
+                <select class="input" id="def-visibility" aria-describedby="vis-hint-def">
+                  <option value="private">Private</option>
+                  <option value="link">Anyone with the link</option>
+                  <option value="public">Public</option>
+                </select>
+                <p class="muted small" id="vis-hint-def">Private: you and people you share it with, logged in. Anyone with the link: not listed by search engines. Public: anyone, search engines too.</p>
+              </div>
+              <div class="field">
+                <label for="def-retention">Keep new pages for</label>
+                <select class="input" id="def-retention" aria-describedby="def-hint">
+                  <option value="1">1 day</option>
+                  <option value="7">7 days</option>
+                  <option value="30">30 days</option>
+                  <option value="90">90 days</option>
+                  <option value="365">1 year</option>
+                  <option value="forever">Forever</option>
+                </select>
+                <p class="muted small" id="def-hint">Server default: <span id="def-server">—</span>. Expired pages are deleted.</p>
+              </div>
+              <p class="error small" id="page-defaults-error" role="alert" hidden></p>
+              <div class="row start">
+                <button class="btn primary" id="page-defaults-save" type="submit">Save defaults</button>
+                <button class="btn" id="page-defaults-reset" type="button">Use server defaults</button>
+              </div>
+            </form>
+          </section>
           <section class="block" aria-labelledby="session-title">
             <div class="block-head"><h2 id="session-title">Session</h2></div>
             <div class="panel split">
@@ -407,7 +484,7 @@
           <header class="page-head">
             <div>
               <h1 id="share-title" tabindex="-1">Share</h1>
-              <p class="muted">Invite accounts to this app. Viewers see it; admins can also change it.</p>
+              <p class="muted" id="share-sub">Invite accounts to this app. Viewers see it; admins can also change it.</p>
             </div>
           </header>
           <section class="block" aria-labelledby="people-title">
@@ -433,6 +510,16 @@
               <div class="row start"><button class="btn primary" id="invite-send" type="submit">Send invite</button></div>
             </form>
           </section>
+        </main>
+
+        <main id="view" class="page narrow" hidden aria-labelledby="view-title">
+          <header class="page-head">
+            <div>
+              <h1 id="view-title" tabindex="-1">Private page</h1>
+              <p class="muted" id="view-text" aria-live="polite">Opening…</p>
+            </div>
+          </header>
+          <div class="row start" id="view-actions"></div>
         </main>
 
         <main id="admin" class="page wide" hidden aria-labelledby="admin-title">

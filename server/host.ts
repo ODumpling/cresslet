@@ -2,7 +2,7 @@
 import { stat } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { serveFile } from "./static.ts";
-import { appUrl, type Config, paths } from "./config.ts";
+import { appUrl, type Config, paths, rootUrl } from "./config.ts";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { App, Store } from "./store.ts";
@@ -78,8 +78,90 @@ export function scheduled(cfg: Config, store: Store, runtime: Runtime) {
   };
 }
 
+/** Query parameter carrying a private page's one-time ticket (from `POST /v1/pages/:name/view`). */
+export const PAGE_TICKET_PARAM = "cresslet_view";
+export const PAGE_TICKET_MS = 2 * 60_000;
+const PAGE_SESSION_MS = 24 * 3600_000;
+/** `__Host-`: a cookie no other host (another app or page under the domain) can set for this one. */
+const pageCookie = (cfg: Config) => cfg.scheme === "https" ? "__Host-cresslet_page" : "cresslet_page";
+
+function cookies(req: Request, name: string): string[] {
+  const out: string[] = [];
+  for (const part of (req.headers.get("cookie") ?? "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === name) out.push(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+/** Where a private page sends a visitor without a session: the studio, which signs them in and back. */
+export function pageLoginUrl(cfg: Config, name: string, path = "/") {
+  return `${rootUrl(cfg)}/#/view/${encodeURIComponent(name)}?${new URLSearchParams({ path })}`;
+}
+
+function pages(cfg: Config, store: Store) {
+  const notFound = () =>
+    new Response("This page doesn't exist, or it expired.", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
+  /** The account behind one of the request's session cookies, if it can still see the page. */
+  const viewer = async (req: Request, app: App) => {
+    for (const token of cookies(req, pageCookie(cfg))) {
+      const acct = await store.pageSession(app.id, token);
+      if (acct && store.access(app, acct)) return acct;
+    }
+  };
+  return async (req: Request, app: App): Promise<Response> => {
+    if (!app.page_deploy_id || (app.expires_at !== null && app.expires_at <= Date.now())) return notFound();
+    if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method Not Allowed", { status: 405 });
+    const url = new URL(req.url);
+    const extra: Record<string, string> = app.visibility === "public"
+      ? {}
+      // Not for search engines, and the URL doesn't leak to the sites the page links to.
+      : { "x-robots-tag": "noindex, nofollow", "referrer-policy": "no-referrer" };
+    if (app.visibility === "private") {
+      const ticket = url.searchParams.get(PAGE_TICKET_PARAM);
+      if (ticket !== null) {
+        url.searchParams.delete(PAGE_TICKET_PARAM);
+        const s = await store.redeemPageTicket(app.id, ticket, PAGE_SESSION_MS);
+        if (!s || !store.access(app, s.account_id)) {
+          return new Response("This sign-in link expired or was already used. Open the page again.", {
+            status: 403,
+            headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", ...extra },
+          });
+        }
+        const secure = cfg.scheme === "https" ? "; Secure" : "";
+        // One leading slash: `//other.host/` would be a redirect to another site.
+        const back = "/" + url.pathname.replace(/^[/\\]+/, "") + url.search;
+        return new Response(null, {
+          status: 303,
+          headers: {
+            location: back,
+            "set-cookie": `${pageCookie(cfg)}=${s.token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${PAGE_SESSION_MS / 1000}${secure}`,
+            "cache-control": "no-store",
+            ...extra,
+          },
+        });
+      }
+      if (!await viewer(req, app)) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: pageLoginUrl(cfg, app.name, url.pathname + url.search), "cache-control": "no-store", ...extra },
+        });
+      }
+      // Never in a shared cache (a CDN would serve it to anyone).
+      extra["cache-control"] = "private, no-store";
+    }
+    // No SPA fallback: a page is plain HTML files, so a broken link gets its 404.html (or a 404), not index.html.
+    const res = await serveStatic(req, join(paths(cfg, app.id).deploy(app.page_deploy_id), "public"), url, { spa: false });
+    const h = new Headers(res.headers);
+    for (const [k, v] of Object.entries(extra)) h.set(k, v);
+    return new Response(res.body, { status: res.status, headers: h });
+  };
+}
+
 export function host(cfg: Config, store: Store, runtime: Runtime) {
+  const servePage = pages(cfg, store);
   return async (req: Request, appName: string, app = store.appByName(appName)): Promise<Response> => {
+    if (app?.kind === "page") return servePage(req, app);
     if (!app || !app.current_deploy_id) {
       return new Response(`No app named "${appName}" is deployed here.`, {
         status: 404,
@@ -104,7 +186,13 @@ export function host(cfg: Config, store: Store, runtime: Runtime) {
     if (req.method !== "GET" && req.method !== "HEAD") {
       return new Response("Method Not Allowed", { status: 405 });
     }
-    const pub = join(p.deploy(app.current_deploy_id), "public");
+    return serveStatic(req, join(p.deploy(app.current_deploy_id), "public"), url);
+  };
+}
+
+/** A deploy's static files: exact path, `.html`, directory index, SPA fallback (unless `spa: false`), then 404.html. */
+async function serveStatic(req: Request, pub: string, url: URL, { spa = true } = {}): Promise<Response> {
+  {
     let rel: string;
     try {
       rel = posix.normalize(decodeURIComponent(url.pathname)).replace(/^\/+/, "");
@@ -121,7 +209,7 @@ export function host(cfg: Config, store: Store, runtime: Runtime) {
     }
     // SPA fallback for navigation requests (no extension).
     const last = rel.split("/").pop() ?? "";
-    if (!last.includes(".") && await isFile(join(pub, "index.html"))) {
+    if (spa && !last.includes(".") && await isFile(join(pub, "index.html"))) {
       return withCache(await serveFile(req, join(pub, "index.html")), "index.html");
     }
     if (await isFile(join(pub, "404.html"))) {
@@ -129,7 +217,7 @@ export function host(cfg: Config, store: Store, runtime: Runtime) {
       return new Response(r.body, { status: 404, headers: r.headers });
     }
     return new Response("Not Found", { status: 404 });
-  };
+  }
 }
 
 function withCache(res: Response, rel: string): Response {
