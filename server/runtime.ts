@@ -51,7 +51,7 @@ interface Proc {
 }
 
 /** Every sandbox slot (CRESSLET_MAX_RUNNING_SANDBOXES) is taken by one that's serving: the caller answers 503. */
-export class SandboxesBusy extends Error {
+class SandboxesBusy extends Error {
   constructor() {
     super("all sandbox slots are busy");
   }
@@ -163,6 +163,14 @@ export class Runtime {
       this.logs.push(spec.appId, "system", `failed to start: ${(e as Error).message}`);
       return new Response("App failed to start. See `cresslet logs`.", { status: 502 });
     }
+    let streaming = false;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      proc.inflight--;
+      proc.lastUsed = Date.now();
+    };
     const timeout = AbortSignal.timeout(this.#cfg.limits.requestMs);
     const signal = AbortSignal.any([timeout, req.signal]);
     try {
@@ -189,6 +197,9 @@ export class Runtime {
         await res.body.dump();
         return new Response(null, { status: res.statusCode, headers: h });
       }
+      // Still in flight while the body streams (ended, failed, cancelled or timed out: `close`), so it isn't evicted mid-response.
+      streaming = true;
+      res.body.once("close", release);
       return new Response(Readable.toWeb(res.body) as ReadableStream, { status: res.statusCode, headers: h });
     } catch (e) {
       if (timeout.aborted) {
@@ -201,8 +212,7 @@ export class Runtime {
       this.logs.push(spec.appId, "system", `proxy error: ${(e as Error).message}`);
       return new Response("Bad Gateway", { status: 502 });
     } finally {
-      proc.inflight--;
-      proc.lastUsed = Date.now();
+      if (!streaming) release();
     }
   }
 
@@ -257,6 +267,7 @@ export class Runtime {
     }
     headers.push("x-cresslet-url", url);
     const u = new URL(url);
+    const started = Date.now();
     let done = false;
     let responded = false;
     let upstream: Duplex | undefined;
@@ -299,6 +310,7 @@ export class Runtime {
         socket.pipe(client);
         client.pipe(socket);
         const expire = (why: string) => () => {
+          if (done) return;
           this.logs.push(spec.appId, "system", `websocket ${u.pathname} closed: ${why}`);
           close();
         };
@@ -306,7 +318,7 @@ export class Runtime {
           const t = idle = setTimeout(expire(`no traffic for ${lim.wsIdleMs}ms`), lim.wsIdleMs);
           t.unref?.();
           // After pipe(): these listeners don't change the streams' flow (pipe already made them flowing).
-          const bump = () => t.refresh();
+          const bump = () => done || t.refresh();
           socket.on("data", bump);
           client.on("data", bump);
         }
@@ -319,6 +331,10 @@ export class Runtime {
       up.on("response", (res) => {
         clearTimeout(timer);
         responded = true;
+        // Not a WebSocket: frees its slot now, and the body still has to finish within the request deadline.
+        uncount();
+        timer = setTimeout(close, Math.max(0, started + this.#cfg.limits.requestMs - Date.now()));
+        timer.unref?.();
         let raw = `HTTP/1.1 ${res.statusCode} ${res.statusMessage ?? ""}\r\n`;
         for (let i = 0; i < res.rawHeaders.length; i += 2) {
           if (!/^(connection|keep-alive|transfer-encoding)$/i.test(res.rawHeaders[i])) raw += `${res.rawHeaders[i]}: ${res.rawHeaders[i + 1]}\r\n`;
@@ -346,7 +362,9 @@ export class Runtime {
     // start racing a PUT /egress) is replaced on the next request.
     if (cur && !cur.exited && cur.spec.deployId === spec.deployId && samePolicy(cur.spec, spec)) {
       await cur.ready;
-      // Counted before returning: an idle sandbox can be evicted (#makeRoom) between two awaits.
+      // It may have been evicted (#makeRoom) or stopped while we waited: then start over.
+      if (cur.exited || this.procs.get(spec.appId) !== cur) return this.#get(spec);
+      // Counted before returning (synchronously with the check), so it can't be evicted once handed out.
       cur.inflight++;
       cur.lastUsed = Date.now();
       return cur;

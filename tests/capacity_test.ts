@@ -17,6 +17,14 @@ export default {
   async fetch(req) {
     const path = new URL(req.url).pathname;
     if (path === "/api/hang") await new Promise((r) => setTimeout(r, Number(new URL(req.url).searchParams.get("ms") ?? 800)));
+    if (path === "/api/stream") {
+      // First chunk now, the rest after 700 ms (a server-sent-events style response).
+      const { readable, writable } = new TransformStream();
+      const w = writable.getWriter(), enc = new TextEncoder();
+      w.write(enc.encode("first;"));
+      setTimeout(() => w.write(enc.encode("last")).then(() => w.close()), 700);
+      return new Response(readable, { status: req.headers.get("upgrade") ? 400 : 200 });
+    }
     if (req.headers.get("upgrade") !== "websocket") return new Response("ok");
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
@@ -53,12 +61,12 @@ async function setup(limits: Partial<Config["limits"]>, apps: string[]) {
   const running = () => Object.keys(ids).filter((n) => srv.runtime.status(ids[n]).running).sort();
   const logs = (name: string) => srv.runtime.logs.recent(ids[name], 100).map((l) => l.msg).join("\n");
   /** Opens a WebSocket; resolves with the open socket (status 101) or the refusal's status. */
-  const ws = (name: string) =>
+  const ws = (name: string, path = "/api/ws") =>
     new Promise<{ status: number; socket?: Socket }>((resolve, reject) => {
       const req = request({
         host: "127.0.0.1",
         port,
-        path: "/api/ws",
+        path,
         headers: { host: `${name}.test.local`, upgrade: "websocket", connection: "Upgrade", "sec-websocket-key": randomBytes(16).toString("base64"), "sec-websocket-version": "13" },
       });
       req.on("response", (res) => {
@@ -76,13 +84,23 @@ async function setup(limits: Partial<Config["limits"]>, apps: string[]) {
       s.once("data", (d: Buffer) => resolve(d.subarray(2, 2 + (d[1] & 0x7f)).toString()));
       s.write(Buffer.concat([Buffer.from([0x81, 0x80 | payload.length]), mask, payload.map((b, i) => b ^ mask[i % 4])]));
     });
-  const closed = (s: Socket) => new Promise<void>((r) => (s.destroyed ? r() : s.once("close", () => r())));
+  /** Resolves when the socket closes; fails (rather than hangs) after 3 s. */
+  const closed = (s: Socket) =>
+    new Promise<void>((r, j) => {
+      if (s.destroyed) return r();
+      const t = setTimeout(() => j(new Error("socket still open after 3 s")), 3000);
+      s.once("close", () => (clearTimeout(t), r()));
+    });
+  const settled = async (name: string) => {
+    for (let i = 0; i < 300 && t0(name); i++) await sleep(10);
+  };
+  const t0 = (name: string) => srv.runtime.procs.get(ids[name])?.inflight;
   const done = async () => {
     http.close();
     srv.close();
     await rm(dataDir, { recursive: true, force: true });
   };
-  return { srv, ids, get, running, logs, ws, echo, closed, done };
+  return { srv, ids, get, running, logs, ws, echo, closed, settled, done };
 }
 
 test("sandbox cap: a new app evicts the least recently used idle sandbox", async () => {
@@ -134,6 +152,26 @@ test("sandbox cap: 503 with retry-after when every slot is serving; a busy sandb
   }
 });
 
+test("sandbox cap: a streaming response keeps its sandbox busy until the body ends", async () => {
+  const t = await setup({ maxRunningSandboxes: 1 }, ["a8", "b8"]);
+  try {
+    const host = "a8.test.local";
+    const res = await t.srv.handler(new Request(`http://${host}/api/stream`, { headers: { host } }));
+    const reader = res.body!.getReader();
+    assert.equal(new TextDecoder().decode((await reader.read()).value), "first;");
+    // Headers are out but the body isn't: a8 isn't idle, so b8 can't take its slot.
+    assert.equal((await t.get("b8")).status, 503);
+    let rest = "";
+    for (let r; !(r = await reader.read()).done;) rest += new TextDecoder().decode(r.value);
+    assert.equal(rest, "last", "not cut off");
+    await t.settled("a8");
+    assert.equal((await t.get("b8")).text, "ok");
+    assert.deepEqual(t.running(), ["b8"]);
+  } finally {
+    await t.done();
+  }
+});
+
 test("sandbox cap: concurrent cold starts can't overshoot it", async () => {
   const t = await setup({ maxRunningSandboxes: 2 }, ["a3", "b3", "c3", "d3"]);
   try {
@@ -154,7 +192,7 @@ test("sandbox cap: an open WebSocket keeps its sandbox busy (not evicted)", asyn
     assert.equal((await t.get("b4")).status, 503);
     open.socket!.destroy();
     await t.closed(open.socket!);
-    await sleep(50);
+    await t.settled("a4");
     assert.equal((await t.get("b4")).text, "ok");
     assert.deepEqual(t.running(), ["b4"]);
   } finally {
@@ -174,11 +212,27 @@ test("websocket caps: per app and per instance, freed when a socket closes", asy
     // Refusals don't leak slots; closing one frees it.
     a[0].socket!.destroy();
     await t.closed(a[0].socket!);
-    await sleep(50);
+    for (let i = 0; i < 300 && t.srv.runtime.procs.get(t.ids.a5)!.inflight > 1; i++) await sleep(10);
     const again = await t.ws("b5");
     assert.equal(again.status, 101);
     assert.equal(await t.echo(again.socket!, "hi"), "echo:hi");
     for (const s of [a[1], b, again]) s.socket!.destroy();
+  } finally {
+    await t.done();
+  }
+});
+
+test("websocket caps: an upgrade answered with a normal response frees its slot at once", async () => {
+  const t = await setup({ maxWebSocketsPerApp: 1 }, ["a9"]);
+  try {
+    // A 400 with a body that streams for 700 ms: not a WebSocket, so it doesn't hold the app's one slot.
+    const slow = t.ws("a9", "/api/stream");
+    for (let i = 0; i < 300 && !t.srv.runtime.procs.get(t.ids.a9)?.inflight; i++) await sleep(10);
+    await sleep(100);
+    const open = await t.ws("a9");
+    assert.equal(open.status, 101);
+    assert.equal((await slow).status, 400);
+    open.socket!.destroy();
   } finally {
     await t.done();
   }
@@ -240,7 +294,7 @@ test("limit settings: from env, 0 = off, invalid values refused", () => {
     keys.forEach((k, i) => (process.env[k] = String(i)));
     const l = loadConfig().limits;
     assert.deepEqual([l.maxRunningSandboxes, l.maxWebSockets, l.maxWebSocketsPerApp, l.wsIdleMs, l.wsMaxMs], [0, 1, 2, 3, 4]);
-    for (const bad of ["-1", "1.5", "lots"]) {
+    for (const bad of ["-1", "1.5", "lots", String(2 ** 31)]) {
       process.env.CRESSLET_MAX_RUNNING_SANDBOXES = bad;
       assert.throws(() => loadConfig(), /CRESSLET_MAX_RUNNING_SANDBOXES must be a whole number/, bad);
     }

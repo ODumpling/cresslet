@@ -221,7 +221,10 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   }
   for (const [k, env] of [["maxRunningSandboxes", "CRESSLET_MAX_RUNNING_SANDBOXES"], ["maxWebSockets", "CRESSLET_MAX_WEBSOCKETS"],
     ["maxWebSocketsPerApp", "CRESSLET_MAX_WEBSOCKETS_PER_APP"], ["wsIdleMs", "CRESSLET_WS_IDLE_MS"], ["wsMaxMs", "CRESSLET_WS_MAX_MS"]] as const) {
-    if (!(Number.isSafeInteger(limits[k]) && limits[k] >= 0)) throw new Error(`${env} must be a whole number, 0 or more (0 = no limit)`);
+    // Timers past 2^31-1 ms fire at once in Node.
+    if (!(Number.isSafeInteger(limits[k]) && limits[k] >= 0 && limits[k] <= 2 ** 31 - 1)) {
+      throw new Error(`${env} must be a whole number from 0 (no limit) to ${2 ** 31 - 1}`);
+    }
   }
   return {
     ...merged,
