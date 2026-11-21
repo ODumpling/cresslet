@@ -156,7 +156,12 @@ async function fill(store: Store) {
   await store.uidSeq(app.id);
   await store.grantAi(owner.id, 5000, { by: "test" });
   await store.chargeAi(owner.id, "2026-11", 1000, 1500, { model: "claude-opus-5-5", input: 3, output: 4, usd: 0.25 });
-  return { owner, guest, token, app };
+  const org = await store.createOrg("acme", "Acme", owner.id);
+  await store.setOrgMember(org.id, owner.id, "admin");
+  await store.setOrgMember(org.id, guest.id, "member");
+  const { app: orgApp } = await store.createApp("tool", null, owner.id);
+  await store.setAppOrg(orgApp.id, org.id, owner.id);
+  return { owner, guest, token, app, orgApp: (await store.appById(orgApp.id))! };
 }
 
 test("SQLite → Postgres → SQLite: every row and secret copied and checked; the source untouched", { skip: needsPg }, async () => {
@@ -183,8 +188,8 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
     assert.equal(createHash("sha256").update(await readFile(join(dir, "cresslet.db"))).digest("hex"), before, "source file unchanged");
     const rows = Object.fromEntries(report.tables.map((t) => [t.table, t.rows]));
     assert.deepEqual(rows, {
-      accounts: 2, apps: 2, tokens: 2, deploys: 3, secrets: 2, domains: 1, meta: 1, collaborators: 1, invites: 1,
-      page_sessions: 1, rate_hits: 1, ai_wallets: 1, ai_ledger: 2,
+      accounts: 2, apps: 3, tokens: 2, deploys: 3, secrets: 2, domains: 1, meta: 1, collaborators: 1, invites: 1,
+      page_sessions: 1, rate_hits: 1, ai_wallets: 1, ai_ledger: 2, orgs: 1, org_members: 2,
     });
 
     // The copy works as the database of a server.
@@ -195,6 +200,8 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
       assert.deepEqual((await store.deploys(seed.app.id)).map((d) => d.id), ["dep_3", "dep_2", "dep_1"]);
       assert.deepEqual((await store.appsWithCrons()).map((a) => a.name), ["shop"]);
       assert.equal(await store.access(seed.app, seed.guest.id), "admin");
+      assert.equal(await store.access(seed.orgApp, seed.guest.id), "admin", "an org member");
+      assert.equal(await store.access(seed.orgApp, seed.owner.id), "owner", "an org admin");
       assert.equal(await store.uidSeq(seed.app.id), 1);
       assert.deepEqual(await store.aiWallet(seed.owner.id, "2026-11"), { balance: 4500, periodUsed: 1000 });
       // Generated ids carry on after the copied ones.
