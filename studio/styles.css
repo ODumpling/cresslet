@@ -762,9 +762,49 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 
 /* pages */
 .page-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 16px; }
-.page-fields > fieldset { grid-column: 1 / -1; }
+.page-fields > fieldset, .page-fields > .slug-field { grid-column: 1 / -1; }
+.page-fields > .slug-field { max-width: 40rem; }
 .file-btn { cursor: pointer; }
 .file-btn:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
 .pages-list { margin-top: 12px; }
 .pages-list .role-select { width: auto; min-height: 28px; padding: 3px 8px; max-width: 13rem; }
 .keep-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+
+/* ------------------------------------------------------------------ subdomain picker (new app or page) */
+.slug-input {
+  display: flex; align-items: stretch; min-width: 0; border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong); background: var(--bg);
+}
+.slug-input:hover { border-color: var(--text-3); }
+.slug-input:focus-within { border-color: var(--focus); outline: 2px solid var(--focus); outline-offset: 0; }
+.slug-input { cursor: text; }
+.slug-input .input { width: auto; flex: 1 1 auto; min-width: 4ch; border: 0; background: transparent; padding-inline: 2px; outline: none; }
+/* Sized to the name where supported, so the domain follows it (clicking the rest of the box focuses the input). */
+@supports (field-sizing: content) {
+  /* Short of room, the domain gives way before the name does. */
+  .slug-input .input { field-sizing: content; flex: 0 0 auto; max-width: 100%; }
+  .slug-input .slug-affix:last-child { flex: 1 1 0; min-width: 0; max-width: none; }
+}
+@media (max-width: 480px) {
+  .slug-input .slug-affix:first-child { display: none; }
+  .slug-input .input { padding-left: 11px; }
+}
+.slug-affix {
+  display: flex; align-items: center; flex: none; max-width: 45%; overflow: hidden;
+  white-space: nowrap; color: var(--text-3); font-family: var(--mono); font-size: 13px;
+}
+.slug-affix:first-child { padding-left: 11px; }
+.slug-affix:last-child { padding-right: 11px; }
+.slug-affix:empty { display: none; }
+.slug-status { display: flex; align-items: center; gap: 6px; min-height: 1.5em; margin: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.slug-status .icon { flex: none; }
+.slug-status[data-state="ok"] { color: var(--success); }
+.slug-status[data-state="bad"] { color: var(--danger); }
+
+.modal {
+  width: min(30rem, calc(100vw - 32px)); padding: 20px; border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--surface); color: var(--text); box-shadow: var(--shadow);
+}
+.modal::backdrop { background: #0009; }
+.modal h2 { font-size: 16px; margin: 0 0 4px; }
+.modal p { margin: 0; }

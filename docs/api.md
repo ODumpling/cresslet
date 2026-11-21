@@ -40,6 +40,8 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/auth/cli/approve` | full-access account token (the studio) + `{userCode}` (case, dashes ignored) → `{approved: true}`; 404 if unknown, expired or already approved. 10 tries per account per 10 min |
 | POST | `/v1/auth/cli/token` | `{deviceCode}` → `{status: pending}` or `{status: complete, account, token}` (a new token, once); 400 `expired_token` after, or if the approving token was revoked. Poll every `interval`s |
 | GET | `/v1/templates` | `{templates: [{name, description}]}` |
+| GET | `/v1/names/suggest?kind=app\|page` | no auth: a free generated [name](#names) for a new app (`amber-comet-1a2b`) or page (`pg-<20 hex>`) → `{name, url}` |
+| GET | `/v1/names/:name` | no auth: can a new app or page have this name? → `{name, available: true, url}` or `{name, available: false, reason: invalid\|taken, message}` |
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |
 | GET | `/v1/apps` | apps the account owns or collaborates on; each has `access: owner\|admin\|viewer` |
@@ -72,7 +74,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/me/settings` | `{pages: {visibility, retentionDays}, defaults: {pages}}`: the account's defaults for new [pages](#pages) (falling back to the server's), and the server's |
 | PUT | `/v1/me/settings` | full-access token: `{pages: {visibility?, retentionDays?}}` (keys left out keep their value) or `{pages: null}` (back to the server's) |
 | GET | `/v1/pages` | pages the account owns or collaborates on (each with `access`; expired ones left out) → `{pages, defaults}` |
-| POST | `/v1/pages` | `deploy` token over the whole account: `{html}` or `{files}`, `title?`, `visibility?`, `retentionDays?` → `{page}` (201) |
+| POST | `/v1/pages` | `deploy` token over the whole account: `{html}` or `{files}`, `name?`, `title?`, `visibility?`, `retentionDays?` → `{page}` (201). `name` left out: a generated unguessable one. 409 if taken, 400 `invalid_name` |
 | GET | `/v1/pages/:name` | `{page}` |
 | PUT | `/v1/pages/:name` | owner or admin (`deploy`): `{html}` or `{files}` → same URL, new files; restarts the retention clock |
 | PATCH | `/v1/pages/:name` | owner or admin: `{title?, visibility?, retentionDays?}`; a new `retentionDays` counts from now |
@@ -91,7 +93,9 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 
 ## Pages
 
-Static HTML you upload and share, like an artifact: one file (`{"html": "…"}`, served as `index.html`) or a folder (`{"files": [{path, data, encoding}]}` with an `index.html` at the root; same size limits as deploys). No server, crons, secrets or domains: the `/v1/apps` endpoints for those answer 409 `is_page`. Each page gets an unguessable name (`pg-<20 hex>`) and its own origin, `pg-….<domain>`, so its scripts can't read another page's or the studio's storage.
+Static HTML you upload and share, like an artifact: one file (`{"html": "…"}`, served as `index.html`) or a folder (`{"files": [{path, data, encoding}]}` with an `index.html` at the root; same size limits as deploys). No server, crons, secrets or domains: the `/v1/apps` endpoints for those answer 409 `is_page`. Each page gets an unguessable name (`pg-<20 hex>`), or the `name` you upload it with, and its own origin, `pg-….<domain>`, so its scripts can't read another page's or the studio's storage.
+
+A name you choose can be guessed: keep the generated one for a `link` page that only the people you send it to should open.
 
 `visibility`:
 - `private`: only its owner and [collaborators](#http-api-v1) (any role), logged in. A visitor without a session is sent to the studio (`/#/view/<name>?path=…`), which calls `POST /v1/pages/:name/view` and sends them back with a one-time ticket (`?cresslet_view=…`, 2 minutes). The page's host swaps it for an HttpOnly session cookie for that host only (`__Host-cresslet_page` on https, 24 h) and drops it from the URL. Each request checks that the account still has access, so removing a collaborator takes effect at once. Responses are `cache-control: private, no-store`.
@@ -147,6 +151,12 @@ Response `201`:
   "deploy": { "id", "bytes", "files", "server" },
   "deployKey": "clv_app_…" }
 ```
+
+## Names
+
+A new app or page is served at `<name>.<domain>`. Names are 1-40 characters of `a-z`, `0-9` and single dashes, not starting or ending with a dash, and not a reserved word (`www`, `api`, `studio`, `admin`, `app`, `apps`, `docs`, `status`, `mail`, `preview`). Apps and pages share one namespace, and a deleted app's name stays taken until it's purged. The name is fixed once created.
+
+The studio asks for one before an app's first deploy and on the page upload form: it starts from `GET /v1/names/suggest` and checks each edit with `GET /v1/names/:name` (both 120 per minute per address). The check is advisory: `POST /v1/deploys` and `POST /v1/pages` still answer 409 if someone took the name in between.
 
 ## Minimal agent deploy (no CLI)
 

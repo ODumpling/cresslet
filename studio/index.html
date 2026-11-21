@@ -375,6 +375,16 @@
                     <span class="muted small" id="page-picked" aria-live="polite">Nothing chosen</span>
                   </div>
                 </fieldset>
+                <div class="field slug-field">
+                  <label for="page-name">Address</label>
+                  <div class="slug-input">
+                    <span class="slug-affix js-slug-before" aria-hidden="true"></span>
+                    <input class="input mono" id="page-name" maxlength="40" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="page-name-status page-name-hint" />
+                    <span class="slug-affix js-slug-after" aria-hidden="true"></span>
+                  </div>
+                  <p class="slug-status small" id="page-name-status" aria-live="polite"></p>
+                  <p class="muted small" id="page-name-hint">A generated address can't be guessed, so an "Anyone with the link" page stays with the people you send it to. A name of your own is easier to share, and easier to guess.</p>
+                </div>
                 <div class="field">
                   <label for="page-visibility">Who can open it</label>
                   <select class="input" id="page-visibility" aria-describedby="vis-hint">
@@ -698,6 +708,30 @@
         </main>
       </div>
     </div>
+
+    <!-- First deploy from the studio: the new app's address, generated and editable (GET /v1/names). -->
+    <dialog class="modal" id="deploy-dialog" aria-labelledby="deploy-dialog-title" aria-describedby="deploy-dialog-desc">
+      <form class="form" id="deploy-form" method="dialog">
+        <div>
+          <h2 id="deploy-dialog-title">Deploy a new app</h2>
+          <p class="muted" id="deploy-dialog-desc">It goes live at this address. Keep the one we picked or choose your own; it stays the same for every later deploy.</p>
+        </div>
+        <div class="field slug-field">
+          <label for="deploy-name">Address</label>
+          <div class="slug-input">
+            <span class="slug-affix js-slug-before" aria-hidden="true"></span>
+            <input class="input mono" id="deploy-name" maxlength="40" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="deploy-name-status deploy-name-hint" />
+            <span class="slug-affix js-slug-after" aria-hidden="true"></span>
+          </div>
+          <p class="slug-status small" id="deploy-name-status" aria-live="polite"></p>
+          <p class="muted small" id="deploy-name-hint">Lowercase letters, numbers and single dashes, up to 40.</p>
+        </div>
+        <div class="row">
+          <button class="btn" type="button" id="deploy-cancel">Cancel</button>
+          <button class="btn primary" type="submit" id="deploy-confirm"><svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Deploy</button>
+        </div>
+      </form>
+    </dialog>
 
     <!-- Always in the accessibility tree (a live region that appears with its message may not be announced);
          closed, it's empty and visually collapsed. -->

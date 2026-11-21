@@ -1,4 +1,5 @@
-// Browser e2e: template → in-browser npm install → preview → API → Deploy → live app; Settings → API tokens.
+// Browser e2e: template → in-browser npm install → preview → API → Deploy (pick the address) → live app; Settings → API tokens.
+// SHOTS=<dir> also saves screenshots of the address picker.
 // Run: start the server (CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev), then:
 //   cd tests/e2e && npm i && npx playwright install chromium && CRESSLET_ADMIN_TOKEN=e2e-admin node studio.mjs
 import { chromium } from "@playwright/test";
@@ -57,9 +58,42 @@ try {
   await frame.getByRole("button", { name: "Add" }).click();
   await frame.getByText("from studio").waitFor({ timeout: 15000 });
   console.log("api + sql.js works");
-  await page.getByRole("button", { name: "Deploy" }).click();
+  // First deploy: a generated address, editable; a taken one is refused before anything is built.
+  const taken = `taken-${Date.now().toString(36)}`, mine = `mine-${Date.now().toString(36)}`;
+  const owner = await (await fetch(base + "/v1/accounts", {
+    method: "POST",
+    headers: { authorization: `Bearer ${process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin"}`, "content-type": "application/json" },
+    body: JSON.stringify({ email: `taken-${Date.now()}@example.com` }),
+  })).json();
+  const made = await fetch(base + "/v1/deploys", {
+    method: "POST",
+    headers: { authorization: `Bearer ${owner.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ app: taken, files: [{ path: "index.html", data: "x" }] }),
+  });
+  if (made.status !== 201) throw new Error(`couldn't create ${taken}: ${made.status} ${await made.text()}`);
+  await page.locator("#deploy-btn").click();
+  const nameInput = page.getByRole("textbox", { name: "Address" });
+  await page.locator("#deploy-name-status", { hasText: "is available" }).waitFor();
+  const suggested = await nameInput.inputValue();
+  if (!/^[a-z]+-[a-z]+-[0-9a-f]{4}$/.test(suggested)) throw new Error(`suggested name ${suggested}`);
+  if (await page.evaluate(() => document.activeElement?.id) !== "deploy-name") throw new Error("the dialog didn't focus the address");
+  if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/deploy-suggested.png` });
+  await nameInput.fill(taken);
+  await page.locator("#deploy-name-status", { hasText: `${taken} is taken` }).waitFor();
+  await page.locator("#deploy-confirm").click();
+  if (!(await page.locator("#deploy-dialog").evaluate((d) => d.open))) throw new Error("deployed to a taken name");
+  if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/deploy-taken.png` });
+  await nameInput.fill("Bad--Name");
+  await page.locator("#deploy-name-status", { hasText: "single dashes" }).waitFor();
+  if (await nameInput.inputValue() !== "bad--name") throw new Error("the address wasn't lowercased");
+  await nameInput.fill(mine);
+  await page.locator("#deploy-name-status", { hasText: `${mine} is available` }).waitFor();
+  if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/deploy-custom.png` });
+  await page.locator("#deploy-confirm").click();
   await page.locator("#deploy-link").waitFor({ state: "visible", timeout: 60000 });
   const url = await page.locator("#deploy-link").getAttribute("href");
+  if (!url.includes(`//${mine}.`)) throw new Error(`deployed to ${url}, not ${mine}`);
+  if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/deploy-done.png` });
   console.log("deployed", url);
   console.log(await page.locator("#deploy-log").textContent());
   const p2 = await browser.newPage();
@@ -153,7 +187,7 @@ async function settings() {
   await tokens.getByText("this browser").waitFor();
 
   await s.getByLabel("Name", { exact: true }).fill("e2e ci");
-  await s.getByLabel("Access").selectOption("deploy");
+  await s.getByLabel("Access", { exact: true }).selectOption("deploy");
   await s.getByLabel("Only these apps").check();
   await s.locator("#token-apps").getByLabel(appName).check();
   await s.getByRole("button", { name: "Create token" }).click();

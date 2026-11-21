@@ -1,4 +1,5 @@
-// Browser e2e: Settings → page defaults; home → upload an HTML file and a folder (defaults prefilled, overridable);
+// Browser e2e: Settings → page defaults; home → upload an HTML file (generated address) and a folder (its own address;
+// defaults prefilled, overridable);
 // change a page's visibility and retention in its row; replace a page with a folder; a private page opens through the studio's sign-in hop,
 // and a stranger is told they have no access. No 320px horizontal scroll.
 // Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node pages.mjs
@@ -51,18 +52,22 @@ try {
   await shot(o, "pages-settings");
 
   // Home: the form starts at the account's defaults; upload a file with them.
-  await o.goto(base + "/");
-  await o.getByRole("heading", { name: "Pages" }).waitFor();
+  await o.goto(base + "/#/pages");
+  await o.getByRole("heading", { name: "Pages", exact: true }).waitFor();
   await o.waitForFunction(() => document.getElementById("page-retention").value === "7");
   assert(await o.getByLabel("Who can open it").inputValue() === "link", "form default visibility");
   await o.getByRole("button", { name: "Upload" }).click();
   await o.getByText("Choose an HTML file or a folder first.").waitFor();
   await o.locator("#page-file").setInputFiles(join(dir, "report.html"));
   await o.getByText("report.html").waitFor();
+  // Its address: a generated unguessable one unless changed.
+  await o.locator("#page-name-status", { hasText: "is available" }).waitFor();
+  const generated = await o.getByRole("textbox", { name: "Address" }).inputValue();
+  assert(/^pg-[0-9a-f]{20}$/.test(generated), `generated page name ${generated}`);
   await o.getByRole("button", { name: "Upload" }).click();
   await o.getByText(/^Uploaded report:/).waitFor();
   let pages = (await call("/v1/pages", owner.token)).pages;
-  assert(pages.length === 1 && pages[0].title === "report" && pages[0].visibility === "link" && pages[0].retentionDays === 7, `upload 1 ${JSON.stringify(pages)}`);
+  assert(pages.length === 1 && pages[0].name === generated && pages[0].title === "report" && pages[0].visibility === "link" && pages[0].retentionDays === 7, `upload 1 ${JSON.stringify(pages)}`);
   const report = pages[0];
   const r = await fetch(report.url, { redirect: "manual" });
   assert(r.status === 200 && (await r.text()).includes("Quarterly report"), "link page serves");
@@ -72,10 +77,23 @@ try {
   await o.getByText("site/ (2 files)").waitFor();
   await o.getByLabel("Who can open it").selectOption("public");
   await o.getByLabel("Keep for", { exact: true }).selectOption("forever");
+  // A name of your own: a taken one is refused before uploading, a free one is the page's address.
+  const address = o.getByRole("textbox", { name: "Address" });
+  await o.locator("#page-name-status", { hasText: "is available" }).waitFor();
+  assert(await address.inputValue() !== generated, "a new address for the next page");
+  await address.fill(generated);
+  await o.locator("#page-name-status", { hasText: `${generated} is taken` }).waitFor();
+  await o.getByRole("button", { name: "Upload" }).click();
+  assert(await o.evaluate(() => document.activeElement?.id) === "page-name", "upload to a taken name didn't return to the address");
+  const custom = `site-${run.toString(36)}`;
+  await address.fill(custom);
+  await o.locator("#page-name-status", { hasText: `${custom} is available` }).waitFor();
+  await shot(o, "pages-custom-name");
   await o.getByRole("button", { name: "Upload" }).click();
   await o.getByText(/^Uploaded site:/).waitFor();
   pages = (await call("/v1/pages", owner.token)).pages;
   const site = pages.find((p) => p.title === "site");
+  assert(site?.name === custom && site.url.includes(`//${custom}.`), `custom page name ${JSON.stringify(site)}`);
   assert(site && site.visibility === "public" && site.retentionDays === null && site.files === 2, `upload 2 ${JSON.stringify(site)}`);
   assert((await fetch(site.url + "/img/dot.svg")).status === 200, "folder asset serves");
   assert(await o.getByLabel("Who can open it").inputValue() === "link", "form back to defaults after upload");
@@ -109,7 +127,7 @@ try {
   assert(anon.url().startsWith(base + "/#/view/"), `anon at ${anon.url()}`);
 
   // Replace a page with a folder: same link, all its files swapped; a missing page there is a 404, not the index.
-  await o.goto(base + "/");
+  await o.goto(base + "/#/pages");
   await o.getByLabel("Replace report with a folder").setInputFiles(join(dir, "site"));
   await o.getByText("Replaced report (same link)").waitFor();
   const replaced = (await call(`/v1/pages/${report.name}`, owner.token)).page;
@@ -120,17 +138,17 @@ try {
   assert((await o.goto(report.url + "/no-such-page")).status() === 404, "broken link is a 404");
 
   // Delete.
-  await o.goto(base + "/");
+  await o.goto(base + "/#/pages");
   await o.getByRole("button", { name: "Delete site" }).click();
   await o.getByText("Deleted site").waitFor();
   assert((await fetch(site.url)).status === 404, "deleted page 404s");
 
   // Phone width: no horizontal scroll.
   const narrow = await as(owner.token, { width: 320, height: 700 });
-  await narrow.goto(base + "/");
-  await narrow.getByRole("heading", { name: "Pages" }).waitFor();
+  await narrow.goto(base + "/#/pages");
+  await narrow.getByRole("heading", { name: "Pages", exact: true }).waitFor();
   await narrow.getByLabel("Who can open report").waitFor();
-  for (const hash of ["#/", "#/settings"]) {
+  for (const hash of ["#/", "#/pages", "#/settings"]) {
     await narrow.goto(base + "/" + hash);
     await narrow.waitForTimeout(300);
     const over = await narrow.evaluate(() => document.documentElement.scrollWidth - innerWidth);
