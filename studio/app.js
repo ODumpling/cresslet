@@ -1656,9 +1656,12 @@ $("pages-login-btn").addEventListener("click", () => {
 });
 
 let pageUploading = false; // the dialog stays open (Escape, Cancel, × do nothing) while a deploy is in flight
+let pageUploadGen = 0; // the latest deploy: an earlier one finishing later doesn't unlock the dialog it no longer owns
 const pageSlug = slugField($("page-name"), "page");
 function renderPages() {
   return api("/v1/pages").then(({ pages }) => {
+    // Closed before their rows go, so their scroll/resize listeners go with them.
+    for (const m of $("page-list").querySelectorAll(".menu:popover-open")) m.hidePopover();
     $("page-list").replaceChildren(pages.length
       ? el("ul", { className: "list art-list", ariaLabel: "Your artifacts" }, ...pages.map(pageRow))
       : el("div", { className: "empty-state" },
@@ -1910,6 +1913,7 @@ $("page-form").addEventListener("submit", async (e) => {
   }
   pageError("");
   const dlg = $("page-dialog");
+  const mine = ++pageUploadGen;
   pageUploading = true;
   for (const id of ["page-upload", "page-cancel", "page-close"]) $(id).disabled = true;
   try {
@@ -1943,9 +1947,11 @@ $("page-form").addEventListener("submit", async (e) => {
     if (dlg.open) pageError(`Could not deploy: ${err.message}`);
     else toast(`Could not deploy: ${err.message}`); // closed by leaving the page meanwhile
   } finally {
-    pageUploading = false;
-    for (const id of ["page-upload", "page-cancel", "page-close"]) $(id).disabled = false;
-    if (dlg.open && !dlg.contains(document.activeElement)) $("page-upload").focus(); // disabling Deploy dropped focus
+    if (mine === pageUploadGen) {
+      pageUploading = false;
+      for (const id of ["page-upload", "page-cancel", "page-close"]) $(id).disabled = false;
+      if (dlg.open && !dlg.contains(document.activeElement)) $("page-upload").focus(); // disabling Deploy dropped focus
+    }
   }
 });
 
