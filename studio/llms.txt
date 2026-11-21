@@ -15,7 +15,7 @@
 
 ## Share a static HTML file or folder as an artifact (account token)
 - An artifact: private, link-only or public, expires (default 30 days); no server. Need a server, database or rollback? Deploy an app (above).
-- CLI: `npx cresslet deploy report.html --visibility link --keep 7 [--name q4-report]`; a folder: `npx cresslet deploy ./site --artifact`. Deploying it again updates the same URL.
+- CLI (a version with artifacts: `npx cresslet@latest`; older ones ignore the file and deploy the folder as a public app): `npx cresslet@latest deploy report.html --visibility link --keep 7 [--name q4-report]`; a folder: `npx cresslet@latest deploy ./site --artifact`. Deploying it again updates the same URL.
 - POST /v1/pages {"html":"<h1>hi</h1>","name":"<optional address>","visibility":"private|link|public","retentionDays":30|null} → {page.url}; PUT /v1/pages/<name> replaces its files
 
 ## Docs
