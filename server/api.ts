@@ -1249,8 +1249,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     await authorize(c, a, "read");
     const n = Math.trunc(Number(c.req.query("limit") ?? 100));
     const limit = Number.isFinite(n) ? Math.min(Math.max(n, 0), 1000) : 100;
-    const tables = await inspect<Record<string, unknown>>(a.id, paths(cfg, a.id).db, { kind: "tables", limit });
-    return c.json({ tables: tables ?? {} });
+    const r = await inspect<{ tables: Record<string, unknown>; truncated: boolean }>(a.id, paths(cfg, a.id).db, { kind: "tables", limit });
+    return c.json({ tables: r?.tables ?? {}, ...(r?.truncated ? { truncated: true } : {}) });
   });
 
   adminRoutes(app, { cfg, store, runtime, isAdminToken: isAdmin, body });

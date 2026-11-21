@@ -144,13 +144,15 @@ export function adminRoutes(
     const a = getSite(c.req.param("name"));
     // Site admin powers cover the site, not its data: the tables are only shown to whoever runs the app
     // (its owner, or an admin it invited).
-    let database: { tables: { name: string; rows: number }[]; error: string | null } | null = null;
+    let database: { tables: { name: string; rows: number }[]; error: string | null; truncated?: true } | null = null;
     // requireSiteAdmin already demands a full-access token (admin role, every app).
     const acct = c.get("account"), access = acct ? store.access(a, acct.id) : undefined;
     if (access === "owner" || access === "admin") {
       database = { tables: [], error: null };
       try {
-        database.tables = await inspect<{ name: string; rows: number }[]>(a.id, paths(cfg, a.id).db, { kind: "counts" }) ?? [];
+        const r = await inspect<{ tables: { name: string; rows: number }[]; truncated: boolean }>(a.id, paths(cfg, a.id).db, { kind: "counts" });
+        database.tables = r?.tables ?? [];
+        if (r?.truncated) database.truncated = true;
       } catch (e) {
         database.error = (e as Error).message;
       }

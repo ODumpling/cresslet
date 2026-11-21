@@ -11,35 +11,55 @@ process.once("message", ({ path, job, maxBytes }: { path: string; job: Job; maxB
     // bounded by the app's database cap). `limits` is Node ≥ 24.15; before, only the deadline bounds it.
     if (job.kind === "query" && db.limits) db.limits.length = maxBytes;
     let bytes = 0;
+    /** Counts `n` bytes against the reply's budget; false (and nothing counted) if they don't fit. */
+    const charge = (n: number) => bytes + n <= maxBytes && ((bytes += n), true);
+    /** A value's size in the reply, before building it (a stored blob's base64 may not even fit a string). */
+    const size = (x: unknown) =>
+      x instanceof Uint8Array ? Math.ceil(x.length / 3) * 4 + 12 : typeof x === "string" ? Buffer.byteLength(x) + 2 : 24;
     /** Rows (JSON-safe) until `max` rows or the shared byte budget runs out. */
     const take = (sql: string, params: SQLInputValue[], max: number) => {
       const rows: unknown[] = [];
-      for (const row of db.prepare(sql).iterate(...params)) {
+      for (const row of db.prepare(sql).iterate(...params) as Iterable<Record<string, unknown>>) {
         if (rows.length >= max) return { rows, truncated: true };
-        const s = JSON.stringify(row, (_k, x) =>
-          typeof x === "bigint" ? Number(x) : x instanceof Uint8Array ? { $bytes: Buffer.from(x).toString("base64") } : x);
-        const len = Buffer.byteLength(s);
-        if (bytes + len > maxBytes) return { rows, truncated: true };
-        bytes += len;
-        rows.push(JSON.parse(s));
+        let len = 2;
+        for (const [k, v] of Object.entries(row)) len += Buffer.byteLength(k) + 4 + size(v);
+        if (!charge(len)) return { rows, truncated: true };
+        rows.push(JSON.parse(JSON.stringify(row, (_k, x) =>
+          typeof x === "bigint" ? Number(x) : x instanceof Uint8Array ? { $bytes: Buffer.from(x).toString("base64") } : x)));
       }
       return { rows, truncated: false };
     };
     const quote = (name: string) => `"${name.replace(/"/g, '""')}"`;
-    const tables = () => (db.prepare(
+    const tables = () => db.prepare(
       "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-    ).all() as { name: string; sql: string }[]);
+    ).iterate() as Iterable<{ name: string; sql: string }>;
     const count = (name: string) => Number((db.prepare(`SELECT count(*) n FROM ${quote(name)}`).get() as { n: number }).n);
     let result: unknown;
     if (job.kind === "query") result = take(job.sql, job.params as SQLInputValue[], job.maxRows);
-    else if (job.kind === "counts") result = tables().map((t) => ({ name: t.name, rows: count(t.name) }));
-    else {
-      const out: Record<string, unknown> = {};
+    else if (job.kind === "counts") {
+      const list: { name: string; rows: number }[] = [];
+      let truncated = false;
       for (const t of tables()) {
-        const { rows, truncated } = take(`SELECT * FROM ${quote(t.name)} LIMIT ?`, [job.limit], job.limit);
-        out[t.name] = { schema: t.sql, count: count(t.name), rows, ...(truncated ? { truncated } : {}) };
+        if (!charge(size(t.name) + 32)) {
+          truncated = true;
+          break;
+        }
+        list.push({ name: t.name, rows: count(t.name) });
       }
-      result = out;
+      result = { tables: list, truncated };
+    } else {
+      const out: Record<string, unknown> = {};
+      let truncated = false;
+      for (const t of tables()) {
+        // Names and schemas count too: a database of many tables mustn't make an unbounded reply.
+        if (!charge(size(t.name) + size(t.sql) + 64)) {
+          truncated = true;
+          break;
+        }
+        const r = take(`SELECT * FROM ${quote(t.name)} LIMIT ?`, [job.limit], job.limit);
+        out[t.name] = { schema: t.sql, count: count(t.name), rows: r.rows, ...(r.truncated ? { truncated: true } : {}) };
+      }
+      result = { tables: out, truncated };
     }
     db.close();
     process.send!({ result }, () => process.exit(0));

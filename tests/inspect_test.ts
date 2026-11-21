@@ -89,18 +89,22 @@ test("db inspection: normal queries, row and byte caps, sql errors, busy", async
     const wide = await q("WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 10) SELECT replace(printf('%.*c', 1000000, 'a'), 'a', '€') s FROM r");
     assert.equal(wide.body.truncated, true);
     assert.equal(wide.body.rows.length, 1);
-    // A single value bigger than the cap is refused, not built.
+    // A single value bigger than the cap: refused, not built (Node ≥ 24.15); before, left out of the reply.
     const huge = await q("SELECT zeroblob(100000000) z");
-    assert.equal(huge.status, 400);
-    assert.equal(huge.body.error, "sql_error");
-    assert.match(huge.body.message, /too big/);
+    if (new DatabaseSync(":memory:").limits) {
+      assert.equal(huge.status, 400);
+      assert.equal(huge.body.error, "sql_error");
+      assert.match(huge.body.message, /too big/);
+    } else assert.deepEqual(huge.body, { rows: [], truncated: true });
     // Read-only and confined as before.
     assert.equal((await q("DELETE FROM small")).status, 400);
     assert.equal((await q("ATTACH '/etc/passwd' AS m")).status, 400);
     assert.equal((await t.json("POST", "/v1/apps/shop/db/query", t.owner, { sql: 1 })).status, 400);
 
     // The table listing: capped rows per table, byte budget shared.
-    const tables = (await t.json("GET", "/v1/apps/shop/db?limit=5000", t.owner)).body.tables;
+    const listing = (await t.json("GET", "/v1/apps/shop/db?limit=5000", t.owner)).body;
+    assert.equal(listing.truncated, undefined);
+    const tables = listing.tables;
     assert.equal(tables.small.count, 1500);
     assert.equal(tables.small.rows.length, 1000);
     assert.equal(tables.wide.count, 10);
@@ -112,6 +116,21 @@ test("db inspection: normal queries, row and byte caps, sql errors, busy", async
 
     // Site admin view: table counts.
     assert.deepEqual((await t.json("GET", "/v1/admin/sites/shop", t.owner)).body.database.tables, [{ name: "blob", rows: 1 }, { name: "small", rows: 1500 }, { name: "wide", rows: 10 }]);
+
+    // Table names and schemas count against the budget too (here a tiny one): the listing stops.
+    const maxBytes = INSPECT_LIMITS.maxBytes;
+    INSPECT_LIMITS.maxBytes = 150;
+    try {
+      const cut = (await t.json("GET", "/v1/apps/shop/db?limit=0", t.owner)).body;
+      assert.equal(cut.truncated, true);
+      assert.deepEqual(Object.keys(cut.tables), ["blob"]);
+      INSPECT_LIMITS.maxBytes = 80;
+      const site = (await t.json("GET", "/v1/admin/sites/shop", t.owner)).body.database;
+      assert.equal(site.truncated, true);
+      assert.ok(site.tables.length < 3);
+    } finally {
+      INSPECT_LIMITS.maxBytes = maxBytes;
+    }
 
     // Too many at once: the per-app cap answers 429 instead of queueing processes.
     const timeoutMs = INSPECT_LIMITS.timeoutMs;
