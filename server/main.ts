@@ -16,6 +16,7 @@ import type { Duplex } from "node:stream";
 import { purgeApp } from "./admin.ts";
 import { settled as sandboxSettled } from "./sandbox.ts";
 import { bindingsSettled } from "./bindings.ts";
+import { type Cluster, singleNode } from "./cluster.ts";
 
 const STUDIO = join(import.meta.dirname, "../studio");
 const RETIRE_SW = `self.addEventListener("install", () => self.skipWaiting());
@@ -57,11 +58,12 @@ const ISOLATION = {
   "cross-origin-resource-policy": "same-origin",
 };
 
-export function createServer(cfg: Config = loadConfig()) {
+/** `cluster`: which apps this node owns (docs/architecture.md#scaling-out); by default all of them. */
+export function createServer(cfg: Config = loadConfig(), cluster: Cluster = singleNode) {
   const store = new Store(cfg.dataDir);
   const logs = new Logs(cfg.limits.logLines);
   const runtime = new Runtime(cfg, logs);
-  const control = api(cfg, store, runtime);
+  const control = api(cfg, store, runtime, cluster);
   const serveApp = host(cfg, store, runtime);
   const upgradeApp = upgrader(cfg, store, runtime);
   const suffix = "." + cfg.domain;
@@ -70,15 +72,25 @@ export function createServer(cfg: Config = loadConfig()) {
     console.warn(`cresslet: ${cfg.previewHost} is the studio preview host; the app using that name/domain is no longer reachable`);
   }
   let studioHtml: Promise<string> | undefined;
-  const scheduler = new Scheduler(store, scheduled(cfg, store, runtime));
+  // Each app's crons fire on the node that owns it (checked again at dispatch: runs queue).
+  const run = scheduled(cfg, store, runtime);
+  const scheduler = new Scheduler(
+    { appsWithCrons: () => store.appsWithCrons().filter((a) => cluster.local(a.id)) },
+    async (appId, cron, at) => cluster.local(appId) ? run(appId, cron, at) : undefined,
+  );
   scheduler.start();
 
-  const reap = setInterval(async () => {
-    // Expired anonymous apps, and sites a site admin deleted longer ago than the retention period.
+  /** Purges expired anonymous apps, and sites a site admin deleted longer ago than the retention period (owned here). */
+  async function reap() {
     for (const a of [...store.expiredApps(), ...store.deletedBefore(Date.now() - cfg.limits.deletedRetentionMs)]) {
-      await purgeApp(cfg, store, runtime, a);
+      if (cluster.local(a.id)) await purgeApp(cfg, store, runtime, a);
     }
-  }, 10 * 60_000);
+  }
+  const reaper = setInterval(reap, 10 * 60_000);
+
+  /** An app host's request: served here, or by the node that owns the app. */
+  const appHost = (req: Request, name: string, app = store.appByName(name)) =>
+    app && !cluster.local(app.id) ? cluster.forward(app.id, req) : serveApp(req, name, app);
 
   /**
    * The studio's previews run on their own origin (cresslet-container `previewOrigin`), so preview
@@ -110,10 +122,10 @@ export function createServer(cfg: Config = loadConfig()) {
     if (hostname === cfg.previewHost) return servePreviewHost(req);
     if (hostname.endsWith(suffix)) {
       const sub = hostname.slice(0, -suffix.length);
-      if (sub && !sub.includes(".")) return serveApp(req, sub);
+      if (sub && !sub.includes(".")) return appHost(req, sub);
     } else if (hostname !== cfg.domain) {
       const custom = store.appByDomain(hostname);
-      if (custom) return serveApp(req, custom.name);
+      if (custom) return appHost(req, custom.name, custom);
     }
     const url = new URL(req.url);
     if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return control.fetch(req, { remoteAddr: env?.incoming?.socket?.remoteAddress });
@@ -155,9 +167,12 @@ export function createServer(cfg: Config = loadConfig()) {
     const hostname = normDomain((req.headers.host ?? "").replace(/:\d+$/, ""));
     if (hostname === cfg.previewHost) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
     let name = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : "";
-    if (!name && hostname !== cfg.domain) name = store.appByDomain(hostname)?.name ?? ""; // custom domain
+    const custom = !name && hostname !== cfg.domain ? store.appByDomain(hostname) : undefined;
+    if (custom) name = custom.name;
     if (!name || name.includes(".")) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
-    void upgradeApp(req, socket, head, name).catch(() => socket.destroy());
+    const app = custom ?? store.appByName(name);
+    if (app && !cluster.local(app.id)) return void cluster.forwardUpgrade(app.id, req, socket, head).catch(() => socket.destroy());
+    void upgradeApp(req, socket, head, name, app).catch(() => socket.destroy());
   }
 
   return {
@@ -166,12 +181,13 @@ export function createServer(cfg: Config = loadConfig()) {
     store,
     runtime,
     scheduler,
+    reap,
     handler,
     close() {
-      clearInterval(reap);
+      clearInterval(reaper);
       scheduler.stop();
       runtime.close();
-      store.db.close();
+      store.close();
     },
   };
 }

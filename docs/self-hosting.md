@@ -258,4 +258,4 @@ Claimed apps' outbound goes through the control plane's egress proxy in this mod
 
 `*.localhost` resolves to 127.0.0.1 in browsers and curl, so local dev needs no DNS setup.
 
-v1 caveats: one server process (no horizontal scaling). See [architecture.md](architecture.md#roadmap).
+v1 caveats: one server process (no horizontal scaling). [architecture.md](architecture.md#scaling-out) describes the seam a second node would use and what is still missing.
