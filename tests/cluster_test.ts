@@ -19,13 +19,13 @@ export default {
 /** A cluster where the apps in `remote` are owned by another node; forwards are recorded and answered with 203. */
 function fakeCluster() {
   const remote = new Set<string>();
-  const forwards: { appId: string; method: string; url: string; body: Uint8Array; length: string | null }[] = [];
+  const forwards: { appId: string; method: string; url: string; body: Uint8Array; length: string | null; signal: AbortSignal }[] = [];
   const upgrades: string[] = [];
   let failUpgrade = false;
   const cluster: Cluster = {
     local: (id) => !remote.has(id),
     async forward(appId, req) {
-      forwards.push({ appId, method: req.method, url: req.url, body: new Uint8Array(await req.arrayBuffer()), length: req.headers.get("content-length") });
+      forwards.push({ appId, method: req.method, url: req.url, body: new Uint8Array(await req.arrayBuffer()), length: req.headers.get("content-length"), signal: req.signal });
       return new Response("from owner", { status: 203 });
     },
     async forwardUpgrade(appId, req, socket) {
@@ -104,7 +104,8 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     // A deploy, as sent (byte for byte, BOM included), before auth: a token this node rejects still goes to the owner.
     const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(deployBody)]);
     const deployHeaders = { authorization: "Bearer clv_acct_unknown", "content-length": String(bom.length) };
-    assert.equal(await text("/v1/deploys", { method: "POST", headers: deployHeaders, body: bom }), "203 from owner");
+    const client = new AbortController();
+    assert.equal(await text("/v1/deploys", { method: "POST", headers: deployHeaders, body: bom, signal: client.signal }), "203 from owner");
     assert.equal(await text("/v1/admin/sites/shop", { method: "DELETE" }), "203 from owner");
     assert.deepEqual(fake.forwards.map((f) => `${f.method} ${f.url}`), [
       "GET http://shop.test.local/",
@@ -120,6 +121,8 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     assert.equal(new TextDecoder().decode(fake.forwards[5].body), '{"deployId":"d1"}');
     assert.deepEqual(fake.forwards[6].body, bom); // read here to find the app, forwarded intact
     assert.equal(fake.forwards[6].length, String(bom.length));
+    client.abort(); // the client going away reaches the owner
+    assert.ok(fake.forwards[6].signal.aborted);
     // Not app-scoped, or a CORS preflight: answered here.
     assert.equal((await call("/v1/apps/shop", { method: "OPTIONS", headers: { origin: "http://x", "access-control-request-method": "GET" } })).status, 204);
     assert.equal((await call("/v1/apps", { headers: auth })).status, 200);
@@ -154,6 +157,25 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     assert.ok(!srv.store.appById(app.id, true) && !existsSync(paths(srv.cfg, app.id).app));
   } finally {
     http.close();
+    srv.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a single node rejects a bad token on a deploy without reading its body", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "cresslet-cluster-"));
+  const srv = createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
+  try {
+    const pending = new ReadableStream({ start() {} }); // never ends
+    const res = srv.handler(new Request("http://test.local/v1/deploys", {
+      method: "POST",
+      headers: { host: "test.local", "content-type": "application/json", authorization: "Bearer clv_acct_unknown" },
+      body: pending,
+      duplex: "half",
+    } as RequestInit));
+    const timeout = new Promise<string>((r) => setTimeout(() => r("still reading the body"), 2000).unref());
+    assert.equal(await Promise.race([res.then((r) => r.status), timeout]), 401);
+  } finally {
     srv.close();
     await rm(dataDir, { recursive: true, force: true });
   }

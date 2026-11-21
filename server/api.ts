@@ -23,7 +23,7 @@ import {
   type Token,
 } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
-import type { Cluster } from "./cluster.ts";
+import { type Cluster, singleNode } from "./cluster.ts";
 import { github } from "./github.ts";
 import { confine } from "./bindings.ts";
 import { normalizeEgress } from "./egress.ts";
@@ -63,21 +63,20 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   };
   app.use("/apps/:name/*", toOwner);
   app.use("/admin/sites/:name/*", toOwner);
-  // A deploy names its app in the body: one for an app another node owns goes there as sent (bytes, auth).
+  // A deploy names its app in the body: one for an app another node owns goes there as sent (bytes,
+  // auth). A single node owns them all, so it doesn't read the body before auth.
   app.use("/deploys", async (c, next) => {
-    if (c.req.method === "POST") {
-      const bytes = await c.req.arrayBuffer();
-      let input: { app?: unknown } | null | undefined;
-      try {
-        input = JSON.parse(new TextDecoder().decode(bytes));
-      } catch { /* the route answers 400 */ }
-      c.set("deploy", input);
-      const a = typeof input?.app === "string" ? store.appByName(input.app) : undefined;
-      if (a && !cluster.local(a.id)) {
-        return forward(a.id, new Request(c.req.url, { method: "POST", headers: c.req.raw.headers, body: bytes }));
-      }
-    }
-    await next();
+    if (cluster === singleNode || c.req.method !== "POST") return next();
+    const bytes = await c.req.arrayBuffer().catch(() => undefined); // unreadable: the route answers 400
+    let input: { app?: unknown } | null | undefined;
+    try {
+      if (bytes) input = JSON.parse(new TextDecoder().decode(bytes));
+    } catch { /* the route answers 400 */ }
+    c.set("deploy", input);
+    const a = typeof input?.app === "string" ? store.appByName(input.app) : undefined;
+    if (!a || cluster.local(a.id)) return next();
+    const { url, method, headers, signal } = c.req.raw;
+    return forward(a.id, new Request(url, { method, headers, body: bytes, signal }));
   });
 
   app.onError((err, c) => {
