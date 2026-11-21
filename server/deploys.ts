@@ -259,7 +259,7 @@ async function prunePage(cfg: Config, store: Store, appId: string, graceMs = PAG
   const app = store.appById(appId, true); // a deleted page only needs the version a restore serves
   const served = app?.page_deploy_id;
   if (!served) return;
-  const all = store.deploys(appId, 1000); // newest first: each was replaced when the one before it came
+  const all = store.pageVersions(appId); // each was replaced when the one before it came
   const servedAt = all.find((d) => d.id === served)?.created_at ?? 0;
   const cutoff = Date.now() - graceMs;
   await removeDeploys(cfg, store, all.filter((d, i) =>
