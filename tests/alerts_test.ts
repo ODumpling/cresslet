@@ -14,7 +14,7 @@ const NET = "netuuid";
 
 const STUBS: Record<string, string> = {
   // ps lists "<id> <coolify.proxy label>" lines from $FIX/ps. $FIX/inspect-<id> sets label, name,
-  // restarts, oom (sh), rendered into the -f format; $FIX/stats-<id> is "<name> <mem %>".
+  // restarts (sh), rendered into the -f format; $FIX/stats-<id> is "<name> <mem %>".
   docker: `#!/bin/sh
 F=$FIX
 for last; do :; done
@@ -22,7 +22,7 @@ case $1 in
   ps) [ -f "$F/ps" ] || exit 0; case "$*" in *"{{.ID}} {{.Label"*) cat "$F/ps" ;; *"{{.Label"*) cut -d' ' -f2 "$F/ps" ;; *) cut -d' ' -f1 "$F/ps" ;; esac ;;
   inspect) [ -f "$F/inspect-$last" ] || { echo "Error: No such object: $last" >&2; exit 1; }; [ "$2" = -f ] || exit 0; . "$F/inspect-$last"
     printf '%s\\n' "$3" | sed -e "s#{{or (index .Config.Labels \\"coolify.proxy\\") \\"-\\"}}#$label#" -e "s#{{.Name}}#$name#" \\
-      -e "s#{{.RestartCount}}#$restarts#" -e "s#{{.State.OOMKilled}}#$oom#" ;;
+      -e "s#{{.RestartCount}}#$restarts#" ;;
   stats) cat "$F/stats-$last" 2>/dev/null || exit 1 ;;
   stop) [ ! -f "$F/stop-fails" ] || exit 1; echo "$2" >> "$F/stopped"; grep -v "^$2 " "$F/ps" > "$F/ps.n" || :; mv "$F/ps.n" "$F/ps" ;;
   network) echo 0123456789abcdef0123 ;;
@@ -89,8 +89,8 @@ async function setup(status = 200) {
   // A healthy host: one Cresslet container and Coolify's proxy on the network.
   set("df", "40");
   meminfo(30);
-  const container = (id: string, name: string, { restarts = 0, oom = false, proxy = false, mem = "2.50%" } = {}) => {
-    set(`inspect-${id}`, `label=${proxy ? "true" : "-"} name=/${name} restarts=${restarts} oom=${oom}\n`);
+  const container = (id: string, name: string, { restarts = 0, proxy = false, mem = "2.50%" } = {}) => {
+    set(`inspect-${id}`, `label=${proxy ? "true" : "-"} name=/${name} restarts=${restarts}\n`);
     set(`stats-${id}`, `${name} ${mem}\n`);
   };
   set("ps", "c1 \nproxy true\n");
@@ -146,12 +146,12 @@ test("memory: host use, the Cresslet container against its limit (not the proxy)
     t.container("c1", "cresslet-abc", { mem: "10.00%" });
     assert.match((await t.check()).sent[0], /recovered: host memory 95%/);
 
-    t.container("c1", "cresslet-abc", { restarts: 1, oom: true });
+    t.container("c1", "cresslet-abc", { restarts: 1 });
     assert.deepEqual((await t.check()).sent.map((s) => s.replace(/^[^:]+: /, "")),
-      ["cresslet-abc restarted (restarts: 1, last exit OOM-killed: true; docker logs cresslet-abc)"]);
+      ["cresslet-abc restarted (restarts: 1; why: docker logs cresslet-abc, and journalctl -k for OOM kills)"]);
     assert.deepEqual((await t.check()).sent, []);
     t.container("c1", "cresslet-abc", { restarts: 3 });
-    assert.match((await t.check()).sent[0], /restarts: 3, last exit OOM-killed: false/);
+    assert.match((await t.check()).sent[0], /restarts: 3;/);
     writeFileSync(join(t.dir, "state", "restarts-c1"), ""); // a run killed while writing it
     t.container("c1", "cresslet-abc", { restarts: 4 });
     assert.match((await t.check()).sent[0], /restarts: 4/);
@@ -364,6 +364,17 @@ test("firewall: a marker it can't remove once the rules apply doesn't fail the r
     assert.equal(fw.code, 0, fw.stderr);
     assert.match(fw.stderr, /couldn't remove/);
     assert.doesNotMatch(fw.stderr, /stopping its containers/);
+  } finally {
+    t.done();
+  }
+});
+
+test("a queue it can't write (a full disk) doesn't hold the alert back from the URL", { skip }, async () => {
+  const t = await setup();
+  try {
+    mkdirSync(join(t.dir, "state", "outbox"), { recursive: true }); // appending to it fails
+    t.set("df", "100");
+    assert.match((await t.check()).sent[0], /: disk 100% full on \/$/);
   } finally {
     t.done();
   }

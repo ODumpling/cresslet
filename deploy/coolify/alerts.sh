@@ -101,7 +101,8 @@ fi
 # URL can't hold them up), after anything queued before it. "<run> <time> <text>" lines.
 send() {
   logger -t cresslet-alert -- "cresslet on $HOST: $1" 2>/dev/null || echo "cresslet on $HOST: $1" >&2
-  [ -z "$URL" ] || printf '%s %s %s\n' "$T0.$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "cresslet on $HOST: $1" >> "$OUTBOX" || :
+  [ -z "$URL" ] || printf '%s %s %s\n' "$T0.$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "cresslet on $HOST: $1" >> "$OUTBOX" ||
+    post "cresslet on $HOST: $1" || : # a full disk: straight to the URL
 }
 # report <check> <problem>: alert when <problem> appears (non-empty), and again when it's gone.
 report() {
@@ -139,7 +140,7 @@ for d in $PATHS; do
   [ $# -eq 2 ] || { echo "cresslet-alerts: df couldn't read $d" >&2; err=1; continue; }
   case $seen in *" $1 "*) continue ;; esac
   seen="$seen$1 "
-  [ "$2" -lt "$lim" ] || p="${p:+$p; }disk $2% full on $1"
+  case $2 in '' | *[!0-9]*) ;; *) [ "$2" -lt "$lim" ] || p="${p:+$p; }disk $2% full on $1" ;; esac
   # Inodes too: many small files can run out of them with room to spare (some filesystems: "-").
   mnt=$1
   set -- $(df -Pi "$d" 2>/dev/null | awk 'NR == 2 { sub("%", "", $5); print $5 }')
@@ -198,14 +199,15 @@ done
 report memory "$p"
 
 # Restarts (an OOM kill, a crash): an alert when the count goes up (two in a minute: one alert).
+# Not why: Docker clears State.OOMKilled when the container starts again.
 # A redeploy is a new container.
-cresslet '{{.Name}} {{.RestartCount}} {{.State.OOMKilled}}'
-while read -r c name n oom; do
+cresslet '{{.Name}} {{.RestartCount}}'
+while read -r c name n; do
   f=$STATE/restarts-$c
   old=$(cat "$f" 2>/dev/null || :)
   case $old in '' | *[!0-9]*) old=0 ;; esac # none yet, or cut short by a killed run
-  [ -n "$oom" ] && [ "$n" -gt "$old" ] || continue
-  send "${name#/} restarted (restarts: $n, last exit OOM-killed: $oom; docker logs ${name#/})"
+  [ -n "$n" ] && [ "$n" -gt "$old" ] || continue
+  send "${name#/} restarted (restarts: $n; why: docker logs ${name#/}, and journalctl -k for OOM kills)"
   echo "$n" > "$f" || :
 done <<EOF
 $out

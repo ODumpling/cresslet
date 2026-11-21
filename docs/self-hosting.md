@@ -92,20 +92,20 @@ Notes:
 
 ### Sizing a shared host
 
-cresslet.dev runs on 4 vCPU, 7.6 GB of memory (no swap) and a 72 GB disk (58 GB free), shared with other apps and Coolify, which builds on the same host. What the limits allow there, at the compose file's defaults (estimates: a long write transaction can grow a WAL past 64 MB until it ends, and a server bundle's 5 MB limit counts characters, so non-ASCII text takes up to 3× on disk):
+cresslet.dev runs on 4 vCPU, 7.6 GB of memory (no swap) and a 72 GB disk (58 GB free), shared with other apps and Coolify, which builds on the same host. What the limits allow there, at the compose file's defaults (estimates: a long write transaction can grow a WAL past 64 MB until it ends):
 
 | | Bound | Worst case (about) |
 |---|---|---|
 | CPU | the container: 2 of 4 vCPU (`CRESSLET_CONTAINER_CPUS`) | the other apps keep 2 |
 | Memory | the container: 3 GB of 7.6 (`CRESSLET_CONTAINER_MEMORY`); each sandbox's V8 heap: 128 MB (`CRESSLET_APP_MEMORY_MB`, Cloudflare Workers' limit too) | the other apps (about 2 GB today) and builds keep the rest. About 12–15 sandboxes at a full heap fill the container (each also has workerd's own memory and a bindings thread); idle ones stop after `CRESSLET_IDLE_MS`, but nothing caps how many are awake at once |
-| One app's disk | database 128 MB (+ up to 64 MB of WAL) + files 256 MB + 10 deploys kept × (25 MB of files + a 5 MB server bundle) | ≈ 0.75 GB |
-| One account | 10 apps (`CRESSLET_MAX_APPS_PER_ACCOUNT`) | ≈ 7.5 GB |
-| Anonymous apps | 25 live (`CRESSLET_MAX_ANON_APPS`), 5 new per IP per hour; gone after 72 h | ≈ 19 GB |
+| One app's disk | database 128 MB (+ up to 64 MB of WAL) + files 256 MB + 10 deploys kept × (25 MB of files + a server bundle: 5 MB of characters, up to 15 MB of UTF-8) | ≈ 0.85 GB |
+| One account | 10 apps (`CRESSLET_MAX_APPS_PER_ACCOUNT`) | ≈ 8.5 GB |
+| Anonymous apps | 25 live (`CRESSLET_MAX_ANON_APPS`), 5 new per IP per hour; gone after 72 h | ≈ 21 GB |
 | Local backups ([Backups](#backups)) | `CRESSLET_BACKUP_KEEP` (14) archives, and during a run an uncompressed copy of the volume (in Docker's storage) and the new archive | up to `CRESSLET_BACKUP_KEEP` + 2 (16) × the volume, less what compresses |
 
-The server's own defaults (512 MB databases, 1 GB of files, 50 apps per account, 200 anonymous apps) allow ≈ 1.9 GB per app (counted the same way), 95 GB per account and 380 GB of anonymous apps: they don't fit this disk.
+The server's own defaults (512 MB databases, 1 GB of files, 50 apps per account, 200 anonymous apps) allow ≈ 2 GB per app (counted the same way), 100 GB per account and 400 GB of anonymous apps: they don't fit this disk.
 
-The worst cases don't fit either, and no limit bounds the total: accounts aren't capped, so with open signup every GitHub account adds up to 7.5 GB. A disk that fills up stops the other apps' databases too. The disk alert ([Alerts](#alerts)) at 80% is the backstop: about 42 GB of growth on this host, but every GB in the volume costs up to `CRESSLET_BACKUP_KEEP + 3` GB on disk at a backup run's peak (itself, the kept archives, the new one and the staging copy; less what compresses), so the alert can fire after about 2.5 GB of new app data at `CRESSLET_BACKUP_KEEP=14`, or 7 GB at 3. Before opening signup, set up [off-site](#off-site) snapshots and reinstall the backups with `CRESSLET_BACKUP_KEEP=3`. When it fires: see who uses what on the studio's Admin page and **Delete**, then **Purge**, their sites (deleted ones keep their data for `CRESSLET_DELETED_RETENTION_DAYS` until purged), close signup and anonymous deploys again if it's abuse, and delete old local snapshots if they're the bulk. A full container (memory alert, or restarts) affects only Cresslet. Five client IPs can also fill the anonymous pool in an hour, and keep it full: anonymous deploys then return 429 for everyone until those apps expire (accounts still deploy).
+The worst cases don't fit either, and no limit bounds the total: accounts aren't capped, so with open signup every GitHub account adds up to 8.5 GB. A disk that fills up stops the other apps' databases too. The disk alert ([Alerts](#alerts)) at 80% is the backstop: about 42 GB of growth on this host, but every GB in the volume costs up to `CRESSLET_BACKUP_KEEP + 3` GB on disk at a backup run's peak (itself, the kept archives, the new one and the staging copy; less what compresses), so the alert can fire after about 2.5 GB of new app data at `CRESSLET_BACKUP_KEEP=14`, or 7 GB at 3. Before opening signup, set up [off-site](#off-site) snapshots and reinstall the backups with `CRESSLET_BACKUP_KEEP=3`. When it fires: see who uses what on the studio's Admin page and **Delete**, then **Purge**, their sites (deleted ones keep their data for `CRESSLET_DELETED_RETENTION_DAYS` until purged), if it's abuse, close signup and anonymous deploys again (that stops new accounts and new anonymous apps; existing accounts still create apps up to their limit, and an anonymous app's deploy key still updates it, so deal with those sites too), and delete old local snapshots if they're the bulk. A full container (memory alert, or restarts) affects only Cresslet. Five client IPs can also fill the anonymous pool in an hour, and keep it full: anonymous deploys then return 429 for everyone until those apps expire (accounts still deploy).
 
 ### Alerts
 
@@ -115,7 +115,7 @@ The worst cases don't fit either, and no limit bounds the total: accounts aren't
 |---|---|
 | disk | a filesystem holding Docker's data or the backups (`CRESSLET_ALERT_PATHS`) is `CRESSLET_ALERT_DISK_PCT` (80) % full, or has used that much of its inodes (many small files) |
 | memory | the host has `CRESSLET_ALERT_MEM_PCT` (90) % of its memory in use (from `MemAvailable`), or a Cresslet container that much of its limit |
-| restart | a running Cresslet container's restart count went up since the last check (an OOM kill or a crash; several in a minute are one alert), with whether the last exit was an OOM kill. A container that stays stopped isn't checked: Coolify shows it |
+| restart | a running Cresslet container's restart count went up since the last check (an OOM kill or a crash; several in a minute are one alert; Docker doesn't keep which, see `docker logs` and `journalctl -k`). A container that stays stopped isn't checked: Coolify shows it |
 | firewall | `cresslet-firewall` fails (its own alert); it failed closed and stopped Cresslet, until its first run after Cresslet runs again (start or redeploy it in Coolify once the rules apply); or it couldn't stop a container, which runs unfirewalled until the rules apply. Each of these is its own alert |
 | backup | the last `cresslet-backup` run failed |
 
