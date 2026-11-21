@@ -303,7 +303,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 
 /* forms */
 .form { display: flex; flex-direction: column; gap: 16px; }
-.form h3 { font-size: 14px; }
+.form h3, .page-form h2 { font-size: 14px; }
 .field { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; border: 0; min-width: 0; }
 .field > label, .field > legend { font-size: 13px; font-weight: 500; padding: 0; }
 .field > legend { margin-bottom: 8px; }

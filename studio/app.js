@@ -151,6 +151,7 @@ function renderAccount() {
     ? [auth.email ?? "Account", srOnly(": account settings")]
     : ["Log in with GitHub"]));
   $("nav-settings-item").hidden = !auth.token;
+  $("nav-pages-item").hidden = !auth.token;
 }
 
 // Login is GitHub only: the server redirects back to /#cresslet_login=<one-time code>.
@@ -213,7 +214,7 @@ function logOut() {
 // ------------------------------------------------------------------ settings
 let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
 function showOnly(id) {
-  for (const m of ["landing", "home", "settings", "share", "view", "cli-login", "admin", "workspace"]) $(m).hidden = m !== id;
+  for (const m of ["landing", "home", "pages", "settings", "share", "view", "cli-login", "admin", "workspace"]) $(m).hidden = m !== id;
   $("app").dataset.view = id;
   $("topbar").hidden = id !== "workspace";
   $("site-nav").hidden = id !== "landing";
@@ -668,11 +669,9 @@ async function renderHome() {
   await renderProjects();
 
   $("apps-section").hidden = !auth.token;
-  $("pages-section").hidden = !auth.token;
   $("invites-section").hidden = true;
   if (auth.token) {
     renderApps();
-    renderPages();
     renderInvites();
   }
 }
@@ -762,6 +761,17 @@ async function copyLink(url) {
   }
 }
 
+/** #/pages: upload and manage static pages (logged in only). */
+function renderPagesView() {
+  if (!auth.token) {
+    location.hash = "#/";
+    return;
+  }
+  showOnly("pages");
+  document.title = "Pages · Cresslet Studio";
+  renderPages();
+}
+
 let pageFormTouched = false; // the upload form keeps a choice made before the list (re)loads
 function renderPages() {
   return api("/v1/pages").then(({ pages, defaults }) => {
@@ -769,10 +779,10 @@ function renderPages() {
       $("page-visibility").value = defaults.visibility;
       setKeep($("page-retention"), defaults.retentionDays);
     }
-    $("pages").replaceChildren(pages.length
+    $("page-list").replaceChildren(pages.length
       ? dataTable("pages-title", [["Page"], ["Who can open it"], ["Keep for"], ["Actions", "actions", true]], pages.map(pageRow))
       : emptyState("No pages yet", "Upload an HTML file above, or run cresslet page upload <file>."));
-  }).catch((e) => $("pages").replaceChildren(el("p", { className: "error", textContent: `Could not load pages: ${e.message}` })));
+  }).catch((e) => $("page-list").replaceChildren(el("p", { className: "error", textContent: `Could not load pages: ${e.message}` })));
 }
 
 function pageRow(p) {
@@ -1154,7 +1164,7 @@ async function renderShare(name) {
   // A page: its title, and what sharing means for it.
   api(`/v1/pages/${encodeURIComponent(name)}`).then(({ page }) => {
     if (shareApp !== name) return;
-    $("share-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", `Share ${pageName(page)}`);
+    $("share-title").replaceChildren(el("a", { href: "#/pages", textContent: "Pages" }), " / ", `Share ${pageName(page)}`);
     $("share-sub").textContent = "Invite accounts to this page. Viewers can open it even when it's private; admins can also change it.";
   }, () => {});
   $("invite-form").reset();
@@ -1776,6 +1786,7 @@ function route() {
   if (m) openProject(m[1], gen);
   else if (booted) reloadForRoute();
   else if (location.hash === "#/settings") renderSettings();
+  else if (location.hash === "#/pages") renderPagesView();
   else if (location.hash.startsWith("#/share/")) renderShare(decodeURIComponent(location.hash.slice("#/share/".length)));
   else if (location.hash.startsWith("#/view/")) {
     const [n, q] = location.hash.slice("#/view/".length).split("?");

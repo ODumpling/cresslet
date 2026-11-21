@@ -62,6 +62,7 @@
           <p class="nav-label" id="nav-workspace">Workspace</p>
           <ul aria-labelledby="nav-workspace">
             <li><a href="#/" data-nav="home"><svg class="icon" aria-hidden="true"><use href="#i-folder" /></svg>Projects</a></li>
+            <li id="nav-pages-item" hidden><a href="#/pages" data-nav="pages"><svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>Pages</a></li>
             <li id="nav-settings-item" hidden><a href="#/settings" data-nav="settings"><svg class="icon" aria-hidden="true"><use href="#i-settings" /></svg>Settings</a></li>
           </ul>
           <div id="recent-wrap" hidden>
@@ -326,13 +327,32 @@
             </div>
             <div id="apps"></div>
           </section>
-          <section class="block" id="pages-section" hidden aria-labelledby="pages-title">
-            <div class="block-head">
-              <h2 id="pages-title" tabindex="-1">Pages</h2>
-              <p class="muted small">Static HTML you upload and share: one file, or a folder with an index.html</p>
+          <section class="block" aria-labelledby="cli-label">
+            <div class="panel split cli-panel">
+              <div>
+                <h2 id="cli-label">Prefer your terminal or an agent?</h2>
+                <p class="muted small">Scaffold, run and deploy with the CLI. Every command takes <code>--json</code>.</p>
+              </div>
+              <div class="cli-box">
+                <code id="cli-cmd"><span class="cli-prompt" aria-hidden="true">$ </span>npx github:ODumpling/cresslet-cli new my-app</code>
+                <button class="icon-btn" id="cli-copy" type="button" aria-describedby="cli-label">
+                  <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg><span class="sr-only">Copy command</span>
+                </button>
+              </div>
             </div>
+          </section>
+        </main>
+
+        <main id="pages" class="page" hidden aria-labelledby="pages-title">
+          <header class="page-head">
+            <div>
+              <h1 id="pages-title" tabindex="-1">Pages</h1>
+              <p class="muted">Static HTML you upload and share: one file, or a folder with an index.html.</p>
+            </div>
+          </header>
+          <section class="block first">
             <form id="page-form" class="panel form page-form" aria-labelledby="page-form-title">
-              <h3 id="page-form-title">Upload a page</h3>
+              <h2 id="page-form-title">Upload a page</h2>
               <div class="page-fields">
                 <fieldset class="field">
                   <legend>Files</legend>
@@ -367,21 +387,7 @@
               <p class="error small" id="page-error" role="alert" hidden></p>
               <div class="row start"><button class="btn primary" id="page-upload" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Upload</button></div>
             </form>
-            <div id="pages" class="pages-list"></div>
-          </section>
-          <section class="block" aria-labelledby="cli-label">
-            <div class="panel split cli-panel">
-              <div>
-                <h2 id="cli-label">Prefer your terminal or an agent?</h2>
-                <p class="muted small">Scaffold, run and deploy with the CLI. Every command takes <code>--json</code>.</p>
-              </div>
-              <div class="cli-box">
-                <code id="cli-cmd"><span class="cli-prompt" aria-hidden="true">$ </span>npx github:ODumpling/cresslet-cli new my-app</code>
-                <button class="icon-btn" id="cli-copy" type="button" aria-describedby="cli-label">
-                  <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg><span class="sr-only">Copy command</span>
-                </button>
-              </div>
-            </div>
+            <div id="page-list" class="pages-list"></div>
           </section>
         </main>
 
