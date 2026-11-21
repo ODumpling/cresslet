@@ -19,7 +19,7 @@ const STUBS: Record<string, string> = {
 F=$FIX
 for last; do :; done
 case $1 in
-  ps) [ -f "$F/ps" ] || exit 0; case "$*" in *coolify.proxy*) cat "$F/ps" ;; *) cut -d' ' -f1 "$F/ps" ;; esac ;;
+  ps) [ -f "$F/ps" ] || exit 0; case "$*" in *"{{.ID}} {{.Label"*) cat "$F/ps" ;; *"{{.Label"*) cut -d' ' -f2 "$F/ps" ;; *) cut -d' ' -f1 "$F/ps" ;; esac ;;
   inspect) [ -f "$F/inspect-$last" ] || { echo "Error: No such object: $last" >&2; exit 1; }; [ "$2" = -f ] || exit 0; . "$F/inspect-$last"
     printf '%s\\n' "$3" | sed -e "s#{{or (index .Config.Labels \\"coolify.proxy\\") \\"-\\"}}#$label#" -e "s#{{.Name}}#$name#" \\
       -e "s#{{.RestartCount}}#$restarts#" -e "s#{{.State.OOMKilled}}#$oom#" ;;
@@ -39,8 +39,9 @@ echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 printf '/dev/sda1 100 0 100 %s%% %s\\n' "$(cat "$FIX/df")" "$(cat "$FIX/mount" 2>/dev/null || echo /)"`,
   logger: `#!/bin/sh
 echo "$@" >> "$FIX/log"`,
-  iptables: "#!/bin/sh\nexit 1",
-  ip6tables: "#!/bin/sh\nexit 1",
+  // $FIX/ipt-fails: every call fails. Otherwise -D (unhook's loop) finds nothing, the rest works.
+  iptables: `#!/bin/sh\n[ ! -f "$FIX/ipt-fails" ] || exit 1\ncase "$*" in *" -D "*) exit 1 ;; esac`,
+  ip6tables: `#!/bin/sh\n[ ! -f "$FIX/ipt-fails" ] || exit 1\ncase "$*" in *" -D "*) exit 1 ;; esac`,
 };
 
 interface Hit { type: string; body: string }
@@ -171,11 +172,28 @@ test("a container gone between docker ps and inspect, or a path df can't read, s
     t.container("c1", "cresslet-abc", { mem: "95.00%" });
     t.fail("cresslet-backup.service");
     const a = await t.check();
-    assert.equal(a.code, 1);
+    assert.equal(a.code, 0, a.stderr);
     assert.match(a.stderr, /df couldn't read/);
-    assert.equal(a.sent.length, 2);
-    assert.match(a.sent[0], /cresslet-abc at 95% of its memory limit$/);
-    assert.match(a.sent[1], /the last backup failed/);
+    assert.deepEqual(a.sent.map((s) => s.replace(/^[^:]+: /, "")),
+      ["the last backup failed (journalctl -u cresslet-backup)", "cresslet-abc at 95% of its memory limit"]);
+  } finally {
+    t.done();
+  }
+});
+
+test("a probe that fails isn't a recovery", { skip }, async () => {
+  const t = await setup();
+  try {
+    t.set("df", "90");
+    t.container("c1", "cresslet-abc", { mem: "95.00%" });
+    assert.equal((await t.check()).sent.length, 2);
+    t.set("df-fails", "");
+    rmSync(join(t.fix, "stats-c1")); // docker stats fails
+    assert.deepEqual((await t.check()).sent, []);
+    rmSync(join(t.fix, "df-fails"));
+    t.set("df", "10");
+    t.container("c1", "cresslet-abc", { mem: "5.00%" });
+    assert.equal((await t.check()).sent.filter((s) => s.includes("recovered: ")).length, 2);
   } finally {
     t.done();
   }
@@ -184,8 +202,10 @@ test("a container gone between docker ps and inspect, or a path df can't read, s
 test("firewall: failing closed stops Cresslet (not the proxy) and alerts until Cresslet runs again", { skip }, async () => {
   const t = await setup();
   try {
-    // iptables fails: firewall.sh stops what runs on the network, except Coolify's proxy, and leaves its marker.
     const marker = join(t.dir, "fw", `${NET}.stopped`);
+    const strip = (x: string[]) => x.map((s) => s.replace(/^[^:]+: /, ""));
+    // iptables fails: firewall.sh stops what runs on the network, except Coolify's proxy, and leaves its marker.
+    t.set("ipt-fails", "");
     const fw = await t.run(FIREWALL, [NET]);
     assert.notEqual(fw.code, 0);
     assert.match(fw.stderr, /stopping its containers/);
@@ -194,8 +214,7 @@ test("firewall: failing closed stops Cresslet (not the proxy) and alerts until C
     assert.match(first, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ stopped\n$/);
     t.fail("cresslet-firewall.service");
 
-    const a = await t.check();
-    assert.deepEqual(a.sent.map((s) => s.replace(/^[^:]+: /, "")), [
+    assert.deepEqual(strip((await t.check()).sent), [
       `cresslet-firewall couldn't apply its rules and stopped Cresslet at ${first.split(" ")[0]}; start it again once fixed (journalctl -u cresslet-firewall)`,
       "cresslet-firewall can't apply its rules (journalctl -u cresslet-firewall)",
     ]);
@@ -204,43 +223,52 @@ test("firewall: failing closed stops Cresslet (not the proxy) and alerts until C
     t.set("ps", "c1 \nproxy true\n");
     await t.run(FIREWALL, [NET]);
     assert.equal(readFileSync(marker, "utf8"), first);
-    // The rules apply again, but Cresslet stays stopped: one recovery (the failing unit), the stop alert stays.
-    t.fail("cresslet-firewall.service", false);
-    assert.deepEqual((await t.check()).sent.map((s) => s.replace(/^[^:]+: /, "")),
-      ["recovered: cresslet-firewall can't apply its rules (journalctl -u cresslet-firewall)"]);
+    // The rules apply again, but Cresslet stays stopped: the marker stays, one recovery (the failing unit).
+    rmSync(join(t.fix, "ipt-fails"));
+    const ok = await t.run(FIREWALL, [NET]);
+    assert.equal(ok.code, 0, ok.stderr);
     assert.ok(existsSync(marker));
-    // A firewall run in progress (the one that may be failing closed): not cleared yet.
+    t.fail("cresslet-firewall.service", false);
+    assert.deepEqual(strip((await t.check()).sent), ["recovered: cresslet-firewall can't apply its rules (journalctl -u cresslet-firewall)"]);
+    // Started again (in Coolify): the next firewall run removes the marker, and that's the recovery.
     t.set("ps", "c2 \nproxy true\n");
     t.container("c2", "cresslet-def");
-    t.set("active-cresslet-firewall.service", "");
     assert.deepEqual((await t.check()).sent, []);
-    // Started again (in Coolify), the last run worked: recovered, and the marker is gone.
-    rmSync(join(t.fix, "active-cresslet-firewall.service"));
-    assert.match((await t.check()).sent[0], /recovered: cresslet-firewall couldn't apply its rules and stopped/);
+    await t.run(FIREWALL, [NET]);
     assert.ok(!existsSync(marker));
+    assert.match((await t.check()).sent[0], /recovered: cresslet-firewall couldn't apply its rules and stopped/);
   } finally {
     t.done();
   }
 });
 
-test("firewall: a container it couldn't stop runs unfirewalled; with only the proxy there's no marker", { skip }, async () => {
+test("firewall: a container it couldn't stop runs unfirewalled, a new alert after a stop; only the proxy: no marker", { skip }, async () => {
   const t = await setup();
   try {
     const marker = join(t.dir, "fw", `${NET}.stopped`);
+    t.set("ipt-fails", "");
     t.set("ps", "proxy true\n");
     await t.run(FIREWALL, [NET]);
     assert.ok(!existsSync(marker));
 
+    // Stopped once, started by hand, then a run that can't stop it either: that's news.
+    t.set("ps", "c1 \nproxy true\n");
+    await t.run(FIREWALL, [NET]);
+    assert.match((await t.check()).sent[0], /stopped Cresslet at/);
     t.set("ps", "c1 \nproxy true\n");
     t.set("stop-fails", "");
     const fw = await t.run(FIREWALL, [NET]);
     assert.match(fw.stderr, /couldn't stop: c1/);
     assert.match(readFileSync(marker, "utf8"), /^\S+ couldn't stop: c1\n$/);
-    t.set("active-cresslet-firewall.service", ""); // c1 still runs, but the run that wrote it hasn't exited
-    assert.match((await t.check()).sent[0], /cresslet-firewall couldn't apply its rules or stop c1 at \S+: they run unfirewalled/);
-    rmSync(join(t.fix, "active-cresslet-firewall.service"));
-    assert.match((await t.check()).sent[0], /recovered: .*they run unfirewalled/);
+    const a = (await t.check()).sent;
+    assert.equal(a.length, 2);
+    assert.match(a[0], /recovered: .*stopped Cresslet/);
+    assert.match(a[1], /cresslet-firewall couldn't apply its rules or stop c1 at \S+: they run unfirewalled/);
+    // The rules apply: the marker goes even though nothing restarted.
+    rmSync(join(t.fix, "ipt-fails"));
+    await t.run(FIREWALL, [NET]);
     assert.ok(!existsSync(marker));
+    assert.match((await t.check()).sent[0], /recovered: .*they run unfirewalled/);
   } finally {
     t.done();
   }

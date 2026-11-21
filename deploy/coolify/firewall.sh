@@ -138,3 +138,14 @@ for t in iptables ip6tables; do
   # To the host itself (its SSH, Coolify on :8000, …): replies only.
   swap $t INPUT $IN "-i $BR -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN" "-i $BR -j DROP"
 done
+
+# The rules apply: a marker from failing closed goes once Cresslet runs again (one it couldn't stop
+# goes now). Here, not in alerts.sh: runs don't overlap, so no stop can come between the check and
+# the removal. A failing `docker ps` keeps it (and doesn't fail the run).
+M=$DIR/$NET.stopped
+if [ "$MODE" != --boot ] && [ -f "$M" ]; then
+  if ! grep -q ' stopped$' "$M" ||
+    docker ps --filter "network=$NET" --format '{{.ID}} {{.Label "coolify.proxy"}}' | awk '$2 != "true" { f = 1 } END { exit !f }'; then
+    rm -f "$M"
+  fi
+fi

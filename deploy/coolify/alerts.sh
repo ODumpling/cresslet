@@ -10,7 +10,7 @@
 # Each alert goes to the journal (journalctl -t cresslet-alert) and, with CRESSLET_ALERT_URL set, is
 # POSTed there: as plain text (ntfy), or as JSON {"<key>": "<text>"} with CRESSLET_ALERT_JSON_KEY
 # (`content` for a Discord webhook, `text` for Slack). One alert when a check starts failing, one
-# when it recovers; a send that fails is retried at the next check.
+# when it recovers; one the URL refuses is queued and sent after the checks of a later run.
 #   CRESSLET_ALERT_DISK_PCT  (80)  a filesystem holding CRESSLET_ALERT_PATHS is this full
 #   CRESSLET_ALERT_MEM_PCT   (90)  the host's memory in use (from MemAvailable), or a Cresslet
 #                                  container's of its memory limit; and any container restart
@@ -89,20 +89,8 @@ if [ "$MODE" = --test ]; then
 fi
 
 mkdir -p "$STATE"
-# Alerts that couldn't be sent go first, in order (up to the first that fails again). A run killed
-# mid-way (the unit's timeout) leaves .sending: those go again, rather than being lost.
-if [ -f "$OUTBOX.sending" ]; then
-  cat "$OUTBOX" >> "$OUTBOX.sending" 2>/dev/null || :
-  mv "$OUTBOX.sending" "$OUTBOX"
-fi
-if [ -s "$OUTBOX" ]; then
-  mv "$OUTBOX" "$OUTBOX.sending"
-  while IFS= read -r m; do
-    [ -s "$OUTBOX" ] || post "$m" || printf '%s\n' "$m" >> "$OUTBOX"
-  done < "$OUTBOX.sending"
-  rm -f "$OUTBOX.sending"
-fi
-# send <text>: to the journal now, and to the URL now or (queued, with the time) at a later check.
+# send <text>: to the journal now, and to the URL now, or (queued, with the time) at the end of
+# this or a later check, after anything queued before it.
 send() {
   logger -t cresslet-alert -- "cresslet on $HOST: $1" 2>/dev/null || echo "cresslet on $HOST: $1" >&2
   [ ! -s "$OUTBOX" ] && post "cresslet on $HOST: $1" ||
@@ -120,77 +108,40 @@ report() {
 }
 failed() { systemctl is-failed --quiet "$1" 2>/dev/null; }
 # Docker calls are bounded: a hung dockerd (likely when the disk or memory runs out) mustn't stall
-# the checks after them. The disk check comes first and doesn't need Docker.
+# the checks. Those that don't need Docker go first.
 if command -v timeout >/dev/null; then dk() { timeout 15 docker "$@"; }; else dk() { docker "$@"; }; fi
 # limit <check> <threshold>: 5 points lower while <check> is firing, so a value hovering at the
 # threshold doesn't alert and recover over and over.
 limit() { if [ -f "$STATE/$1" ]; then echo $(($2 - 5)); else echo "$2"; fi; }
-# The firewall's last run worked and none is running now (a run that fails closed is "activating"
-# until it exits, after writing its marker).
-fw_ok() { [ "$(systemctl is-active cresslet-firewall.service 2>/dev/null)" = inactive ]; }
-# cresslet <fields>: "<id> <fields>" for each running container on the network but Coolify's proxy.
-cresslet() {
-  for c in $(dk ps --filter "network=$NET" --format '{{.ID}}' 2>/dev/null); do
-    # Gone since `docker ps` (a redeploy): skipped.
-    i=$(dk inspect -f "{{or (index .Config.Labels \"coolify.proxy\") \"-\"}} $1" "$c" 2>/dev/null) || continue
-    [ "${i%% *}" = true ] || echo "$c ${i#* }"
-  done
-}
+# A probe that fails sets err: the check then doesn't recover this time (a failed df isn't a disk
+# with room).
+err=""
 
-# Disk: each filesystem once. A path df can't read is skipped (and said on stderr).
+# Disk: each filesystem once.
 p="" seen=" " lim=$(limit disk "$DISK")
 for d in $PATHS; do
   [ -e "$d" ] || continue
   set -- $(df -P "$d" 2>/dev/null | awk 'NR == 2 { sub("%", "", $5); print $6, $5 }')
-  [ $# -eq 2 ] || { echo "cresslet-alerts: df couldn't read $d" >&2; rc=1; continue; }
+  [ $# -eq 2 ] || { echo "cresslet-alerts: df couldn't read $d" >&2; err=1; continue; }
   case $seen in *" $1 "*) continue ;; esac
   seen="$seen$1 "
   [ "$2" -lt "$lim" ] || p="${p:+$p; }disk $2% full on $1"
 done
+[ -n "$p" ] || [ -z "$err" ] || [ ! -f "$STATE/disk" ] || p=$(cat "$STATE/disk")
 report disk "$p"
 
-# Memory: the host, and each Cresslet container of its limit.
-lim=$(limit memory "$MEM")
-p=$(awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 }
-  END { u = int((t - a) * 100 / t); if (u >= m) print "host memory " u "% in use" }' m="$lim" "$MEMINFO")
-for c in $(cresslet '{{.Name}}' | cut -d' ' -f1); do
-  u=$(dk stats --no-stream --format '{{.Name}} {{.MemPerc}}' "$c" 2>/dev/null) || continue
-  pct=$(echo "${u#* }" | cut -d. -f1 | tr -dc 0-9)
-  [ "${pct:-0}" -lt "$lim" ] || p="${p:+$p; }${u%% *} at $pct% of its memory limit"
-done
-report memory "$p"
-
-# Restarts (an OOM kill, a crash): an alert when the count goes up (two in a minute: one alert).
-# A redeploy is a new container.
-while read -r c name n oom; do
-  f=$STATE/restarts-$c
-  [ -n "$oom" ] && [ "$n" -gt "$(cat "$f" 2>/dev/null || echo 0)" ] || continue
-  send "${name#/} restarted (restarts: $n, last exit OOM-killed: $oom; docker logs ${name#/})"
-  echo "$n" > "$f"
-done <<EOF
-$(cresslet '{{.Name}} {{.RestartCount}} {{.State.OOMKilled}}')
-EOF
-for f in "$STATE"/restarts-*; do
-  [ -f "$f" ] || continue
-  # Only once Docker says it's gone (not when the call fails or times out).
-  ! dk inspect "${f##*/restarts-}" 2>&1 >/dev/null | grep -qi "no such" || rm -f "$f"
-done
-
-# Firewall: failed closed (firewall.sh's marker), and failing. The marker is written after the
-# stops, so a Cresslet container running once it's read was started since.
-p=""
+# Firewall: failed closed (firewall.sh's marker; it removes it itself once its rules apply and
+# Cresslet runs again), and failing. One check per outcome, so a change is a new alert.
+stopped="" unstopped=""
 if [ -f "$FW" ]; then
   m=$(cat "$FW")
   case $m in
-    *" stopped")
-      if fw_ok && [ -n "$(cresslet -)" ]; then rm -f "$FW"
-      else p="cresslet-firewall couldn't apply its rules and stopped Cresslet at ${m%% *}; start it again once fixed"; fi ;;
-    *)
-      if fw_ok; then rm -f "$FW"
-      else p="cresslet-firewall couldn't apply its rules or stop${m##*:} at ${m%% *}: they run unfirewalled"; fi ;;
+    *" stopped") stopped="cresslet-firewall couldn't apply its rules and stopped Cresslet at ${m%% *}; start it again once fixed" ;;
+    *) unstopped="cresslet-firewall couldn't apply its rules or stop${m##*:} at ${m%% *}: they run unfirewalled" ;;
   esac
 fi
-report firewall-stop "${p:+$p (journalctl -u cresslet-firewall)}"
+report firewall-stop "${stopped:+$stopped (journalctl -u cresslet-firewall)}"
+report firewall-unstopped "${unstopped:+$unstopped (journalctl -u cresslet-firewall)}"
 p=""
 failed cresslet-firewall.service && p="cresslet-firewall can't apply its rules (journalctl -u cresslet-firewall)"
 report firewall "$p"
@@ -198,5 +149,60 @@ report firewall "$p"
 p=""
 failed cresslet-backup.service && p="the last backup failed (journalctl -u cresslet-backup)"
 report backup "$p"
+
+# The Cresslet containers: running on the network, not Coolify's proxy. Sets out to "<id> <fields>"
+# lines (fields: an inspect template).
+err=""
+ids=$(dk ps --filter "network=$NET" --format '{{.ID}}') || { echo "cresslet-alerts: docker ps failed" >&2; err=1; }
+cresslet() {
+  out=""
+  for c in $ids; do
+    if i=$(dk inspect -f "{{or (index .Config.Labels \"coolify.proxy\") \"-\"}} $1" "$c"); then
+      [ "${i%% *}" = true ] || out="$out$c ${i#* }
+"
+    else
+      err=1 # gone since `docker ps` (a redeploy), or Docker failing: no conclusion this time
+    fi
+  done
+}
+
+# Memory: the host, and each Cresslet container of its limit.
+lim=$(limit memory "$MEM")
+p=$(awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 }
+  END { u = int((t - a) * 100 / t); if (u >= m) print "host memory " u "% in use" }' m="$lim" "$MEMINFO")
+cresslet '{{.Name}}'
+for c in $(printf %s "$out" | cut -d' ' -f1); do
+  u=$(dk stats --no-stream --format '{{.Name}} {{.MemPerc}}' "$c") || { err=1; continue; }
+  pct=$(echo "${u#* }" | cut -d. -f1 | tr -dc 0-9)
+  [ "${pct:-0}" -lt "$lim" ] || p="${p:+$p; }${u%% *} at $pct% of its memory limit"
+done
+[ -n "$p" ] || [ -z "$err" ] || [ ! -f "$STATE/memory" ] || p=$(cat "$STATE/memory")
+report memory "$p"
+
+# Restarts (an OOM kill, a crash): an alert when the count goes up (two in a minute: one alert).
+# A redeploy is a new container.
+cresslet '{{.Name}} {{.RestartCount}} {{.State.OOMKilled}}'
+while read -r c name n oom; do
+  f=$STATE/restarts-$c
+  [ -n "$oom" ] && [ "$n" -gt "$(cat "$f" 2>/dev/null || echo 0)" ] || continue
+  send "${name#/} restarted (restarts: $n, last exit OOM-killed: $oom; docker logs ${name#/})"
+  echo "$n" > "$f"
+done <<EOF
+$out
+EOF
+for f in "$STATE"/restarts-*; do
+  [ -f "$f" ] || continue
+  # Only once Docker says it's gone (not when the call fails or times out).
+  ! dk inspect "${f##*/restarts-}" 2>&1 >/dev/null | grep -qi "no such" || rm -f "$f"
+done
+
+# Last, so slow deliveries never hold up the checks: queued alerts, oldest first, each removed once
+# sent (a run killed mid-way sends at most one twice), up to the first that fails again. Not after
+# a send that already failed this time.
+while [ "$rc" -eq 0 ] && [ -s "$OUTBOX" ]; do
+  IFS= read -r m < "$OUTBOX" || break
+  post "$m" || break
+  sed 1d "$OUTBOX" > "$OUTBOX.n" && mv "$OUTBOX.n" "$OUTBOX"
+done
 
 exit $rc

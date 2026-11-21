@@ -92,9 +92,9 @@ Notes:
 
 ### Sizing a shared host
 
-cresslet.dev runs on 4 vCPU, 7.6 GB of memory (no swap) and a 72 GB disk (58 GB free), shared with other apps and Coolify, which builds on the same host. What the limits allow there, at the compose file's defaults:
+cresslet.dev runs on 4 vCPU, 7.6 GB of memory (no swap) and a 72 GB disk (58 GB free), shared with other apps and Coolify, which builds on the same host. What the limits allow there, at the compose file's defaults (estimates: a long write transaction can grow a WAL past 64 MB until it ends, and a server bundle's 5 MB limit counts characters, so non-ASCII text takes up to 3× on disk):
 
-| | Bound | Worst case |
+| | Bound | Worst case (about) |
 |---|---|---|
 | CPU | the container: 2 of 4 vCPU (`CRESSLET_CONTAINER_CPUS`) | the other apps keep 2 |
 | Memory | the container: 3 GB of 7.6 (`CRESSLET_CONTAINER_MEMORY`); each sandbox's V8 heap: 128 MB (`CRESSLET_APP_MEMORY_MB`, Cloudflare Workers' limit too) | the other apps (about 2 GB today) and builds keep the rest. About 12–15 sandboxes at a full heap fill the container (each also has workerd's own memory and a bindings thread); idle ones stop after `CRESSLET_IDLE_MS`, but nothing caps how many are awake at once |
@@ -116,10 +116,10 @@ The worst cases don't fit either, and no limit bounds the total: accounts aren't
 | disk | a filesystem holding Docker's data or the backups (`CRESSLET_ALERT_PATHS`) is `CRESSLET_ALERT_DISK_PCT` (80) % full |
 | memory | the host has `CRESSLET_ALERT_MEM_PCT` (90) % of its memory in use (from `MemAvailable`), or a Cresslet container that much of its limit |
 | restart | a running Cresslet container's restart count went up since the last check (an OOM kill or a crash; several in a minute are one alert), with whether the last exit was an OOM kill. A container that stays stopped isn't checked: Coolify shows it |
-| firewall | `cresslet-firewall` fails (its own alert); it failed closed and stopped Cresslet, until Cresslet runs again (start or redeploy it in Coolify once the rules apply); or it couldn't stop a container, which runs unfirewalled until the rules apply |
+| firewall | `cresslet-firewall` fails (its own alert); it failed closed and stopped Cresslet, until its first run after Cresslet runs again (start or redeploy it in Coolify once the rules apply); or it couldn't stop a container, which runs unfirewalled until the rules apply. Each of these is its own alert |
 | backup | the last `cresslet-backup` run failed |
 
-The firewall alert also fires while the network is missing (its first deploy, or Coolify recreating it) and, for good, while Cresslet is stopped in Coolify on purpose: then `systemctl disable --now cresslet-alerts.timer` (and `enable --now` again with Cresslet). Each goes to the journal (`journalctl -t cresslet-alert`) and, with `CRESSLET_ALERT_URL`, is POSTed there: plain text by default (an [ntfy](https://ntfy.sh) topic: pick a long random name, since anyone who knows it can read it), or `{"<key>": "<text>"}` with `CRESSLET_ALERT_JSON_KEY` (`content` for a Discord webhook, `text` for Slack). One alert when a check starts failing and one when it recovers. An alert the URL doesn't take (an error, a timeout) is in the journal right away and sent at the next check that reaches it, with the time it happened, even if the problem is over by then. `--install` writes the settings to `/etc/cresslet-alerts.env` (root-only, as the URL is a secret): rerun it with all of them to change one. Coolify's own disk notification (if its notifications are set up) only checks once a day.
+The firewall alert also fires while the network is missing (its first deploy, or Coolify recreating it) and, for good, while Cresslet is stopped in Coolify on purpose: then `systemctl disable --now cresslet-alerts.timer` (and `enable --now` again with Cresslet). Each goes to the journal (`journalctl -t cresslet-alert`) and, with `CRESSLET_ALERT_URL`, is POSTed there: plain text by default (an [ntfy](https://ntfy.sh) topic: pick a long random name, since anyone who knows it can read it), or `{"<key>": "<text>"}` with `CRESSLET_ALERT_JSON_KEY` (`content` for a Discord webhook, `text` for Slack). One alert when a check starts failing and one when it recovers (disk and memory recover 5 points under the threshold; a check that couldn't measure doesn't recover). An alert the URL doesn't take (an error, a timeout) is in the journal right away and sent after the checks of a later run, with the time it happened, even if the problem is over by then. `--install` writes the settings to `/etc/cresslet-alerts.env` (root-only, as the URL is a secret): rerun it with all of them to change one. Coolify's own disk notification (if its notifications are set up) only checks once a day.
 
 ## Backups
 
