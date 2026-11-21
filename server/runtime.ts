@@ -198,7 +198,7 @@ export class Runtime {
         await res.body.dump();
         return new Response(null, { status: res.statusCode, headers: h });
       }
-      // Still in flight while the body streams (ended, failed, cancelled or timed out: `close`), so it isn't evicted mid-response.
+      // Still in flight until the body is done (ended, failed, cancelled or timed out), so it isn't evicted mid-response.
       const out = new Response(Readable.toWeb(res.body) as ReadableStream, { status: res.statusCode, headers: h });
       streaming = true;
       finished(res.body, release);
