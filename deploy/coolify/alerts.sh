@@ -13,7 +13,8 @@
 # when it recovers; one the URL refuses is queued and sent after the checks of a later run.
 #   CRESSLET_ALERT_DISK_PCT  (80)  a filesystem holding CRESSLET_ALERT_PATHS is this full
 #   CRESSLET_ALERT_MEM_PCT   (90)  the host's memory in use (from MemAvailable), or a Cresslet
-#                                  container's of its memory limit; and any container restart
+#                                  container's of its memory limit
+# Restarts of a Cresslet container alert whatever the thresholds.
 #   CRESSLET_ALERT_PATHS     (/var/lib/docker /var/backups/cresslet)
 # --install writes them, with CRESSLET_ALERT_URL, to /etc/cresslet-alerts.env (0600): rerun with them all.
 set -eu
@@ -184,7 +185,9 @@ report memory "$p"
 cresslet '{{.Name}} {{.RestartCount}} {{.State.OOMKilled}}'
 while read -r c name n oom; do
   f=$STATE/restarts-$c
-  [ -n "$oom" ] && [ "$n" -gt "$(cat "$f" 2>/dev/null || echo 0)" ] || continue
+  old=$(cat "$f" 2>/dev/null || :)
+  case $old in '' | *[!0-9]*) old=0 ;; esac # none yet, or cut short by a killed run
+  [ -n "$oom" ] && [ "$n" -gt "$old" ] || continue
   send "${name#/} restarted (restarts: $n, last exit OOM-killed: $oom; docker logs ${name#/})"
   echo "$n" > "$f"
 done <<EOF

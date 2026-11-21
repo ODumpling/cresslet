@@ -149,6 +149,9 @@ test("memory: host use, the Cresslet container against its limit (not the proxy)
     assert.deepEqual((await t.check()).sent, []);
     t.container("c1", "cresslet-abc", { restarts: 3 });
     assert.match((await t.check()).sent[0], /restarts: 3, last exit OOM-killed: false/);
+    writeFileSync(join(t.dir, "state", "restarts-c1"), ""); // a run killed while writing it
+    t.container("c1", "cresslet-abc", { restarts: 4 });
+    assert.match((await t.check()).sent[0], /restarts: 4/);
     // Its state goes once Docker says the container is gone (a redeploy), and not before.
     const state = join(t.dir, "state", "restarts-c1");
     assert.ok(existsSync(state));
@@ -294,9 +297,11 @@ test("delivery: JSON for Discord/Slack; alerts that couldn't be sent go at a lat
     assert.equal(a.code, 1);
     assert.match(a.stderr, /couldn't send the alert/);
     assert.match(readFileSync(join(t.fix, "log"), "utf8"), /disk 99% full/); // the journal has it right away
-    // Over before the webhook is back: both alerts still arrive.
+    // Over before the webhook is back, and two more checks fail to send: both alerts still arrive.
     t.set("df", "40");
     assert.equal((await t.check(json)).code, 1);
+    assert.equal((await t.check(json)).code, 1);
+    assert.equal(readFileSync(join(t.dir, "state", "outbox"), "utf8").trim().split("\n").length, 2);
     t.setStatus(204);
     const b = await t.check(json);
     assert.equal(b.code, 0, b.stderr);
