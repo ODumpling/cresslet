@@ -166,6 +166,18 @@ meta.then((m) => {
   }
 });
 
+// Projects (home, recent, workspace) need a session when this server offers login; without login set up the studio
+// stays usable logged out (local dev, self-hosts without GitHub OAuth).
+const loginRequired = meta.then((m) => !!m.auth?.github);
+const mustLogIn = async () => !auth.token && await loginRequired;
+/** Back to the landing page; `after`: where to return once logged in. */
+function toLanding(after) {
+  try {
+    if (after) sessionStorage.setItem("cresslet.afterLogin", after);
+  } catch { /* storage blocked: login lands on the home page */ }
+  location.hash = "#/";
+}
+
 async function logIn() {
   if ((await meta).auth?.github) location.href = "/v1/auth/github";
   else toast("Login isn't set up on this server (operator: set CRESSLET_GITHUB_CLIENT_ID / _SECRET).");
@@ -193,6 +205,12 @@ function logOut() {
   $("admin-item").hidden = true;
   renderAccount();
   if (!$("cli-login").hidden) route(); // its Authorize button needs the session
+  // Projects need the session: leave them for the landing page.
+  loginRequired.then((req) => {
+    if (!req || auth.token) return;
+    if (booted) location.hash = "#/";
+    else if (!$("home").hidden) renderHome();
+  });
 }
 
 {
@@ -246,7 +264,7 @@ function showOnly(id) {
 }
 
 async function renderRecent() {
-  const list = (await projects.list().catch(() => [])).slice(0, 6);
+  const list = await mustLogIn() ? [] : (await projects.list().catch(() => [])).slice(0, 6);
   $("recent-wrap").hidden = !list.length;
   $("recent").replaceChildren(...list.map((p) =>
     el("li", {}, el("a", { href: `#/p/${p.id}` }, icon("code"), el("span", { textContent: p.name })))));
@@ -945,11 +963,12 @@ function renderTemplates(into) {
   });
 }
 
-/** #/: the landing page for new visitors (logged out, no local projects), else the projects dashboard. */
+/** #/: the landing page when logged out (and, on servers without login, for new visitors with no local projects),
+ *  else the projects dashboard. */
 async function renderHome() {
   if (!auth.token) {
     const gen = routeGen;
-    const local = await projects.list().catch(() => []);
+    const local = await mustLogIn() ? [] : await projects.list().catch(() => []);
     if (gen !== routeGen) return; // navigated away meanwhile
     if (!local.length) return renderLanding();
   }
@@ -1640,10 +1659,13 @@ function renderLanding() {
       for (const n of document.querySelectorAll(".js-app-host")) n.textContent = url.replace(/^https?:\/\//, "");
     }
     const hours = Math.round((m.limits?.anonTtlMs ?? 0) / 3600_000);
-    const keep = m.auth?.github ? " Log in with GitHub to keep them." : "";
-    $("landing-note").textContent = m.anonDeploys
-      ? `Free and open source. No account needed: apps deployed without one last ${hours} hours.${keep}`
-      : `Free and open source. Try it without an account${m.auth?.github ? "; log in with GitHub to deploy" : ""}.`;
+    if (m.auth?.github) {
+      $("landing-note").textContent = $("cta-note").textContent = "Free and open source. Log in with GitHub to start building.";
+    } else {
+      $("landing-note").textContent = m.anonDeploys
+        ? `Free and open source. No account needed: apps deployed without one last ${hours} hours.`
+        : "Free and open source. Try it without an account.";
+    }
     $("landing-login").hidden = !m.auth?.github;
   });
 }
@@ -1676,6 +1698,7 @@ async function openDeployed({ name, url }) {
 }
 
 async function createProject(template) {
+  if (await mustLogIn()) return logIn();
   const t = await api(`/v1/templates/${template}`);
   const files = {};
   for (const f of t.files) {
@@ -1738,6 +1761,10 @@ function mountLayout({ onCode, onDrawer }) {
 }
 
 async function openProject(id, gen) {
+  if (await mustLogIn()) {
+    if (gen === routeGen) toLanding(location.hash);
+    return;
+  }
   const project = await projects.get(id);
   if (gen !== routeGen) return; // navigated elsewhere while it loaded
   if (!project) {
