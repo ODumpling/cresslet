@@ -19,7 +19,7 @@ process.once("message", ({ path, job, maxBytes }: { path: string; job: Job; maxB
      * stored blob's base64 may not even fit in a string.
      */
     const size = (x: unknown) =>
-      x instanceof Uint8Array ? Math.ceil(x.length / 3) * 4 + 12 : typeof x === "string" ? Buffer.byteLength(JSON.stringify(x)) : 24;
+      x instanceof Uint8Array ? Math.ceil(x.length / 3) * 4 + 13 : typeof x === "string" ? Buffer.byteLength(JSON.stringify(x)) : 24;
     /** Rows (JSON-safe) until `max` rows or the shared byte budget runs out. */
     const take = (sql: string, params: SQLInputValue[], max: number) => {
       const rows: unknown[] = [];
