@@ -414,7 +414,7 @@ export function createCresslet(c, opts) {
         await deploy(out);
         return 0;
       }
-      out("usage: cresslet dev [--port 3000] | build | deploy\r\n(other commands: use the real CLI, npx github:ODumpling/cresslet-cli)");
+      out("usage: cresslet dev [--port 3000] | build | deploy\r\n(other commands: use the real CLI: npx cresslet, or npm i -g cresslet)");
       return sub ? 1 : 0;
     } catch (e) {
       err(e.message ?? String(e));

@@ -265,7 +265,7 @@ curl -X POST https://cresslet.example.com/v1/accounts -H "authorization: Bearer 
 2. Tick **Enable Device Flow** (the CLI uses it; the server proxies it, so the secret never leaves the server).
 3. Set `CRESSLET_GITHUB_CLIENT_ID` and `CRESSLET_GITHUB_CLIENT_SECRET`.
 
-Accounts are keyed by GitHub user id. First GitHub login links to an existing (operator-created) account with the same **verified** GitHub email and revokes its older tokens; otherwise it creates one, if `CRESSLET_OPEN_SIGNUP` allows. Users create named API tokens in the studio under **Settings** (read / deploy / admin, optionally limited to some apps; revoke each one alone) or run `cresslet login`.
+Accounts are keyed by GitHub user id. First GitHub login links to an existing (operator-created) account with the same **verified** GitHub email and revokes its older tokens; otherwise it creates one, if `CRESSLET_OPEN_SIGNUP` allows. Users create named API tokens in the studio under **Settings** (read / deploy / admin, optionally limited to some apps; revoke each one alone) or run `cresslet login`. The CLI talks to https://cresslet.dev by default: point it at your server with `cresslet config set api https://<domain>` (or `--api` / `CRESSLET_API`).
 
 ## Docker and isolation
 

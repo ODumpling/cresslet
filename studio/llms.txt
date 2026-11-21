@@ -3,9 +3,9 @@
 > Deploy small web apps (static client + optional fetch-handler server with SQLite, files, secrets). Each app is sandboxed on <name>.<domain>.
 
 ## Fastest path (CLI)
-- `npx github:ODumpling/cresslet-cli new my-app --api <this server>` then `cd my-app && npm install`
+- `npx cresslet new my-app --api <this server>` then `cd my-app && npm install` (the project remembers the server; default is https://cresslet.dev)
 - Edit `src/` (client) and `server/index.ts` (`export default { fetch(req, env) }`, gets `/api/*`)
-- `npx cresslet deploy --api <this server>` → prints URL. Then `npx cresslet logs`, `npx cresslet db`.
+- `npx cresslet deploy` → prints URL. Then `npx cresslet logs`, `npx cresslet db`.
 - Read the app's AGENTS.md for rules.
 
 ## Raw HTTP

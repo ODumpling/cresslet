@@ -7,7 +7,7 @@ This repo: **platform server** (control plane + app host + studio) and app **tem
 | Repo | What |
 |---|---|
 | [cresslet](https://github.com/ODumpling/cresslet) | Node server: API, workerd-sandboxed app runtime, static hosting, browser studio, templates |
-| [cresslet-cli](https://github.com/ODumpling/cresslet-cli) | `cresslet` CLI: new, dev, build, deploy, logs, db, secrets |
+| [cresslet-cli](https://github.com/ODumpling/cresslet-cli) | `cresslet` CLI ([npm](https://www.npmjs.com/package/cresslet)): new, dev, build, deploy, logs, db, secrets |
 | [cresslet-container](https://github.com/ODumpling/cresslet-container) | In-browser runtime (our WebContainer): VFS, shell, npm, dev server, previews |
 
 ## Quickstart
@@ -18,7 +18,9 @@ Requires Node ≥ 24.12 for the server (≥ 22.18 for the CLI). The app sandbox 
 git clone https://github.com/ODumpling/cresslet && cd cresslet
 npm install && npm run dev                   # http://localhost:8787, apps on http://<name>.localhost:8787
 
-npx github:ODumpling/cresslet-cli new my-app
+npm i -g cresslet                            # or use npx cresslet …
+cresslet config set api http://localhost:8787   # the CLI talks to https://cresslet.dev by default
+cresslet new my-app
 cd my-app && npm install
 npm run dev                            # http://localhost:3000
 npx cresslet deploy                      # → http://<name>.localhost:8787
