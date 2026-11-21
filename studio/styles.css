@@ -200,6 +200,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .page.wide { max-width: 1200px; }
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 28px; }
 .page-head > div { min-width: 0; overflow-wrap: anywhere; }
+.page-head > div:has(+ .btn) { flex: 1 1 24rem; }
+.page-head > .btn { align-self: flex-start; }
 .page-head h1 { font-size: 26px; margin-bottom: 4px; overflow-wrap: anywhere; }
 .page-head h1 a { color: var(--text-2); text-decoration: underline; text-decoration-color: var(--line-strong); text-decoration-thickness: 1px; }
 .page-head h1 a:hover { color: var(--text); text-decoration-color: currentColor; }
@@ -822,15 +824,73 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   :focus-visible, .editor:focus-within::after, .terminal:focus-within { outline-color: Highlight; }
 }
 
-/* pages */
-.page-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 16px; }
-.page-fields > fieldset, .page-fields > .slug-field { grid-column: 1 / -1; }
-.page-fields > .slug-field { max-width: 40rem; }
+/* pages (artifacts) */
+.page-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 16px; }
 .file-btn { cursor: pointer; }
 .file-btn:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
-.pages-list { margin-top: 12px; }
-.pages-list .role-select { width: auto; min-height: 28px; padding: 3px 8px; max-width: 13rem; }
-.keep-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.dropzone {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px;
+  border: 1px dashed var(--line-strong); border-radius: var(--radius); background: var(--surface-2);
+  transition: border-color 120ms, background-color 120ms;
+}
+.dropzone[data-over] { border-color: var(--accent); background: var(--accent-soft); }
+.dropzone[data-picked="true"] { border-style: solid; }
+.dropzone[data-picked="true"] .dropzone-ico { color: var(--accent-text); background: var(--accent-soft); }
+.dropzone-ico { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 9px; background: var(--surface-3); color: var(--text-2); flex: none; }
+.dropzone-text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 10rem; min-width: 0; overflow-wrap: anywhere; }
+.dropzone-text strong { font-weight: 500; }
+.dropzone-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* One artifact per row: name and address | who can open it, how long it's kept | copy, more. Below ~40rem the
+   controls drop to a line of their own, and on a phone the copy button keeps only its icon. */
+.art-list { container-type: inline-size; }
+.list > .art-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px 16px;
+  padding: 12px 12px 12px 16px; border-top: 1px solid var(--line); transition: background-color 120ms;
+}
+.list > .art-row:first-child { border-top: 0; }
+.list > .art-row:hover { background: var(--surface-2); }
+.art-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.art-main .file-ico { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--surface-3); color: var(--text-2); flex: none; }
+.art-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.art-title { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; color: var(--text); font-weight: 500; text-decoration: none; }
+.art-title .icon { flex: none; width: 13px; height: 13px; color: var(--text-3); }
+.art-title:hover { color: var(--accent-text); text-decoration: underline; }
+.art-text .sub { display: flex; gap: 6px; min-width: 0; color: var(--text-2); font-size: 12.5px; white-space: nowrap; }
+.art-text .sub > :last-child { flex: none; }
+.art-controls { display: flex; align-items: center; gap: 8px; }
+.art-controls .role-select { width: auto; min-height: 30px; padding: 3px 8px; font-size: 13px; }
+.art-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.art-actions .btn.sm { min-height: 30px; }
+@container (max-width: 40rem) {
+  .list > .art-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .art-controls { grid-column: 1 / -1; grid-row: 2; padding-left: 40px; }
+}
+@container (max-width: 26rem) {
+  .art-controls { padding-left: 0; }
+  .art-controls .role-select { flex: 1 1 0; min-width: 0; }
+  .art-actions .lbl { display: none; }
+  .art-actions .btn.sm { width: 30px; padding: 0; }
+  .art-text .sub > :last-child, .art-text .sub > [aria-hidden] { display: none; }
+}
+
+/* A row's "more" menu (a native popover, placed by rowMenu). */
+.menu {
+  position: fixed; inset: auto; margin: 0; min-width: 13rem; padding: 4px;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); box-shadow: var(--shadow);
+}
+.menu-item {
+  display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 10px; border: 0; border-radius: 6px;
+  background: none; color: var(--text); font: inherit; font-size: 13px; text-align: left; text-decoration: none; cursor: pointer;
+}
+.menu-item .icon { color: var(--text-2); }
+.menu-item:hover, .menu-item:focus-visible { background: var(--surface-3); }
+.menu-item:focus-visible { outline-offset: -2px; }
+.menu-item.danger, .menu-item.danger .icon { color: var(--danger); }
+.menu-item.danger:hover, .menu-item.danger:focus-visible { background: var(--danger-soft); }
+.menu-sep { margin: 4px 0; border: 0; border-top: 1px solid var(--line); }
 
 /* ------------------------------------------------------------------ subdomain picker (new app or page) */
 .slug-input {
@@ -869,4 +929,9 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 }
 .modal::backdrop { background: #0009; }
 .modal h2 { font-size: 16px; margin: 0 0 4px; }
+.modal-lg { width: min(36rem, calc(100vw - 32px)); padding: 0; }
+.modal-lg > .form { padding: 20px; }
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.modal-head .icon-btn { margin: -4px -6px 0 0; }
+.modal-foot { padding-top: 16px; margin-top: 4px; border-top: 1px solid var(--line); }
 .modal p { margin: 0; }

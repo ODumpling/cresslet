@@ -1645,6 +1645,7 @@ function renderPagesView() {
   document.title = "Artifacts · Cresslet Studio";
   $("pages-login").hidden = !!auth.token;
   $("pages-main").hidden = !auth.token;
+  $("page-new").hidden = !auth.token;
   if (auth.token) renderPages();
 }
 $("pages-login-btn").addEventListener("click", () => {
@@ -1654,50 +1655,84 @@ $("pages-login-btn").addEventListener("click", () => {
   logIn();
 });
 
-let pageFormTouched = false; // the upload form keeps a choice made before the list (re)loads
+let pageDefaults = null; // the account's defaults for new artifacts, from the last GET /v1/pages
 const pageSlug = slugField($("page-name"), "page");
 function renderPages() {
-  if (!$("page-name").value) pageSlug.suggest();
   return api("/v1/pages").then(({ pages, defaults }) => {
-    if (!pageFormTouched) {
-      $("page-visibility").value = defaults.visibility;
-      setKeep($("page-retention"), defaults.retentionDays);
-    }
+    pageDefaults = defaults;
     $("page-list").replaceChildren(pages.length
-      ? dataTable("pages-title", [["Artifact"], ["Who can open it"], ["Keep for"], ["Actions", "actions", true]], pages.map(pageRow))
-      : emptyState("No artifacts yet", "Deploy an HTML file above, or run npx cresslet@latest deploy <file.html>."));
+      ? el("ul", { className: "list art-list", ariaLabel: "Your artifacts" }, ...pages.map(pageRow))
+      : el("div", { className: "empty-state" },
+        el("strong", { textContent: "No artifacts yet" }),
+        el("span", {}, "Deploy an HTML file or a folder, or run ", el("code", { textContent: "npx cresslet@latest deploy report.html" }), "."),
+        el("button", { className: "btn primary sm", type: "button", onclick: openPageDialog }, icon("plus"), "New artifact")));
   }).catch((e) => $("page-list").replaceChildren(el("p", { className: "error", textContent: `Could not load artifacts: ${e.message}` })));
 }
+
+/** A popover menu under its button (native popover: Escape and a click outside close it, focus returns to the button). */
+function rowMenu(id, label, items) {
+  const menu = el("div", { id, className: "menu" }, ...items);
+  menu.setAttribute("popover", "");
+  const btn = el("button", { className: "icon-btn row-more", type: "button", title: "More actions", ariaLabel: `More actions for ${label}` }, icon("more"));
+  btn.setAttribute("popovertarget", id);
+  const hide = () => menu.hidePopover();
+  // Placed before it shows (under the button, right edges lined up), flipped above if there's no room below.
+  menu.addEventListener("beforetoggle", (e) => {
+    if (e.newState !== "open") return;
+    const r = btn.getBoundingClientRect();
+    menu.style.right = `${Math.max(8, innerWidth - r.right)}px`;
+    menu.style.top = `${r.bottom + 4}px`;
+  });
+  menu.addEventListener("toggle", (e) => {
+    if (e.newState !== "open") {
+      removeEventListener("scroll", hide, true);
+      removeEventListener("resize", hide);
+      return;
+    }
+    const r = btn.getBoundingClientRect();
+    if (r.bottom + 4 + menu.offsetHeight > innerHeight) menu.style.top = `${Math.max(8, r.top - 4 - menu.offsetHeight)}px`;
+    addEventListener("scroll", hide, true); // placed once: it closes rather than drift away from its row
+    addEventListener("resize", hide);
+    menu.querySelector("button, a")?.focus();
+  });
+  // Closed before the item acts, so a confirm() or a file picker isn't drawn over an open menu.
+  menu.addEventListener("click", (e) => e.target.closest("button, a") && hide(), true);
+  return [btn, menu];
+}
+const menuItem = (iconName, text, srText, attrs = {}) =>
+  el(attrs.href ? "a" : "button", { className: "menu-item", ...(attrs.href ? {} : { type: "button" }), ...attrs }, icon(iconName), text, srText ? srOnly(srText) : null);
 
 function pageRow(p) {
   const manage = p.access === "owner" || p.access === "admin";
   const label = pageName(p);
-  const until = el("span", { className: "sub", textContent: untilText(p) });
-  const ico = el("span", { className: "file-ico" }, icon(p.visibility === "private" ? "shield" : "globe"));
+  const until = el("span", { textContent: untilText(p) });
+  const ico = el("span", { className: "file-ico", title: VIS_LABEL[p.visibility] }, icon(p.visibility === "private" ? "shield" : "globe"));
   const vis = manage
-    ? visSelect({ id: `vis-${p.id}`, ariaLabel: `Who can open ${label}`, onchange: () => changePage(p, { visibility: vis.value }, vis, until, ico) }, p.visibility)
-    : el("span", { className: "muted", textContent: VIS_LABEL[p.visibility] });
+    ? visSelect({ id: `vis-${p.id}`, title: "Who can open it", ariaLabel: `Who can open ${label}`, onchange: () => changePage(p, { visibility: vis.value }, vis, until, ico) }, p.visibility)
+    : el("span", { className: "muted small", textContent: VIS_LABEL[p.visibility] });
   const keep = manage
-    ? keepSelect({ id: `keep-${p.id}`, ariaLabel: `Keep ${label} for`, onchange: () => changePage(p, { retentionDays: keepParse(keep.value) }, keep, until) }, p.retentionDays)
-    : el("span", { className: "muted", textContent: keepText(p.retentionDays) });
-  const replace = el("input", { type: "file", className: "sr-only", accept: ".html,.htm,text/html", onchange: () => replacePage(p, replace) });
-  const replaceDir = el("input", { type: "file", className: "sr-only", webkitdirectory: true, multiple: true, onchange: () => replacePage(p, replaceDir) });
-  return el("tr", { className: "list-row" },
-    el("td", {}, el("div", { className: "name-cell" },
+    ? keepSelect({ id: `keep-${p.id}`, title: "Keep for", ariaLabel: `Keep ${label} for`, onchange: () => changePage(p, { retentionDays: keepParse(keep.value) }, keep, until) }, p.retentionDays)
+    : null;
+  const replace = el("input", { type: "file", hidden: true, accept: ".html,.htm,text/html", onchange: () => replacePage(p, replace) });
+  const replaceDir = el("input", { type: "file", hidden: true, webkitdirectory: true, multiple: true, onchange: () => replacePage(p, replaceDir) });
+  const items = [
+    p.access === "viewer" ? null : menuItem("refresh", "Replace with an HTML file", ` (${label}, same link)`, { onclick: () => replace.click() }),
+    p.access === "viewer" ? null : menuItem("folder", "Replace with a folder", ` (${label}, same link)`, { onclick: () => replaceDir.click() }),
+    manage ? menuItem("users", "Share", ` ${label}`, { href: `#/share/${encodeURIComponent(p.name)}` }) : null,
+    p.access === "owner" ? el("hr", { className: "menu-sep" }) : null,
+    p.access === "owner" ? menuItem("trash", "Delete", ` ${label}`, { id: `delete-page-${p.id}`, className: "menu-item danger", onclick: () => deletePage(p) }) : null,
+  ].filter(Boolean);
+  return el("li", { className: "art-row" },
+    el("div", { className: "art-main" },
       ico,
-      el("div", {}, extLink(p.url, label), el("span", { className: "sub", textContent: p.url.replace(/^https?:\/\//, "") })))),
-    el("td", {}, vis),
-    el("td", {}, el("div", { className: "keep-cell" }, keep, until)),
-    el("td", { className: "actions" },
-      el("button", { className: "btn sm", type: "button", ariaLabel: `Copy link to ${label}`, onclick: () => copyLink(p.url) }, icon("copy"), "Copy link"),
-      p.access === "viewer" ? null
-        : el("label", { className: "icon-btn file-btn", title: "Replace with an HTML file (same link)" }, replace, icon("refresh"), srOnly(`Replace ${label} with an HTML file`)),
-      p.access === "viewer" ? null
-        : el("label", { className: "icon-btn file-btn", title: "Replace with a folder (same link)" }, replaceDir, icon("folder"), srOnly(`Replace ${label} with a folder`)),
-      manage ? el("a", { className: "icon-btn", href: `#/share/${encodeURIComponent(p.name)}`, title: "Share" }, icon("users"), srOnly(`Share ${label}`)) : null,
-      p.access === "owner"
-        ? el("button", { className: "icon-btn danger", type: "button", id: `delete-page-${p.id}`, title: "Delete artifact", ariaLabel: `Delete ${label}`, onclick: () => deletePage(p) }, icon("trash"))
-        : null));
+      el("div", { className: "art-text" },
+        extLink(p.url, el("span", { className: "truncate", textContent: label }), "ext art-title"),
+        el("span", { className: "sub" }, el("span", { className: "truncate", textContent: p.url.replace(/^https?:\/\//, "") }), el("span", { ariaHidden: "true", textContent: "·" }), until))),
+    el("div", { className: "art-controls" }, vis, keep),
+    el("div", { className: "art-actions" },
+      el("button", { className: "btn sm", type: "button", title: "Copy link", ariaLabel: `Copy link to ${label}`, onclick: () => copyLink(p.url) }, icon("copy"), el("span", { className: "lbl", textContent: "Copy link" })),
+      ...(items.length ? rowMenu(`more-${p.id}`, label, items) : []),
+      replace, replaceDir));
 }
 
 async function changePage(p, change, select, until, ico) {
@@ -1706,7 +1741,10 @@ async function changePage(p, change, select, until, ico) {
     const { page } = await api(`/v1/pages/${encodeURIComponent(p.name)}`, { method: "PATCH", body: JSON.stringify(change) });
     Object.assign(p, page);
     until.textContent = untilText(page);
-    ico?.replaceChildren(icon(page.visibility === "private" ? "shield" : "globe"));
+    if (ico) {
+      ico.replaceChildren(icon(page.visibility === "private" ? "shield" : "globe"));
+      ico.title = VIS_LABEL[page.visibility];
+    }
     toast(change.visibility
       ? `${pageName(page)}: ${VIS_LABEL[page.visibility].toLowerCase()}`
       : `${pageName(page)} is kept ${page.retentionDays === null ? "forever" : untilText(page)}`);
@@ -1752,7 +1790,7 @@ async function deletePage(p) {
   refocus($("pages-title"));
 }
 
-/** What the upload form will send: one HTML file, or a folder's files (its top directory stripped). */
+/** What the new-artifact dialog will send: one HTML file, or a folder's files (its top directory stripped). */
 let pagePick = null;
 const b64 = async (file) => {
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -1764,13 +1802,26 @@ function pageError(text) {
   $("page-error").textContent = text;
   $("page-error").hidden = !text;
 }
-$("page-file").addEventListener("change", () => {
-  const f = $("page-file").files[0];
+const VIS_HINT = {
+  private: "Only you and the people you share it with, logged in.",
+  link: "Anyone who has the link. Search engines don't list it.",
+  public: "Anyone. Search engines can list it.",
+};
+const showVisHint = () => ($("vis-hint").textContent = VIS_HINT[$("page-visibility").value]);
+$("page-visibility").addEventListener("change", showVisHint);
+function showPick(title, sub) {
+  $("page-picked").textContent = title;
+  $("page-picked-sub").textContent = sub;
+  $("page-drop").dataset.picked = String(!!pagePick);
+}
+const NO_PICK = ["Nothing chosen", "Drop an HTML file here, or choose one."];
+function pickHtml(f) {
   $("page-dir").value = "";
   pagePick = f ? { title: f.name.replace(/\.html?$/i, ""), html: f } : null;
-  $("page-picked").textContent = f ? f.name : "Nothing chosen";
+  showPick(...(f ? [f.name, f.size < 1024 ? `${f.size} bytes` : `${(f.size / 1024).toFixed(f.size < 10240 ? 1 : 0)} KB`] : NO_PICK));
   pageError("");
-});
+}
+$("page-file").addEventListener("change", () => pickHtml($("page-file").files[0]));
 /** A picked folder's files, its top directory stripped; hidden files and folders (.git, .DS_Store) stay behind. */
 function folderFiles(list) {
   const files = [...list]
@@ -1784,10 +1835,47 @@ $("page-dir").addEventListener("change", () => {
   $("page-file").value = "";
   const { dir, files } = folderFiles($("page-dir").files);
   pagePick = files.length ? { title: dir, files } : null;
-  $("page-picked").textContent = files.length ? `${dir}/ (${files.length} file${files.length === 1 ? "" : "s"})` : "Nothing chosen";
+  showPick(...(files.length ? [`${dir}/`, `${files.length} file${files.length === 1 ? "" : "s"}`] : NO_PICK));
   pageError(files.length && !files.some((x) => x.path === "index.html") ? "That folder has no index.html at its top level." : "");
 });
-for (const id of ["page-visibility", "page-retention"]) $(id).addEventListener("change", () => (pageFormTouched = true));
+// Dropping a file: an HTML file is picked; a folder needs the Folder button (a dropped folder can't be read as one here).
+const drop = $("page-drop");
+drop.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  drop.dataset.over = "true";
+});
+drop.addEventListener("dragleave", (e) => !drop.contains(e.relatedTarget) && delete drop.dataset.over);
+drop.addEventListener("drop", (e) => {
+  e.preventDefault();
+  delete drop.dataset.over;
+  const item = e.dataTransfer.items?.[0];
+  const f = e.dataTransfer.files[0];
+  if (item?.webkitGetAsEntry?.()?.isDirectory) return pageError("To deploy a folder, choose it with the Folder button.");
+  if (!f || !/\.html?$/i.test(f.name)) return pageError("Drop an .html file.");
+  $("page-file").value = "";
+  pickHtml(f);
+});
+
+/** Opens the new-artifact dialog at the account's defaults, with a new generated address. */
+async function openPageDialog() {
+  const dlg = $("page-dialog");
+  if (dlg.open) return;
+  $("page-form").reset();
+  pagePick = null;
+  showPick(...NO_PICK);
+  pageError("");
+  $("page-upload").disabled = false;
+  $("page-name").value = "";
+  if (pageDefaults) {
+    $("page-visibility").value = pageDefaults.visibility;
+    setKeep($("page-retention"), pageDefaults.retentionDays);
+  }
+  showVisHint();
+  dlg.showModal();
+  pageSlug.suggest();
+}
+$("page-new").addEventListener("click", openPageDialog);
+for (const id of ["page-cancel", "page-close"]) $(id).addEventListener("click", () => $("page-dialog").close());
 
 $("page-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1798,6 +1886,7 @@ $("page-form").addEventListener("submit", async (e) => {
   }
   pageError("");
   $("page-upload").disabled = true;
+  const dlg = $("page-dialog");
   try {
     const name = await pageSlug.value();
     if (!name) {
@@ -1819,18 +1908,15 @@ $("page-form").addEventListener("submit", async (e) => {
       }),
     });
     pagePick = null;
-    pageFormTouched = false;
-    $("page-form").reset();
-    $("page-name").value = ""; // a new address for the next page
-    $("page-picked").textContent = "Nothing chosen";
+    dlg.close();
     await renderPages();
     toast(el("span", {}, `Deployed ${pageName(page)}: `, extLink(page.url, page.url.replace(/^https?:\/\//, "")), " ",
       el("button", { className: "btn sm", type: "button", onclick: () => copyLink(page.url) }, icon("copy"), "Copy link")));
   } catch (err) {
-    pageError(`Could not deploy: ${err.message}`);
+    if (dlg.open) pageError(`Could not deploy: ${err.message}`);
+    else toast(`Could not deploy: ${err.message}`);
   } finally {
     $("page-upload").disabled = false;
-    if (document.activeElement === document.body) $("page-upload").focus();
   }
 });
 

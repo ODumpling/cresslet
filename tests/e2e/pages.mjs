@@ -1,6 +1,6 @@
-// Browser e2e: Settings → page defaults; home → upload an HTML file (generated address) and a folder (its own address;
-// defaults prefilled, overridable);
-// change a page's visibility and retention in its row; replace a page with a folder; a private page opens through the studio's sign-in hop,
+// Browser e2e: Settings → page defaults; Artifacts → New artifact (a dialog) → upload an HTML file (generated address)
+// and a folder (its own address; defaults prefilled, overridable);
+// change a page's visibility and retention in its row; replace a page with a folder (its row's menu); a private page opens through the studio's sign-in hop,
 // and a stranger is told they have no access. No 320px horizontal scroll.
 // Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node pages.mjs
 // SHOTS=<dir> also saves screenshots.
@@ -51,9 +51,16 @@ try {
   assert(saved.pages.visibility === "link" && saved.pages.retentionDays === 7, `saved ${JSON.stringify(saved.pages)}`);
   await shot(o, "pages-settings");
 
-  // Home: the form starts at the account's defaults; upload a file with them.
+  // The list, then the New artifact dialog: it starts at the account's defaults; Cancel closes it; upload a file with them.
   await o.goto(base + "/#/pages");
   await o.getByRole("heading", { name: "Artifacts", exact: true }).waitFor();
+  await o.getByText("No artifacts yet").waitFor();
+  const dialog = o.getByRole("dialog", { name: "New artifact" });
+  await o.getByRole("button", { name: "New artifact" }).first().click();
+  await dialog.waitFor();
+  await o.getByRole("button", { name: "Cancel" }).click();
+  await dialog.waitFor({ state: "hidden" });
+  await o.getByRole("button", { name: "New artifact" }).first().click();
   await o.waitForFunction(() => document.getElementById("page-retention").value === "7");
   assert(await o.getByLabel("Who can open it").inputValue() === "link", "form default visibility");
   await o.getByRole("button", { name: "Deploy" }).click();
@@ -72,9 +79,13 @@ try {
   const r = await fetch(report.url, { redirect: "manual" });
   assert(r.status === 200 && (await r.text()).includes("Quarterly report"), "link page serves");
 
+  await dialog.waitFor({ state: "hidden" });
+
   // A folder, overriding the defaults: public, forever. Hidden files stay behind.
+  await o.getByRole("button", { name: "New artifact" }).click();
   await o.locator("#page-dir").setInputFiles(join(dir, "site"));
-  await o.getByText("site/ (2 files)").waitFor();
+  await o.getByText("site/", { exact: true }).waitFor();
+  await o.getByText("2 files", { exact: true }).waitFor();
   await o.getByLabel("Who can open it").selectOption("public");
   await o.getByLabel("Keep for", { exact: true }).selectOption("forever");
   // A name of your own: a taken one is refused before uploading, a free one is the page's address.
@@ -96,7 +107,11 @@ try {
   assert(site?.name === custom && site.url.includes(`//${custom}.`), `custom page name ${JSON.stringify(site)}`);
   assert(site && site.visibility === "public" && site.retentionDays === null && site.files === 2, `upload 2 ${JSON.stringify(site)}`);
   assert((await fetch(site.url + "/img/dot.svg")).status === 200, "folder asset serves");
+  await o.getByRole("button", { name: "New artifact" }).click();
   assert(await o.getByLabel("Who can open it").inputValue() === "link", "form back to defaults after upload");
+  assert(await o.getByText("Nothing chosen").isVisible(), "no file picked in a new dialog");
+  await o.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
 
   // Row controls: make the report private, keep it 90 days.
   await o.getByLabel("Who can open report").selectOption("private");
@@ -143,7 +158,12 @@ try {
 
   // Replace a page with a folder: same link, all its files swapped; a missing page there is a 404, not the index.
   await o.goto(base + "/#/pages");
-  await o.getByLabel("Replace report with a folder").setInputFiles(join(dir, "site"));
+  await o.getByRole("button", { name: "More actions for report" }).click();
+  const [chooser] = await Promise.all([
+    o.waitForEvent("filechooser"),
+    o.getByRole("button", { name: /^Replace with a folder/ }).click(),
+  ]);
+  await chooser.setFiles(join(dir, "site"));
   await o.getByText("Replaced report (same link)").waitFor();
   const replaced = (await call(`/v1/pages/${report.name}`, owner.token)).page;
   assert(replaced.name === report.name && replaced.files === 2, `replace ${JSON.stringify(replaced)}`);
@@ -154,6 +174,7 @@ try {
 
   // Delete.
   await o.goto(base + "/#/pages");
+  await o.getByRole("button", { name: "More actions for site" }).click();
   await o.getByRole("button", { name: "Delete site" }).click();
   await o.getByText("Deleted site").waitFor();
   assert((await fetch(site.url)).status === 404, "deleted page 404s");
