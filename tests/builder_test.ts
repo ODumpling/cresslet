@@ -197,6 +197,23 @@ test("run_command: counts as running (deploys then need approval); time spent as
   asking = false;
   assert.match((await p).text, /stopped after 0.3s/);
   assert.equal(t.running, 0);
+  // a late (throttled) tick spanning the start or end of a question charges at most one normal tick
+  let t0 = 0;
+  asking = false;
+  const late = createTools(c, { timeoutMs: 1000, paused: () => asking, clock: () => t0 });
+  const q = late.execute("run_command", { command: "cresslet deploy" });
+  let lateDone = false;
+  q.then(() => (lateDone = true));
+  await new Promise((r) => setTimeout(r, 300)); // one tick, not asking: nothing charged (clock stood still)
+  asking = true;
+  t0 += 5000; // asked just after that tick; the next one comes 5 s late
+  await new Promise((r) => setTimeout(r, 300));
+  asking = false;
+  t0 += 5000;
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(lateDone, false); // 2 × 250 ms charged, not 10 s
+  t0 += 600;
+  assert.match((await q).text, /stopped after 1s/);
   // long output: one note for everything left out
   const big = createTools(fakeContainer({}, { "yes": { out: "y\n".repeat(30_000) } }));
   const text = (await big.execute("run_command", { command: "yes" })).text;
@@ -394,6 +411,16 @@ test("cresslet deploy from the builder: asks first, deploys to the app it named,
     assert.equal(posted[1].body.app, undefined); // a new app, as approved; not other-app
     assert.equal(posted[1].key, undefined);
     assert.deepEqual(JSON.parse(c.files.get("/project/cresslet.json")!), { routes: ["/x/*"], name: "new-app" });
+    // a name the user removed while asked isn't put back
+    project.deploy = null;
+    c.files.set("/project/cresslet.json", '{"name":"named"}');
+    const third = command(ctx({ CRESSLET_AI_BUILDER: "1" }));
+    await new Promise((r) => setTimeout(r, 0));
+    c.files.set("/project/cresslet.json", "{}");
+    answer(true);
+    assert.equal(await third, 0);
+    assert.equal(posted[2].body.app, "named");
+    assert.equal(c.files.get("/project/cresslet.json"), "{}");
   } finally {
     globalThis.fetch = realFetch;
   }

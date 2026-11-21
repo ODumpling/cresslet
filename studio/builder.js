@@ -79,7 +79,7 @@ const tail = (s, n = MAX_OUTPUT) => (s.length > n ? `[… ${s.length - n} earlie
  * was started (directly, an npm script, `sh -c`). Commands also get CRESSLET_AI_BUILDER=1, for one left in the
  * background. `paused()`: true while the user is being asked; that time doesn't count toward the timeout.
  */
-export function createTools(c, { devLog = () => "", onChange = () => {}, timeoutMs = COMMAND_TIMEOUT_MS, paused = () => false } = {}) {
+export function createTools(c, { devLog = () => "", onChange = () => {}, timeoutMs = COMMAND_TIMEOUT_MS, paused = () => false, clock = () => performance.now() } = {}) {
   const wd = c.workdir;
   let running = 0;
   const abs = (rel) => (rel ? `${wd}/${rel}` : wd);
@@ -143,14 +143,15 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     let timer, stop;
     const stopped = new Promise((r) => {
       // Wall-clock time (timers are throttled in background tabs), not counting time spent asking the user.
-      // Each interval counts by whether the user was being asked when it began (a late tick can't charge the wait).
-      let used = 0, last = performance.now(), asking = paused();
+      // An interval in which the user was being asked at either end counts at most one normal tick (a throttled,
+      // late tick can't charge the wait), and it never times out while they're being asked.
+      let used = 0, last = clock(), wasAsking = paused();
       const tick = () => {
-        const now = performance.now();
-        if (!asking) used += now - last;
+        const now = clock(), asking = paused();
+        used += !wasAsking && !asking ? now - last : wasAsking !== asking ? Math.min(now - last, 250) : 0;
         last = now;
-        asking = paused();
-        if (used >= timeoutMs) r("timeout");
+        wasAsking = asking;
+        if (used >= timeoutMs && !asking) r("timeout");
         else timer = setTimeout(tick, 250);
       };
       timer = setTimeout(tick, 250);

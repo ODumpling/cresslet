@@ -174,9 +174,10 @@ export function createCresslet(c, opts) {
       body = await res.json();
     }
     if (!res.ok) throw new Error(body.message ?? `deploy failed (${res.status})`);
-    // The new app's name into cresslet.json as it is now (it may have been edited since it was read).
+    // A new app's name into cresslet.json as it is now (it may have been edited since it was read); a name the user
+    // removed meanwhile isn't put back.
     const now = await config().catch(() => null);
-    if (now && !now.name) await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...now, name: body.app.name }, null, 2) + "\n");
+    if (!cfg.name && now && !now.name) await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...now, name: body.app.name }, null, 2) + "\n");
     log(`deployed ${body.app.name} → ${body.app.url}`);
     if (body.deploy?.warning) log(`warning: ${body.deploy.warning}`);
     if (!body.app.claimed) log(`unclaimed: expires ${new Date(body.app.expiresAt).toLocaleString()}. Log in to keep it.`);
