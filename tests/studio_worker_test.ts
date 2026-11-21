@@ -50,6 +50,7 @@ async function startWorker(code: string) {
   const files = new Map<string, { bytes: Uint8Array; contentType: string; updatedAt: number }>();
   const responses = new Map<number, (m: { status: number; body: ArrayBuffer }) => void>();
   let snapshot: Uint8Array | null = null;
+  let lastSeen: Uint8Array | null = null;
   let ready!: () => void;
   let fatal!: (e: Error) => void;
   const started = new Promise<void>((res, rej) => ((ready = res), (fatal = rej)));
@@ -75,7 +76,16 @@ async function startWorker(code: string) {
   const get = (path: string) =>
     new Promise<{ status: number; json: any }>((resolve) => {
       const n = ++id;
-      responses.set(n, (m) => resolve({ status: m.status, json: JSON.parse(new TextDecoder().decode(m.body)) }));
+      responses.set(n, (m) => {
+        const text = new TextDecoder().decode(m.body);
+        let json;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          json = text; // e.g. a 500's stack trace: the assertion that follows shows it
+        }
+        resolve({ status: m.status, json });
+      });
       w.postMessage({ type: "request", id: n, url: `https://app.preview${path}`, method: "GET", headers: [], body: null });
     });
   w.postMessage({
@@ -92,10 +102,14 @@ async function startWorker(code: string) {
   }>)();
   return {
     get,
-    /** The database the studio would reload from, once pending saves (300 ms debounce) have run. */
+    /**
+     * The database the studio would reload from, once pending saves (300 ms debounce) have run. Each call needs a new
+     * save since the last one: what was just done must have scheduled it.
+     */
     async saved() {
       await new Promise((r) => setTimeout(r, 700));
-      assert.ok(snapshot, "a snapshot was posted");
+      assert.ok(snapshot && snapshot !== lastSeen, "a new snapshot was posted");
+      lastSeen = snapshot;
       return new SQL.Database(snapshot!);
     },
     async close() {
@@ -134,8 +148,8 @@ export default { async fetch(req) {
   if (p === "/touch") return json(await db.run("UPDATE t SET v = v"));
   if (p === "/partial-run") return db.run("INSERT OR FAIL INTO u VALUES (3), (4), (3)").then(() => json("no error"), (e) => json(e.message));
   if (p === "/partial-exec") return db.exec("INSERT INTO u VALUES (5); INSERT INTO u VALUES (5);").then(() => json("no error"), (e) => json(e.message));
+  if (p === "/mk-u") return db.exec("CREATE TABLE u (k INTEGER PRIMARY KEY)").then(() => json("ok"));
   if (p === "/partial") {
-    await db.exec("CREATE TABLE IF NOT EXISTS u (k INTEGER PRIMARY KEY)");
     return db.query("INSERT OR FAIL INTO u VALUES (1), (2), (1) RETURNING k").then(() => json("no error"), (e) => json(e.message));
   }
   if (p === "/big") return db.batch([db.sql\`SELECT \${9007199254740993n}\`]).then(() => json("stored"), (e) => json(e.message));
@@ -155,13 +169,15 @@ export default { async fetch(req) {
     await w.get("/touch");
     await w.saved();
     assert.equal((await w.get("/rowid")).json, ret.id);
-    // a query that failed part-way: SQLite kept the rows it wrote, and so does the save
+    // a query that failed part-way: SQLite kept the rows it wrote, and so does the save (the table's own save is done
+    // first, so the one after must come from the failing call)
+    await w.get("/mk-u");
+    await w.saved();
     assert.match((await w.get("/partial")).json, /UNIQUE constraint failed/);
     assert.deepEqual((await w.saved()).exec("SELECT k FROM u ORDER BY k")[0].values, [[1], [2]]);
     assert.match((await w.get("/partial-run")).json, /UNIQUE constraint failed/);
     assert.match((await w.get("/partial-exec")).json, /UNIQUE constraint failed/);
     assert.deepEqual((await w.saved()).exec("SELECT k FROM u ORDER BY k")[0].values, [[1], [2], [3], [4], [5]]);
-    await w.saved();
     await w.get("/ddl");
     assert.equal((await w.saved()).exec("SELECT name FROM sqlite_master WHERE name = 'ddl_only'").length, 1);
     assert.match((await w.get("/big")).json, /can't store the integer 9007199254740993 exactly/);
