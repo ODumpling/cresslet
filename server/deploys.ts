@@ -242,9 +242,8 @@ export async function writePage(cfg: Config, store: Store, app: App, files: Depl
 
 /** Keep `keep` and the `keepCount - 1` most recent others (10 in all for an app's rollback). */
 async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = 10) {
-  const live = store.appById(appId, true)?.current_deploy_id; // a rollback may have moved it
   const others = store.deploys(appId, 1000).filter((d) => d.id !== keep);
-  await removeDeploys(cfg, store, others.slice(keepCount - 1).filter((d) => d.id !== live));
+  await removeDeploys(cfg, store, others.slice(keepCount - 1));
 }
 
 /** A replaced page version stays this long, so a request that read the old pointer can finish. */
@@ -274,23 +273,28 @@ export async function pruneOldPageVersions(cfg: Config, store: Store, local: (ap
   }
 }
 
-/** Deploys a prune has picked to remove (this node owns their apps): rollback refuses them. */
+/** Deploys a prune is removing, and ones whose removal failed (files may be half gone): rollback refuses both. */
 const removing = new Set<string>();
-export const beingRemoved = (deployId: string) => removing.has(deployId);
+const broken = new Set<string>();
+export const beingRemoved = (deployId: string) => removing.has(deployId) || broken.has(deployId);
 
 /**
- * Marked at once (before any await), then removed files first: if that fails, the row stays, so the
- * next prune tries again, and the mark stays too.
+ * Marked at once (before any await; ones another prune is removing are left to it), then removed
+ * files first: if that fails, the row stays, so the next prune tries again.
  */
 async function removeDeploys(cfg: Config, store: Store, deploys: Pick<Deploy, "id" | "app_id">[]) {
-  for (const d of deploys) removing.add(d.id);
-  for (const d of deploys) {
+  const todo = deploys.filter((d) => !removing.has(d.id));
+  for (const d of todo) removing.add(d.id);
+  for (const d of todo) {
     try {
       await rm(paths(cfg, d.app_id).deploy(d.id), { recursive: true, force: true });
       store.deleteDeploy(d.id);
-      removing.delete(d.id);
+      broken.delete(d.id);
     } catch (e) {
-      console.error(`cresslet: couldn't remove deploy ${d.id}:`, e); // stays marked: its files may be half gone
+      broken.add(d.id);
+      console.error(`cresslet: couldn't remove deploy ${d.id}:`, e);
+    } finally {
+      removing.delete(d.id);
     }
   }
 }
