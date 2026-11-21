@@ -53,7 +53,7 @@ runsc install && systemctl reload docker
 docker run --rm --runtime=runsc alpine uname -r     # 4.19.0-gvisor (or newer)
 ```
 
-In Coolify: build pack Docker Compose, compose location as above, and the `CRESSLET_*` variables the compose file reads (`CRESSLET_DOMAIN` is required; `CRESSLET_OPEN_SIGNUP` and `CRESSLET_ANON_DEPLOYS` default to `false` here). `CRESSLET_CONTAINER_MEMORY` / `CRESSLET_CONTAINER_CPUS` (default `3g` / `2`) cap the whole container. Behind Cloudflare, set `CRESSLET_CLIENT_IP_HEADER=cf-connecting-ip` for the per-IP limits. Other `CRESSLET_*` settings need a line under `environment:` too (Coolify passes only the variables the file names). No domain is set in Coolify: the compose file's Traefik labels route `<domain>` and `*.<domain>`. Coolify doesn't expand variables in labels, so edit the domain in them.
+In Coolify: build pack Docker Compose, compose location as above, and the `CRESSLET_*` variables the compose file reads (`CRESSLET_DOMAIN` is required; `CRESSLET_OPEN_SIGNUP` and `CRESSLET_ANON_DEPLOYS` default to `false` here). `CRESSLET_CONTAINER_MEMORY` / `CRESSLET_CONTAINER_CPUS` (default `3g` / `2`) cap the whole container. The abuse limits default lower here than the server's ([Sizing a shared host](#sizing-a-shared-host)). Behind Cloudflare, set `CRESSLET_CLIENT_IP_HEADER=cf-connecting-ip` for the per-IP limits. Other `CRESSLET_*` settings need a line under `environment:` too (Coolify passes only the variables the file names). No domain is set in Coolify: the compose file's Traefik labels route `<domain>` and `*.<domain>`. Coolify doesn't expand variables in labels, so edit the domain in them.
 
 Coolify names the data volume `<app uuid>_data`. Switching an existing Dockerfile deploy (volume `<app uuid>-cresslet-data`) means copying its data across once, just before the first compose deploy. SQLite's `.backup` makes the copy safe while the old container is still running:
 
@@ -77,11 +77,49 @@ deploy/coolify/firewall.sh <app uuid> --install     # <app uuid> = the compose a
 
 A network that doesn't exist yet (the first deploy, or one Coolify recreated) is covered within a minute of its creation; a connection opened in that minute stays up. Run the script once right after the first deploy. If the rules can't be applied, the script stops the containers on that network (not Coolify's proxy) rather than leave them unfirewalled; start them again once it's fixed. It handles one Cresslet network per host.
 
+Then the alerts ([Alerts](#alerts)), with the same network (on a host set up before them, rerun `firewall.sh <app uuid> --install` first: the installed copy doesn't leave the marker its fail-closed alert needs):
+
+```sh
+CRESSLET_ALERT_URL=https://ntfy.sh/<secret topic> deploy/coolify/alerts.sh <app uuid> --install
+cresslet-alerts <app uuid> --test     # a test alert should arrive
+```
+
 Notes:
 - gVisor's network stack can't reach Docker's embedded DNS (127.0.0.11) on a user-defined network ([gVisor FAQ](https://gvisor.dev/docs/user_guide/faq/)), so the entrypoint writes public resolvers (`CRESSLET_RESOLVERS`, default `1.1.1.1 9.9.9.9`) into `/etc/resolv.conf`. The container can't look up other containers by name (it doesn't need to).
 - The compose file sets `CRESSLET_OUTER_GVISOR=true` (the container runs under `runtime: runsc`), so the server doesn't warn about missing gVisor.
 - This mode doesn't use `CRESSLET_RUNSC` (gVisor per sandbox, which needs a privileged container) or `CRESSLET_CGROUP_DIR`. The uids keep apps out of each other's files and the control plane's. Each sandbox still has its heap cap and request timeout, and the container caps bound them all.
-- Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (it mounts the old `<app uuid>-cresslet-data` volume, without the writes made since; copy back the same way to keep them). Then `systemctl disable --now cresslet-firewall.timer cresslet-firewall-boot.service` and `systemctl stop cresslet-firewall.service` first (or a run puts the rules back), and `firewall.sh <app uuid> --remove`.
+- Rolling back: the server ran as root here, so files it created in the volume are root's. Give them back to the Dockerfile image's `node` user (`docker run --rm -v <volume>:/data alpine chown -R 1000:1000 /data`), switch the build pack back to Dockerfile (it mounts the old `<app uuid>-cresslet-data` volume, without the writes made since; copy back the same way to keep them). Then `systemctl disable --now cresslet-firewall.timer cresslet-firewall-boot.service cresslet-alerts.timer` and `systemctl stop cresslet-firewall.service` first (or a run puts the rules back), and `firewall.sh <app uuid> --remove`.
+
+### Sizing a shared host
+
+cresslet.dev runs on 4 vCPU, 7.6 GB of memory (no swap) and a 72 GB disk (58 GB free), shared with other apps and Coolify, which builds on the same host. What the limits allow there, at the compose file's defaults (estimates of what the quotas count: payload bytes. On disk it's more: a long write transaction grows a WAL past 64 MB until it ends, and many small files take filesystem blocks, directories and index rows beyond their bytes, so the quotas don't bound disk use; the disk and inode alerts do the rest):
+
+| | Bound | Worst case (about) |
+|---|---|---|
+| CPU | the container: 2 of 4 vCPU (`CRESSLET_CONTAINER_CPUS`) | the other apps keep 2 |
+| Memory | the container: 3 GB of 7.6 (`CRESSLET_CONTAINER_MEMORY`); each sandbox's V8 heap: 128 MB (`CRESSLET_APP_MEMORY_MB`, Cloudflare Workers' limit too) | the other apps (about 2 GB today) and builds keep the rest. About 12–15 sandboxes at a full heap fill the container (each also has workerd's own memory and a bindings thread); idle ones stop after `CRESSLET_IDLE_MS`, but nothing caps how many are awake at once |
+| One app's disk | database 128 MB (+ up to 64 MB of WAL) + files 256 MB + 10 deploys kept × (25 MB of files + a server bundle: 5 MB of characters, up to 15 MB of UTF-8) | ≈ 0.85 GB |
+| One account | 10 apps (`CRESSLET_MAX_APPS_PER_ACCOUNT`) | ≈ 8.5 GB |
+| Anonymous apps | 25 live (`CRESSLET_MAX_ANON_APPS`), 5 new per IP per hour; gone after 72 h | ≈ 21 GB |
+| Local backups ([Backups](#backups)) | `CRESSLET_BACKUP_KEEP` (14) archives, and during a run an uncompressed copy of the volume (in Docker's storage) and the new archive | up to `CRESSLET_BACKUP_KEEP` + 2 (16) × the volume, less what compresses |
+
+The server's own defaults (512 MB databases, 1 GB of files, 50 apps per account, 200 anonymous apps) allow ≈ 2 GB per app (counted the same way), 100 GB per account and 400 GB of anonymous apps: they don't fit this disk.
+
+The worst cases don't fit either, and no limit bounds the total: accounts aren't capped, so with open signup every GitHub account adds up to 8.5 GB. A disk that fills up stops the other apps' databases too. The disk alert ([Alerts](#alerts)) at 80% is the backstop: about 42 GB of growth on this host, but every GB in the volume costs up to `CRESSLET_BACKUP_KEEP + 3` GB on disk at a backup run's peak (itself, the kept archives, the new one and the staging copy; less what compresses), so the alert can fire after about 2.5 GB of new app data at `CRESSLET_BACKUP_KEEP=14`, or 7 GB at 3. Before opening signup, set up [off-site](#off-site) snapshots with `CRESSLET_BACKUP_KEEP=3` in the same `--install` command (it rewrites every setting: one left out, such as the remotes, is cleared). The old archives go only once the next run has written its snapshot (it needs room for that first): check `ls /var/backups/cresslet` after it. The estimates assume data within the quotas: lowering them doesn't shrink a bigger database or take apps from an account already past them. When it fires: see who uses what on the studio's Admin page and **Delete**, then **Purge**, their sites (deleted ones keep their data for `CRESSLET_DELETED_RETENTION_DAYS` until purged), if it's abuse, close signup and anonymous deploys again (that stops new accounts and new anonymous apps; existing accounts still create apps up to their limit, and an anonymous app's deploy key still updates it, so deal with those sites too), and delete old local snapshots if they're the bulk. A full container (memory alert, or restarts) affects only Cresslet. Five client IPs can also fill the anonymous pool in an hour, and keep it full: new anonymous apps then return 429 for everyone until a slot frees up (an app expires, is claimed or deleted). Existing anonymous apps and accounts still deploy.
+
+### Alerts
+
+[`deploy/coolify/alerts.sh`](../deploy/coolify/alerts.sh) checks the host every minute (a systemd timer, as root) and alerts when:
+
+| Check | Fires when |
+|---|---|
+| disk | a filesystem holding Docker's data or the backups (`CRESSLET_ALERT_PATHS`) is `CRESSLET_ALERT_DISK_PCT` (80) % full, or has used that much of its inodes (many small files) |
+| memory | the host has `CRESSLET_ALERT_MEM_PCT` (90) % of its memory in use (from `MemAvailable`); separately, when a Cresslet container uses that much of its limit |
+| restart | a running Cresslet container's restart count went up since the last check (an OOM kill or a crash; several in a minute are one alert; Docker doesn't keep which, see `docker logs` and `journalctl -k`). A container that stays stopped isn't checked: Coolify shows it |
+| firewall | `cresslet-firewall` fails (its own alert); it failed closed and stopped Cresslet, until its first run after Cresslet runs again (start or redeploy it in Coolify once the rules apply); or it couldn't stop a container, which runs unfirewalled until the rules apply. Each of these is its own alert |
+| backup | the last `cresslet-backup` run failed |
+
+The firewall alert also fires while the network is missing (its first deploy, or Coolify recreating it, or Cresslet stopped in Coolify on purpose): once, then a recovery when it's back. Keep the timer on meanwhile: it also watches the disk, memory and backups of the whole host. Each goes to the journal (`journalctl -t cresslet-alert`) and, with `CRESSLET_ALERT_URL`, is POSTed there: plain text by default (an [ntfy](https://ntfy.sh) topic: pick a long random name, since anyone who knows it can read it), or `{"<key>": "<text>"}` with `CRESSLET_ALERT_JSON_KEY` (`content` for a Discord webhook, `text` for Slack). One alert when a check starts failing and one when it recovers (disk and memory recover 5 points under the threshold; a check that couldn't measure doesn't recover). Alerts go to the URL after the checks (a slow URL can't hold them up); one it doesn't take (an error, a timeout) is in the journal right away and sent by a later run, with the time it happened, even if the problem is over by then. A run started while another is going (by hand, say) does nothing. With the disk full, an alert can't be recorded as sent: it goes again each minute until there's room. `--install` writes the settings to `/etc/cresslet-alerts.env` (root-only, as the URL is a secret); rerunning it (to change one, or to update the script) keeps the ones it isn't given. Coolify's own disk notification (if its notifications are set up) only checks once a day.
 
 ## Backups
 
@@ -127,14 +165,14 @@ rclone lsf keys:cresslet-snapshots
 Then:
 
 ```sh
-CRESSLET_BACKUP_RCLONE=snaps:cresslet-snapshots CRESSLET_BACKUP_KEY_RCLONE=keys:cresslet-keys \
+CRESSLET_BACKUP_RCLONE=snaps:cresslet-snapshots CRESSLET_BACKUP_KEY_RCLONE=keys:cresslet-keys CRESSLET_BACKUP_KEEP=3 \
   deploy/backup.sh <volume> --install   # the variables are written into the unit: rerun with them all
 systemctl start cresslet-backup; journalctl -u cresslet-backup -n 20   # one run now
 ```
 
 - A run fails (`systemctl status cresslet-backup`) when an upload fails (the keys go first: a failed key upload stops the snapshot's), or when `CRESSLET_BACKUP_RCLONE` is set without `CRESSLET_BACKUP_KEY_RCLONE` while the volume has a `secrets.key` (the snapshot stays local: off-site it couldn't be restored).
 - One snapshot path per volume: a restore takes the newest snapshot there.
-- The script doesn't delete off-site snapshots: give the snapshot bucket a lifecycle rule (e.g. delete after 30 days, and noncurrent versions too if it keeps versions), and watch for failed runs (`OnFailure=`, monitoring), or a month of them leaves none. Not the key bucket; turn on its versioning or object lock if your storage has them.
+- The script doesn't delete off-site snapshots: give the snapshot bucket a lifecycle rule (e.g. delete after 30 days, and noncurrent versions too if it keeps versions), and watch for failed runs ([Alerts](#alerts) does), or a month of them leaves none. Not the key bucket; turn on its versioning or object lock if your storage has them.
 - Snapshots made before the key was kept apart hold `secrets.key` themselves: delete them from the snapshot bucket (every version, if it keeps versions) only once a newer snapshot restored with its key (below) gets an app's secret back.
 - With `CRESSLET_SECRETS_KEY` set there may be no `secrets.key` to copy: set `CRESSLET_BACKUP_ENV_KEY=true` too (at `--install`), or snapshots without a key file stay local and the run fails (a key file deleted under a running server looks the same, and those snapshots couldn't be restored).
 - Keep both tokens (and `CRESSLET_SECRETS_KEY`, if you set it) somewhere other than the server, such as a password manager: a restore after losing the host needs them.

@@ -37,6 +37,15 @@ services:
       CRESSLET_GITHUB_CLIENT_SECRET: ${CRESSLET_GITHUB_CLIENT_SECRET:-}
       # Behind Cloudflare: cf-connecting-ip, so per-IP limits see clients, not Traefik.
       CRESSLET_CLIENT_IP_HEADER: ${CRESSLET_CLIENT_IP_HEADER:-}
+      # Abuse limits sized for a small shared host (4 vCPU, 8 GB, ~70 GB disk; the server's own
+      # defaults are larger). Worst cases: docs/self-hosting.md#sizing-a-shared-host.
+      CRESSLET_APP_MEMORY_MB: ${CRESSLET_APP_MEMORY_MB:-128}
+      CRESSLET_APP_DB_MB: ${CRESSLET_APP_DB_MB:-128}
+      CRESSLET_APP_FILES_MB: ${CRESSLET_APP_FILES_MB:-256}
+      CRESSLET_MAX_APPS_PER_ACCOUNT: ${CRESSLET_MAX_APPS_PER_ACCOUNT:-10}
+      CRESSLET_MAX_ANON_APPS: ${CRESSLET_MAX_ANON_APPS:-25}
+      CRESSLET_ANON_APPS_PER_HOUR: ${CRESSLET_ANON_APPS_PER_HOUR:-5}
+      CRESSLET_DEPLOYS_PER_HOUR: ${CRESSLET_DEPLOYS_PER_HOUR:-120}
       CRESSLET_SANDBOX_UID_BASE: 100000
       # `runtime: runsc` above: tells the server, so it doesn't warn about missing gVisor.
       CRESSLET_OUTER_GVISOR: "true"
