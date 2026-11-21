@@ -25,12 +25,16 @@ Patterns: exact (`/hook`), prefix (`/api/*` matches `/api` and `/api/...`), or `
 ## Server Env
 
 ```ts
-import { db, files, secrets, app } from "cresslet"; // the cresslet npm package (SDK + CLI), bundled into server.js
+import { db, secrets, type Env, type ExecutionContext } from "cresslet"; // the cresslet npm package (SDK + CLI), bundled into server.js
 
 export default {
-  async fetch(req: Request, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const id = Number(new URL(req.url).searchParams.get("id"));
     const todo = await db.first(db.sql`SELECT * FROM todos WHERE id = ${id}`);
-    return Response.json({ todo, key: secrets.get("STRIPE_KEY") });
+    const res = await fetch("https://api.stripe.com/v1/balance", {
+      headers: { authorization: `Bearer ${secrets.get("STRIPE_KEY")}` }, // server-side only
+    });
+    return Response.json({ todo, stripeOk: res.ok });
   },
 };
 ```
@@ -63,7 +67,7 @@ export default {
 
 | Binding | API |
 |---|---|
-| `db` | ``sql`…${v}` `` → a statement whose values are parameters (a nested `db.sql` is spliced in); `query(q)` → rows (or `await q`), `first(q)` → row \| null, `run(q)` → `{changes, lastInsertRowid}`; each also takes `(sql, ...params)` with `?`. `exec(sql)` (DDL, no params). `batch([q, "sql", {sql, params}, …])` → `{rows, changes, lastInsertRowid}[]`: one transaction (a savepoint), all or none, with no other statement in between. Per-app SQLite, SQLite SQL (`ATTACH`/`VACUUM INTO`, temp tables, `temp_store_directory`, `fts3_tokenizer` and the size/journal pragmas are refused; plain `VACUUM` works) |
+| `db` | ``sql`…${v}` `` → a statement whose values are parameters (a nested `db.sql` is spliced in); `query(q)` → rows (or `await q`), `first(q)` → row \| null, `run(q)` → `{changes, lastInsertRowid}`; each also takes `(sql, ...params)` with `?`. `exec(sql)` (DDL, no params). `batch([q, "sql", {sql, params}, …])` → `{rows, changes, lastInsertRowid}[]`: one transaction (a savepoint), all or none, with no other statement in between; transaction control (`BEGIN`, `COMMIT`, `SAVEPOINT`, …) isn't allowed in it. Inside a transaction the app opened with `exec("BEGIN")`, a batch is part of it, and SQLite's `OR ROLLBACK` conflict clause rolls back that whole transaction. Per-app SQLite, SQLite SQL (`ATTACH`/`VACUUM INTO`, temp tables, `temp_store_directory`, `fts3_tokenizer` and the size/journal pragmas are refused; plain `VACUUM` works) |
 | `files` | `put(key, body, {contentType})`, `get(key) → Response \| null`, `delete(key)`, `list(prefix) → {key,size,contentType,updatedAt}[]` |
 | `secrets` | `get(name)` (throws, naming it, if unset), `optional(name) → string \| undefined`, record access (`secrets.NAME`, `Object.keys(secrets)`). Set via `cresslet secrets set` (claimed apps); `.env.cresslet` locally |
 | `app` | `{ id, name, url, deployId }` |

@@ -198,7 +198,8 @@ function createDb(SQL, bytes) {
     /^(?:begin|commit|end|rollback|savepoint|release)\b/i.test(sql.replace(/^(?:[\s;]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, ""));
   const batch = (statements) => {
     if (!Array.isArray(statements)) throw new TypeError("batch takes an array of { sql, params }");
-    statements.forEach(({ sql, params } = {}, i) => {
+    statements.forEach((s, i) => {
+      const { sql, params } = s ?? {};
       if (typeof sql !== "string") throw new TypeError(`batch statement ${i + 1}: sql required`);
       if (params !== undefined && !Array.isArray(params)) throw new TypeError(`batch statement ${i + 1}: params must be an array`);
       if (isTxControl(sql)) throw new TypeError(`batch statement ${i + 1}: transaction control isn't allowed in a batch (it is one transaction)`);
@@ -227,10 +228,17 @@ function createDb(SQL, bytes) {
     }
   };
   db.exec("PRAGMA foreign_keys = ON;");
+  // query/first can write too (INSERT … RETURNING): save when they changed anything
+  const reading = (sql, params) => {
+    const before = one("SELECT total_changes()");
+    const rows = all(sql, params);
+    if (one("SELECT total_changes()") !== before) persist();
+    return rows;
+  };
   return {
     batch: async (statements) => batch(statements),
-    query: async (sql, ...params) => all(sql, params),
-    first: async (sql, ...params) => all(sql, params)[0] ?? null,
+    query: async (sql, ...params) => reading(sql, params),
+    first: async (sql, ...params) => reading(sql, params)[0] ?? null,
     run: async (sql, ...params) => {
       db.run(sql, norm(params));
       const changes = db.getRowsModified();

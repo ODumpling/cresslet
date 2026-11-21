@@ -119,6 +119,7 @@ export function createDb(path: string, maxBytes?: number) {
     batch(statements: { sql: string; params?: SQLInputValue[] }[]) {
       const total = db.prepare("SELECT total_changes() n");
       const counts = db.prepare("SELECT changes() changes, last_insert_rowid() id");
+      counts.setReadBigInts(true); // a rowid past 2^53 would throw otherwise
       db.exec("SAVEPOINT cresslet_batch");
       try {
         const out = statements.map(({ sql, params = [] }, i) => {
