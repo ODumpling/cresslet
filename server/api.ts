@@ -726,12 +726,13 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
     const d = deployId ? store.deploy(deployId) : store.deploys(a.id, 2)[1];
     if (!d || d.app_id !== a.id || beingRemoved(d.id)) throw new HttpError(404, "deploy not found", "not_found");
-    const json = await readFile(join(paths(cfg, a.id).deploy(d.id), "deploy.json"), "utf8").catch((e) => {
+    const file = join(paths(cfg, a.id).deploy(d.id), "deploy.json");
+    const json = await readFile(file, "utf8").catch((e) => {
       throw e?.code === "ENOENT" ? new HttpError(404, "deploy not found", "not_found") : e;
     });
     const config = JSON.parse(json);
-    // A prune may have picked it meanwhile: checked again with no await before the swap.
-    if (beingRemoved(d.id) || !store.deploy(d.id)) throw new HttpError(404, "deploy not found", "not_found");
+    // A prune may have picked it (or moved it aside) meanwhile: checked again with no await before the swap.
+    if (beingRemoved(d.id) || !store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
     store.setCurrentDeploy(a.id, d.id, config);
     runtime.stop(a.id);
     runtime.logs.push(a.id, "system", `rolled back to ${d.id}`);

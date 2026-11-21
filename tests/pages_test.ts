@@ -338,6 +338,11 @@ test("pages keep only the version they serve on disk; apps keep 10 for rollback"
     assert.deepEqual(rows(row.id), [v4]);
     assert.deepEqual(await onDisk(row.id), [v4]);
     assert.equal(await (await t.visit(page.name)).text(), "v4");
+    // A version replaced before this process started (no grace recorded) goes at once, within the 3 too.
+    store.db.prepare("INSERT INTO deploys (rowid, id, app_id, created_at, bytes, file_count, has_server, source) VALUES (-10, 'dep_old3', ?, ?, 2, 1, 0, 'api')")
+      .run(row.id, Date.now());
+    await t.srv.reap();
+    assert.deepEqual(rows(row.id), [v4]);
 
     // A deleted page keeps only the version a restore would serve.
     const v5 = await put("v5");
