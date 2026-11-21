@@ -111,6 +111,12 @@ no_check_bucket = true
 # the same, with token 2
 ```
 
+Install rclone from [rclone.org](https://rclone.org/install/), not the distro: older packages (Ubuntu 26.04 ships 1.60.1) check each upload with a request R2 rejects (`501 NotImplemented`), so every upload fails once and only gets through on a retry. Before installing, check that each token is limited to its bucket: both of these must fail with `AccessDenied`.
+
+```sh
+rclone lsf snaps:cresslet-keys; rclone lsf keys:cresslet-snapshots
+```
+
 ```sh
 CRESSLET_BACKUP_RCLONE=snaps:cresslet-snapshots CRESSLET_BACKUP_KEY_RCLONE=keys:cresslet-keys \
   deploy/backup.sh <volume> --install   # the variables are written into the unit: rerun with them all
