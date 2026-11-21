@@ -129,6 +129,12 @@ test("disk: one alert when it crosses the threshold, none while it stays, one wh
     assert.match(readFileSync(join(t.fix, "log"), "utf8"), /-t cresslet-alert -- cresslet on .+: disk 85% full/);
     t.set("dfi", "92"); // out of inodes with room to spare
     assert.match((await t.check()).sent[0], /: inodes 92% used on \/$/);
+    t.set("dfi", "?"); // df -i fails, df doesn't: not a recovery
+    const f = await t.check();
+    assert.deepEqual(f.sent, []);
+    assert.match(f.stderr, /df -i couldn't read/);
+    t.set("dfi", "-"); // a filesystem without inode counts: nothing to measure
+    assert.match((await t.check()).sent[0], /recovered: inodes 92%/);
   } finally {
     t.done();
   }
@@ -321,6 +327,9 @@ test("delivery: JSON for Discord/Slack; alerts that couldn't be sent go at a lat
     assert.equal(t.hits.at(-1)!.type, "application/json");
     assert.deepEqual((await t.check(json)).sent, []);
 
+    const none = await t.run(ALERTS, [NET, "--test"], { CRESSLET_ALERT_URL: "" });
+    assert.equal(none.code, 1);
+    assert.match(none.stderr, /no CRESSLET_ALERT_URL/);
     const c = await t.run(ALERTS, [NET, "--test"]);
     assert.equal(c.code, 0, c.stderr);
     assert.equal(t.hits.at(-1)!.type, "text/plain");

@@ -87,6 +87,7 @@ post() {
 }
 
 if [ "$MODE" = --test ]; then
+  [ -n "$URL" ] || { echo "cresslet-alerts: no CRESSLET_ALERT_URL (in $CONF: run as root?)" >&2; exit 1; }
   post "cresslet on $HOST: test alert (cresslet-alerts works)"
   exit $rc
 fi
@@ -144,7 +145,11 @@ for d in $PATHS; do
   # Inodes too: many small files can run out of them with room to spare (some filesystems: "-").
   mnt=$1
   set -- $(df -Pi "$d" 2>/dev/null | awk 'NR == 2 { sub("%", "", $5); print $5 }')
-  case ${1:-} in '' | *[!0-9]*) ;; *) [ "$1" -lt "$lim" ] || p="${p:+$p; }inodes $1% used on $mnt" ;; esac
+  case ${1:-} in
+    -) ;;
+    '' | *[!0-9]*) echo "cresslet-alerts: df -i couldn't read $d" >&2; err=1 ;;
+    *) [ "$1" -lt "$lim" ] || p="${p:+$p; }inodes $1% used on $mnt" ;;
+  esac
 done
 [ -n "$p" ] || [ -z "$err" ] || [ ! -f "$STATE/disk" ] || p=$(cat "$STATE/disk")
 report disk "$p"
@@ -218,10 +223,11 @@ for f in "$STATE"/restarts-*; do
   ! dk inspect "${f##*/restarts-}" 2>&1 >/dev/null | grep -qi "no such" || rm -f "$f"
 done
 
-# Last, so slow deliveries never hold up the checks: queued alerts, oldest first, each removed once
-# sent (a run killed mid-way sends at most one twice), up to the first that fails, within the time.
-while [ "$rc" -eq 0 ] && [ -s "$OUTBOX" ] && [ $(($(date +%s) - T0)) -lt 38 ]; do
-  IFS= read -r m < "$OUTBOX" || break
+# Last, so slow deliveries never hold up the checks: queued alerts, oldest first, up to the first
+# that fails, within the time; then the sent ones come off (a run killed before that sends them
+# again). All sent: truncated in place, which a disk out of room or inodes still allows.
+sent=0
+[ ! -s "$OUTBOX" ] || while [ "$rc" -eq 0 ] && [ $(($(date +%s) - T0)) -lt 38 ] && IFS= read -r m; do
   run=${m%% *}
   m=${m#* }
   at=${m%% *}
@@ -229,7 +235,14 @@ while [ "$rc" -eq 0 ] && [ -s "$OUTBOX" ] && [ $(($(date +%s) - T0)) -lt 38 ]; d
   # From an earlier run: say when it happened.
   [ "$run" = "$T0.$$" ] || m="$m (at $at)"
   post "$m" || break
-  sed 1d "$OUTBOX" > "$OUTBOX.n" && mv "$OUTBOX.n" "$OUTBOX" || break # disk full: not the same line again
-done
+  sent=$((sent + 1))
+done < "$OUTBOX"
+if [ "$sent" -gt 0 ]; then
+  if [ "$sent" -ge "$(wc -l < "$OUTBOX")" ]; then
+    : > "$OUTBOX"
+  else
+    sed "1,${sent}d" "$OUTBOX" > "$OUTBOX.n" && mv "$OUTBOX.n" "$OUTBOX" || :
+  fi
+fi
 
 exit $rc
