@@ -41,8 +41,7 @@ export function appSpec(cfg: Config, store: Store, app: App): AppSpec {
 
 /** HTTP upgrades (WebSockets) on server routes go to the sandbox; anything else is refused. */
 export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
-  return async (req: IncomingMessage, socket: Duplex, head: Buffer, appName: string) => {
-    const app = store.appByName(appName);
+  return async (req: IncomingMessage, socket: Duplex, head: Buffer, appName: string, app = store.appByName(appName)) => {
     const target = req.url ?? "/";
     if (!target.startsWith("/") || target.startsWith("//")) {
       socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
@@ -80,8 +79,7 @@ export function scheduled(cfg: Config, store: Store, runtime: Runtime) {
 }
 
 export function host(cfg: Config, store: Store, runtime: Runtime) {
-  return async (req: Request, appName: string): Promise<Response> => {
-    const app = store.appByName(appName);
+  return async (req: Request, appName: string, app = store.appByName(appName)): Promise<Response> => {
     if (!app || !app.current_deploy_id) {
       return new Response(`No app named "${appName}" is deployed here.`, {
         status: 404,

@@ -90,7 +90,7 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
 
   /** An app host's request: served here, or by the node that owns the app. */
   const appHost = (req: Request, name: string, app = store.appByName(name)) =>
-    app && !cluster.local(app.id) ? cluster.forward(app.id, req) : serveApp(req, name);
+    app && !cluster.local(app.id) ? cluster.forward(app.id, req) : serveApp(req, name, app);
 
   /**
    * The studio's previews run on their own origin (cresslet-container `previewOrigin`), so preview
@@ -167,11 +167,12 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
     const hostname = normDomain((req.headers.host ?? "").replace(/:\d+$/, ""));
     if (hostname === cfg.previewHost) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
     let name = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : "";
-    if (!name && hostname !== cfg.domain) name = store.appByDomain(hostname)?.name ?? ""; // custom domain
+    const custom = !name && hostname !== cfg.domain ? store.appByDomain(hostname) : undefined;
+    if (custom) name = custom.name;
     if (!name || name.includes(".")) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
-    const app = store.appByName(name);
+    const app = custom ?? store.appByName(name);
     if (app && !cluster.local(app.id)) return void cluster.forwardUpgrade(app.id, req, socket, head).catch(() => socket.destroy());
-    void upgradeApp(req, socket, head, name).catch(() => socket.destroy());
+    void upgradeApp(req, socket, head, name, app).catch(() => socket.destroy());
   }
 
   return {

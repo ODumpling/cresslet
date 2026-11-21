@@ -19,13 +19,13 @@ export default {
 /** A cluster where the apps in `remote` are owned by another node; forwards are recorded and answered with 203. */
 function fakeCluster() {
   const remote = new Set<string>();
-  const forwards: { appId: string; method: string; url: string; body: string }[] = [];
+  const forwards: { appId: string; method: string; url: string; body: Uint8Array; length: string | null }[] = [];
   const upgrades: string[] = [];
   let failUpgrade = false;
   const cluster: Cluster = {
     local: (id) => !remote.has(id),
     async forward(appId, req) {
-      forwards.push({ appId, method: req.method, url: req.url, body: await req.text() });
+      forwards.push({ appId, method: req.method, url: req.url, body: new Uint8Array(await req.arrayBuffer()), length: req.headers.get("content-length") });
       return new Response("from owner", { status: 203 });
     },
     async forwardUpgrade(appId, req, socket) {
@@ -101,7 +101,10 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     assert.equal(await text("/v1/apps/shop"), "203 from owner");
     assert.equal(await text("/v1/apps/shop/logs?n=5"), "203 from owner");
     assert.equal(await text("/v1/apps/shop/rollback", { method: "POST", body: '{"deployId":"d1"}' }), "203 from owner");
-    assert.equal(await text("/v1/deploys", { method: "POST", headers: auth, body: deployBody }), "203 from owner");
+    // A deploy, as sent (byte for byte, BOM included), before auth: a token this node rejects still goes to the owner.
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(deployBody)]);
+    const deployHeaders = { authorization: "Bearer clv_acct_unknown", "content-length": String(bom.length) };
+    assert.equal(await text("/v1/deploys", { method: "POST", headers: deployHeaders, body: bom }), "203 from owner");
     assert.equal(await text("/v1/admin/sites/shop", { method: "DELETE" }), "203 from owner");
     assert.deepEqual(fake.forwards.map((f) => `${f.method} ${f.url}`), [
       "GET http://shop.test.local/",
@@ -114,17 +117,21 @@ test("apps another node owns: their requests are forwarded; their crons and reap
       "DELETE http://test.local/v1/admin/sites/shop",
     ]);
     assert.ok(fake.forwards.every((f) => f.appId === app.id));
-    assert.equal(fake.forwards[5].body, '{"deployId":"d1"}');
-    assert.equal(fake.forwards[6].body, deployBody); // read here to find the app, forwarded intact
+    assert.equal(new TextDecoder().decode(fake.forwards[5].body), '{"deployId":"d1"}');
+    assert.deepEqual(fake.forwards[6].body, bom); // read here to find the app, forwarded intact
+    assert.equal(fake.forwards[6].length, String(bom.length));
     // Not app-scoped, or a CORS preflight: answered here.
     assert.equal((await call("/v1/apps/shop", { method: "OPTIONS", headers: { origin: "http://x", "access-control-request-method": "GET" } })).status, 204);
     assert.equal((await call("/v1/apps", { headers: auth })).status, 200);
     assert.equal(fake.forwards.length, 8);
     assert.equal(srv.store.deploys(app.id).length, 1); // the forwarded deploy didn't land here
 
-    // Crons: not queued for it, and a run queued while it was owned here doesn't start after it moved.
-    await srv.scheduler.tick(new Date("2026-11-19T10:10:00Z"));
+    // Crons: not queued for it (even if it moves here before the run would start), and a run queued
+    // while it was owned here doesn't start after it moved.
+    const notQueued = srv.scheduler.tick(new Date("2026-11-19T10:10:00Z"));
     fake.remote.delete(app.id);
+    await notQueued;
+    assert.equal(cronRuns(), 2);
     const queued = srv.scheduler.tick(new Date("2026-11-19T10:15:00Z"));
     fake.remote.add(app.id);
     await queued;

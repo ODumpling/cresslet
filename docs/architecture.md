@@ -99,7 +99,7 @@ Design: app affinity. Each app has one owner node. The owner holds `data/apps/<a
 `Cluster` has three methods: `local(appId)` says whether this node owns the app, `forward(appId, req)` sends an HTTP request to the owner, and `forwardUpgrade(appId, …)` does the same for a WebSocket upgrade. The server calls them in these places:
 
 - App hosts (subdomain or verified custom domain), HTTP and WebSocket upgrades: `main.ts`, after the host name resolves to an app.
-- App-scoped API calls: `/v1/apps/:name[/…]` and `/v1/admin/sites/:name[/…]` (soft-deleted sites included, so restore and purge run where the files are). The API forwards them before auth, and the owner authorizes against the shared metadata. `POST /v1/deploys` names its app in the body, so the API forwards it once it has read the body, before the per-app deploy limit is charged. Deploys, rollbacks, the restarts after claim, secret and egress changes, logs (including `?follow=1`), source, the data browser, usage and purge therefore all run on the owner.
+- App-scoped API calls: `/v1/apps/:name[/…]` and `/v1/admin/sites/:name[/…]` (soft-deleted sites included, so restore and purge run where the files are). The API forwards them before auth, and the owner authorizes against the shared metadata. `POST /v1/deploys` names its app in the body, so the API reads the body first, then forwards the request byte for byte, also before auth. Deploys, rollbacks, the restarts after claim, secret and egress changes, logs (including `?follow=1`), source, the data browser, usage and purge therefore all run on the owner.
 - Crons: the scheduler only queues apps this node owns, and checks again at dispatch, since a queued run can outlive a move.
 - Reaping: only apps this node owns.
 
@@ -112,6 +112,7 @@ Left before a second node works:
   - placement (an owner per app, and an owner chosen when an app is created; new apps are created on the node that took the deploy)
   - forwarding over HTTP that keeps the client IP for app hosts and streams in both directions, so `logs?follow=1` and cancellation work end to end
   - a hop guard, so two nodes that disagree about an owner don't forward to each other forever
+  - an answer when the owner is unreachable (a 502, not the generic 500 a rejected `forward` gives today)
   - moving an app, and failover
 - Node-wide state that has to be shared or made sticky: the per-IP limit on new anonymous apps, GitHub OAuth state and exchange codes, and `/v1/admin/sites` usage (it reads local disk for every site).
 

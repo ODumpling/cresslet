@@ -1,6 +1,5 @@
 // Control-plane HTTP API (/v1). Used by cresslet-cli, the studio, and agents.
 import { type Context, Hono, type Next } from "hono";
-import { cloneRawRequest } from "hono/request";
 import { cors } from "hono/cors";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { DatabaseSync } from "node:sqlite";
@@ -45,7 +44,7 @@ const encodeBase64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 const SECRET_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 
 /** `remoteAddr`: the TCP peer (main.ts passes it; tests don't). */
-type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
+type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string; deploy?: unknown } };
 
 export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluster) {
   const app = new Hono<Env>().basePath("/v1");
@@ -64,6 +63,22 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   };
   app.use("/apps/:name/*", toOwner);
   app.use("/admin/sites/:name/*", toOwner);
+  // A deploy names its app in the body: one for an app another node owns goes there as sent (bytes, auth).
+  app.use("/deploys", async (c, next) => {
+    if (c.req.method === "POST") {
+      const bytes = await c.req.arrayBuffer();
+      let input: { app?: unknown } | null | undefined;
+      try {
+        input = JSON.parse(new TextDecoder().decode(bytes));
+      } catch { /* the route answers 400 */ }
+      c.set("deploy", input);
+      const a = typeof input?.app === "string" ? store.appByName(input.app) : undefined;
+      if (a && !cluster.local(a.id)) {
+        return forward(a.id, new Request(c.req.url, { method: "POST", headers: c.req.raw.headers, body: bytes }));
+      }
+    }
+    await next();
+  });
 
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.code, message: err.message }, err.status as 400);
@@ -378,10 +393,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   // ---- deploys
   app.post("/deploys", async (c) => {
-    const input = await body<DeployInput & { app?: string }>(c);
+    const input = (c.get("deploy") ?? await body(c)) as DeployInput & { app?: string };
     const acct = c.get("account");
     let target = input.app ? store.appByName(input.app) : undefined;
-    if (target && !cluster.local(target.id)) return forward(target.id, await cloneRawRequest(c.req));
     let createdKey: string | undefined;
     if (target) {
       await authorize(c, target, "deploy");
