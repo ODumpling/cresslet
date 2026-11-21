@@ -176,7 +176,7 @@ function createDb(SQL, bytes) {
       } catch {
         return persist(); // in a transaction: try again later
       }
-      savedRowid = Number(one("SELECT last_insert_rowid()"));
+      savedRowid = rowid(); // the live value, or the one kept from before an earlier save
       const out = db.export();
       reopened = true; // last_insert_rowid() is 0 on the new connection until its next insert
       db.exec("PRAGMA foreign_keys = ON;");
@@ -266,16 +266,21 @@ function createDb(SQL, bytes) {
     batch: async (statements) => batch(statements),
     query: async (sql, ...params) => reading(sql, params),
     first: async (sql, ...params) => reading(sql, params)[0] ?? null,
+    // persist in finally: a statement (or script) that failed part-way may still have written
     run: async (sql, ...params) => {
-      db.run(sql, norm(params));
-      const changes = db.getRowsModified();
-      const lastInsertRowid = rowid();
-      persist();
-      return { changes, lastInsertRowid };
+      try {
+        db.run(sql, norm(params));
+        return { changes: db.getRowsModified(), lastInsertRowid: rowid() };
+      } finally {
+        persist();
+      }
     },
     exec: async (sql) => {
-      db.exec(sql);
-      persist();
+      try {
+        db.exec(sql);
+      } finally {
+        persist();
+      }
     },
   };
 }

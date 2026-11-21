@@ -131,6 +131,9 @@ export default { async fetch(req) {
   if (p === "/rowid") return json((await db.batch(["SELECT 1"]))[0].lastInsertRowid);
   if (p === "/ret") return json(await db.first(db.sql\`INSERT INTO t VALUES (\${"r"}) RETURNING rowid AS id\`));
   if (p === "/zero") return json((await db.batch(["INSERT INTO t (rowid, v) VALUES (0, 'z')"]))[0].lastInsertRowid);
+  if (p === "/touch") return json(await db.run("UPDATE t SET v = v"));
+  if (p === "/partial-run") return db.run("INSERT OR FAIL INTO u VALUES (3), (4), (3)").then(() => json("no error"), (e) => json(e.message));
+  if (p === "/partial-exec") return db.exec("INSERT INTO u VALUES (5); INSERT INTO u VALUES (5);").then(() => json("no error"), (e) => json(e.message));
   if (p === "/partial") {
     await db.exec("CREATE TABLE IF NOT EXISTS u (k INTEGER PRIMARY KEY)");
     return db.query("INSERT OR FAIL INTO u VALUES (1), (2), (1) RETURNING k").then(() => json("no error"), (e) => json(e.message));
@@ -148,9 +151,16 @@ export default { async fetch(req) {
     const ret = (await w.get("/ret")).json;
     await w.saved();
     assert.equal((await w.get("/rowid")).json, ret.id);
+    // a second save with no insert in between keeps it too
+    await w.get("/touch");
+    await w.saved();
+    assert.equal((await w.get("/rowid")).json, ret.id);
     // a query that failed part-way: SQLite kept the rows it wrote, and so does the save
     assert.match((await w.get("/partial")).json, /UNIQUE constraint failed/);
     assert.deepEqual((await w.saved()).exec("SELECT k FROM u ORDER BY k")[0].values, [[1], [2]]);
+    assert.match((await w.get("/partial-run")).json, /UNIQUE constraint failed/);
+    assert.match((await w.get("/partial-exec")).json, /UNIQUE constraint failed/);
+    assert.deepEqual((await w.saved()).exec("SELECT k FROM u ORDER BY k")[0].values, [[1], [2], [3], [4], [5]]);
     await w.saved();
     await w.get("/ddl");
     assert.equal((await w.saved()).exec("SELECT name FROM sqlite_master WHERE name = 'ddl_only'").length, 1);
