@@ -2156,20 +2156,15 @@ function mountBuilder({ c, devLog, onChange }) {
 
   // Where Claude is reached: "key" (the user's own Anthropic API key, from this browser), "credits" (this server, on
   // the account's AI credits; when it offers them and the user is logged in), or null (set one up first).
-  let creditsOn = false, wantKey = false; // wantKey: entering an own key though credits are available
-  const source = () => (apiKey.get() ? "key" : creditsOn && auth.token && !wantKey ? "credits" : null);
+  let creditsOn = false;
+  const source = () => (apiKey.get() ? "key" : creditsOn && auth.token ? "credits" : null);
   function showView() {
     const src = source();
     $("builder-setup").hidden = !!src;
     $("builder-chat").hidden = !src;
     $("builder-credits-offer").hidden = !creditsOn || !!auth.token;
-    $("builder-key-cancel").hidden = !(creditsOn && auth.token);
     $("builder-forget").hidden = src !== "key";
-    $("builder-own-key").hidden = src !== "credits";
     $("builder-credits").hidden = src !== "credits";
-    $("builder-key-help").firstChild.textContent = creditsOn && auth.token
-      ? "Kept in this browser and sent only to Anthropic. Usage is billed to your Anthropic account, not your AI credits. "
-      : "Kept in this browser and sent only to Anthropic. Usage is billed to your Anthropic account. ";
     return !!src;
   }
   const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
@@ -2215,7 +2210,6 @@ function mountBuilder({ c, devLog, onChange }) {
     $("builder-send").disabled = busy || locked;
     $("builder-stop").hidden = !busy;
     $("builder-new").disabled = busy;
-    $("builder-own-key").disabled = busy;
     $("builder-forget").disabled = busy;
     input.disabled = locked;
     $("builder-locked").hidden = !locked;
@@ -2238,24 +2232,10 @@ function mountBuilder({ c, devLog, onChange }) {
     }
     $("builder-key").value = "";
     $("builder-key-error").textContent = "";
-    wantKey = false;
     showView();
     chatFocus();
   };
   $("builder-key").oninput = () => ($("builder-key-error").textContent = "");
-  $("builder-key-cancel").onclick = () => {
-    wantKey = false;
-    $("builder-key-error").textContent = "";
-    showView();
-    refreshCredits();
-    chatFocus();
-  };
-  $("builder-own-key").onclick = () => {
-    if (busy) return;
-    wantKey = true;
-    showView();
-    $("builder-key").focus();
-  };
   $("builder-forget").onclick = () => {
     if (busy) return;
     apiKey.set(null);
