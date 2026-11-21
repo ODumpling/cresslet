@@ -162,8 +162,9 @@ function files(op, payload, transfer = []) {
 }
 
 /**
- * PRAGMAs that only report, with or without an argument (`table_info(t)`). Any other PRAGMA, or one with `=`, may change
- * the database (incremental_vacuum, optimize, wal_checkpoint, user_version = …): the preview saves after it.
+ * PRAGMAs that only report when they have no `=` or `(…)`. Any other PRAGMA, or one with `=`, or `(…)` outside
+ * READ_PRAGMAS_WITH_ARG, may change the database (incremental_vacuum, optimize, user_version = 7, user_version(7)): the
+ * preview saves after it.
  */
 const READ_PRAGMAS = new Set([
   "application_id", "auto_vacuum", "cache_size", "collation_list", "compile_options", "data_version", "database_list",
@@ -171,6 +172,12 @@ const READ_PRAGMAS = new Set([
   "index_list", "index_xinfo", "integrity_check", "journal_mode", "module_list", "page_count", "page_size",
   "pragma_list", "quick_check", "recursive_triggers", "schema_version", "table_info", "table_list", "table_xinfo",
   "user_version",
+]);
+
+/** Report-only PRAGMAs whose argument names what to report on (`table_info(t)`), not a value to set. */
+const READ_PRAGMAS_WITH_ARG = new Set([
+  "foreign_key_check", "foreign_key_list", "index_info", "index_list", "index_xinfo", "integrity_check", "quick_check",
+  "table_info", "table_list", "table_xinfo",
 ]);
 
 function createDb(SQL, bytes) {
@@ -236,8 +243,15 @@ function createDb(SQL, bytes) {
     const s = sql.replace(/^(?:[\s;(]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
     if (/^(?:select|values|explain)\b/i.test(s)) return false;
     if (/^with\b/i.test(s)) return /\b(?:insert|update|delete|replace)\b/i.test(s);
-    const pragma = /^pragma\s+(?:\w+\s*\.\s*)?(\w+)\s*(=)?/i.exec(s);
-    if (pragma) return !!pragma[2] || !READ_PRAGMAS.has(pragma[1].toLowerCase()); // unsure: save
+    if (/^pragma\b/i.test(s)) {
+      // comments anywhere in it out (`PRAGMA main.user_version /* x */ = 7`), then name and what follows
+      const p = /^pragma\s+(?:\w+\s*\.\s*)?(\w+)\s*([=(])?/i.exec(s.replace(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, " "));
+      if (!p) return true; // unsure: save
+      const name = p[1].toLowerCase();
+      if (p[2] === "=") return true;
+      if (p[2] === "(") return !READ_PRAGMAS_WITH_ARG.has(name); // user_version(7) sets it; table_info(t) reports
+      return !READ_PRAGMAS.has(name);
+    }
     return true;
   };
   // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).

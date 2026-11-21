@@ -156,6 +156,8 @@ export default { async fetch(req) {
   if (p === "/table-info") return json((await db.query("PRAGMA table_info(t)")).length);
   if (p === "/vacuum-inc") return json(await db.query("PRAGMA incremental_vacuum"));
   if (p === "/version") return json(await db.query("PRAGMA main.user_version = 7"));
+  if (p === "/version-call") return json(await db.query("PRAGMA user_version(8)"));
+  if (p === "/version-comment") return json(await db.query("PRAGMA main.user_version /* c */ = 9"));
   if (p === "/mk-u") return db.exec("CREATE TABLE u (k INTEGER PRIMARY KEY)").then(() => json("ok"));
   if (p === "/partial") {
     return db.query("INSERT OR FAIL INTO u VALUES (1), (2), (1) RETURNING k").then(() => json("no error"), (e) => json(e.message));
@@ -209,6 +211,10 @@ export default { async fetch(req) {
     await w.saved();
     await w.get("/version");
     assert.deepEqual((await w.saved()).exec("PRAGMA user_version")[0].values, [[7]]);
+    await w.get("/version-call");
+    assert.deepEqual((await w.saved()).exec("PRAGMA user_version")[0].values, [[8]]);
+    await w.get("/version-comment");
+    assert.deepEqual((await w.saved()).exec("PRAGMA user_version")[0].values, [[9]]);
     assert.match((await w.get("/big")).json, /can't store the integer 9007199254740993 exactly/);
     assert.deepEqual((await w.get("/safe")).json, { x: 5 });
   } finally {
