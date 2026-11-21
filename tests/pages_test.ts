@@ -299,35 +299,41 @@ test("pages keep only the version they serve on disk; apps keep 10 for rollback"
     const tok = await t.account("a@b.co");
     const { store, cfg } = t.srv;
     const rows = (appId: string) => store.deploys(appId, 100).map((d) => d.id);
-    const rowSet = (appId: string) => rows(appId).sort();
     const onDisk = async (appId: string) => (await readdir(paths(cfg, appId).deploys)).sort();
     const page = (await t.send("POST", "/v1/pages", tok, { html: "v1", visibility: "link" })).body.page;
-    for (const v of ["v2", "v3", "v4"]) assert.equal((await t.send("PUT", `/v1/pages/${page.name}`, tok, { html: v })).status, 200);
     const row = store.appByName(page.name)!;
-    const served = row.page_deploy_id!;
-    // An upload removes all but the version it replaced, which a request in flight may still read.
-    const [, previous] = rows(row.id);
-    assert.deepEqual(rows(row.id), [served, previous]);
-    assert.deepEqual(await onDisk(row.id), [served, previous].sort());
+    const put = async (html: string) => {
+      assert.equal((await t.send("PUT", `/v1/pages/${page.name}`, tok, { html })).status, 200);
+      return store.appByName(page.name)!.page_deploy_id!;
+    };
+    const v1 = row.page_deploy_id!;
+    // Versions replaced in the last minute stay (a request in flight may have read the old pointer)…
+    const v2 = await put("v2");
+    const v3 = await put("v3");
+    assert.deepEqual(rows(row.id), [v3, v2, v1]);
+    // …up to 3 in all.
+    const v4 = await put("v4");
+    assert.deepEqual(rows(row.id), [v4, v3, v2]);
+    assert.deepEqual(await onDisk(row.id), [v4, v3, v2].sort());
     assert.equal(await (await t.visit(page.name)).text(), "v4");
 
-    // Versions an older server kept (rows and directories).
+    // Versions an older server kept (rows and directories), past the 3.
     for (const [i, d] of ["dep_old1", "dep_old2"].entries()) {
-      store.addDeploy({ id: d, app_id: row.id, created_at: Date.now() - 1000 * (i + 1), bytes: 2, file_count: 1, has_server: 0, source: "api" });
+      store.addDeploy({ id: d, app_id: row.id, created_at: Date.now() - 600_000 * (i + 1), bytes: 2, file_count: 1, has_server: 0, source: "api" });
       await mkdir(join(paths(cfg, row.id).deploy(d), "public"), { recursive: true });
     }
-    const all = [served, previous, "dep_old1", "dep_old2"];
-    // The reaper waits a minute after an upload, and leaves pages another node owns alone.
-    await t.srv.reap();
-    assert.deepEqual(rows(row.id), all);
-    store.db.prepare("UPDATE deploys SET created_at = ? WHERE id = ?").run(Date.now() - 61_000, served);
+    const all = [v4, v3, v2, "dep_old1", "dep_old2"];
+    // The reaper leaves pages another node owns alone.
     await pruneOldPageVersions(cfg, store, () => false);
-    assert.deepEqual(rowSet(row.id), [...all].sort());
+    assert.deepEqual(rows(row.id), all);
     assert.deepEqual(await onDisk(row.id), [...all].sort());
-    // Then only the served version is left.
+    // Here, it removes what's past the 3 at once, and the rest a minute after they were replaced.
     await t.srv.reap();
-    assert.deepEqual(rows(row.id), [served]);
-    assert.deepEqual(await onDisk(row.id), [served]);
+    assert.deepEqual(rows(row.id), [v4, v3, v2]);
+    store.db.prepare("UPDATE deploys SET created_at = created_at - 61000 WHERE app_id = ?").run(row.id);
+    await t.srv.reap();
+    assert.deepEqual(rows(row.id), [v4]);
+    assert.deepEqual(await onDisk(row.id), [v4]);
     assert.equal(await (await t.visit(page.name)).text(), "v4");
 
     // An app keeps its last 10 deploys (rollback), files and rows alike; the reaper leaves them alone.

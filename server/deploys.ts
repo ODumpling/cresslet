@@ -236,9 +236,7 @@ export async function writePage(cfg: Config, store: Store, app: App, files: Depl
     source: String(source).slice(0, 20),
   });
   store.setPageDeploy(app.id, deployId);
-  // No rollback for pages: older versions go now. The one just replaced stays until the reaper
-  // (pruneOldPageVersions), so a request that read the old pointer can still finish.
-  await pruneDeploys(cfg, store, app.id, deployId, 2);
+  await prunePage(cfg, store, app.id);
   return { id: deployId, bytes, files: decoded.length };
 }
 
@@ -248,13 +246,29 @@ async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: stri
   for (const d of others.slice(keepCount - 1)) await removeDeploy(cfg, store, d);
 }
 
+/** A replaced page version stays this long, so a request that read the old pointer can finish. */
+const PAGE_GRACE_MS = 60_000;
+/** …but no more than this many versions in all (the served one included), however fast the uploads. */
+const MAX_PAGE_VERSIONS = 3;
+
 /**
- * Removes the versions a page no longer serves, once it has served its current one for `graceMs`
- * (the one before, which writePage leaves; and any an older server kept, 10 per page).
+ * Pages have no rollback: removes the versions a page no longer serves, once they were replaced
+ * `graceMs` ago (or they're past MAX_PAGE_VERSIONS). After an upload, and by the reaper.
  */
-export async function pruneOldPageVersions(cfg: Config, store: Store, local: (appId: string) => boolean, graceMs = 60_000) {
-  for (const d of store.oldPageDeploys(Date.now() - graceMs)) {
-    if (local(d.app_id)) await removeDeploy(cfg, store, d);
+async function prunePage(cfg: Config, store: Store, appId: string, graceMs = PAGE_GRACE_MS) {
+  const served = store.appById(appId)?.page_deploy_id;
+  if (!served) return;
+  const all = store.deploys(appId, 1000); // newest first: each was replaced when the one before it came
+  const cutoff = Date.now() - graceMs;
+  for (let i = 1; i < all.length; i++) {
+    if (all[i].id !== served && (i >= MAX_PAGE_VERSIONS || all[i - 1].created_at <= cutoff)) await removeDeploy(cfg, store, all[i]);
+  }
+}
+
+/** The reaper's pass: pages (owned here) with versions they don't serve, kept by prunePage or an older server. */
+export async function pruneOldPageVersions(cfg: Config, store: Store, local: (appId: string) => boolean, graceMs = PAGE_GRACE_MS) {
+  for (const appId of store.pagesWithOldVersions()) {
+    if (local(appId)) await prunePage(cfg, store, appId, graceMs);
   }
 }
 

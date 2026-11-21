@@ -69,7 +69,7 @@ data/apps/<appId>/data/files/          app file storage
 1. Client builds (CLI: native esbuild; studio: esbuild-wasm in cresslet-container).
 2. `POST /v1/deploys` with files + server bundle → written to new immutable deploy dir.
 3. Pointer swap (`apps.current_deploy_id`), sandbox stopped → next request cold-starts new code (~70 ms).
-4. Last 10 deploys kept; `rollback` swaps the pointer back. A page (`PUT /v1/pages/:name`) keeps only the version it serves (the reaper removes the replaced one after a minute, so requests in flight finish).
+4. Last 10 deploys kept; `rollback` swaps the pointer back. A page (`PUT /v1/pages/:name`) keeps only the version it serves (a replaced one goes a minute later, so requests in flight finish).
 
 ## Studio (browser)
 

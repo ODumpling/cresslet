@@ -97,7 +97,7 @@ Static HTML you upload and share, like an artifact: one file (`{"html": "…"}`,
 
 Defaults for a new page, in order: the upload's own fields, the account's (`PUT /v1/me/settings`), the server's (`CRESSLET_PAGE_VISIBILITY`, default `private`; `CRESSLET_PAGE_RETENTION_DAYS`, default 30). Every page can be changed later with `PATCH`.
 
-Sharing a private page: invite accounts with `POST /v1/apps/<page>/collaborators` (viewers can open it; admins can also change and re-upload it). Pages count toward `CRESSLET_MAX_PAGES_PER_ACCOUNT` (default 200), not the app limit, and aren't in `GET /v1/apps`. A page keeps only the version it serves: re-uploading replaces the files, with no history or rollback (the replaced files are removed within minutes).
+Sharing a private page: invite accounts with `POST /v1/apps/<page>/collaborators` (viewers can open it; admins can also change and re-upload it). Pages count toward `CRESSLET_MAX_PAGES_PER_ACCOUNT` (default 200), not the app limit, and aren't in `GET /v1/apps`. A page keeps only the version it serves: re-uploading replaces the files, with no history or rollback (the replaced files are removed a few minutes later).
 
 ```sh
 curl -X POST $CRESSLET/v1/pages -H "authorization: Bearer $CRESSLET_TOKEN" -H "content-type: application/json" \

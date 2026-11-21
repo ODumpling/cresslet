@@ -717,11 +717,10 @@ export class Store {
   deploy(deployId: string): Deploy | undefined {
     return this.db.prepare("SELECT * FROM deploys WHERE id = ?").get(deployId) as Deploy | undefined;
   }
-  /** Deploys of pages other than the one each serves, where that one was uploaded before `servedBefore`. */
-  oldPageDeploys(servedBefore: number): Pick<Deploy, "id" | "app_id">[] {
-    return this.db.prepare(`SELECT d.id, d.app_id FROM deploys d JOIN apps a ON a.id = d.app_id
-      JOIN deploys s ON s.id = a.page_deploy_id
-      WHERE a.kind = 'page' AND d.id <> s.id AND s.created_at < ?`).all(servedBefore) as unknown as Pick<Deploy, "id" | "app_id">[];
+  /** Pages with deploys other than the one each serves. */
+  pagesWithOldVersions(): string[] {
+    return (this.db.prepare(`SELECT DISTINCT d.app_id FROM deploys d JOIN apps a ON a.id = d.app_id
+      WHERE a.kind = 'page' AND a.page_deploy_id IS NOT NULL AND d.id <> a.page_deploy_id`).all() as { app_id: string }[]).map((r) => r.app_id);
   }
   deleteDeploy(deployId: string) {
     this.db.prepare("DELETE FROM deploys WHERE id = ?").run(deployId);
