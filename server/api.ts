@@ -1142,7 +1142,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.body(null, await store.appByDomain(d) || (d === cfg.previewHost && !previewAppName(cfg)) ? 200 : 404);
   });
 
-  // ---- pages: uploaded static HTML with a visibility and a retention (docs/api.md#pages)
+  // ---- pages (artifacts to users): uploaded static HTML with a visibility and a retention (docs/api.md#artifacts)
   const pageDefaults = (acct: Account) => {
     const own = store.settings(acct).pages ?? {};
     return {

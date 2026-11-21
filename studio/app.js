@@ -242,9 +242,13 @@ function slugField(input, kind) {
     },
   };
 }
+// What sharing an app lets each role do (the Share page swaps in an artifact's).
+const INVITE_VIEWER_APP = $("invite-role").options[0].textContent;
+let inviteAdminApp = $("invite-role-admin").textContent;
 // Custom domains off on this server (CRESSLET_CUSTOM_DOMAINS=false): don't offer them in the role descriptions.
 meta.then((m) => {
   if (m.customDomains !== false) return;
+  inviteAdminApp = inviteAdminApp.replace(/,? domains\b/, "");
   for (const id of ["token-role-admin", "invite-role-admin"]) {
     const o = $(id);
     o.textContent = o.textContent.replace(/,? domains\b/, "");
@@ -313,7 +317,7 @@ function logOut() {
           after = sessionStorage.getItem("cresslet.afterLogin");
           sessionStorage.removeItem("cresslet.afterLogin");
         } catch { /* storage blocked */ }
-        if (after?.startsWith("#/view/") || after?.startsWith("#/p/") || after === "#/cli") {
+        if (after?.startsWith("#/view/") || after?.startsWith("#/p/") || after === "#/cli" || after === "#/artifacts") {
           location.hash = after;
           return;
         }
@@ -1477,7 +1481,7 @@ async function renderView(name, path) {
     sessionStorage.setItem(key, JSON.stringify([...tries, Date.now()]));
   } catch { /* storage blocked */ }
   if (tries.length >= 3) {
-    text("Your browser didn't keep this page's sign-in. Allow cookies for it, then try again.");
+    text("Your browser didn't keep this artifact's sign-in. Allow cookies for it, then try again.");
     $("view-actions").replaceChildren(el("button", {
       className: "btn",
       type: "button",
@@ -1537,7 +1541,8 @@ async function answerInvite(i, accept) {
     refocus($("invites-section").hidden ? $("apps-title") : $("invites-title"));
     return;
   }
-  toast(accept ? `${i.app} is in your deployed apps (${ACCESS_LABEL[r.app.access]?.toLowerCase() ?? r.app.access})` : `Declined the invite to ${i.app}`);
+  // An invite can be to an app (Deployed apps) or an artifact (Artifacts).
+  toast(accept ? `Joined ${i.app} as ${ACCESS_LABEL[r.app.access]?.toLowerCase() ?? r.app.access}: it's in Deployed apps or Artifacts` : `Declined the invite to ${i.app}`);
   await Promise.all([renderInvites(), accept ? renderApps() : null]);
   refocus($("invites-section").hidden ? $("apps-title") : $("invites-title"));
 }
@@ -1568,8 +1573,8 @@ async function renderShare(name) {
   document.title = `Share ${name} · Cresslet Studio`;
   $("share-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", `Share ${name}`);
   $("share-sub").textContent = "Invite accounts to this app. Viewers see it; admins can also change it.";
-  $("invite-role").options[0].textContent = "Viewer: see the app, logs, source and data";
-  $("invite-role-admin").textContent = "Admin: also deploy, roll back, secrets, domains and sharing (not deleting the app)";
+  $("invite-role").options[0].textContent = INVITE_VIEWER_APP;
+  $("invite-role-admin").textContent = inviteAdminApp;
   // An artifact: its title, and what sharing means for it.
   api(`/v1/pages/${encodeURIComponent(name)}`).then(({ page }) => {
     if (shareApp !== name) return;

@@ -125,7 +125,11 @@ try {
   await anon.goto(report.url);
   await anon.locator("#view").getByRole("button", { name: "Log in with GitHub" }).waitFor();
   assert(anon.url().startsWith(base + "/#/view/"), `anon at ${anon.url()}`);
-  // Logged out, artifacts are still in the nav; the old #/pages address goes to #/artifacts, which asks for a login.
+  // Logged out: the landing page links to artifacts, which ask for a login; they stay in the nav; the old #/pages
+  // address goes to #/artifacts.
+  await anon.goto(base + "/");
+  await anon.locator("#landing").getByRole("link", { name: "artifact", exact: true }).click();
+  await anon.getByText("Log in to deploy artifacts").waitFor();
   await anon.goto(base + "/#/pages");
   await anon.getByText("Log in to deploy artifacts").waitFor();
   assert(anon.url().endsWith("#/artifacts"), `old address at ${anon.url()}`);
