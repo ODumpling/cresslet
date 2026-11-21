@@ -137,6 +137,18 @@ test("studio preview worker: contract cases pass; its database snapshot keeps ev
   }
 });
 
+test("studio preview worker: the module's top level and its export getters see no bindings", async () => {
+  const w = await startWorker(withSdk(`import { app } from "cresslet";
+const name = () => { try { return app.name; } catch (e) { return e.name; } };
+const top = name();
+export default { get fetch() { const got = name(); return () => Response.json({ top, getter: got, later: name() }); } };`));
+  try {
+    assert.deepEqual((await w.get("/")).json, { top: "CressletError", getter: "CressletError", later: "preview" });
+  } finally {
+    await w.close();
+  }
+});
+
 test("studio preview worker: schema changes through query are saved, lastInsertRowid survives a save, unsafe bigints refused", async () => {
   const w = await startWorker(withSdk(`import { db } from "cresslet";
 export default { async fetch(req) {

@@ -363,11 +363,11 @@ onmessage = async ({ data: m, ports }) => {
         mod = await import(url);
       } finally {
         URL.revokeObjectURL(url);
-        runtime.env = env; // after the module's top level, as on the platform
       }
       const exp = mod.default ?? mod;
       handler = typeof exp === "function" ? exp : exp?.fetch?.bind(exp);
       if (!handler) throw new Error("server/index must `export default { fetch(req, env) {} }`");
+      runtime.env = env; // after the module's top level and reading its exports, as on the platform
       postMessage({ type: "ready" });
     } catch (e) {
       postMessage({ type: "fatal", message: e?.stack ?? String(e) });
