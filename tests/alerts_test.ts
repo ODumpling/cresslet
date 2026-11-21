@@ -13,20 +13,28 @@ const FIREWALL = resolve("deploy/coolify/firewall.sh");
 const NET = "netuuid";
 
 const STUBS: Record<string, string> = {
-  // ps lists "<id> <coolify.proxy label>" lines from $FIX/ps; inspect/stats read $FIX/inspect-<id>, $FIX/stats-<id>.
+  // ps lists "<id> <coolify.proxy label>" lines from $FIX/ps. $FIX/inspect-<id> sets label, name,
+  // restarts, oom (sh), rendered into the -f format; $FIX/stats-<id> is "<name> <mem %>".
   docker: `#!/bin/sh
 F=$FIX
 for last; do :; done
 case $1 in
   ps) [ -f "$F/ps" ] || exit 0; case "$*" in *coolify.proxy*) cat "$F/ps" ;; *) cut -d' ' -f1 "$F/ps" ;; esac ;;
-  inspect) [ -f "$F/inspect-$last" ] || exit 1; case "$*" in *-f*) cat "$F/inspect-$last" ;; esac ;;
-  stats) cat "$F/stats-$last" 2>/dev/null || echo 0.00% ;;
-  stop) echo "$2" >> "$F/stopped"; grep -v "^$2 " "$F/ps" > "$F/ps.n" || :; mv "$F/ps.n" "$F/ps" ;;
+  inspect) [ -f "$F/inspect-$last" ] || exit 1; [ "$2" = -f ] || exit 0; . "$F/inspect-$last"
+    printf '%s\\n' "$3" | sed -e "s#{{or (index .Config.Labels \\"coolify.proxy\\") \\"-\\"}}#$label#" -e "s#{{.Name}}#$name#" \\
+      -e "s#{{.RestartCount}}#$restarts#" -e "s#{{.State.OOMKilled}}#$oom#" ;;
+  stats) cat "$F/stats-$last" 2>/dev/null || exit 1 ;;
+  stop) [ ! -f "$F/stop-fails" ] || exit 1; echo "$2" >> "$F/stopped"; grep -v "^$2 " "$F/ps" > "$F/ps.n" || :; mv "$F/ps.n" "$F/ps" ;;
   network) echo 0123456789abcdef0123 ;;
 esac`,
+  // failed-<unit>: failed; active-<unit>: a run in progress; else inactive (the last run worked).
   systemctl: `#!/bin/sh
-[ "$1" = is-failed ] && [ -f "$FIX/failed-$3" ]`,
+case $1 in
+  is-failed) [ -f "$FIX/failed-$3" ] ;;
+  is-active) if [ -f "$FIX/failed-$2" ]; then echo failed; exit 3; elif [ -f "$FIX/active-$2" ]; then echo activating; exit 3; fi; echo inactive; exit 3 ;;
+esac`,
   df: `#!/bin/sh
+[ ! -f "$FIX/df-fails" ] || exit 1
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/sda1 100 0 100 $(cat "$FIX/df")% /"`,
   logger: `#!/bin/sh
@@ -79,11 +87,13 @@ async function setup(status = 200) {
   // A healthy host: one Cresslet container and Coolify's proxy on the network.
   set("df", "40");
   meminfo(30);
+  const container = (id: string, name: string, { restarts = 0, oom = false, proxy = false, mem = "2.50%" } = {}) => {
+    set(`inspect-${id}`, `label=${proxy ? "true" : "-"} name=/${name} restarts=${restarts} oom=${oom}\n`);
+    set(`stats-${id}`, `${name} ${mem}\n`);
+  };
   set("ps", "c1 \nproxy true\n");
-  set("inspect-c1", "/cresslet-abc - 0 false\n");
-  set("inspect-proxy", "/coolify-proxy true 0 false\n");
-  set("stats-c1", "2.50%\n");
-  set("stats-proxy", "99.00%\n");
+  container("c1", "cresslet-abc");
+  container("proxy", "coolify-proxy", { proxy: true, mem: "99.00%" });
   const check = async (extra: Record<string, string> = {}) => {
     const before = hits.length;
     const r = await run(ALERTS, [NET], extra);
@@ -93,7 +103,7 @@ async function setup(status = 200) {
     srv.close();
     rmSync(dir, { recursive: true, force: true });
   };
-  return { dir, fix, hits, set, meminfo, run, check, done, fail: (unit: string, on = true) => (on ? set(`failed-${unit}`, "") : rmSync(join(fix, `failed-${unit}`), { force: true })), setStatus: (s: number) => (code = s) };
+  return { dir, fix, hits, set, container, meminfo, run, check, done, fail: (unit: string, on = true) => (on ? set(`failed-${unit}`, "") : rmSync(join(fix, `failed-${unit}`), { force: true })), setStatus: (s: number) => (code = s) };
 }
 
 const skip = process.platform === "win32" ? "needs sh" : false;
@@ -122,20 +132,38 @@ test("memory: host use, the Cresslet container against its limit (not the proxy)
   const t = await setup();
   try {
     t.meminfo(95);
-    t.set("stats-c1", "93.10%\n");
+    t.container("c1", "cresslet-abc", { mem: "93.10%" });
     const a = await t.check();
     assert.equal(a.sent.length, 1);
     assert.match(a.sent[0], /: host memory 95% in use; cresslet-abc at 93% of its memory limit$/);
     t.meminfo(30);
-    t.set("stats-c1", "10.00%\n");
+    t.container("c1", "cresslet-abc", { mem: "10.00%" });
     assert.match((await t.check()).sent[0], /recovered: host memory 95%/);
 
-    t.set("inspect-c1", "/cresslet-abc - 1 true\n");
+    t.container("c1", "cresslet-abc", { restarts: 1, oom: true });
     assert.deepEqual((await t.check()).sent.map((s) => s.replace(/^[^:]+: /, "")),
-      ["cresslet-abc restarted (restarts: 1, OOM-killed: true; docker logs cresslet-abc)"]);
+      ["cresslet-abc restarted (restarts: 1, last exit OOM-killed: true; docker logs cresslet-abc)"]);
     assert.deepEqual((await t.check()).sent, []);
-    t.set("inspect-c1", "/cresslet-abc - 2 false\n");
-    assert.match((await t.check()).sent[0], /restarts: 2/);
+    t.container("c1", "cresslet-abc", { restarts: 3 });
+    assert.match((await t.check()).sent[0], /restarts: 3, last exit OOM-killed: false/);
+  } finally {
+    t.done();
+  }
+});
+
+test("a container gone between docker ps and inspect, or a path df can't read, skips only that probe", { skip }, async () => {
+  const t = await setup();
+  try {
+    t.set("ps", "gone \nc1 \nproxy true\n"); // no inspect-gone: replaced by a redeploy
+    t.set("df-fails", "");
+    t.container("c1", "cresslet-abc", { mem: "95.00%" });
+    t.fail("cresslet-backup.service");
+    const a = await t.check();
+    assert.equal(a.code, 1);
+    assert.match(a.stderr, /df couldn't read/);
+    assert.equal(a.sent.length, 2);
+    assert.match(a.sent[0], /cresslet-abc at 95% of its memory limit$/);
+    assert.match(a.sent[1], /the last backup failed/);
   } finally {
     t.done();
   }
@@ -145,29 +173,62 @@ test("firewall: failing closed stops Cresslet (not the proxy) and alerts until C
   const t = await setup();
   try {
     // iptables fails: firewall.sh stops what runs on the network, except Coolify's proxy, and leaves its marker.
+    const marker = join(t.dir, "fw", `${NET}.stopped`);
     const fw = await t.run(FIREWALL, [NET]);
     assert.notEqual(fw.code, 0);
     assert.match(fw.stderr, /stopping its containers/);
     assert.equal(readFileSync(join(t.fix, "stopped"), "utf8"), "c1\n");
-    assert.ok(existsSync(join(t.dir, "fw", `${NET}.stopped`)));
+    const first = readFileSync(marker, "utf8");
+    assert.match(first, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ stopped\n$/);
     t.fail("cresslet-firewall.service");
 
     const a = await t.check();
-    assert.equal(a.sent.length, 1);
-    assert.match(a.sent[0], /cresslet-firewall couldn't apply its rules and stopped Cresslet at \d{4}-\d\d-\d\dT.*; start it again once fixed$/);
-    // The rules apply again, but Cresslet stays stopped: still the same alert, not re-sent.
+    assert.deepEqual(a.sent.map((s) => s.replace(/^[^:]+: /, "")), [
+      `cresslet-firewall couldn't apply its rules and stopped Cresslet at ${first.split(" ")[0]}; start it again once fixed (journalctl -u cresslet-firewall)`,
+      "cresslet-firewall can't apply its rules (journalctl -u cresslet-firewall)",
+    ]);
+    // Started by hand while the rules still fail: stopped again, the marker keeps the first time.
+    await new Promise((r) => setTimeout(r, 1100));
+    t.set("ps", "c1 \nproxy true\n");
+    await t.run(FIREWALL, [NET]);
+    assert.equal(readFileSync(marker, "utf8"), first);
+    // The rules apply again, but Cresslet stays stopped: one recovery (the failing unit), the stop alert stays.
     t.fail("cresslet-firewall.service", false);
-    assert.deepEqual((await t.check()).sent, []);
-    assert.ok(existsSync(join(t.dir, "fw", `${NET}.stopped`)));
-    // Started again (in Coolify): recovered, and the marker is gone.
+    assert.deepEqual((await t.check()).sent.map((s) => s.replace(/^[^:]+: /, "")),
+      ["recovered: cresslet-firewall can't apply its rules (journalctl -u cresslet-firewall)"]);
+    assert.ok(existsSync(marker));
+    // A firewall run in progress (the one that may be failing closed): not cleared yet.
     t.set("ps", "c2 \nproxy true\n");
-    t.set("inspect-c2", "/cresslet-def - 0 false\n");
-    assert.match((await t.check()).sent[0], /recovered: cresslet-firewall couldn't apply/);
-    assert.ok(!existsSync(join(t.dir, "fw", `${NET}.stopped`)));
+    t.container("c2", "cresslet-def");
+    t.set("active-cresslet-firewall.service", "");
+    assert.deepEqual((await t.check()).sent, []);
+    // Started again (in Coolify), the last run worked: recovered, and the marker is gone.
+    rmSync(join(t.fix, "active-cresslet-firewall.service"));
+    assert.match((await t.check()).sent[0], /recovered: cresslet-firewall couldn't apply its rules and stopped/);
+    assert.ok(!existsSync(marker));
+  } finally {
+    t.done();
+  }
+});
 
-    // Failing without stopping anything (e.g. no network yet) alerts too.
-    t.fail("cresslet-firewall.service");
-    assert.match((await t.check()).sent[0], /cresslet-firewall can't apply its rules \(journalctl -u cresslet-firewall\)$/);
+test("firewall: a container it couldn't stop runs unfirewalled; with only the proxy there's no marker", { skip }, async () => {
+  const t = await setup();
+  try {
+    const marker = join(t.dir, "fw", `${NET}.stopped`);
+    t.set("ps", "proxy true\n");
+    await t.run(FIREWALL, [NET]);
+    assert.ok(!existsSync(marker));
+
+    t.set("ps", "c1 \nproxy true\n");
+    t.set("stop-fails", "");
+    const fw = await t.run(FIREWALL, [NET]);
+    assert.match(fw.stderr, /couldn't stop: c1/);
+    assert.match(readFileSync(marker, "utf8"), /^\S+ couldn't stop: c1\n$/);
+    t.set("active-cresslet-firewall.service", ""); // c1 still runs, but the run that wrote it hasn't exited
+    assert.match((await t.check()).sent[0], /cresslet-firewall couldn't apply its rules or stop c1 at \S+: they run unfirewalled/);
+    rmSync(join(t.fix, "active-cresslet-firewall.service"));
+    assert.match((await t.check()).sent[0], /recovered: .*they run unfirewalled/);
+    assert.ok(!existsSync(marker));
   } finally {
     t.done();
   }
@@ -183,19 +244,28 @@ test("a failed backup run alerts", { skip }, async () => {
   }
 });
 
-test("delivery: JSON for Discord/Slack, and a failed send is retried at the next check", { skip }, async () => {
+test("delivery: JSON for Discord/Slack; alerts that couldn't be sent go at a later check, in order", { skip }, async () => {
   const t = await setup(500);
   try {
+    const json = { CRESSLET_ALERT_JSON_KEY: "content" };
     t.set("df", "99");
-    const a = await t.check({ CRESSLET_ALERT_JSON_KEY: "content" });
+    const a = await t.check(json);
     assert.equal(a.code, 1);
     assert.match(a.stderr, /couldn't send the alert/);
+    assert.match(readFileSync(join(t.fix, "log"), "utf8"), /disk 99% full/); // the journal has it right away
+    // Over before the webhook is back: both alerts still arrive.
+    t.set("df", "40");
+    assert.equal((await t.check(json)).code, 1);
     t.setStatus(204);
-    const b = await t.check({ CRESSLET_ALERT_JSON_KEY: "content" });
+    const b = await t.check(json);
     assert.equal(b.code, 0, b.stderr);
-    assert.equal(b.sent.length, 1);
-    assert.match(JSON.parse(b.sent[0]).content, /disk 99% full on \/$/);
+    assert.deepEqual(b.sent.map((x) => JSON.parse(x).content.replace(/^[^:]+: /, "")), [
+      "disk 99% full on / (at " + JSON.parse(b.sent[0]).content.split("(at ")[1],
+      "recovered: disk 99% full on / (at " + JSON.parse(b.sent[1]).content.split("(at ")[1],
+    ]);
+    assert.match(JSON.parse(b.sent[0]).content, /\(at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\)$/);
     assert.equal(t.hits.at(-1)!.type, "application/json");
+    assert.deepEqual((await t.check(json)).sent, []);
 
     const c = await t.run(ALERTS, [NET, "--test"]);
     assert.equal(c.code, 0, c.stderr);

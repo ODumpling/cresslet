@@ -78,15 +78,23 @@ fi
 
 stop_all() {
   echo "cresslet-firewall: couldn't apply the rules for $NET; stopping its containers" >&2
-  failed=""
   docker ps --filter "network=$NET" --format '{{.ID}} {{.Label "coolify.proxy"}}' | {
+    stopped="" failed=""
     while read -r c proxy; do
-      [ "$proxy" = true ] || docker stop "$c" >/dev/null || failed="$failed $c"
+      [ "$proxy" != true ] || continue
+      if docker stop "$c" >/dev/null; then stopped="$stopped $c"; else failed="$failed $c"; fi
     done
     [ -z "$failed" ] || echo "cresslet-firewall: couldn't stop:$failed" >&2
-  }
-  # After the stops: alerts.sh reads it as "stopped, not started again yet".
-  mkdir -p "$DIR" && date -u +%Y-%m-%dT%H:%M:%SZ > "$DIR/$NET.stopped" || true
+    # For alerts.sh, after the stops: "<time> stopped" (the first time, kept while it stays
+    # stopped) or "<time> couldn't stop: <ids>". Nothing to stop: no marker.
+    f=$DIR/$NET.stopped now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    mkdir -p "$DIR" || exit 0
+    if [ -n "$failed" ]; then
+      echo "$now couldn't stop:$failed" > "$f"
+    elif [ -n "$stopped" ] && ! grep -q ' stopped$' "$f" 2>/dev/null; then
+      echo "$now stopped" > "$f"
+    fi
+  } || true
 }
 
 if [ "$MODE" = --boot ]; then
