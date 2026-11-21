@@ -288,3 +288,79 @@ test("AI builder on credits: the studio's agent loop through the real endpoint w
     await t.close();
   }
 });
+
+test("AI credits admin view: totals, per model and per day, accounts, the ledger, one account", async () => {
+  const t = await setup({ monthlyCredits: 1 });
+  try {
+    const a = await t.account("a@b.co");
+    const boss = await t.account("boss@b.co");
+    await t.account("idle@b.co"); // no wallet: not listed
+    const view = (by: string, path = "") => t.json(`/v1/admin/credits${path}`, { headers: t.bearer(by) });
+    assert.equal((await t.json("/v1/admin/credits")).status, 401);
+    assert.equal((await view(a)).status, 403);
+    assert.equal((await view(a, "/accounts/x")).status, 403);
+
+    // a: 1.94 credits (1 of them free), then 10 granted by the operator; boss: 0.14 credits, all free.
+    t.replies.push(t.streamed(sse("claude-opus-5-5", { input_tokens: 1000, output_tokens: 1, cache_read_input_tokens: 2000, cache_creation_input_tokens: 1000 }, { output_tokens: 500 })));
+    await (await t.message(a)).text();
+    t.replies.push(t.streamed(sse("claude-sonnet-5-5", { input_tokens: 200, output_tokens: 1 }, { output_tokens: 100 })));
+    await (await t.message(boss)).text();
+    const g = await t.json("/v1/admin/accounts/credits", { method: "POST", headers: t.bearer(boss), body: JSON.stringify({ email: "a@b.co", credits: 10, note: "beta" }) });
+    assert.equal(g.status, 200);
+
+    const r = await view("adm");
+    assert.equal(r.status, 200);
+    const d = r.body;
+    assert.equal(d.enabled, true);
+    assert.equal(d.monthlyCredits, 1);
+    assert.equal(d.period, new Date().toISOString().slice(0, 7));
+    // 200 × $2 + 100 × $10 per MTok = 1400 µ$ = 0.14 credits
+    assert.deepEqual(d.totals, { used: 2.08, free: 1.14, usd: 0.0208, requests: 2, granted: 10, grants: 1, balance: 9.06, overdrawn: 0, accounts: 2, active: 2 });
+    assert.deepEqual(d.models, [
+      { model: "claude-opus-5-5", credits: 1.94, requests: 1, usd: 0.0194, inputTokens: 4000, outputTokens: 500 },
+      { model: "claude-sonnet-5-5", credits: 0.14, requests: 1, usd: 0.0014, inputTokens: 200, outputTokens: 100 },
+    ]);
+    assert.equal(d.days.length, 30);
+    assert.deepEqual(d.days.at(-1), { date: new Date().toISOString().slice(0, 10), credits: 2.08, requests: 2 });
+    assert.equal(d.days[0].credits, 0);
+    assert.deepEqual(d.accounts.map((x: { email: string }) => x.email), ["a@b.co", "boss@b.co"], "most used first; no wallet, not listed");
+    const acct = d.accounts[0];
+    assert.deepEqual({ ...acct, id: undefined, lastUsedAt: undefined }, {
+      id: undefined, email: "a@b.co", github: null, balance: 9.06, monthlyUsed: 1, available: 9.06, used: 1.94, requests: 1, lastUsedAt: undefined,
+    });
+    assert.ok(acct.lastUsedAt);
+    assert.equal(d.accounts[1].available, 0.86);
+    assert.deepEqual(d.recent.map((x: { kind: string; account: { email: string } }) => [x.kind, x.account.email]),
+      [["grant", "a@b.co"], ["usage", "boss@b.co"], ["usage", "a@b.co"]]);
+    assert.deepEqual({ ...d.recent[0], at: undefined, account: undefined }, { at: undefined, kind: "grant", credits: 10, note: "beta", by: "boss@b.co", account: undefined });
+    assert.equal(d.recent[2].usd, 0.0194);
+    assert.equal(d.recent[2].free, 1);
+
+    // One account: its wallet and ledger; a site admin's session works too, unknown ids 404.
+    const one = await view(boss, `/accounts/${acct.id}`);
+    assert.equal(one.status, 200);
+    assert.equal(one.body.account.email, "a@b.co");
+    assert.equal(one.body.account.siteAdmin, false);
+    assert.equal(one.body.account.available, 9.06);
+    assert.deepEqual(one.body.history.map((h: { kind: string; credits: number }) => [h.kind, h.credits]), [["grant", 10], ["usage", -1.94]]);
+    assert.equal((await view("adm", "/accounts/nope")).status, 404);
+    // An account with no wallet yet: zeros.
+    const idle = (await t.json("/v1/me", { headers: t.bearer(await t.account("new@b.co")) })).body.account.id;
+    const empty = (await view("adm", `/accounts/${idle}`)).body;
+    assert.deepEqual({ ...empty.account, id: undefined }, {
+      id: undefined, email: "new@b.co", github: null, siteAdmin: false, balance: 0, monthlyUsed: 0, available: 1, used: 0, requests: 0, lastUsedAt: null,
+    });
+    assert.deepEqual(empty.history, []);
+  } finally {
+    await t.close();
+  }
+});
+
+test("AI credits admin view: off without AI credits", async () => {
+  const t = await setup(null);
+  try {
+    assert.deepEqual((await t.json("/v1/admin/credits", { headers: t.bearer("adm") })).body, { enabled: false });
+  } finally {
+    await t.close();
+  }
+});

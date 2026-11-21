@@ -1,10 +1,12 @@
-// Site admin API (/v1/admin): every site on the server, its disk and database usage, delete/restore/purge.
+// Site admin API (/v1/admin): every site on the server, its disk and database usage, delete/restore/purge; AI credit
+// usage across accounts, and grants.
 // Allowed for accounts with the SiteAdmin role (or listed in CRESSLET_SITE_ADMINS) and the operator's admin token.
 import type { Context, Hono } from "hono";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { appUrl, type Config, paths } from "./config.ts";
-import { type Account, type App, SITE_ADMIN, type Store, type Token } from "./store.ts";
+import { type Account, type AiAccountRow, type App, SITE_ADMIN, type Store, type Token } from "./store.ts";
+import { credits as toCredits, ledgerEntry, nextPeriod, period, periodStart } from "./credits.ts";
 import type { Runtime } from "./runtime.ts";
 import { inspect } from "./inspect.ts";
 import { HttpError, removeAppFiles } from "./deploys.ts";
@@ -230,5 +232,84 @@ export function adminRoutes(
     const balance = store.grantAi(acct.id, Math.round(credits * 1000), { note: note ?? null, by: who });
     console.log(`cresslet: ${credits} AI credits to ${acct.email} by ${who}`);
     return c.json({ account: { id: acct.id, email: acct.email, github: acct.github_login }, balance: balance / 1000 });
+  });
+
+  // AI credit usage across accounts: this month's totals, per model and per day (last 30), every account with a
+  // wallet, and the latest ledger rows. `{enabled: false}` without AI credits.
+  const DAY = 86_400_000;
+  const DAYS = 30;
+  const walletView = (allowance: number, r: AiAccountRow) => ({
+    balance: toCredits(r.balance),
+    monthlyUsed: toCredits(r.period_used),
+    available: toCredits(r.balance + Math.max(0, allowance - r.period_used)),
+    used: toCredits(r.used),
+    requests: r.requests,
+    lastUsedAt: iso(r.last_used_at),
+  });
+  const who = (a: { id: string; email: string; github_login: string | null }) => ({ id: a.id, email: a.email, github: a.github_login });
+
+  app.get("/admin/credits", (c) => {
+    requireSiteAdmin(c);
+    const ai = cfg.ai;
+    if (!ai) return c.json({ enabled: false });
+    const now = Date.now(), since = periodStart(now), allowance = Math.round(ai.monthlyCredits * 1000);
+    const accounts = store.aiAccounts(period(now), since).map((r) => ({ ...who(r), ...walletView(allowance, r) }));
+    const models = store.aiModels(since);
+    const today = Math.floor(now / DAY);
+    const byDay = new Map(store.aiDays((today - DAYS + 1) * DAY).map((d) => [d.day, d]));
+    const granted = store.aiGranted(since), held = store.aiOutstanding();
+    const sum = (k: "used" | "requests" | "free" | "usd") => models.reduce((n, m) => n + m[k], 0);
+    return c.json({
+      enabled: true,
+      creditsPerUsd: ai.creditsPerUsd,
+      monthlyCredits: ai.monthlyCredits,
+      period: period(now),
+      resetsAt: nextPeriod(now),
+      totals: {
+        used: toCredits(sum("used")),
+        free: toCredits(sum("free")),
+        usd: Math.round(sum("usd") * 1e6) / 1e6,
+        requests: sum("requests"),
+        granted: toCredits(granted.amount),
+        grants: granted.grants,
+        balance: toCredits(held.balance),
+        overdrawn: toCredits(held.overdrawn),
+        accounts: accounts.length,
+        active: accounts.filter((a) => a.requests > 0).length,
+      },
+      days: Array.from({ length: DAYS }, (_, i) => {
+        const day = today - DAYS + 1 + i, d = byDay.get(day);
+        return { date: new Date(day * DAY).toISOString().slice(0, 10), credits: toCredits(d?.used ?? 0), requests: d?.requests ?? 0 };
+      }),
+      models: models.map((m) => ({
+        model: m.model ?? "unknown",
+        credits: toCredits(m.used),
+        requests: m.requests,
+        usd: Math.round(m.usd * 1e6) / 1e6,
+        inputTokens: m.input,
+        outputTokens: m.output,
+      })),
+      accounts,
+      recent: store.aiLedgerAll(50).map((r) => ({ ...ledgerEntry(r, { admin: true }), account: who({ ...r, id: r.account_id }) })),
+    });
+  });
+
+  // One account's wallet and its latest 200 ledger rows.
+  app.get("/admin/credits/accounts/:id", (c) => {
+    requireSiteAdmin(c);
+    const ai = cfg.ai;
+    if (!ai) return c.json({ enabled: false });
+    const acct = store.accountById(c.req.param("id"));
+    if (!acct) throw new HttpError(404, "account not found", "not_found");
+    const now = Date.now(), allowance = Math.round(ai.monthlyCredits * 1000);
+    const row = store.aiAccounts(period(now), periodStart(now), acct.id)[0] ??
+      { ...acct, balance: 0, period_used: 0, used: 0, requests: 0, last_used_at: null };
+    return c.json({
+      enabled: true,
+      monthlyCredits: ai.monthlyCredits,
+      resetsAt: nextPeriod(now),
+      account: { ...who(acct), siteAdmin: isSiteAdmin(cfg, acct), ...walletView(allowance, row) },
+      history: store.aiLedger(acct.id, 200).map((r) => ledgerEntry(r, { admin: true })),
+    });
   });
 }

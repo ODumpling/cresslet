@@ -6,7 +6,7 @@ Auth (either):
 - `Authorization: Bearer clv_acct_…` (or `clv_scoped_…`) — account token (GitHub login, or created in the studio under Settings → API tokens).
 - `X-Cresslet-Deploy-Key: clv_app_…` (or `Authorization: Bearer clv_app_…`) — per-app key, returned once on app creation.
 
-Site admin = an account with the `SiteAdmin` role (or listed in `CRESSLET_SITE_ADMINS`) using a full-access token (`admin`, all apps), or the operator's `CRESSLET_ADMIN_TOKEN`. The studio shows them an **Admin** page (`/#/admin`).
+Site admin = an account with the `SiteAdmin` role (or listed in `CRESSLET_SITE_ADMINS`) using a full-access token (`admin`, all apps), or the operator's `CRESSLET_ADMIN_TOKEN`. The studio shows them an **Admin** page (`/#/admin`), and, with AI credits on, an **AI credits** page (`/#/admin-credits`): use per day, model and account, and giving or taking back credits.
 
 Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 
@@ -86,6 +86,8 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/me/credits` | token with `read` or more over the whole account: `{enabled: false}`, or `{enabled: true, available, balance, monthly: {allowance, used, remaining, resetsAt}, creditsPerUsd, history: [{at, kind: usage\|grant, credits, model?, inputTokens?, outputTokens?, cacheReadTokens?, cacheWriteTokens?, estimated?, note?}]}` (last 50) |
 | POST | `/v1/ai/v1/messages` | `deploy` token over the whole account: a streamed Anthropic Messages request, on [AI credits](#ai-credits) |
 | POST | `/v1/admin/accounts/credits` | **site admin**: `{email, credits, note?}` adds credits to the account (negative: takes some back) → `{account, balance}`. 409 `ai_disabled` without AI credits |
+| GET | `/v1/admin/credits` | **site admin**: `{enabled: false}`, or `{enabled: true, creditsPerUsd, monthlyCredits, period, resetsAt, totals: {used, free, usd, requests, granted, grants, balance, overdrawn, accounts, active}, days: [{date, credits, requests}] (last 30, UTC), models: [{model, credits, requests, usd, inputTokens, outputTokens}], accounts: [{id, email, github, available, balance, monthlyUsed, used, requests, lastUsedAt}], recent: [ledger row + {account}]}`. `totals`, `models`, `used` and `requests` are this month (UTC); `accounts` lists every account that has used or been given credits, most used first; `recent` is the last 50 rows, which also carry `usd` and `free` (usage) or `by` (grants) |
+| GET | `/v1/admin/credits/accounts/:id` | **site admin**: one account: `{enabled, monthlyCredits, resetsAt, account: {id, email, github, siteAdmin, available, balance, monthlyUsed, used, requests, lastUsedAt}, history}` (last 200 ledger rows) |
 
 ## Pages
 

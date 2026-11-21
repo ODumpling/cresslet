@@ -6,7 +6,7 @@
 // more (`POST /v1/admin/accounts/credits`). Amounts are kept in millicredits (integers).
 import type { Context, Hono } from "hono";
 import type { AiConfig, Config } from "./config.ts";
-import type { Account, Role, Store, Token } from "./store.ts";
+import type { Account, AiLedgerRow, Role, Store, Token } from "./store.ts";
 import { HttpError } from "./deploys.ts";
 
 type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
@@ -73,11 +73,32 @@ export function usageCost(model: string | undefined, u: Usage): number {
 export const toMillicredits = (ai: AiConfig, microUsd: number) => Math.ceil((microUsd * ai.creditsPerUsd) / 1000);
 
 export const period = (t = Date.now()) => new Date(t).toISOString().slice(0, 7);
-const nextPeriod = (t = Date.now()) => {
+/** When this month (UTC) started, in ms. */
+export const periodStart = (t = Date.now()) => {
+  const d = new Date(t);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+};
+export const nextPeriod = (t = Date.now()) => {
   const d = new Date(t);
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString();
 };
-const credits = (millicredits: number) => Math.round(millicredits) / 1000;
+/** Millicredits → credits. */
+export const credits = (millicredits: number) => Math.round(millicredits) / 1000;
+
+/** One ledger row as the API shows it. `admin`: also who granted it, or a request's cost and free part. */
+export function ledgerEntry(r: AiLedgerRow, { admin = false } = {}) {
+  const d = r.detail ? JSON.parse(r.detail) : {};
+  const usage = r.kind === "usage";
+  return {
+    at: new Date(r.created_at).toISOString(),
+    kind: r.kind,
+    credits: credits(r.amount),
+    ...(usage
+      ? { model: d.model, inputTokens: d.input, outputTokens: d.output, cacheReadTokens: d.cacheRead, cacheWriteTokens: d.cacheWrite, estimated: !!d.estimated }
+      : { note: d.note ?? null }),
+    ...(!admin ? {} : usage ? { usd: d.usd ?? null, free: credits(d.free ?? 0) } : { by: d.by ?? null }),
+  };
+}
 
 /** Betas a request may ask for (the AI builder's); others could reach features that aren't metered. */
 export const ALLOWED_BETAS = new Set(["server-side-fallback-2026-07-01"]);
@@ -211,17 +232,7 @@ export function aiRoutes(
       available: credits(w.available),
       balance: credits(w.balance),
       monthly: { allowance: credits(w.allowance), used: credits(w.used), remaining: credits(w.monthly), resetsAt: nextPeriod() },
-      history: store.aiLedger(acct.id, 50).map((r) => {
-        const d = r.detail ? JSON.parse(r.detail) : {};
-        return {
-          at: new Date(r.created_at).toISOString(),
-          kind: r.kind,
-          credits: credits(r.amount),
-          ...(r.kind === "usage"
-            ? { model: d.model, inputTokens: d.input, outputTokens: d.output, cacheReadTokens: d.cacheRead, cacheWriteTokens: d.cacheWrite, estimated: !!d.estimated }
-            : { note: d.note ?? null }),
-        };
-      }),
+      history: store.aiLedger(acct.id, 50).map((r) => ledgerEntry(r)),
     });
   });
 
