@@ -245,6 +245,9 @@ test("studio is cross-origin isolated", withServer(async (t) => {
   assert.equal(versioned.status, 200);
   assert.equal(await versioned.text(), await (await t.call("/app.js")).text());
   assert.equal((await t.call(src.replace("app.js", "vendor/editor.js"))).status, 200);
+  const copy = await t.call(src.replace("app.js", "index.html")); // the studio by another path: still unframeable
+  await copy.body?.cancel();
+  assert.equal(copy.headers.get("content-security-policy"), "frame-ancestors 'none'");
   const llms = await t.call("/llms.txt");
   assert.match(await llms.text(), /POST \/v1\/deploys/);
 }));

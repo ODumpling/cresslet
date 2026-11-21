@@ -965,6 +965,7 @@ $("page-defaults-form").addEventListener("submit", (e) => {
 });
 $("page-defaults-reset").addEventListener("click", () => savePageDefaults(null, "Using the server's page defaults"));
 
+let cliToken = null; // the token renderCli named the account of
 /**
  * #/cli: where `cresslet auth login` sends the browser. The user types the code from their terminal (it isn't in
  * the link, so a link someone else sent can't log their CLI in to this account), and the CLI's poll then gets a
@@ -992,9 +993,16 @@ function renderCli() {
       },
     }, icon("github"), "Log in with GitHub"));
   }
-  text(`Enter the code \`cresslet auth login\` shows in your terminal. The CLI gets full access to ${auth.email ?? "your account"}. Only enter a code from a terminal you're using.`);
-  form.hidden = false;
-  form.dataset.token = auth.token; // the account named above: a login in another tab re-renders instead
+  // Name the account this session's token belongs to, and approve only with that same token.
+  const token = (cliToken = auth.token);
+  text("Checking your account…");
+  api("/v1/me").then(({ account }) => {
+    if (auth.token !== token || location.hash !== "#/cli") return;
+    text(`Enter the code that cresslet auth login shows in your terminal. The CLI gets full access to ${account.github ?? account.email}. Only enter a code from a terminal you're using.`);
+    form.hidden = false;
+  }, (e) => {
+    if (auth.token === token) text(`Could not load your account: ${e.message}`);
+  });
 }
 function cliError(t) {
   $("cli-login-error").textContent = t;
@@ -1003,7 +1011,7 @@ function cliError(t) {
 $("cli-login-code").addEventListener("input", () => cliError(""));
 $("cli-login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (auth.token !== $("cli-login-form").dataset.token) return renderCli();
+  if (auth.token !== cliToken) return renderCli();
   $("cli-login-approve").disabled = true;
   try {
     await api("/v1/auth/cli/approve", { method: "POST", body: JSON.stringify({ userCode: $("cli-login-code").value }) });

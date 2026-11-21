@@ -167,6 +167,7 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
     // Studio files aren't content-hashed: always revalidate (ETag), or a CDN/browser can pair new HTML
     // with stale JS.
     h.set("cache-control", "no-cache");
+    if (h.get("content-type")?.startsWith("text/html")) h.set("content-security-policy", "frame-ancestors 'none'");
     return new Response(res.body, { status: res.status, headers: h });
   }
 
