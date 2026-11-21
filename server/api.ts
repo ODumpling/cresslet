@@ -37,6 +37,7 @@ import {
 import type { Runtime } from "./runtime.ts";
 import { type Cluster, singleNode } from "./cluster.ts";
 import { github } from "./github.ts";
+import { cliLogin } from "./cli-login.ts";
 import { confine } from "./bindings.ts";
 import { normalizeEgress } from "./egress.ts";
 import { adminRoutes, isSiteAdmin, purgeApp } from "./admin.ts";
@@ -247,7 +248,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       previewOrigin: previewOrigin(cfg),
       openSignup: cfg.openSignup,
       anonDeploys: cfg.anonDeploys,
-      auth: { github: !!cfg.github },
+      auth: { github: !!cfg.github, cli: !!cfg.github }, // cli: browser login via the studio, which logs in with GitHub
       limits: cfg.limits,
       docs: "https://github.com/ODumpling/cresslet/blob/main/docs/api.md",
     }));
@@ -366,6 +367,33 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       const { deviceCode } = await body<{ deviceCode?: string }>(c);
       if (!deviceCode) throw new HttpError(400, "deviceCode required");
       const r = await gh.devicePoll(deviceCode);
+      if ("token" in r) return c.json({ status: "complete", account: accountView(r.account), token: r.token });
+      return c.json(r);
+    });
+
+    // CLI browser login (server/cli-login.ts): start → studio approves at verificationUri → poll for the token.
+    const cli = cliLogin(store);
+    const cliStarts = new RateLimit(20, 10 * 60_000);
+    const cliApproves = new RateLimit(10, 10 * 60_000);
+    app.post("/auth/cli", (c) => {
+      if (!cliStarts.take(clientIp(c))) throw new HttpError(429, "too many logins, try again in a few minutes", "rate_limited");
+      return c.json(cli.start(rootUrl(cfg)));
+    });
+
+    app.post("/auth/cli/approve", async (c) => {
+      const a = accountWide(c, "admin");
+      // Guessing someone else's pending code would log their CLI in to this account.
+      if (!cliApproves.take(a.id)) throw new HttpError(429, "too many tries, wait a few minutes", "rate_limited");
+      const { userCode } = await body<{ userCode?: unknown } | null>(c) ?? {};
+      if (typeof userCode !== "string" || !userCode) throw new HttpError(400, "userCode required");
+      cli.approve(userCode, a, c.get("token")!.id);
+      return c.json({ approved: true });
+    });
+
+    app.post("/auth/cli/token", async (c) => {
+      const { deviceCode } = await body<{ deviceCode?: unknown } | null>(c) ?? {};
+      if (typeof deviceCode !== "string" || !deviceCode) throw new HttpError(400, "deviceCode required");
+      const r = await cli.poll(deviceCode);
       if ("token" in r) return c.json({ status: "complete", account: accountView(r.account), token: r.token });
       return c.json(r);
     });

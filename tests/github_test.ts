@@ -140,7 +140,7 @@ const octo: FakeUser = { id: 42, login: "octo", emails: [{ email: "Octo@Example.
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
 
 test("meta advertises GitHub login", withServer(async (t) => {
-  assert.deepEqual((await t.json("/v1")).body.auth, { github: true });
+  assert.deepEqual((await t.json("/v1")).body.auth, { github: true, cli: true });
 }));
 
 test("studio web flow: one-time code → token, account by GitHub id", withServer(async (t) => {
@@ -173,6 +173,69 @@ test("web flow rejects state not bound to this browser", withServer(async (t) =>
   assert.match(new URLSearchParams(back.hash.slice(1)).get("cresslet_login_error")!, /expired/);
   const back2 = await t.webLogin(octo, { state: "st_forged", cookie: "cresslet_oauth_state=st_forged" });
   assert.match(new URLSearchParams(back2.hash.slice(1)).get("cresslet_login_error")!, /expired/);
+}));
+
+test("CLI browser login: studio approves the code, the poll gets a new token once", withServer(async (t) => {
+  const back = await t.webLogin(octo);
+  const studio = await t.json("/v1/auth/exchange", {
+    method: "POST",
+    body: JSON.stringify({ code: new URLSearchParams(back.hash.slice(1)).get("cresslet_login") }),
+  });
+  const start = await t.json("/v1/auth/cli", { method: "POST", body: "{}" });
+  assert.equal(start.status, 200);
+  assert.match(start.body.userCode, /^[A-Z]{4}-[A-Z]{4}$/);
+  assert.equal(start.body.verificationUri, "http://test.local/#/cli"); // the user types the code
+  const poll = (deviceCode = start.body.deviceCode) =>
+    t.json("/v1/auth/cli/token", { method: "POST", body: JSON.stringify({ deviceCode }) });
+  assert.deepEqual((await poll()).body, { status: "pending" });
+
+  const approve = (userCode: string, headers: HeadersInit = bearer(studio.body.token)) =>
+    t.json("/v1/auth/cli/approve", { method: "POST", headers, body: JSON.stringify({ userCode }) });
+  assert.equal((await approve(start.body.userCode, {})).status, 401); // needs the studio's login
+  assert.equal((await approve("BBBB-BBBB")).status, 404);
+  assert.equal((await approve(start.body.userCode.toLowerCase().replace("-", ""))).status, 200); // typed by hand
+  assert.equal((await approve(start.body.userCode)).status, 404); // once
+
+  const done = await poll();
+  assert.equal(done.body.status, "complete");
+  assert.equal(done.body.account.id, studio.body.account.id);
+  const me = await t.json("/v1/me", { headers: bearer(done.body.token) });
+  assert.equal(me.body.tokenInfo.name, "CLI (browser login)");
+  assert.notEqual(done.body.token, studio.body.token);
+  assert.equal((await poll()).body.error, "expired_token"); // single use
+  assert.equal((await poll("cli_nope")).status, 400);
+
+  // a scoped token can't hand out a full-access one
+  const scoped = await t.json("/v1/me/tokens", {
+    method: "POST",
+    headers: bearer(studio.body.token),
+    body: JSON.stringify({ name: "ro", role: "read" }),
+  });
+  assert.equal(scoped.status, 201, JSON.stringify(scoped.body));
+  const s2 = await t.json("/v1/auth/cli", { method: "POST", body: "{}" });
+  assert.equal((await approve(s2.body.userCode, bearer(scoped.body.token))).status, 403);
+
+  // the approving token revoked before the CLI collects: no token
+  const other = await t.json("/v1/me/tokens", {
+    method: "POST",
+    headers: bearer(studio.body.token),
+    body: JSON.stringify({ name: "other" }),
+  });
+  assert.equal((await approve(s2.body.userCode, bearer(other.body.token))).status, 200);
+  await t.json(`/v1/me/tokens/${other.body.info.id}`, { method: "DELETE", headers: bearer(studio.body.token) });
+  assert.equal((await poll(s2.body.deviceCode)).body.error, "expired_token");
+  const names = (await t.json("/v1/me/tokens", { headers: bearer(studio.body.token) })).body.tokens.map((x: { name: string }) => x.name);
+  assert.equal(names.filter((n: string) => n === "CLI (browser login)").length, 1);
+
+  // code guesses are limited per account (10 tries / 10 min, including the ones above)
+  let status = 0;
+  for (let i = 0; i < 10 && status !== 429; i++) status = (await approve("BBBB-BBBB")).status;
+  assert.equal(status, 429);
+}));
+
+test("CLI browser login is rate limited per client", withServer(async (t) => {
+  for (let i = 0; i < 20; i++) assert.equal((await t.json("/v1/auth/cli", { method: "POST", body: "{}" })).status, 200);
+  assert.equal((await t.json("/v1/auth/cli", { method: "POST", body: "{}" })).status, 429);
 }));
 
 test("CLI device flow: pending → complete, denial", withServer(async (t) => {

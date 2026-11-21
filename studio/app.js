@@ -181,6 +181,7 @@ function logOut() {
   auth.email = null;
   $("admin-item").hidden = true;
   renderAccount();
+  if (!$("cli-login").hidden) route(); // its Authorize button needs the session
 }
 
 {
@@ -198,7 +199,7 @@ function logOut() {
           after = sessionStorage.getItem("cresslet.afterLogin");
           sessionStorage.removeItem("cresslet.afterLogin");
         } catch { /* storage blocked */ }
-        if (after?.startsWith("#/view/")) {
+        if (after?.startsWith("#/view/") || after === "#/cli") {
           location.hash = after;
           return;
         }
@@ -212,7 +213,7 @@ function logOut() {
 // ------------------------------------------------------------------ settings
 let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
 function showOnly(id) {
-  for (const m of ["landing", "home", "settings", "share", "view", "admin", "workspace"]) $(m).hidden = m !== id;
+  for (const m of ["landing", "home", "settings", "share", "view", "cli-login", "admin", "workspace"]) $(m).hidden = m !== id;
   $("app").dataset.view = id;
   $("topbar").hidden = id !== "workspace";
   $("site-nav").hidden = id !== "landing";
@@ -963,6 +964,70 @@ $("page-defaults-form").addEventListener("submit", (e) => {
   savePageDefaults({ visibility: $("def-visibility").value, retentionDays: keepParse($("def-retention").value) }, "Page defaults saved");
 });
 $("page-defaults-reset").addEventListener("click", () => savePageDefaults(null, "Using the server's page defaults"));
+
+let cliToken = null; // the token renderCli named the account of
+/**
+ * #/cli: where `cresslet auth login` sends the browser. The user types the code from their terminal (it isn't in
+ * the link, so a link someone else sent can't log their CLI in to this account), and the CLI's poll then gets a
+ * new token for this account.
+ */
+function renderCli() {
+  showOnly("cli-login");
+  document.title = "Log in the CLI · Cresslet Studio";
+  const text = (t) => ($("cli-login-text").textContent = t);
+  const form = $("cli-login-form");
+  form.hidden = true;
+  form.reset();
+  cliError("");
+  $("cli-login-actions").replaceChildren();
+  if (!auth.token) {
+    text("Log in to let the Cresslet CLI use your account.");
+    return $("cli-login-actions").replaceChildren(el("button", {
+      className: "btn primary",
+      type: "button",
+      onclick: () => {
+        try {
+          sessionStorage.setItem("cresslet.afterLogin", "#/cli");
+        } catch { /* storage blocked: login lands on the home page */ }
+        logIn();
+      },
+    }, icon("github"), "Log in with GitHub"));
+  }
+  // Name the account this session's token belongs to, and approve only with that same token.
+  const token = (cliToken = auth.token);
+  text("Checking your account…");
+  // Session changed meanwhile (another tab): start over with the current one.
+  const stale = () => location.hash !== "#/cli" || (auth.token !== token && (renderCli(), true));
+  api("/v1/me").then(({ account }) => {
+    if (stale()) return;
+    text(`Enter the code that cresslet auth login shows in your terminal. The CLI gets full access to ${account.github ?? account.email}. Only enter a code from a terminal you're using.`);
+    form.hidden = false;
+  }, (e) => {
+    if (!stale()) text(`Could not load your account: ${e.message}`);
+  });
+}
+function cliError(t) {
+  $("cli-login-error").textContent = t;
+  $("cli-login-error").hidden = !t;
+}
+$("cli-login-code").addEventListener("input", () => cliError(""));
+$("cli-login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (auth.token !== cliToken) return renderCli();
+  $("cli-login-approve").disabled = true;
+  try {
+    await api("/v1/auth/cli/approve", { method: "POST", body: JSON.stringify({ userCode: $("cli-login-code").value }) });
+    $("cli-login-form").hidden = true;
+    $("cli-login-text").textContent = "CLI logged in. You can close this tab and go back to your terminal.";
+    focusView();
+  } catch (err) {
+    if (!auth.token) return renderCli(); // session expired: offer the login
+    cliError(`Could not authorize: ${err.message}`);
+    $("cli-login-code").focus();
+  } finally {
+    $("cli-login-approve").disabled = false;
+  }
+});
 
 /**
  * #/view/<page>?path=…: where a private page sends a visitor without a session. Asks the server for a
@@ -1716,6 +1781,7 @@ function route() {
     const [n, q] = location.hash.slice("#/view/".length).split("?");
     renderView(decodeURIComponent(n), new URLSearchParams(q ?? "").get("path") ?? "/");
   }
+  else if (location.hash === "#/cli") renderCli();
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();
 }

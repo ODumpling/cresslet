@@ -151,7 +151,13 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
     if (url.pathname === "/" || url.pathname === "/index.html") {
       const html = await (studioHtml ??= studioRelease());
       return new Response(req.method === "HEAD" ? null : html, {
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", ...ISOLATION },
+        // Nothing frames the studio: an app's page could otherwise overlay it (e.g. its CLI login).
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-cache",
+          "content-security-policy": "frame-ancestors 'none'",
+          ...ISOLATION,
+        },
       });
     }
     const path = url.pathname.replace(VERSIONED, "");
@@ -161,6 +167,7 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
     // Studio files aren't content-hashed: always revalidate (ETag), or a CDN/browser can pair new HTML
     // with stale JS.
     h.set("cache-control", "no-cache");
+    if (h.get("content-type")?.startsWith("text/html")) h.set("content-security-policy", "frame-ancestors 'none'");
     return new Response(res.body, { status: res.status, headers: h });
   }
 

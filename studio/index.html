@@ -522,6 +522,24 @@
           <div class="row start" id="view-actions"></div>
         </main>
 
+        <main id="cli-login" class="page narrow" hidden aria-labelledby="cli-login-title">
+          <header class="page-head">
+            <div>
+              <h1 id="cli-login-title" tabindex="-1">Log in the CLI</h1>
+              <p class="muted" id="cli-login-text" aria-live="polite"></p>
+            </div>
+          </header>
+          <form id="cli-login-form" class="panel form" hidden>
+            <div class="field">
+              <label for="cli-login-code">Code from your terminal</label>
+              <input class="input mono" id="cli-login-code" required placeholder="XXXX-XXXX" maxlength="16" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-describedby="cli-login-error" />
+            </div>
+            <p class="error small" id="cli-login-error" role="alert" hidden></p>
+            <div class="row start"><button class="btn primary" id="cli-login-approve" type="submit">Authorize CLI</button></div>
+          </form>
+          <div class="row start" id="cli-login-actions"></div>
+        </main>
+
         <main id="admin" class="page wide" hidden aria-labelledby="admin-title">
           <header class="page-head">
             <div>
