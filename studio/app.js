@@ -1702,6 +1702,7 @@ function rowMenu(id, label, items) {
   menu.addEventListener("click", (e) => e.target.closest("button, a") && hide(), true);
   // Tabbing out of it closes it too, so it doesn't sit over the rows focus moved on to.
   menu.addEventListener("focusout", (e) => e.relatedTarget && !menu.contains(e.relatedTarget) && e.relatedTarget !== btn && hide());
+  btn.addEventListener("focusout", (e) => e.relatedTarget && !menu.contains(e.relatedTarget) && hide());
   return [btn, menu];
 }
 const menuItem = (iconName, text, srText, attrs = {}) =>
@@ -1841,7 +1842,7 @@ $("page-dir").addEventListener("change", () => {
   const { dir, files } = folderFiles($("page-dir").files);
   const noIndex = files.length && !files.some((x) => x.path === "index.html");
   pagePick = files.length && !noIndex ? { title: dir, files } : null;
-  showPick(...(files.length ? [`${dir}/`, `${files.length} file${files.length === 1 ? "" : "s"}`] : NO_PICK));
+  showPick(...(pagePick ? [`${dir}/`, `${files.length} file${files.length === 1 ? "" : "s"}`] : NO_PICK));
   pageError(noIndex ? "That folder has no index.html at its top level." : "");
 });
 // Dropping a file: an HTML file is picked; a folder needs the Folder button (a dropped folder can't be read as one here).
