@@ -184,7 +184,7 @@ test("CLI browser login: studio approves the code, the poll gets a new token onc
   const start = await t.json("/v1/auth/cli", { method: "POST", body: "{}" });
   assert.equal(start.status, 200);
   assert.match(start.body.userCode, /^[A-Z]{4}-[A-Z]{4}$/);
-  assert.equal(start.body.verificationUri, `http://test.local/#/cli?code=${start.body.userCode}`);
+  assert.equal(start.body.verificationUri, "http://test.local/#/cli"); // the user types the code
   const poll = (deviceCode = start.body.deviceCode) =>
     t.json("/v1/auth/cli/token", { method: "POST", body: JSON.stringify({ deviceCode }) });
   assert.deepEqual((await poll()).body, { status: "pending" });
@@ -214,6 +214,23 @@ test("CLI browser login: studio approves the code, the poll gets a new token onc
   assert.equal(scoped.status, 201, JSON.stringify(scoped.body));
   const s2 = await t.json("/v1/auth/cli", { method: "POST", body: "{}" });
   assert.equal((await approve(s2.body.userCode, bearer(scoped.body.token))).status, 403);
+
+  // the approving token revoked before the CLI collects: no token
+  const other = await t.json("/v1/me/tokens", {
+    method: "POST",
+    headers: bearer(studio.body.token),
+    body: JSON.stringify({ name: "other" }),
+  });
+  assert.equal((await approve(s2.body.userCode, bearer(other.body.token))).status, 200);
+  await t.json(`/v1/me/tokens/${other.body.info.id}`, { method: "DELETE", headers: bearer(studio.body.token) });
+  assert.equal((await poll(s2.body.deviceCode)).body.error, "expired_token");
+  const names = (await t.json("/v1/me/tokens", { headers: bearer(studio.body.token) })).body.tokens.map((x: { name: string }) => x.name);
+  assert.equal(names.filter((n: string) => n === "CLI (browser login)").length, 1);
+
+  // code guesses are limited per account (10 tries / 10 min, including the ones above)
+  let status = 0;
+  for (let i = 0; i < 10 && status !== 429; i++) status = (await approve("BBBB-BBBB")).status;
+  assert.equal(status, 429);
 }));
 
 test("CLI browser login is rate limited per client", withServer(async (t) => {

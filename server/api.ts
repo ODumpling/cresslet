@@ -374,6 +374,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     // CLI browser login (server/cli-login.ts): start → studio approves at verificationUri → poll for the token.
     const cli = cliLogin(store);
     const cliStarts = new RateLimit(20, 10 * 60_000);
+    const cliApproves = new RateLimit(10, 10 * 60_000);
     app.post("/auth/cli", (c) => {
       if (!cliStarts.take(clientIp(c))) throw new HttpError(429, "too many logins, try again in a few minutes", "rate_limited");
       return c.json(cli.start(rootUrl(cfg)));
@@ -381,9 +382,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
     app.post("/auth/cli/approve", async (c) => {
       const a = accountWide(c, "admin");
+      // Guessing someone else's pending code would log their CLI in to this account.
+      if (!cliApproves.take(a.id)) throw new HttpError(429, "too many tries, wait a few minutes", "rate_limited");
       const { userCode } = await body<{ userCode?: unknown } | null>(c) ?? {};
       if (typeof userCode !== "string" || !userCode) throw new HttpError(400, "userCode required");
-      cli.approve(userCode, a);
+      cli.approve(userCode, a, c.get("token")!.id);
       return c.json({ approved: true });
     });
 

@@ -36,9 +36,9 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` |
 | POST | `/v1/auth/github/device` | CLI/agents: → `{deviceCode, userCode, verificationUri, expiresIn, interval}` |
 | POST | `/v1/auth/github/device/token` | `{deviceCode}` → `{status: pending\|slow_down}` or `{status: complete, account, token}`; poll every `interval`s |
-| POST | `/v1/auth/cli` | CLI browser login: → `{deviceCode, userCode, verificationUri, expiresIn, interval}`; open `verificationUri` (the studio's `#/cli?code=<userCode>`). 20 per client per 10 min |
-| POST | `/v1/auth/cli/approve` | full-access account token (the studio) + `{userCode}` → `{approved: true}`; 404 if unknown, expired or already approved |
-| POST | `/v1/auth/cli/token` | `{deviceCode}` → `{status: pending}` or `{status: complete, account, token}` (a new token, once); 400 `expired_token` after. Poll every `interval`s |
+| POST | `/v1/auth/cli` | CLI browser login: → `{deviceCode, userCode, verificationUri, expiresIn, interval}`; open `verificationUri` (the studio's `#/cli`) and show `userCode`, which the user types there. 20 per client per 10 min |
+| POST | `/v1/auth/cli/approve` | full-access account token (the studio) + `{userCode}` (case, dashes ignored) → `{approved: true}`; 404 if unknown, expired or already approved. 10 tries per account per 10 min |
+| POST | `/v1/auth/cli/token` | `{deviceCode}` → `{status: pending}` or `{status: complete, account, token}` (a new token, once); 400 `expired_token` after, or if the approving token was revoked. Poll every `interval`s |
 | GET | `/v1/templates` | `{templates: [{name, description}]}` |
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |

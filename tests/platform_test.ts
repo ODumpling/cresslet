@@ -231,6 +231,7 @@ test("studio is cross-origin isolated", withServer(async (t) => {
   assert.deepEqual(r.status, 200);
   assert.deepEqual(r.headers.get("cross-origin-opener-policy"), "same-origin");
   assert.deepEqual(r.headers.get("cross-origin-embedder-policy"), "require-corp");
+  assert.equal(r.headers.get("content-security-policy"), "frame-ancestors 'none'"); // apps can't overlay it
   assert.match(await r.text(), /Cresslet Studio/);
   const js = await t.call("/app.js");
   await js.body?.cancel();
