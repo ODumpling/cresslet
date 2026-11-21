@@ -107,7 +107,7 @@ test("host /db/batch: atomic, nests in an app transaction, validates its input",
     });
     // no transaction control inside a batch (a COMMIT would leave a failing batch half applied)
     const commit = await db("batch", { statements: [{ sql: "DELETE FROM t" }, { sql: "-- c\n COMMIT" }, { sql: "INSERT INTO t (v) VALUES (NULL)" }] });
-    assert.deepEqual(commit, { status: 400, body: "batch statement 2: transaction control isn't allowed in a batch (it is one transaction)" });
+    assert.deepEqual(commit, { status: 400, body: "batch statement 2: transaction control and PRAGMA aren't allowed in a batch (it is one transaction; a PRAGMA isn't rolled back with it)" });
     for (const sql of ["begin", "END", "ROLLBACK", "SAVEPOINT s", "/* x */ RELEASE s", ";COMMIT", " ; /*x*/ END"]) {
       assert.equal((await db("batch", { statements: [{ sql }] })).status, 400, sql);
     }

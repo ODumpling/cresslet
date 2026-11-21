@@ -48,12 +48,13 @@ function isVacuum(sql: string): boolean {
   return /^\s*vacuum(\s+main)?\s*;?\s*$/i.test(out);
 }
 /**
- * True if `sql` starts with transaction control, after comments and empty statements (SQLite skips a leading `;`). A batch refuses those: one could commit or drop the
- * batch's savepoint and leave a failing batch half applied. Same as cresslet-cli lib/bindings.js isTxControl.
+ * True if `sql` starts with transaction control or PRAGMA, after comments and empty statements (SQLite skips a leading
+ * `;`). A batch refuses those: transaction control could commit or drop the batch's savepoint and leave a failing batch
+ * half applied, and a PRAGMA's effect isn't rolled back with it. Same as cresslet-cli lib/bindings.js notInBatch.
  */
-export function isTxControl(sql: string): boolean {
+export function notInBatch(sql: string): boolean {
   const rest = sql.replace(/^(?:[\s;]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
-  return /^(?:begin|commit|end|rollback|savepoint|release)\b/i.test(rest);
+  return /^(?:begin|commit|end|rollback|savepoint|release|pragma)\b/i.test(rest);
 }
 
 export function confine(db: DatabaseSync, vacuum: () => boolean = () => false) {
@@ -372,8 +373,8 @@ export function createBindings(
           for (const [i, s] of list.entries()) {
             if (typeof s?.sql !== "string") return text(`batch statement ${i + 1}: sql required`, 400);
             if (s.params !== undefined && !Array.isArray(s.params)) return text(`batch statement ${i + 1}: params must be an array`, 400);
-            if (isTxControl(s.sql)) {
-              return text(`batch statement ${i + 1}: transaction control isn't allowed in a batch (it is one transaction)`, 400);
+            if (notInBatch(s.sql)) {
+              return text(`batch statement ${i + 1}: transaction control and PRAGMA aren't allowed in a batch (it is one transaction; a PRAGMA isn't rolled back with it)`, 400);
             }
           }
           result = db.batch(list);
