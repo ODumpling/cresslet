@@ -1868,6 +1868,8 @@ let pageDialogOpening = false;
 async function openPageDialog() {
   const dlg = $("page-dialog");
   if (dlg.open || pageDialogOpening) return;
+  // Left the page mid-deploy and came back: that deploy still owns the dialog (it closes it and clears its pick).
+  if (pageUploading) return toast("Still deploying your last artifact…");
   pageDialogOpening = true;
   let defaults;
   try {
@@ -1894,12 +1896,14 @@ $("page-new").addEventListener("click", openPageDialog);
 for (const id of ["page-cancel", "page-close"]) $(id).addEventListener("click", () => !pageUploading && $("page-dialog").close());
 $("page-dialog").addEventListener("cancel", (e) => pageUploading && e.preventDefault());
 // A file dropped anywhere in the dialog but the drop zone would make the browser open it, leaving the studio.
-for (const type of ["dragover", "drop"]) $("page-dialog").addEventListener(type, (e) => e.preventDefault());
+for (const type of ["dragover", "drop"]) {
+  $("page-dialog").addEventListener(type, (e) => e.dataTransfer?.types.includes("Files") && e.preventDefault());
+}
 
 $("page-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   if (!pagePick) {
-    pageError("Choose an HTML file or a folder first.");
+    if ($("page-error").hidden) pageError("Choose an HTML file or a folder first."); // else: why the pick was refused
     $("page-file").focus();
     return;
   }
