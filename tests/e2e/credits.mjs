@@ -68,11 +68,8 @@ try {
   await page.locator(".notice[data-error]", { hasText: "out of AI credits" }).waitFor({ timeout: 30000 });
   if (seen.length !== 1) fail("a request went out without credits");
 
-  // Use own key instead, then back to credits.
-  await page.getByRole("button", { name: "Use own key" }).click();
-  if (!(await page.getByLabel("Anthropic API key").evaluate((e) => e === document.activeElement))) fail("key field not focused");
-  await page.getByRole("button", { name: "Use AI credits instead" }).click();
-  await input.waitFor();
+  // No switch to an own key while on credits.
+  if (await page.locator("#builder-chat button", { hasText: /own key/i }).count()) fail("own key button shown with credits");
   console.log("builder on credits ok");
 
   // Settings: what's left and the use.
