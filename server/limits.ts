@@ -1,18 +1,36 @@
-// In-memory sliding-window counters for abuse limits (one control-plane process, so no shared store).
-// Restarting the server resets them, which is fine for limits measured in hours.
+// Sliding-window counters for abuse limits. Kept in the store's SQLite database (table rate_hits)
+// when one is given, so a crash or restart doesn't hand out fresh allowances; in memory otherwise
+// (short-lived limits like CLI logins, where a reset doesn't matter).
+import { isIPv6 } from "node:net";
+
+/** Where persisted hits live (Store: table rate_hits). */
+export interface RateHits {
+  rateHitCount(bucket: string, key: string, since: number): number;
+  addRateHit(bucket: string, key: string, at: number, until: number): void;
+}
 
 export class RateLimit {
   private hits = new Map<string, number[]>();
   private max: number;
   private windowMs: number;
-  constructor(max: number, windowMs: number) {
+  private persist?: { hits: RateHits; bucket: string };
+  /** `persist.bucket` names this limit's rows (unique per limit). */
+  constructor(max: number, windowMs: number, persist?: { hits: RateHits; bucket: string }) {
     this.max = max;
     this.windowMs = windowMs;
+    this.persist = persist;
   }
 
   /** Records a hit for `key` and returns true, or returns false (no hit recorded) if it's over. */
   take(key: string, now = Date.now()): boolean {
     const since = now - this.windowMs;
+    if (this.persist) {
+      // node:sqlite is synchronous and the control plane is one process: count + insert can't interleave.
+      const { hits, bucket } = this.persist;
+      if (hits.rateHitCount(bucket, key, since) >= this.max) return false;
+      hits.addRateHit(bucket, key, now, now + this.windowMs);
+      return true;
+    }
     const recent = (this.hits.get(key) ?? []).filter((t) => t > since);
     if (recent.length >= this.max) {
       this.hits.set(key, recent);
@@ -27,4 +45,25 @@ export class RateLimit {
   private prune(since: number) {
     for (const [k, v] of this.hits) if (!v.some((t) => t > since)) this.hits.delete(k);
   }
+}
+
+/**
+ * The key per-IP limits count by: an IPv6 address by its /64 (one subscriber usually gets a whole
+ * /64, so counting single addresses would give them billions of allowances), anything else as is.
+ */
+export function ipKey(ip: string): string {
+  const raw = ip.trim();
+  const v4 = /^(\d+\.\d+\.\d+\.\d+)(?::\d+)?$/.exec(raw); // a proxy may append :port
+  if (v4) return v4[1];
+  const addr = raw.replace(/^\[([^\]]*)\](?::\d+)?$/, "$1").split("%")[0];
+  if (!isIPv6(addr)) return raw;
+  // The URL parser canonicalizes (lowercase, embedded IPv4 as hex, longest zero run as ::).
+  const [head, tail] = new URL(`http://[${addr}]/`).hostname.slice(1, -1).split("::");
+  const part = (s?: string) => (s ? s.split(":").map((g) => parseInt(g, 16)) : []);
+  const h = part(head), t = part(tail);
+  const g = tail === undefined ? h : [...h, ...Array(8 - h.length - t.length).fill(0), ...t];
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) {
+    return [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255].join("."); // IPv4-mapped: the IPv4 client
+  }
+  return g.slice(0, 4).map((x) => x.toString(16)).join(":") + "::/64";
 }

@@ -11,9 +11,11 @@ import { createBindings, createDb } from "../server/bindings.ts";
 import { removeAppFiles } from "../server/deploys.ts";
 import { existsSync, mkdirSync } from "node:fs";
 import { paths } from "../server/config.ts";
+import { ipKey } from "../server/limits.ts";
+import type { Store } from "../server/store.ts";
 
-async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> = {}) {
-  const dataDir = await mkdtemp(join(tmpdir(), "cresslet-lim-"));
+async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> = {}, reuseDir?: string) {
+  const dataDir = reuseDir ?? await mkdtemp(join(tmpdir(), "cresslet-lim-"));
   const base = loadConfig();
   const srv = createServer(loadConfig({
     dataDir, domain: "test.local", publicPort: 80, adminToken: "adm", siteAdmins: ["boss@b.co"],
@@ -35,7 +37,9 @@ async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> =
     srv.close();
     await rm(dataDir, { recursive: true, force: true });
   };
-  return { srv, json, bearer, account, deploy, done };
+  /** Stops the server but keeps its data (to start another on it). */
+  const stop = () => srv.close();
+  return { srv, json, bearer, account, deploy, done, stop, dataDir, store: srv.store };
 }
 
 test("app quota per account: new apps and claims stop at the limit; site admins are exempt", async () => {
@@ -85,6 +89,164 @@ test("anonymous apps: per client IP per hour, and a cap on the whole instance", 
   } finally {
     await t.done();
   }
+});
+
+test("new apps and pages per account per hour: create/delete loops get 429; redeploys and site admins don't count", async () => {
+  const t = await setup({ createsPerHour: 3 });
+  try {
+    const a = t.bearer(await t.account("a@b.co"));
+    const page = () => t.json("/v1/pages", { method: "POST", headers: a, body: JSON.stringify({ html: "<p>x</p>" }) });
+    for (let i = 0; i < 2; i++) {
+      const p = await page();
+      assert.equal(p.status, 201);
+      assert.equal((await t.json(`/v1/pages/${p.body.page.name}`, { method: "DELETE", headers: a })).status, 200);
+    }
+    assert.equal((await t.deploy(a, "loop")).status, 201, "apps and pages share the allowance");
+    assert.equal((await t.json("/v1/apps/loop", { method: "DELETE", headers: a })).status, 200);
+    const app = await t.deploy(a, "loop");
+    assert.equal(app.status, 429, "deleting doesn't give the allowance back");
+    assert.equal(app.body.error, "rate_limited");
+    assert.match(app.body.message, /too many new apps and pages \(3 per hour\)/);
+    const p = await page();
+    assert.equal(p.status, 429);
+    assert.equal(p.body.error, "rate_limited");
+
+    const b = t.bearer(await t.account("b@b.co"));
+    assert.equal((await t.deploy(b, "theirs")).status, 201, "other accounts have their own allowance");
+    assert.equal((await t.deploy(b, "theirs")).status, 201, "redeploying an existing app isn't a new one");
+    assert.equal((await t.deploy(b, "theirs")).status, 201);
+    assert.equal((await t.deploy(b, "theirs")).status, 201);
+
+    const boss = t.bearer(await t.account("boss@b.co"));
+    for (let i = 0; i < 4; i++) assert.equal((await t.deploy(boss, `b${i}`)).status, 201, "site admins are exempt");
+  } finally {
+    await t.done();
+  }
+});
+
+/** Runs `meanwhile` once, inside the next call of `store[method]` (after the request's own checks, before its insert). */
+function interleave<K extends "createApp" | "createPage">(store: Store, method: K, meanwhile: () => Promise<void>) {
+  const orig = store[method].bind(store) as (...a: unknown[]) => Promise<unknown>;
+  let once = true;
+  (store as unknown as Record<string, unknown>)[method] = async (...args: unknown[]) => {
+    if (once) {
+      once = false;
+      await meanwhile();
+    }
+    return orig(...args);
+  };
+}
+
+test("a create that loses the last quota slot to a concurrent one doesn't spend the hourly allowance", async () => {
+  const t = await setup({ createsPerHour: 2, maxPagesPerAccount: 1 });
+  try {
+    const a = t.bearer(await t.account("a@b.co"));
+    const page = () => t.json("/v1/pages", { method: "POST", headers: a, body: JSON.stringify({ html: "<p>x</p>" }) });
+    let won = "";
+    interleave(t.store, "createPage", async () => {
+      const r = await page();
+      assert.equal(r.status, 201);
+      won = r.body.page.name;
+    });
+    assert.equal((await page()).status, 403, "the slot went to the other request");
+    assert.equal((await t.json(`/v1/pages/${won}`, { method: "DELETE", headers: a })).status, 200);
+    assert.equal((await page()).status, 201, "the 403 didn't count");
+  } finally {
+    await t.done();
+  }
+});
+
+test("two first deploys of one name: the loser gets 409 and keeps its hourly allowance", async () => {
+  const t = await setup({ createsPerHour: 2 });
+  try {
+    const a = t.bearer(await t.account("a@b.co"));
+    interleave(t.store, "createApp", async () => assert.equal((await t.deploy(a, "same")).status, 201));
+    const lost = await t.deploy(a, "same");
+    assert.equal(lost.status, 409);
+    assert.equal(lost.body.error, "conflict");
+    assert.equal((await t.json("/v1/apps/same", { method: "DELETE", headers: a })).status, 200);
+    assert.equal((await t.deploy(a, "next")).status, 201, "the 409 didn't count");
+  } finally {
+    await t.done();
+  }
+});
+
+test("hourly limits survive a restart", async () => {
+  const t = await setup({ createsPerHour: 1, anonAppsPerHour: 1 }, { clientIpHeader: "cf-connecting-ip" });
+  let tok: string;
+  try {
+    tok = await t.account("a@b.co");
+    assert.equal((await t.deploy(t.bearer(tok), "one")).status, 201);
+    const anon = await t.deploy({ "cf-connecting-ip": "1.1.1.1" });
+    assert.equal(anon.status, 201);
+    assert.equal((await t.json(`/v1/apps/${anon.body.app.name}`, { method: "DELETE", headers: { "x-cresslet-deploy-key": anon.body.deployKey } })).status, 200);
+    t.stop();
+  } catch (e) {
+    await t.done();
+    throw e;
+  }
+  const again = await setup({ createsPerHour: 1, anonAppsPerHour: 1 }, { clientIpHeader: "cf-connecting-ip" }, t.dataDir);
+  try {
+    assert.equal((await again.deploy(again.bearer(tok), "two")).status, 429);
+    assert.equal((await again.deploy({ "cf-connecting-ip": "1.1.1.1" })).status, 429);
+    assert.equal((await again.deploy({ "cf-connecting-ip": "2.2.2.2" })).status, 201);
+  } finally {
+    await again.done();
+  }
+});
+
+test("anonymous pool under saturation: live apps per client IP (IPv6 by /64), freed by delete or claim", async () => {
+  const t = await setup({ anonAppsPerHour: 100, maxAnonAppsPerIp: 2, maxAnonApps: 5 }, { clientIpHeader: "cf-connecting-ip" });
+  try {
+    const ip = (x: string) => ({ "cf-connecting-ip": x });
+    const mine = [await t.deploy(ip("1.1.1.1")), await t.deploy(ip("1.1.1.1"))];
+    for (const r of mine) assert.equal(r.status, 201);
+    const held = await t.deploy(ip("1.1.1.1"));
+    assert.equal(held.status, 429, "one address can't take the whole pool");
+    assert.match(held.body.message, /live anonymous apps from your address \(2\)/);
+
+    assert.equal((await t.deploy(ip("2001:db8:1:2::1"))).status, 201);
+    assert.equal((await t.deploy(ip("2001:db8:1:2:ffff::9"))).status, 201);
+    assert.equal((await t.deploy(ip("2001:db8:1:2::abcd"))).status, 429, "the same IPv6 /64 is one client");
+
+    const third = await t.deploy(ip("3.3.3.3"));
+    assert.equal(third.status, 201, "pool: 5 of 5");
+    const full = await t.deploy(ip("4.4.4.4"));
+    assert.equal(full.status, 429, "a full pool still turns new clients away");
+    assert.match(full.body.message, /too many anonymous apps on this server/);
+
+    const del = await t.json(`/v1/apps/${third.body.app.name}`, { method: "DELETE", headers: { "x-cresslet-deploy-key": third.body.deployKey } });
+    assert.equal(del.status, 200);
+    assert.equal((await t.deploy(ip("4.4.4.4"))).status, 201, "a delete frees a slot");
+
+    // 1.1.1.1 is still at its cap (2 live): a claim takes one off it, and off the pool.
+    const a = t.bearer(await t.account("a@b.co"));
+    const claim = await t.json(`/v1/apps/${mine[1].body.app.name}/claim`, { method: "POST", headers: a, body: JSON.stringify({ deployKey: mine[1].body.deployKey }) });
+    assert.equal(claim.status, 200);
+    assert.equal((await t.deploy(ip("1.1.1.1"))).status, 201, "a claim frees the address's live slot and a pool slot");
+    assert.equal((await t.deploy(ip("1.1.1.1"))).status, 429, "pool full again");
+  } finally {
+    await t.done();
+  }
+});
+
+test("ipKey: IPv4 as is, IPv6 by its /64", () => {
+  assert.equal(ipKey("1.2.3.4"), "1.2.3.4");
+  assert.equal(ipKey("1.2.3.4:5678"), "1.2.3.4");
+  assert.equal(ipKey("[2001:db8:1:2::1]:443"), "2001:db8:1:2::/64");
+  assert.equal(ipKey("[2001::2:3:4:5:6]:443"), "2001:0:0:2::/64");
+  assert.equal(ipKey("1.2.3.4:443") === ipKey("1.9.8.7:443"), false);
+  assert.equal(ipKey("::ffff:1.2.3.4"), "1.2.3.4");
+  assert.equal(ipKey("::ffff:0102:0304"), "1.2.3.4", "hex IPv4-mapped");
+  assert.equal(ipKey("0:0:0:0:0:ffff:5.6.7.8"), "5.6.7.8");
+  assert.equal(ipKey("2001:0db8:0001:0002:0000:0000:0000:0001"), "2001:db8:1:2::/64", "fully expanded");
+  assert.equal(ipKey("2001:DB8:0001:0002:aaaa::1"), "2001:db8:1:2::/64");
+  assert.equal(ipKey("2001:db8:1:2::"), "2001:db8:1:2::/64");
+  assert.equal(ipKey("2001:db8::1"), "2001:db8:0:0::/64");
+  assert.equal(ipKey("[2001:db8:1:2:3:4:5:6]"), "2001:db8:1:2::/64");
+  assert.equal(ipKey("fe80::1%eth0"), "fe80:0:0:0::/64");
+  assert.equal(ipKey("::1"), "0:0:0:0::/64");
+  assert.equal(ipKey("unknown"), "unknown");
 });
 
 test("deploys per app per hour", async () => {

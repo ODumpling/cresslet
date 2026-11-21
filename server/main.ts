@@ -86,6 +86,7 @@ export function createServer(cfg: Config = loadConfig(), cluster: Cluster = sing
    */
   async function reap() {
     store.prunePageSessions();
+    store.pruneRateHits();
     for (const a of [...store.expiredApps(), ...store.deletedBefore(Date.now() - cfg.limits.deletedRetentionMs)]) {
       if (cluster.local(a.id)) await purgeApp(cfg, store, runtime, a);
     }
