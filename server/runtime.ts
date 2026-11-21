@@ -10,7 +10,7 @@ import { createServer as createNetServer, type Server as NetServer } from "node:
 import { type IncomingMessage, request as httpRequest } from "node:http";
 import type { Duplex } from "node:stream";
 import { join } from "node:path";
-import { Readable } from "node:stream";
+import { finished, Readable } from "node:stream";
 import { Client } from "undici";
 import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
@@ -49,6 +49,16 @@ interface Proc {
   inflight: number;
   exited: boolean;
 }
+
+/** Every sandbox slot (CRESSLET_MAX_RUNNING_SANDBOXES) is taken by one that's serving: the caller answers 503. */
+class SandboxesBusy extends Error {
+  constructor() {
+    super("all sandbox slots are busy");
+  }
+}
+
+const busy = () => new Response("Server busy, try again shortly.", { status: 503, headers: { "retry-after": "5" } });
+const BUSY_RAW = "HTTP/1.1 503 Service Unavailable\r\nretry-after: 5\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
 
 const HOP = ["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-connection", "te", "trailer", "expect"];
 const NULL_BODY = new Set([101, 204, 205, 304]);
@@ -124,6 +134,9 @@ export class Runtime {
   #instance: string;
   /** After close(): no new sandboxes (a cold start in flight must not spawn during shutdown). */
   #closed = false;
+  /** Open (or handshaking) WebSockets: on the instance, and per app. */
+  #wsTotal = 0;
+  #ws = new Map<string, number>();
 
   constructor(cfg: Config, logs: Logs) {
     this.#cfg = cfg;
@@ -146,14 +159,22 @@ export class Runtime {
     try {
       proc = await this.#get(spec);
     } catch (e) {
+      if (e instanceof SandboxesBusy) return busy();
       this.logs.push(spec.appId, "system", `failed to start: ${(e as Error).message}`);
       return new Response("App failed to start. See `cresslet logs`.", { status: 502 });
     }
-    proc.inflight++;
-    proc.lastUsed = Date.now();
-    const timeout = AbortSignal.timeout(this.#cfg.limits.requestMs);
-    const signal = AbortSignal.any([timeout, req.signal]);
+    let streaming = false;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      proc.inflight--;
+      proc.lastUsed = Date.now();
+    };
+    let timeout: AbortSignal | undefined;
     try {
+      timeout = AbortSignal.timeout(this.#cfg.limits.requestMs);
+      const signal = AbortSignal.any([timeout, req.signal]);
       const headers: Record<string, string> = {};
       req.headers.forEach((v, k) => {
         // Clients can't forge control-plane headers (x-cresslet-url, -probe, -scheduled, …).
@@ -177,9 +198,13 @@ export class Runtime {
         await res.body.dump();
         return new Response(null, { status: res.statusCode, headers: h });
       }
-      return new Response(Readable.toWeb(res.body) as ReadableStream, { status: res.statusCode, headers: h });
+      // Still in flight until the body is done (ended, failed, cancelled or timed out), so it isn't evicted mid-response.
+      const out = new Response(Readable.toWeb(res.body) as ReadableStream, { status: res.statusCode, headers: h });
+      streaming = true;
+      finished(res.body, release);
+      return out;
     } catch (e) {
-      if (timeout.aborted) {
+      if (timeout?.aborted) {
         // Likely a runaway handler; restart the sandbox.
         this.logs.push(spec.appId, "system", `request timed out after ${this.#cfg.limits.requestMs}ms; restarting`);
         this.stop(spec.appId);
@@ -189,26 +214,60 @@ export class Runtime {
       this.logs.push(spec.appId, "system", `proxy error: ${(e as Error).message}`);
       return new Response("Bad Gateway", { status: 502 });
     } finally {
-      proc.inflight--;
-      proc.lastUsed = Date.now();
+      if (!streaming) release();
     }
   }
 
   /**
    * WebSocket (HTTP upgrade): forward the handshake to the sandbox; only a 101 gets the two sockets
    * spliced. Any other answer is relayed once and the connection closed, so a client can't reuse it
-   * to talk to the sandbox directly. Open sockets count as in-flight (the idle reaper keeps it up).
+   * to talk to the sandbox directly. Open sockets count as in-flight (the idle reaper keeps it up),
+   * so they're capped (per app and per instance) and closed after wsIdleMs without traffic or wsMaxMs in all.
    */
   async upgrade(spec: AppSpec, req: IncomingMessage, client: Duplex, head: Buffer, url: string): Promise<number> {
+    const lim = this.#cfg.limits;
+    const appWs = this.#ws.get(spec.appId) ?? 0;
+    if ((lim.maxWebSockets && this.#wsTotal >= lim.maxWebSockets) || (lim.maxWebSocketsPerApp && appWs >= lim.maxWebSocketsPerApp)) {
+      client.end(BUSY_RAW);
+      return 503;
+    }
+    // Counted from the handshake on, so a flood of slow handshakes is capped too.
+    this.#wsTotal++;
+    this.#ws.set(spec.appId, appWs + 1);
+    let counted = true;
+    const uncount = () => {
+      if (!counted) return;
+      counted = false;
+      this.#wsTotal--;
+      const n = (this.#ws.get(spec.appId) ?? 1) - 1;
+      if (n > 0) this.#ws.set(spec.appId, n);
+      else this.#ws.delete(spec.appId);
+    };
+    // A client gone during a cold start frees its slot right away. Upgraded sockets allow half-open,
+    // so a FIN alone doesn't close it: destroy it then (nothing has been sent yet).
+    const gone = () => client.destroy();
+    client.once("close", uncount).once("end", gone);
     let proc: Proc;
     try {
       proc = await this.#get(spec);
     } catch (e) {
+      client.off("end", gone);
+      uncount();
+      if (e instanceof SandboxesBusy) {
+        client.end(BUSY_RAW);
+        return 503;
+      }
       this.logs.push(spec.appId, "system", `failed to start: ${(e as Error).message}`);
       client.end("HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
       return 502;
     }
-    if (client.destroyed) return 0;
+    client.off("end", gone);
+    if (client.destroyed) {
+      uncount();
+      proc.inflight--;
+      proc.lastUsed = Date.now();
+      return 0;
+    }
     const headers: string[] = [];
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
       // Clients can't forge control-plane headers.
@@ -216,14 +275,20 @@ export class Runtime {
     }
     headers.push("x-cresslet-url", url);
     const u = new URL(url);
+    const started = Date.now();
     let done = false;
     let responded = false;
     let upstream: Duplex | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let idle: ReturnType<typeof setTimeout> | undefined;
+    let maxAge: ReturnType<typeof setTimeout> | undefined;
     const close = () => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      clearTimeout(idle);
+      clearTimeout(maxAge);
+      uncount();
       proc.inflight--;
       proc.lastUsed = Date.now();
       client.destroy();
@@ -231,8 +296,6 @@ export class Runtime {
       up.destroy();
     };
     const up = httpRequest({ socketPath: proc.sockPath, method: req.method, path: u.pathname + u.search, headers, setHost: false });
-    proc.inflight++;
-    proc.lastUsed = Date.now();
     client.on("error", close).on("close", close);
     return await new Promise<number>((resolve) => {
       timer = setTimeout(() => {
@@ -254,11 +317,32 @@ export class Runtime {
         socket.on("error", close).on("close", close);
         socket.pipe(client);
         client.pipe(socket);
+        const expire = (why: string) => () => {
+          if (done) return;
+          this.logs.push(spec.appId, "system", `websocket ${u.pathname} closed: ${why}`);
+          close();
+        };
+        if (lim.wsIdleMs) {
+          const t = idle = setTimeout(expire(`no traffic for ${lim.wsIdleMs}ms`), lim.wsIdleMs);
+          t.unref?.();
+          // After pipe(): these listeners don't change the streams' flow (pipe already made them flowing).
+          const bump = () => done || t.refresh();
+          socket.on("data", bump);
+          client.on("data", bump);
+        }
+        if (lim.wsMaxMs) {
+          maxAge = setTimeout(expire(`open for ${lim.wsMaxMs}ms (the most allowed)`), lim.wsMaxMs);
+          maxAge.unref?.();
+        }
         resolve(101);
       });
       up.on("response", (res) => {
         clearTimeout(timer);
         responded = true;
+        // Not a WebSocket: frees its slot now, and the body still has to finish within the request deadline.
+        uncount();
+        timer = setTimeout(close, Math.max(0, started + this.#cfg.limits.requestMs - Date.now()));
+        timer.unref?.();
         let raw = `HTTP/1.1 ${res.statusCode} ${res.statusMessage ?? ""}\r\n`;
         for (let i = 0; i < res.rawHeaders.length; i += 2) {
           if (!/^(connection|keep-alive|transfer-encoding)$/i.test(res.rawHeaders[i])) raw += `${res.rawHeaders[i]}: ${res.rawHeaders[i + 1]}\r\n`;
@@ -279,12 +363,18 @@ export class Runtime {
     });
   }
 
+  /** A running sandbox for `spec`, with this caller counted in-flight (it must decrement `inflight`). */
   async #get(spec: AppSpec): Promise<Proc> {
     const cur = this.procs.get(spec.appId);
     // Network policy is part of the identity: a sandbox started under an old policy (e.g. a cold
     // start racing a PUT /egress) is replaced on the next request.
     if (cur && !cur.exited && cur.spec.deployId === spec.deployId && samePolicy(cur.spec, spec)) {
       await cur.ready;
+      // It may have been evicted (#makeRoom) or stopped while we waited: then start over.
+      if (cur.exited || this.procs.get(spec.appId) !== cur) return this.#get(spec);
+      // Counted before returning (synchronously with the check), so it can't be evicted once handed out.
+      cur.inflight++;
+      cur.lastUsed = Date.now();
       return cur;
     }
     if (cur) this.stop(spec.appId);
@@ -297,9 +387,31 @@ export class Runtime {
       if (!ok && same) return starting.p;
       return this.#get(spec);
     }
+    this.#makeRoom();
     const p = this.#spawn(spec).finally(() => this.#starting.delete(spec.appId));
     this.#starting.set(spec.appId, { spec, p });
     return p;
+  }
+
+  /**
+   * Before a new sandbox starts: at CRESSLET_MAX_RUNNING_SANDBOXES, stop the least recently used idle
+   * one (nothing in flight, not starting). Throws SandboxesBusy if every slot is serving. Synchronous
+   * with the #starting.set that follows, so two cold starts can't both take the last slot.
+   */
+  #makeRoom() {
+    const max = this.#cfg.limits.maxRunningSandboxes;
+    if (!max) return;
+    const live = new Set([...this.procs.keys(), ...this.#starting.keys()]);
+    while (live.size >= max) {
+      let lru: [string, Proc] | undefined;
+      for (const e of this.procs) {
+        if (e[1].inflight === 0 && !this.#starting.has(e[0]) && (!lru || e[1].lastUsed < lru[1].lastUsed)) lru = e;
+      }
+      if (!lru) throw new SandboxesBusy();
+      this.logs.push(lru[0], "system", `sandbox stopped while idle: ${max} running (CRESSLET_MAX_RUNNING_SANDBOXES), another app needed one`);
+      this.stop(lru[0]);
+      live.delete(lru[0]);
+    }
   }
 
   async #spawn(spec: AppSpec): Promise<Proc> {
@@ -471,6 +583,9 @@ export class Runtime {
       this.stop(spec.appId);
       throw e;
     }
+    // The request that started it is in flight from here (while it's still in #starting: never evictable in between).
+    proc.inflight++;
+    proc.lastUsed = Date.now();
     return proc;
   }
 

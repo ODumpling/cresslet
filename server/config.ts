@@ -82,6 +82,15 @@ export interface Config {
     requestMs: number;
     memoryMb: number;
     idleMs: number;
+    /** Sandboxes awake at once (0 = no cap). At the cap, a new one stops the least recently used idle one; none idle: 503. */
+    maxRunningSandboxes: number;
+    /** Open WebSockets on the whole instance / per app (0 = no cap); past either: 503. */
+    maxWebSockets: number;
+    maxWebSocketsPerApp: number;
+    /** An open WebSocket is closed after this long without a byte either way (0 = never). */
+    wsIdleMs: number;
+    /** …and after this long in all (0 = never), so open sockets can't keep a sandbox awake forever. */
+    wsMaxMs: number;
     anonTtlMs: number;
     logLines: number;
     /** How long a site deleted by a site admin stays restorable before it's purged. */
@@ -161,6 +170,11 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       requestMs: num("CRESSLET_REQUEST_TIMEOUT_MS", 30_000),
       memoryMb: num("CRESSLET_APP_MEMORY_MB", 256),
       idleMs: num("CRESSLET_IDLE_MS", 5 * 60_000),
+      maxRunningSandboxes: num("CRESSLET_MAX_RUNNING_SANDBOXES", 32),
+      maxWebSockets: num("CRESSLET_MAX_WEBSOCKETS", 1000),
+      maxWebSocketsPerApp: num("CRESSLET_MAX_WEBSOCKETS_PER_APP", 100),
+      wsIdleMs: num("CRESSLET_WS_IDLE_MS", 10 * 60_000),
+      wsMaxMs: num("CRESSLET_WS_MAX_MS", 60 * 60_000),
       anonTtlMs: num("CRESSLET_ANON_TTL_HOURS", 72) * 3600_000,
       logLines: num("CRESSLET_LOG_LINES", 1000),
       deletedRetentionMs: num("CRESSLET_DELETED_RETENTION_DAYS", 30) * 86_400_000,
@@ -204,6 +218,13 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   }
   if (!Number.isSafeInteger(limits.jsonBodyBytes) || limits.jsonBodyBytes < 1) {
     throw new Error("CRESSLET_MAX_JSON_BODY_KB / limits.jsonBodyBytes must be a positive safe integer");
+  }
+  for (const [k, env] of [["maxRunningSandboxes", "CRESSLET_MAX_RUNNING_SANDBOXES"], ["maxWebSockets", "CRESSLET_MAX_WEBSOCKETS"],
+    ["maxWebSocketsPerApp", "CRESSLET_MAX_WEBSOCKETS_PER_APP"], ["wsIdleMs", "CRESSLET_WS_IDLE_MS"], ["wsMaxMs", "CRESSLET_WS_MAX_MS"]] as const) {
+    // Timers past 2^31-1 ms fire at once in Node.
+    if (!(Number.isSafeInteger(limits[k]) && limits[k] >= 0 && limits[k] <= 2 ** 31 - 1)) {
+      throw new Error(`${env} must be a whole number from 0 (no limit) to ${2 ** 31 - 1}`);
+    }
   }
   return {
     ...merged,
