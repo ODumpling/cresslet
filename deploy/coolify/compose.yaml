@@ -33,6 +33,9 @@ services:
       CRESSLET_ANON_DEPLOYS: ${CRESSLET_ANON_DEPLOYS:-false}
       CRESSLET_ADMIN_TOKEN: ${CRESSLET_ADMIN_TOKEN:-}
       CRESSLET_SITE_ADMINS: ${CRESSLET_SITE_ADMINS:-}
+      # Cloudflare's proxy + the Traefik labels below route only <domain> and *.<domain>: other people's
+      # hostnames get no route or certificate, so don't let apps add them (docs/self-hosting.md#coolify).
+      CRESSLET_CUSTOM_DOMAINS: ${CRESSLET_CUSTOM_DOMAINS:-false}
       CRESSLET_GITHUB_CLIENT_ID: ${CRESSLET_GITHUB_CLIENT_ID:-}
       CRESSLET_GITHUB_CLIENT_SECRET: ${CRESSLET_GITHUB_CLIENT_SECRET:-}
       # Behind Cloudflare: cf-connecting-ip, so per-IP limits see clients, not Traefik.

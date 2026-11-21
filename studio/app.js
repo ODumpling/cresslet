@@ -156,6 +156,14 @@ function renderAccount() {
 
 // Login is GitHub only: the server redirects back to /#cresslet_login=<one-time code>.
 const meta = fetch("/v1").then((r) => r.json()).catch(() => ({}));
+// Custom domains off on this server (CRESSLET_CUSTOM_DOMAINS=false): don't offer them in the role descriptions.
+meta.then((m) => {
+  if (m.customDomains !== false) return;
+  for (const id of ["token-role-admin", "invite-role-admin"]) {
+    const o = $(id);
+    o.textContent = o.textContent.replace(/,? domains\b/, "");
+  }
+});
 
 async function logIn() {
   if ((await meta).auth?.github) location.href = "/v1/auth/github";
@@ -564,7 +572,7 @@ async function renderAdminSite(name) {
   document.title = `${name} · Admin · Cresslet Studio`;
   $("admin-title").replaceChildren(el("a", { href: "#/admin", textContent: "Sites" }), " / ", name);
   const gen = adminView.gen, route = routeGen;
-  const d = await api(`/v1/admin/sites/${encodeURIComponent(name)}`);
+  const [d, { customDomains }] = await Promise.all([api(`/v1/admin/sites/${encodeURIComponent(name)}`), meta]);
   if (gen !== adminView.gen || route !== routeGen) return;
   const s = d.site;
   $("admin-sub").textContent = s.owner ? `Owned by ${ownerText(s.owner)}` : "Anonymous site";
@@ -594,7 +602,10 @@ async function renderAdminSite(name) {
   const link = (href, text) => extLink(href, text);
   const info = el("div", { className: "panel" }, el("h2", { textContent: "Overview" }), kv([
     ["URL", s.status === "deleted" ? s.url : link(s.url, s.url.replace(/^https?:\/\//, ""))],
-    ["Domains", d.domains.length ? el("span", {}, ...d.domains.flatMap((x, i) => [i ? ", " : null, x.verified ? link(`https://${x.domain}`, x.domain) : `${x.domain} (unverified)`])) : "—"],
+    ["Domains", d.domains.length
+      ? el("span", {}, ...d.domains.flatMap((x, i) => [i ? ", " : null, x.verified ? link(`https://${x.domain}`, x.domain) : `${x.domain} (unverified)`]),
+        customDomains === false ? " · custom domains are off on this server: none can be added or verified" : null)
+      : customDomains === false ? "Custom domains are off on this server" : "—"],
     ["Owner", s.owner ? `${s.owner.email}${s.owner.github ? ` (@${s.owner.github})` : ""}` : `Anonymous${s.expiresAt ? `, expires ${ago(s.expiresAt)}` : ""}`],
     ["Server", s.server ? `Yes${s.crons ? ` · ${s.crons} cron${s.crons > 1 ? "s" : ""}` : ""}` : "Static only"],
     ["Secrets", String(d.secrets)],

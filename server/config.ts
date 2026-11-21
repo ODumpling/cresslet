@@ -47,6 +47,12 @@ export interface Config {
    * limits. Only set it when every request comes through that proxy: clients can send it too.
    */
   clientIpHeader: string | null;
+  /**
+   * Let apps add and verify custom domains (`CRESSLET_CUSTOM_DOMAINS`, default on). Turn it off when
+   * nothing in front can route and certify other people's hostnames, e.g. Cloudflare's proxy + Traefik
+   * on Coolify. Domains verified earlier keep routing.
+   */
+  customDomains: boolean;
   /** TXT lookup for custom-domain verification (tests stub it). */
   resolveTxt: (name: string) => Promise<string[][]>;
   /** OS-level sandbox limits (server/sandbox.ts); Linux, opt-in. */
@@ -120,6 +126,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       }
       : null,
     clientIpHeader: process.env.CRESSLET_CLIENT_IP_HEADER?.trim().toLowerCase() || null,
+    customDomains: env("CRESSLET_CUSTOM_DOMAINS", "true") === "true",
     resolveTxt,
     sandbox: {
       uidBase: process.env.CRESSLET_SANDBOX_UID_BASE ? num("CRESSLET_SANDBOX_UID_BASE", 0) : null,
