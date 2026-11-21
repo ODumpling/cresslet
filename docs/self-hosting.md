@@ -96,7 +96,7 @@ deploy/backup.sh <volume> --install    # daily at 03:30 (systemd timer)
 
 ### Off-site
 
-A snapshot on the same disk doesn't survive losing that disk. With [rclone](https://rclone.org/install/) installed and set up for root (from rclone.org, not the distro: older packages such as Ubuntu 26.04's 1.60.1 follow each upload with a request R2 rejects, `501 NotImplemented`, so each upload logs a failed attempt and only succeeds on rclone's retry; 1.76.0 works), `CRESSLET_BACKUP_RCLONE` gets a copy of each snapshot and `CRESSLET_BACKUP_KEY_RCLONE` gets the keys. Make them two remotes with their own credentials, on two buckets, so a leaked bucket or token holds the data or the key, never both (the host holds both tokens, as it holds the volume). Any S3-compatible storage works (Cloudflare R2, Backblaze B2, AWS S3, …). For R2: two buckets and two API tokens (Object Read & Write, each limited to its bucket), in `/root/.config/rclone/rclone.conf` (mode 0600; or `rclone config`, which asks for the same fields, to keep the tokens out of shell history):
+A snapshot on the same disk doesn't survive losing that disk. With [rclone](https://rclone.org/install/) installed and set up for root, `CRESSLET_BACKUP_RCLONE` gets a copy of each snapshot and `CRESSLET_BACKUP_KEY_RCLONE` gets the keys. Install rclone from rclone.org, not the distro: after each upload, older ones (Ubuntu 26.04's 1.60.1) send a check R2 rejects (`501 NotImplemented`), so each upload logs a failed attempt (the file is up) and rclone's retry passes; 1.76.0 runs clean. Make them two remotes with their own credentials, on two buckets, so a leaked bucket or token holds the data or the key, never both (the host holds both tokens, as it holds the volume). Any S3-compatible storage works (Cloudflare R2, Backblaze B2, AWS S3, …). For R2: two buckets and two API tokens (Object Read & Write, each limited to its bucket), in `/root/.config/rclone/rclone.conf` (mode 0600; or `rclone config`, which asks for the same fields, to keep the tokens out of shell history):
 
 ```ini
 [snaps]
@@ -111,12 +111,12 @@ no_check_bucket = true
 # the same, with token 2
 ```
 
-Before `--install`, as root, check that each token reaches its own bucket and only that one:
+Before `--install`, as root, check that each token can list its own bucket and gets `AccessDenied` on the other (with your bucket names): the first two must list, the last two must fail.
 
 ```sh
-rclone lsf snaps:cresslet-snapshots     # each of these two must succeed
+rclone lsf snaps:cresslet-snapshots
 rclone lsf keys:cresslet-keys
-rclone lsf snaps:cresslet-keys          # each of these two must fail with AccessDenied
+rclone lsf snaps:cresslet-keys
 rclone lsf keys:cresslet-snapshots
 ```
 
