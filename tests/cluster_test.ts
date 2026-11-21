@@ -107,6 +107,9 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     const client = new AbortController();
     assert.equal(await text("/v1/deploys", { method: "POST", headers: deployHeaders, body: bom, signal: client.signal }), "203 from owner");
     assert.equal(await text("/v1/admin/sites/shop", { method: "DELETE" }), "203 from owner");
+    // Create-only (the studio's address picker): the name is taken, answered here (not forwarded).
+    const create = await call("/v1/deploys", { method: "POST", headers: auth, body: JSON.stringify({ app: "shop", create: true, files: [{ path: "index.html", data: "x" }] }) });
+    assert.equal(create.status, 409);
     assert.deepEqual(fake.forwards.map((f) => `${f.method} ${f.url}`), [
       "GET http://shop.test.local/",
       "GET http://shop.test.local/api/x",

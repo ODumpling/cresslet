@@ -199,13 +199,14 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       return undefined; // unreadable: the route answers 400
     });
     c.set("deployBytes", bytes);
-    let input: { app?: unknown } | null | undefined;
+    let input: { app?: unknown; create?: unknown } | null | undefined;
     try {
       if (bytes) input = JSON.parse(new TextDecoder().decode(bytes));
     } catch { /* the route answers 400 */ }
     c.set("deploy", input);
     const a = typeof input?.app === "string" ? store.appByName(input.app) : undefined;
-    if (!a || cluster.local(a.id)) return next();
+    // Create-only (`create: true`) for a name that exists: the route answers 409 here, whoever owns the app.
+    if (!a || cluster.local(a.id) || input?.create === true) return next();
     return forwardDeploy(c, a.id);
   });
   /** The deploy request as sent (bytes cached by the middleware above). */
