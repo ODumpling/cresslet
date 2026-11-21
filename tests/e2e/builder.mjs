@@ -35,6 +35,8 @@ const replies = [
   [[{ type: "tool_use", id: "t5", name: "run_command", input: { command: "unset CRESSLET_AI_BUILDER; cresslet deploy" } }], "tool_use"],
   [[{ type: "tool_use", id: "t4", name: "run_command", input: { command: "cresslet deploy" } }], "tool_use"],
   [[{ type: "text", text: "Renamed the heading to Tasks and deployed it." }], "end_turn"],
+  // second chat: Stop after an approved deploy
+  [[{ type: "tool_use", id: "t6", name: "run_command", input: { command: "cresslet deploy && sleep 30" } }], "tool_use"],
 ];
 const requests = [];
 const cors = { "access-control-allow-origin": base, "access-control-allow-headers": "*", "access-control-allow-methods": "POST, OPTIONS" };
@@ -118,9 +120,23 @@ try {
   console.log("deployed through the builder:", url);
   await page.screenshot({ path: `${out}/builder-done.png` });
 
-  // New chat clears the log; Forget key goes back to the key form and drops the key.
+  // New chat clears the log.
   await page.getByRole("button", { name: "New chat" }).click();
   if (await page.locator("#builder-log > *").count()) fail("New chat kept the log");
+  // Stop after approving a deploy: the chat says it may still go live, and screen readers hear it.
+  requests.length = 0;
+  await input.fill("Deploy again");
+  await input.press("Enter");
+  await approveBtn.click({ timeout: 30000 });
+  await page.locator("#builder-log .step", { hasText: "Deploy approved" }).waitFor();
+  await page.waitForTimeout(2000); // the deploy finishes; `sleep` keeps the command running
+  await page.getByRole("button", { name: "Stop" }).click();
+  await page.locator(".notice", { hasText: "may still go live" }).waitFor({ timeout: 10000 });
+  if (!(await page.locator("#builder-status").textContent()).includes("may still go live")) fail(`not announced: ${await page.locator("#builder-status").textContent()}`);
+  if (!(await page.locator("#builder-working").isHidden())) fail("working indicator stuck");
+  console.log("stop after an approved deploy: warned");
+  await page.getByRole("button", { name: "New chat" }).click();
+  // Forget key goes back to the key form and drops the key.
   await page.getByRole("button", { name: "Forget key" }).click();
   await key.waitFor();
   if ((await page.evaluate(() => localStorage.getItem("cresslet.anthropicKey"))) !== null) fail("key not removed");

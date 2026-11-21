@@ -117,8 +117,9 @@ export function createCresslet(c, opts) {
     return { files: r.files, server };
   }
 
-  async function deploy(log = () => {}, signal = undefined) {
-    const cfg = await config();
+  /** `cfg`: the cresslet.json already read (the target an approval named must be the one deployed to). */
+  async function deploy(log = () => {}, signal = undefined, cfg = undefined) {
+    cfg ??= await config();
     const { files: built, server } = await build(log);
     signal?.throwIfAborted();
     const files = [];
@@ -419,12 +420,14 @@ export function createCresslet(c, opts) {
       }
       if (sub === "deploy") {
         // Started by the AI builder (directly or through a script): the user approves each deploy.
-        // (Its own running count, not just the env var: a command can unset that.)
-        if ((opts.builderRunning?.() || ctx.env.CRESSLET_AI_BUILDER) && !(await opts.approveDeploy?.(opts.project()?.deploy?.name ?? ((await config()).name || null), ctx.signal))) {
+        // (Its own running count, not just the env var: a command can unset that.) The app named is the one deployed
+        // to: cresslet.json is read once, before asking.
+        const cfg = await config();
+        if ((opts.builderRunning?.() || ctx.env.CRESSLET_AI_BUILDER) && !(await opts.approveDeploy?.(opts.project()?.deploy?.name ?? (cfg.name || null), ctx.signal))) {
           err("deploy not approved by the user");
           return 1;
         }
-        await deploy(out, ctx.signal);
+        await deploy(out, ctx.signal, cfg);
         return 0;
       }
       out("usage: cresslet dev [--port 3000] | build | deploy\r\n(other commands: use the real CLI: npx cresslet, or npm i -g cresslet)");

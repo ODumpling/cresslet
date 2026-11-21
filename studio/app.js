@@ -1672,7 +1672,8 @@ async function openProject(id, gen) {
       renderTree();
       save();
       // the open file removed (a command, the AI builder): openFile clears the editor
-      if (current) c.fs.exists(`${wd}/${current}`).then((ok) => ok || openFile(current), () => {});
+      const open = current;
+      if (open) c.fs.exists(`${wd}/${open}`).then((ok) => ok || openFile(open), () => {});
     }, 300);
   });
 
@@ -1870,6 +1871,8 @@ function mountBuilder({ c, devLog, onChange }) {
   };
   $("builder-new").onclick = () => {
     if (busy) return;
+    for (const decline of approvals) decline(); // e.g. from a process the builder left running
+    working("");
     agent = null;
     log.replaceChildren();
     announce("New chat");
@@ -1913,6 +1916,7 @@ function mountBuilder({ c, devLog, onChange }) {
           step.replaceChildren(icon(ev.error ? "x" : STEP_ICON[ev.name] ?? "check"), el("span", { textContent: ev.summary }), ...(ev.error ? [srOnly(" (failed)")] : []));
         }
         step = null;
+        if (ev.name === "run_command" && !stopped) approved = false; // an approved deploy in it has finished
         announce(ev.error ? `${ev.summary} (failed)` : ev.summary);
         working("Thinking…");
         break;
@@ -1947,7 +1951,7 @@ function mountBuilder({ c, devLog, onChange }) {
       await agent.send(text);
     } finally {
       for (const decline of approvals) decline(); // its command is gone (stopped, timed out, or left running)
-      if (approved && stopped) add(el("li", { className: "notice", dataset: { error: "" }, textContent: "If the deploy had started uploading, it may still go live: check the app." }));
+      if (approved && stopped) on({ type: "notice", text: "If the deploy had started uploading, it may still go live: check the app.", error: true });
       busy = false;
       bubble = step = null;
       working("");
@@ -1978,7 +1982,7 @@ function mountBuilder({ c, devLog, onChange }) {
         row.replaceChildren(icon(ok ? "rocket" : "x"), el("span", { textContent: ok ? "Deploy approved" : "Deploy not approved" }));
         if (hadFocus) chatFocus();
         announce(ok ? "Deploy approved" : "Deploy not approved");
-        working(ok ? "Deploying…" : "Thinking…");
+        working(approvals.size ? "Waiting for your approval…" : !busy ? "" : ok ? "Deploying…" : "Thinking…");
         resolve(ok);
       };
       const stop = () => done(false);

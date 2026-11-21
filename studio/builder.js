@@ -142,10 +142,13 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     await proc.input.close().catch(() => {}); // no stdin: a command that waits for input gets EOF
     let timer, stop;
     const stopped = new Promise((r) => {
-      let left = timeoutMs;
+      // Wall-clock time (timers are throttled in background tabs), not counting time spent asking the user.
+      let used = 0, last = performance.now();
       const tick = () => {
-        if (!paused()) left -= 250;
-        if (left <= 0) r("timeout");
+        const now = performance.now();
+        if (!paused()) used += now - last;
+        last = now;
+        if (used >= timeoutMs) r("timeout");
         else timer = setTimeout(tick, 250);
       };
       timer = setTimeout(tick, 250);
