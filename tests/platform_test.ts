@@ -202,6 +202,25 @@ test("anonymous deploy, static + server routes, sandbox limits, claim, secrets, 
   assert.equal(gone.status, 404);
 }, { adminToken: "adm" }));
 
+test("routes: `!pattern` exclusions are served statically (SSR apps: everything but built assets)", withServer(async (t) => {
+  const d = await t.json("/v1/deploys", {
+    method: "POST",
+    body: deployBody({
+      server: `export default { fetch: (req) => new Response("ssr " + new URL(req.url).pathname) };`,
+      config: { routes: ["/*", "!/assets/*", "!/about.html"] },
+    }),
+  });
+  assert.deepEqual(d.status, 201);
+  const host = `${d.body.app.name}.test.local`;
+  assert.deepEqual(await (await t.call("/", { host })).text(), "ssr /");
+  assert.deepEqual(await (await t.call("/boards/1", { host })).text(), "ssr /boards/1");
+  assert.deepEqual(await (await t.call("/assets/app.js", { host })).text(), "console.log(1)");
+  assert.deepEqual(await (await t.call("/about.html", { host })).text(), "about");
+  const missing = await t.call("/assets/nope.js", { host }); // excluded: a static 404, not the server
+  assert.deepEqual([missing.status, (await missing.text()).startsWith("ssr")], [404, false]);
+  assert.deepEqual((await t.json("/v1/deploys", { method: "POST", body: deployBody({ config: { routes: ["!assets"] } }) })).status, 400);
+}));
+
 test("deploy validation", withServer(async (t) => {
   const bad = async (body: unknown) => (await t.json("/v1/deploys", { method: "POST", body: JSON.stringify(body) })).status;
   assert.deepEqual(await bad({ files: [{ path: "../x", data: "" }] }), 400);
@@ -224,6 +243,16 @@ test("templates are served", withServer(async (t) => {
     assert.ok(paths.includes(p), `missing ${p}`);
   }
   assert.equal((await t.json("/v1/templates/..%2Fserver")).status, 404);
+  // TanStack Start: a framework build (cresslet.json `build`), CLI only; SSR everywhere but its built assets
+  const tss = list.body.templates.find((x: { name: string }) => x.name === "tanstack-start");
+  assert.equal(tss?.studio, false);
+  const files = (await t.json("/v1/templates/tanstack-start")).body.files as { path: string; data: string }[];
+  const cfg = JSON.parse(files.find((f) => f.path === "cresslet.json")!.data);
+  assert.deepEqual(cfg.build, { command: "vite build", static: "dist/client", server: "dist/server/server.js", dev: "vite dev" });
+  assert.deepEqual(cfg.routes.slice(0, 2), ["/*", "!/assets/*"]);
+  for (const p of ["vite.config.ts", "src/routes/__root.tsx", "src/routeTree.gen.ts", "src/server/auth.server.ts", ".gitignore", "AGENTS.md"]) {
+    assert.ok(files.some((f) => f.path === p), `tanstack-start: missing ${p}`);
+  }
 }));
 
 test("studio is cross-origin isolated", withServer(async (t) => {

@@ -1,0 +1,10 @@
+{
+  "name": "",
+  "routes": ["/*", "!/assets/*", "!/favicon.svg"],
+  "build": {
+    "command": "vite build",
+    "static": "dist/client",
+    "server": "dist/server/server.js",
+    "dev": "vite dev"
+  }
+}

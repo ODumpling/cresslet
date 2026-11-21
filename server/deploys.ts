@@ -99,7 +99,8 @@ export function normalizeRoutes(routes: unknown): string[] {
     throw new HttpError(400, "config.routes must be an array of path patterns");
   }
   return routes.map((r) => {
-    if (typeof r !== "string" || !r.startsWith("/") || r.length > 200) {
+    // `!/assets/*`: an exclusion (served statically even when another pattern matches)
+    if (typeof r !== "string" || !(r.startsWith("/") || r.startsWith("!/")) || r.length > 200) {
       throw new HttpError(400, `invalid route: ${r}`);
     }
     return r;

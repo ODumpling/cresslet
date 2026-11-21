@@ -12,6 +12,17 @@ export function matchRoute(pattern, p) {
   return p === pattern;
 }
 
+/** Same as server/host.ts serverRoute: a `routes` match and no `!pattern` exclusion. */
+export function serverRoute(routes, p) {
+  let hit = false;
+  for (const r of routes ?? ["/api/*"]) {
+    if (r.startsWith("!")) {
+      if (matchRoute(r.slice(1), p)) return false;
+    } else if (!hit) hit = matchRoute(r, p);
+  }
+  return hit;
+}
+
 export function parseDotenv(text) {
   const out = {};
   for (const line of text.split(/\r?\n/)) {
@@ -382,7 +393,7 @@ export function createCresslet(c, opts) {
       const url = new URL(req.url);
       // Preview URLs are prefixed (/__cresslet__/<id>/<port>/…); match on the app-relative path.
       const path = url.pathname.replace(/^\/__cresslet__\/[^/]+\/\d+/, "") || "/";
-      if (!routes.some((r) => matchRoute(r, path)) || !(await serverEntry())) return undefined;
+      if (!serverRoute(routes, path) || !(await serverEntry())) return undefined;
       const id = ++reqId;
       const body = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
       // after reading the body: the worker may have stopped meanwhile
