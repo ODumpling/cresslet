@@ -200,6 +200,7 @@ const srv = spawn(process.execPath, ["--import", join(ROOT, "scripts/loadtest-el
     CRESSLET_SOCK_DIR: sockDir,
     CRESSLET_DOMAIN: DOMAIN,
     CRESSLET_ANON_APPS_PER_HOUR: "10000",
+    CRESSLET_MAX_ANON_APPS_PER_IP: "10000", // every app comes from loopback
     CRESSLET_DEPLOYS_PER_HOUR: "10000",
     CRESSLET_IDLE_MS: String(3600_000),
   },

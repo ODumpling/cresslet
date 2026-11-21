@@ -12,6 +12,7 @@ import { removeAppFiles } from "../server/deploys.ts";
 import { existsSync, mkdirSync } from "node:fs";
 import { paths } from "../server/config.ts";
 import { ipKey } from "../server/limits.ts";
+import type { Store } from "../server/store.ts";
 
 async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> = {}, reuseDir?: string) {
   const dataDir = reuseDir ?? await mkdtemp(join(tmpdir(), "cresslet-lim-"));
@@ -38,7 +39,7 @@ async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> =
   };
   /** Stops the server but keeps its data (to start another on it). */
   const stop = () => srv.close();
-  return { srv, json, bearer, account, deploy, done, stop, dataDir };
+  return { srv, json, bearer, account, deploy, done, stop, dataDir, store: srv.store };
 }
 
 test("app quota per account: new apps and claims stop at the limit; site admins are exempt", async () => {
@@ -123,15 +124,32 @@ test("new apps and pages per account per hour: create/delete loops get 429; rede
   }
 });
 
+/** Runs `meanwhile` once, inside the next call of `store[method]` (after the request's own checks, before its insert). */
+function interleave<K extends "createApp" | "createPage">(store: Store, method: K, meanwhile: () => Promise<void>) {
+  const orig = store[method].bind(store) as (...a: unknown[]) => Promise<unknown>;
+  let once = true;
+  (store as unknown as Record<string, unknown>)[method] = async (...args: unknown[]) => {
+    if (once) {
+      once = false;
+      await meanwhile();
+    }
+    return orig(...args);
+  };
+}
+
 test("a create that loses the last quota slot to a concurrent one doesn't spend the hourly allowance", async () => {
   const t = await setup({ createsPerHour: 2, maxPagesPerAccount: 1 });
   try {
     const a = t.bearer(await t.account("a@b.co"));
     const page = () => t.json("/v1/pages", { method: "POST", headers: a, body: JSON.stringify({ html: "<p>x</p>" }) });
-    const both = await Promise.all([page(), page()]);
-    assert.deepEqual(both.map((r) => r.status).sort(), [201, 403]);
-    const won = both.find((r) => r.status === 201)!;
-    assert.equal((await t.json(`/v1/pages/${won.body.page.name}`, { method: "DELETE", headers: a })).status, 200);
+    let won = "";
+    interleave(t.store, "createPage", async () => {
+      const r = await page();
+      assert.equal(r.status, 201);
+      won = r.body.page.name;
+    });
+    assert.equal((await page()).status, 403, "the slot went to the other request");
+    assert.equal((await t.json(`/v1/pages/${won}`, { method: "DELETE", headers: a })).status, 200);
     assert.equal((await page()).status, 201, "the 403 didn't count");
   } finally {
     await t.done();
@@ -142,8 +160,10 @@ test("two first deploys of one name: the loser gets 409 and keeps its hourly all
   const t = await setup({ createsPerHour: 2 });
   try {
     const a = t.bearer(await t.account("a@b.co"));
-    const both = await Promise.all([t.deploy(a, "same"), t.deploy(a, "same")]);
-    assert.deepEqual(both.map((r) => r.status).sort(), [201, 409]);
+    interleave(t.store, "createApp", async () => assert.equal((await t.deploy(a, "same")).status, 201));
+    const lost = await t.deploy(a, "same");
+    assert.equal(lost.status, 409);
+    assert.equal(lost.body.error, "conflict");
     assert.equal((await t.json("/v1/apps/same", { method: "DELETE", headers: a })).status, 200);
     assert.equal((await t.deploy(a, "next")).status, 201, "the 409 didn't count");
   } finally {
