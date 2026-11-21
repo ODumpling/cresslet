@@ -96,7 +96,7 @@ deploy/backup.sh <volume> --install    # daily at 03:30 (systemd timer)
 
 ### Off-site
 
-A snapshot on the same disk doesn't survive losing that disk. With [rclone](https://rclone.org) installed and set up for root, `CRESSLET_BACKUP_RCLONE` gets a copy of each snapshot and `CRESSLET_BACKUP_KEY_RCLONE` gets the keys. Make them two remotes with their own credentials, on two buckets, so a leaked bucket or token holds the data or the key, never both (the host holds both tokens, as it holds the volume). Any S3-compatible storage works (Cloudflare R2, Backblaze B2, AWS S3, …). For R2: two buckets and two API tokens (Object Read & Write, each limited to its bucket), in `/root/.config/rclone/rclone.conf` (mode 0600; or `rclone config`, which asks for the same fields, to keep the tokens out of shell history):
+A snapshot on the same disk doesn't survive losing that disk. With [rclone](https://rclone.org/install/) installed and set up for root (from rclone.org, not the distro: older packages such as Ubuntu 26.04's 1.60.1 follow each upload with a request R2 rejects, `501 NotImplemented`, so each upload logs a failed attempt and only succeeds on rclone's retry; 1.76.0 works), `CRESSLET_BACKUP_RCLONE` gets a copy of each snapshot and `CRESSLET_BACKUP_KEY_RCLONE` gets the keys. Make them two remotes with their own credentials, on two buckets, so a leaked bucket or token holds the data or the key, never both (the host holds both tokens, as it holds the volume). Any S3-compatible storage works (Cloudflare R2, Backblaze B2, AWS S3, …). For R2: two buckets and two API tokens (Object Read & Write, each limited to its bucket), in `/root/.config/rclone/rclone.conf` (mode 0600; or `rclone config`, which asks for the same fields, to keep the tokens out of shell history):
 
 ```ini
 [snaps]
@@ -111,10 +111,13 @@ no_check_bucket = true
 # the same, with token 2
 ```
 
-Install rclone from [rclone.org](https://rclone.org/install/), not the distro: older packages (Ubuntu 26.04 ships 1.60.1) check each upload with a request R2 rejects (`501 NotImplemented`), so every upload fails once and only gets through on a retry. Before installing, check that each token is limited to its bucket: both of these must fail with `AccessDenied`.
+Before `--install`, as root, check that each token reaches its own bucket and only that one:
 
 ```sh
-rclone lsf snaps:cresslet-keys; rclone lsf keys:cresslet-snapshots
+rclone lsf snaps:cresslet-snapshots     # each of these two must succeed
+rclone lsf keys:cresslet-keys
+rclone lsf snaps:cresslet-keys          # each of these two must fail with AccessDenied
+rclone lsf keys:cresslet-snapshots
 ```
 
 ```sh
@@ -133,7 +136,7 @@ systemctl start cresslet-backup; journalctl -u cresslet-backup -n 20   # one run
 
 ### Restore
 
-On a clean host (or the same one), as root, with Docker and rclone installed:
+On a clean host (or the same one), as root, with Docker and rclone (from rclone.org, as above) installed:
 
 1. The remotes: the same `rclone.conf` as above, with the tokens you kept.
 2. The newest snapshot and its key:
