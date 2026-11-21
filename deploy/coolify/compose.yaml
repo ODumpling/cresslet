@@ -43,6 +43,16 @@ services:
       # Abuse limits sized for a small shared host (4 vCPU, 8 GB, ~70 GB disk; the server's own
       # defaults are larger). Worst cases: docs/self-hosting.md#sizing-a-shared-host.
       CRESSLET_APP_MEMORY_MB: ${CRESSLET_APP_MEMORY_MB:-128}
+      # Sandboxes awake at once: 12 at a full 128 MB heap (plus workerd's own memory and a bindings
+      # thread each) fit the 3 GB container with room for the control plane. Past it, the least
+      # recently used idle one stops; all busy: 503.
+      CRESSLET_MAX_RUNNING_SANDBOXES: ${CRESSLET_MAX_RUNNING_SANDBOXES:-12}
+      # Open WebSockets (each pins its sandbox awake): per app / on the instance, and closed after
+      # 10 min without traffic or 1 h in all (clients reconnect).
+      CRESSLET_MAX_WEBSOCKETS_PER_APP: ${CRESSLET_MAX_WEBSOCKETS_PER_APP:-50}
+      CRESSLET_MAX_WEBSOCKETS: ${CRESSLET_MAX_WEBSOCKETS:-500}
+      CRESSLET_WS_IDLE_MS: ${CRESSLET_WS_IDLE_MS:-600000}
+      CRESSLET_WS_MAX_MS: ${CRESSLET_WS_MAX_MS:-3600000}
       CRESSLET_APP_DB_MB: ${CRESSLET_APP_DB_MB:-128}
       CRESSLET_APP_FILES_MB: ${CRESSLET_APP_FILES_MB:-256}
       CRESSLET_MAX_APPS_PER_ACCOUNT: ${CRESSLET_MAX_APPS_PER_ACCOUNT:-10}

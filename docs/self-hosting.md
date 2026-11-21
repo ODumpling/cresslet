@@ -97,7 +97,7 @@ cresslet.dev runs on 4 vCPU, 7.6 GB of memory (no swap) and a 72 GB disk (58 GB 
 | | Bound | Worst case (about) |
 |---|---|---|
 | CPU | the container: 2 of 4 vCPU (`CRESSLET_CONTAINER_CPUS`) | the other apps keep 2 |
-| Memory | the container: 3 GB of 7.6 (`CRESSLET_CONTAINER_MEMORY`); each sandbox's V8 heap: 128 MB (`CRESSLET_APP_MEMORY_MB`, Cloudflare Workers' limit too) | the other apps (about 2 GB today) and builds keep the rest. About 12–15 sandboxes at a full heap fill the container (each also has workerd's own memory and a bindings thread); idle ones stop after `CRESSLET_IDLE_MS`, but nothing caps how many are awake at once |
+| Memory | the container: 3 GB of 7.6 (`CRESSLET_CONTAINER_MEMORY`); each sandbox's V8 heap: 128 MB (`CRESSLET_APP_MEMORY_MB`, Cloudflare Workers' limit too) | the other apps (about 2 GB today) and builds keep the rest. About 12–15 sandboxes at a full heap fill the container (each also has workerd's own memory and a bindings thread), so at most 12 are awake at once (`CRESSLET_MAX_RUNNING_SANDBOXES`): another app's cold start stops the least recently used idle one, and gets 503 while all 12 are serving. Idle ones stop after `CRESSLET_IDLE_MS`; an open WebSocket keeps its sandbox busy, so they're capped (50 per app, 500 in all) and closed after 10 minutes without traffic or an hour in all. An app with a cron every minute is idle between runs, so it doesn't hold a slot against other apps |
 | One app's disk | database 128 MB (+ up to 64 MB of WAL) + files 256 MB + 10 deploys kept × (25 MB of files + a server bundle: 5 MB of characters, up to 15 MB of UTF-8) | ≈ 0.85 GB |
 | One account | 10 apps (`CRESSLET_MAX_APPS_PER_ACCOUNT`) | ≈ 8.5 GB |
 | Anonymous apps | 25 live (`CRESSLET_MAX_ANON_APPS`), 5 new per IP per hour; gone after 72 h | ≈ 21 GB |
@@ -243,6 +243,9 @@ On a clean host (or the same one), as root, with Docker and rclone (from rclone.
 | `CRESSLET_APP_CPU_PERCENT` / `CRESSLET_APP_PIDS` | 100 / 256 | per-sandbox `cpu.max` (100 = one core) / `pids.max` (threads count), with `CRESSLET_CGROUP_DIR` |
 | `CRESSLET_APP_MEMORY_MB` | 256 | V8 heap cap |
 | `CRESSLET_IDLE_MS` | 300000 | stop idle sandboxes |
+| `CRESSLET_MAX_RUNNING_SANDBOXES` | 32 | sandboxes awake at once (`0` = no cap). Size it to memory: each can use `CRESSLET_APP_MEMORY_MB` of heap plus workerd's own (about 200 MB in all at a 128 MB heap). At the cap, starting another stops the least recently used idle one (nothing in flight, no open WebSocket); if every one is serving, the request gets 503 with `retry-after: 5` |
+| `CRESSLET_MAX_WEBSOCKETS_PER_APP` / `CRESSLET_MAX_WEBSOCKETS` | 100 / 1000 | open WebSockets per app / on the instance (`0` = no cap); past either the upgrade gets 503. An open socket keeps its sandbox awake and busy |
+| `CRESSLET_WS_IDLE_MS` / `CRESSLET_WS_MAX_MS` | 600000 / 3600000 | close a WebSocket after this long without a byte either way / this long in all (`0` = never), so open sockets can't keep a sandbox awake forever. Clients should reconnect (and ping, if they sit silent) |
 | `CRESSLET_ANON_TTL_HOURS` | 72 | unclaimed app lifetime |
 | `CRESSLET_MAX_APPS_PER_ACCOUNT` | 50 | live apps an account may own (new apps and claims past it: 403 `quota`; site admins exempt) |
 | `CRESSLET_MAX_ANON_APPS` / `CRESSLET_ANON_APPS_PER_HOUR` | 200 / 10 | live unclaimed apps on the instance / new ones per client IP per hour (429 `rate_limited`) |
