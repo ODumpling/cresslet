@@ -526,6 +526,22 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .detail-grid .table tbody tr:hover td { background: none; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
 .scroll-x { position: relative; overflow-x: auto; }
+/* admin: AI credits */
+.section-title { font-size: 14px; margin: 28px 0 12px; }
+.section-title.flush { margin: 0; }
+.toolbar-title { font-size: 14px; margin-right: 8px; }
+.credit-delta.plus { color: var(--success); }
+.table td.wrap { white-space: normal; min-width: 14rem; }
+.table td.wrap .sub { max-width: 36rem; overflow: visible; overflow-wrap: anywhere; }
+.day-table { margin-top: 12px; font-size: 13px; }
+.day-table summary { cursor: pointer; color: var(--text-2); }
+.day-table .table { margin-top: 8px; }
+.grant-form { align-self: start; }
+.detail-grid .table-wrap .table td, .detail-grid .table-wrap .table th { padding: 10px 16px; }
+.day-chart { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding-top: 4px; border-bottom: 1px solid var(--line); }
+.day-chart span { flex: 1; min-width: 0; background: var(--accent-text); border-radius: 3px 3px 0 0; }
+.day-chart span:hover { background: var(--accent); }
+.day-axis { display: flex; justify-content: space-between; margin-top: 6px; color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
 .mt { margin-top: 22px !important; }
 
 
@@ -738,6 +754,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   .dot, .status-dot, .eyebrow-dot { forced-color-adjust: none; background: CanvasText; }
   .mock, .term, .steps li, .features, .l-cta, .site-nav { border: 1px solid CanvasText; }
   .usage-bar span { forced-color-adjust: none; border: 1px solid CanvasText; }
+  .day-chart span { forced-color-adjust: none; background: CanvasText; }
   .brand-mark { color: CanvasText; }
   .nav a[aria-current="page"] .icon, .tree li > button[aria-current="true"] .icon { color: inherit; }
   :focus-visible, .editor:focus-within::after, .terminal:focus-within { outline-color: Highlight; }

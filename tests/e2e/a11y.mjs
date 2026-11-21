@@ -24,7 +24,7 @@ try {
   // Reflow: no horizontal page scroll at 320 CSS px.
   const narrow = await browser.newPage({ viewport: { width: 320, height: 640 } });
   await narrow.addInitScript((t) => localStorage.setItem("cresslet.token", t), token);
-  for (const r of ["/", "/#/settings", "/#/admin"]) {
+  for (const r of ["/", "/#/settings", "/#/admin", "/#/admin-credits"]) {
     await narrow.goto(base + r);
     await narrow.waitForTimeout(600);
     const w = await narrow.evaluate(() => document.documentElement.scrollWidth);

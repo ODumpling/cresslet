@@ -111,6 +111,26 @@ export interface Invite {
   created_at: number;
 }
 
+/** One AI credits ledger row (server/credits.ts): `amount` in millicredits, negative for usage. */
+export interface AiLedgerRow {
+  created_at: number;
+  kind: string;
+  amount: number;
+  detail: string | null;
+}
+
+export interface AiAccountRow {
+  id: string;
+  email: string;
+  github_login: string | null;
+  balance: number;
+  period_used: number;
+  /** Millicredits used since the query's `since`, and how many requests. */
+  used: number;
+  requests: number;
+  last_used_at: number | null;
+}
+
 export interface Domain {
   domain: string;
   app_id: string;
@@ -242,6 +262,7 @@ export class Store {
         id INTEGER PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         created_at INTEGER NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL, detail TEXT);
       CREATE INDEX IF NOT EXISTS ai_ledger_account ON ai_ledger (account_id, id);
+      CREATE INDEX IF NOT EXISTS ai_ledger_created ON ai_ledger (created_at);
     `);
     this.#box = SecretBox.load(dataDir);
     this.#sealSecrets();
@@ -809,9 +830,70 @@ export class Store {
   }
 
   /** The account's latest ledger rows, newest first. */
-  aiLedger(accountId: string, limit = 50): { created_at: number; kind: string; amount: number; detail: string | null }[] {
+  aiLedger(accountId: string, limit = 50): AiLedgerRow[] {
     return this.db.prepare("SELECT created_at, kind, amount, detail FROM ai_ledger WHERE account_id = ? ORDER BY id DESC LIMIT ?")
-      .all(accountId, limit) as { created_at: number; kind: string; amount: number; detail: string | null }[];
+      .all(accountId, limit) as unknown as AiLedgerRow[];
+  }
+
+  /**
+   * Site admin view: every account with a wallet (or just `accountId`'s), its wallet and its usage since `since` (ms), most used first.
+   * `period_used` is 0 when the wallet's period isn't `period` (a new month).
+   */
+  aiAccounts(period: string, since: number, accountId: string | null = null): AiAccountRow[] {
+    return this.db.prepare(
+      `SELECT a.id, a.email, a.github_login, w.balance,
+         CASE WHEN w.period = ? THEN w.period_used ELSE 0 END AS period_used,
+         COALESCE(u.used, 0) AS used, COALESCE(u.requests, 0) AS requests,
+         (SELECT MAX(created_at) FROM ai_ledger l WHERE l.account_id = w.account_id AND l.kind = 'usage') AS last_used_at
+       FROM ai_wallets w JOIN accounts a ON a.id = w.account_id
+       LEFT JOIN (SELECT account_id, -SUM(amount) AS used, COUNT(*) AS requests FROM ai_ledger
+         WHERE kind = 'usage' AND created_at >= ? GROUP BY account_id) u ON u.account_id = w.account_id
+       WHERE ? IS NULL OR w.account_id = ?
+       ORDER BY used DESC, last_used_at DESC, a.email`,
+    ).all(period, since, accountId, accountId) as unknown as AiAccountRow[];
+  }
+
+  /** Usage since `since` (ms) per model, most used first. Amounts are millicredits used (positive). */
+  aiModels(since: number): { model: string | null; used: number; requests: number; free: number; usd: number; input: number; output: number }[] {
+    return this.db.prepare(
+      `SELECT json_extract(detail, '$.model') AS model, -SUM(amount) AS used, COUNT(*) AS requests,
+         SUM(COALESCE(json_extract(detail, '$.free'), 0)) AS free, SUM(COALESCE(json_extract(detail, '$.usd'), 0)) AS usd,
+         SUM(COALESCE(json_extract(detail, '$.input'), 0) + COALESCE(json_extract(detail, '$.cacheRead'), 0) +
+           COALESCE(json_extract(detail, '$.cacheWrite'), 0)) AS input,
+         SUM(COALESCE(json_extract(detail, '$.output'), 0)) AS output
+       FROM ai_ledger WHERE kind = 'usage' AND created_at >= ? GROUP BY model ORDER BY used DESC`,
+    ).all(since) as { model: string | null; used: number; requests: number; free: number; usd: number; input: number; output: number }[];
+  }
+
+  /** Usage since `since` (ms) per UTC day (`day`: days since the epoch), oldest first. */
+  aiDays(since: number): { day: number; used: number; requests: number }[] {
+    return this.db.prepare(
+      `SELECT created_at / 86400000 AS day, -SUM(amount) AS used, COUNT(*) AS requests
+       FROM ai_ledger WHERE kind = 'usage' AND created_at >= ? GROUP BY day ORDER BY day`,
+    ).all(since) as { day: number; used: number; requests: number }[];
+  }
+
+  /** Credits granted (net of take-backs) since `since` (ms), and how many grants. */
+  aiGranted(since: number): { amount: number; grants: number } {
+    const r = this.db.prepare("SELECT COALESCE(SUM(amount), 0) AS amount, COUNT(*) AS grants FROM ai_ledger WHERE kind = 'grant' AND created_at >= ?")
+      .get(since) as { amount: number; grants: number };
+    return { amount: r.amount, grants: r.grants };
+  }
+
+  /** Granted credits left across every wallet (overdrawn ones count as 0), and the overdrawn total. */
+  aiOutstanding(): { balance: number; overdrawn: number } {
+    const r = this.db.prepare(
+      "SELECT COALESCE(SUM(MAX(balance, 0)), 0) AS balance, COALESCE(-SUM(MIN(balance, 0)), 0) AS overdrawn FROM ai_wallets",
+    ).get() as { balance: number; overdrawn: number };
+    return { balance: r.balance, overdrawn: r.overdrawn };
+  }
+
+  /** The latest ledger rows across every account, newest first, with the account. */
+  aiLedgerAll(limit = 100): (AiLedgerRow & { account_id: string; email: string; github_login: string | null })[] {
+    return this.db.prepare(
+      `SELECT l.account_id, l.created_at, l.kind, l.amount, l.detail, a.email, a.github_login
+       FROM ai_ledger l JOIN accounts a ON a.id = l.account_id ORDER BY l.id DESC LIMIT ?`,
+    ).all(limit) as unknown as (AiLedgerRow & { account_id: string; email: string; github_login: string | null })[];
   }
 
   #putWallet(accountId: string, period: string, w: { balance: number; periodUsed: number }) {
