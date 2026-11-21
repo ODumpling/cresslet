@@ -17,9 +17,11 @@ function fakeContainer(files: Record<string, string> = {}, commands: Record<stri
     return d;
   };
   const spawned: string[][] = [];
+  const spawnEnv: Json[] = [];
   const c = {
     workdir: "/project",
     spawned,
+    spawnEnv,
     files: fs,
     fs: {
       async readFile(p: string) {
@@ -46,8 +48,9 @@ function fakeContainer(files: Record<string, string> = {}, commands: Record<stri
         return [...names].map(([name, dir]) => ({ name, isDirectory: () => dir }));
       },
     },
-    async spawn(cmd: string, args: string[]) {
+    async spawn(cmd: string, args: string[], opts: Json) {
       spawned.push([cmd, ...args]);
+      spawnEnv.push(opts?.env);
       const spec = commands[args[1]] ?? { out: `jsh: ${args[1]}: not found\n`, code: 127 };
       let killed!: () => void;
       const exit = spec.hang ? new Promise<number>((r) => (killed = () => r(130))) : Promise.resolve(spec.code ?? 0);
@@ -82,6 +85,13 @@ function fakeClient(replies: Json[]) {
             async finalMessage() {
               if (r.thinking) handlers.streamEvent?.forEach((f) => f({ type: "content_block_start", content_block: { type: "thinking" } }));
               for (const t of r.text ?? []) handlers.text?.forEach((f) => f(t));
+              // tool inputs as streamed (`raw[id]` overrides: JSON the SDK's tolerant parser would still accept)
+              (r.content ?? []).forEach((b: Json, index: number) => {
+                if (b.type !== "tool_use") return;
+                handlers.streamEvent?.forEach((f) => f({ type: "content_block_start", index, content_block: { ...b, input: {} } }));
+                const json = r.raw?.[b.id] ?? JSON.stringify(b.input);
+                handlers.streamEvent?.forEach((f) => f({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: json } }));
+              });
               if (r.wait) await r.wait(opts?.signal);
               if (r.throw) throw r.throw;
               return { content: r.content, stop_reason: r.stop_reason };
@@ -99,7 +109,7 @@ test("paths stay inside the project and away from local secrets", () => {
   assert.equal(projectPath("src/App.tsx"), "src/App.tsx");
   assert.equal(projectPath("./src//a.ts"), "src/a.ts");
   assert.equal(projectPath("", { dir: true }), "");
-  for (const bad of ["/etc/passwd", "../x", "src/../../x", ".env", ".env.cresslet", "server/.env.local", ".dev.vars", ".envrc", ".git/config", ""]) {
+  for (const bad of ["/etc/passwd", "../x", "src/../../x", ".env", ".env.cresslet", "server/.env.local", ".dev.vars", ".envrc", ".env.d/token", ".git/config", ""]) {
     assert.throws(() => projectPath(bad), Error, bad);
   }
 });
@@ -117,13 +127,13 @@ test("tool inputs are checked against their schemas", () => {
 });
 
 test("file tools read, write, edit, delete and list; changes are reported", async () => {
-  const c = fakeContainer({ "AGENTS.md": "# app", "src/App.tsx": "const a = 1;\nconst b = 1;\n", ".env.cresslet": "SECRET=1", "node_modules/x/index.js": "" });
+  const c = fakeContainer({ "AGENTS.md": "# app", "src/App.tsx": "const a = 1;\nconst b = 1;\n", ".env.cresslet": "SECRET=1", ".env.d/token": "T", "node_modules/x/index.js": "" });
   const changed: string[] = [];
   const t = createTools(c, { onChange: (p: string) => changed.push(p) });
 
   const ls = await t.execute("list_files", {});
   assert.equal(ls.error, undefined);
-  assert.deepEqual(ls.text.split("\n").sort(), [".env.cresslet (local secrets, not readable)", "AGENTS.md", "src/App.tsx"]);
+  assert.deepEqual(ls.text.split("\n").sort(), [".env.cresslet (local secrets, not readable)", ".env.d/ (local secrets, not readable)", "AGENTS.md", "src/App.tsx"]);
 
   assert.equal((await t.execute("read_file", { path: "AGENTS.md" })).text, "# app");
   const secret = await t.execute("read_file", { path: ".env.cresslet" });
@@ -160,6 +170,7 @@ test("run_command returns exit code and output; a command that keeps running is 
   assert.equal(ok.error, false);
   assert.equal(ok.text, "exit code 0\nadded 1 package"); // ANSI stripped
   assert.deepEqual(c.spawned[0], ["jsh", "-c", "npm install zod"]);
+  assert.deepEqual(c.spawnEnv[0], { CRESSLET_AI_BUILDER: "1" }); // so `cresslet deploy` asks the user first
   assert.equal((await t.execute("run_command", { command: "false" })).error, true);
   const hung = await t.execute("run_command", { command: "cresslet dev" });
   assert.equal(hung.error, true);
@@ -228,7 +239,7 @@ test("agent: Stop ends the turn; the next message answers the calls that never r
   agent.stop();
   await first;
   assert.equal(events.at(-1).text, "Stopped.");
-  assert.equal(agent.messages.length, 1); // the unanswered request; nothing appended
+  assert.equal(agent.messages.length, 0); // nothing came back: the message isn't kept (or sent again with the next)
 
   const second = agent.send("two");
   await new Promise((r) => setTimeout(r, 10));
@@ -240,43 +251,65 @@ test("agent: Stop ends the turn; the next message answers the calls that never r
   assert.deepEqual(results.map((r: Json) => [r.tool_use_id, r.is_error]), [["a", true], ["b", true]]);
 
   await agent.send("three");
-  // consecutive user turns are allowed; the history stays valid for the API
   assert.equal(api.calls.length, 3);
+  assert.deepEqual(api.calls[2].params.messages.map((m: Json) => m.role), ["user", "assistant", "user", "user"]);
+  assert.equal(api.calls[2].params.messages[0].content, "two");
   assert.equal(agent.messages.at(-1).content[0].text, "ok");
 });
 
-test("agent: refused or cut-off tool calls don't run, and the next message answers them", async () => {
+test("agent: refused, cut-off or malformed tool calls don't run; a declined message isn't kept", async () => {
   const c = fakeContainer({ "a.txt": "x" });
   const api = fakeClient([
     { content: [toolUse("r", "delete_file", { path: "a.txt" })], stop_reason: "max_tokens" },
     { content: [{ type: "text", text: "fine" }], stop_reason: "end_turn" },
     { content: [], stop_reason: "refusal" },
+    { content: [toolUse("w", "write_file", { path: "a.txt", content: "y" })], stop_reason: "model_context_window_exceeded" },
+    // the tolerant parser made `content` shorter than what the model wrote
+    { content: [toolUse("j", "write_file", { path: "a.txt", content: "trunc" })], raw: { j: '{"path":"a.txt","content":"trunc"ated"}' }, stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "done" }], stop_reason: "end_turn" },
   ]);
   const events: Json[] = [];
   const agent = createAgent({ client: async () => api, tools: createTools(c), on: (e: Json) => events.push(e) });
   await agent.send("delete it");
   assert.equal(c.files.has("/project/a.txt"), true);
-  assert.match(events.at(-1).text, /length limit/);
+  assert.match(events.at(-1).text, /length limit before its tool calls were complete/);
   await agent.send("ok then");
   const sent = api.calls[1].params.messages.at(-1).content;
   assert.deepEqual(sent[0], { type: "tool_result", tool_use_id: "r", is_error: true, content: "not run: the turn ended before this tool ran" });
   assert.deepEqual(sent[1], { type: "text", text: "ok then" });
-  await agent.send("something else");
+
+  const before = agent.messages.length;
+  await agent.send("something declined");
   assert.equal(events.at(-1).text, "Claude declined this request.");
+  assert.equal(agent.messages.length, before); // neither the request nor an (empty) reply
+
+  await agent.send("write it");
+  assert.equal(c.files.get("/project/a.txt"), "x");
+  assert.match(events.at(-1).text, /too long for Claude/);
+  await agent.send("write it again");
+  assert.equal(c.files.get("/project/a.txt"), "x"); // invalid JSON: not run
+  const results = api.calls[5].params.messages.at(-1).content;
+  assert.equal(results[0].tool_use_id, "j");
+  assert.match(results[0].content, /INVALID_JSON/);
+  for (const call of api.calls) for (const m of call.params.messages) assert.ok(typeof m.content === "string" || m.content.length, "no empty message");
 });
 
 test("agent: API errors end the turn with a readable message; dropped connections are retried", async () => {
   const api = fakeClient([
     { throw: Object.assign(new Error("invalid x-api-key"), { status: 401 }) },
-    { throw: new TypeError("network error") },
-    { content: [{ type: "text", text: "hi" }], stop_reason: "end_turn" },
+    { text: ["Hel"], throw: new TypeError("network error") },
+    { text: ["Hello"], content: [{ type: "text", text: "Hello" }], stop_reason: "end_turn" },
   ]);
   const events: Json[] = [];
   const agent = createAgent({ client: async () => api, tools: createTools(fakeContainer()), on: (e: Json) => events.push(e) });
   await agent.send("hello");
   assert.equal(events.at(-1).error, true);
   assert.match(events.at(-1).text, /didn't accept the API key/);
+  assert.equal(agent.messages.length, 0); // sending again doesn't repeat it
   await agent.send("hello again");
-  assert.ok(events.some((e) => e.text === "The connection dropped; trying again."));
-  assert.equal(agent.messages.at(-1).content[0].text, "hi");
+  // the partial reply ("Hel") is dropped before the retry streams the whole one
+  const texts = events.filter((e) => e.type === "text" || e.type === "retry").map((e) => e.delta ?? "retry");
+  assert.deepEqual(texts, ["Hel", "retry", "Hello"]);
+  assert.deepEqual(api.calls[2].params.messages, [{ role: "user", content: "hello again" }]);
+  assert.equal(agent.messages.at(-1).content[0].text, "Hello");
 });

@@ -456,7 +456,9 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .step[data-state="ok"] .icon { color: var(--success); }
 .notice { font-size: 12.5px; color: var(--text-2); }
 .notice[data-error] { color: var(--danger); }
-.working { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+.working { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12.5px; color: var(--text-2); min-width: 0; }
+#builder-working-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface-2); font-size: 13px; }
 .working .spinner { width: 14px; height: 14px; border-width: 2px; }
 .builder-form { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--line); }
 .builder-form textarea { resize: vertical; min-height: 64px; max-height: 40vh; line-height: 1.5; }

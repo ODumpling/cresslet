@@ -1555,6 +1555,8 @@ async function openProject(id, gen) {
       }
       showDeployLink(project.deploy);
     },
+    // `cresslet deploy` in a command the AI builder started: the user says yes first.
+    approveDeploy: (signal) => builder.approve(`Claude wants to deploy ${project.deploy?.name ?? "this project as a new app"}. It goes live at once.`, signal),
   });
 
   // editor
@@ -1593,6 +1595,16 @@ async function openProject(id, gen) {
     try {
       text = await c.fs.readFile(`${wd}/${path}`, "utf8");
     } catch {
+      if (path === current) {
+        // The open file is gone (deleted from the terminal or by the AI builder): don't let typing recreate it.
+        current = null;
+        suppress = true;
+        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "" }, effects: lang.reconfigure([]) });
+        suppress = false;
+        $("open-file").textContent = "No file open";
+        view.contentDOM.setAttribute("aria-label", "Code");
+        renderTree();
+      }
       return;
     }
     current = path;
@@ -1738,7 +1750,7 @@ async function openProject(id, gen) {
     $("preview-msg").replaceChildren(
       "This project was opened from a deployed app's source. Review it, then ",
       btn,
-      " to install its dependencies and start it here (the terminal and Deploy unlock then).",
+      " to install its dependencies and start it here (the terminal, Deploy and the AI builder unlock then).",
     );
   } else start();
 
@@ -1806,12 +1818,17 @@ function mountBuilder({ c, devLog, onChange }) {
     $("builder-chat").hidden = !has;
     return has;
   }
-  function setOpen(open) {
+  // Where focus goes in the chat: the message field, or the heading while it's locked (a disabled field can't take it).
+  const chatFocus = () => (locked ? $("builder-title") : input).focus();
+  function setOpen(open, { focus = true } = {}) {
     pane.hidden = !open;
     btn.setAttribute("aria-expanded", String(open));
     $("workspace").dataset.builder = open ? "open" : "";
-    if (!open) return btn.focus();
-    (showView() ? input : $("builder-key")).focus();
+    const chat = showView();
+    if (!focus) return;
+    if (!open) btn.focus();
+    else if (chat) chatFocus();
+    else $("builder-key").focus();
   }
   btn.onclick = () => setOpen(pane.hidden);
   $("builder-close").onclick = () => setOpen(false);
@@ -1821,7 +1838,7 @@ function mountBuilder({ c, devLog, onChange }) {
     $("builder-stop").hidden = !busy;
     $("builder-new").disabled = busy;
     input.disabled = locked;
-    input.placeholder = locked ? "Run the project first (see the preview)" : "Describe a change…";
+    $("builder-locked").hidden = !locked;
   }
 
   $("builder-key-form").onsubmit = (e) => {
@@ -1835,7 +1852,7 @@ function mountBuilder({ c, devLog, onChange }) {
     $("builder-key").value = "";
     $("builder-key-error").textContent = "";
     showView();
-    input.focus();
+    chatFocus();
   };
   $("builder-key").oninput = () => ($("builder-key-error").textContent = "");
   $("builder-forget").onclick = () => {
@@ -1850,7 +1867,7 @@ function mountBuilder({ c, devLog, onChange }) {
     agent = null;
     log.replaceChildren();
     announce("New chat");
-    input.focus();
+    chatFocus();
   };
   $("builder-stop").onclick = () => {
     agent?.stop();
@@ -1865,6 +1882,11 @@ function mountBuilder({ c, devLog, onChange }) {
         break;
       case "thinking":
         working("Thinking…");
+        break;
+      case "retry": // the partial reply is sent again in full
+        bubble?.remove();
+        bubble = null;
+        replied = "";
         break;
       case "text":
         bubble ??= add(el("li", { className: "msg assistant" }));
@@ -1901,14 +1923,16 @@ function mountBuilder({ c, devLog, onChange }) {
     if (!text || busy || locked) return;
     const key = apiKey.get();
     if (!key) return void showView();
-    agent ??= createAgent({ client: () => anthropicClient(apiKey.get() ?? key), tools, on });
+    agent ??= createAgent({ client: () => anthropicClient(apiKey.get()), tools, on });
     add(el("li", { className: "msg user", textContent: text }));
     log.scrollTop = log.scrollHeight;
     input.value = "";
     replied = "";
     failed = "";
+    const fromSend = document.activeElement === $("builder-send");
     busy = true;
     render();
+    if (fromSend) input.focus(); // Send is disabled while Claude works
     working("Thinking…");
     announce("Sent. Claude is working on it.");
     try {
@@ -1929,8 +1953,38 @@ function mountBuilder({ c, devLog, onChange }) {
     }
   });
 
+  /** Asks the user to approve a deploy the builder started. Resolves to true if approved; false if declined or stopped. */
+  function approve(text, signal) {
+    return new Promise((resolve) => {
+      if (signal?.aborted) return resolve(false);
+      if (pane.hidden) setOpen(true, { focus: false });
+      const done = (ok) => {
+        signal?.removeEventListener("abort", stop);
+        const hadFocus = row.contains(document.activeElement);
+        row.className = "step";
+        row.dataset.state = ok ? "ok" : "error";
+        row.replaceChildren(icon(ok ? "rocket" : "x"), el("span", { textContent: ok ? "Deploy approved" : "Deploy not approved" }));
+        if (hadFocus) chatFocus();
+        announce(ok ? "Deploy approved" : "Deploy not approved");
+        working(ok ? "Deploying…" : "Thinking…");
+        resolve(ok);
+      };
+      const stop = () => done(false);
+      // Focus stays where it is (a stray Enter mid-typing must not approve); the request is announced.
+      const row = add(el("li", { className: "approval" },
+        el("p", { textContent: text }),
+        el("div", { className: "row start" },
+          el("button", { type: "button", className: "btn primary sm", textContent: "Approve deploy", onclick: () => done(true) }),
+          el("button", { type: "button", className: "btn sm", textContent: "Decline", onclick: () => done(false) }))));
+      signal?.addEventListener("abort", stop, { once: true });
+      working("Waiting for your approval…");
+      announce(`${text} Approve or decline it in the AI builder.`);
+    });
+  }
+
   render();
   return {
+    approve,
     lock(on) {
       locked = on;
       render();

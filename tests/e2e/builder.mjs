@@ -1,5 +1,5 @@
 // Browser e2e for the AI builder: save a key, ask for a change, Claude's tool calls edit the project (the preview
-// updates), run a command and deploy through `cresslet deploy`; then Forget key. api.anthropic.com is replaced by a
+// updates), run a command and deploy through `cresslet deploy` once the user approves; then Forget key. api.anthropic.com is replaced by a
 // scripted stream (page.route), so no key or network is needed; the requests the studio sends are checked.
 // Run with the server up (npm run dev): cd tests/e2e && npm i && node builder.mjs [outdir]
 import { chromium } from "@playwright/test";
@@ -72,12 +72,19 @@ try {
   await input.press("Enter");
   await page.locator("#builder-stop").waitFor({ state: "visible" });
   console.log("working");
+  // `cresslet deploy` from the builder waits for the user; focus isn't moved onto the approve button.
+  const approveBtn = page.getByRole("button", { name: "Approve deploy" });
+  await approveBtn.waitFor({ timeout: 90000 });
+  if (await approveBtn.evaluate((e) => e === document.activeElement)) fail("approval took focus");
+  if (!(await page.locator("#builder-status").textContent()).includes("Claude wants to deploy")) fail("approval not announced");
+  await page.screenshot({ path: `${out}/builder-approve.png` });
+  await approveBtn.click();
   await page.locator(".msg.assistant", { hasText: "Renamed the heading to Tasks and deployed it." }).waitFor({ timeout: 90000 });
   await frame.getByRole("heading", { name: "Tasks" }).waitFor({ timeout: 30000 });
   console.log("preview shows the edit");
   const steps = await page.locator("#builder-log .step").allInnerTexts();
   console.log("steps:", JSON.stringify(steps));
-  const want = ["Edited src/App.tsx", "Ran ls src", /^read_file: .env.cresslet is a local secrets file/, "Ran cresslet deploy"];
+  const want = ["Edited src/App.tsx", "Ran ls src", /^read_file: .env.cresslet is a local secrets file/, "Ran cresslet deploy", "Deploy approved"];
   want.forEach((w, i) => (typeof w === "string" ? steps[i]?.startsWith(w) : w.test(steps[i] ?? "")) || fail(`step ${i}: ${steps[i]}`));
   if ((await page.locator("#builder-log .step[data-state=error]").count()) !== 1) fail("expected exactly one failed step (the secrets file)");
   if (!(await page.locator("#builder-stop").isHidden())) fail("Stop still shown");

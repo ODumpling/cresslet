@@ -55,7 +55,10 @@ function toBase64(bytes) {
 
 /**
  * @param {import("./vendor/cresslet-container/index").Container} c
- * @param {{ auth: () => { token?: string|null }, project: () => any, onDeployed?: (r: any) => void }} opts
+ * @param {{ auth: () => { token?: string|null }, project: () => any, onDeployed?: (r: any) => void,
+ *   approveDeploy?: (signal: AbortSignal) => Promise<boolean> }} opts
+ *   approveDeploy: asked before `cresslet deploy` runs in a command the AI builder started (CRESSLET_AI_BUILDER set);
+ *   without it, such deploys are refused.
  */
 export function createCresslet(c, opts) {
   const wd = c.workdir;
@@ -113,9 +116,10 @@ export function createCresslet(c, opts) {
     return { files: r.files, server };
   }
 
-  async function deploy(log = () => {}) {
+  async function deploy(log = () => {}, signal = undefined) {
     const cfg = await config();
     const { files: built, server } = await build(log);
+    signal?.throwIfAborted();
     const files = [];
     for (const f of built) {
       const abs = f.startsWith("/") ? f : p(`dist/${f}`);
@@ -154,11 +158,11 @@ export function createCresslet(c, opts) {
       source: "studio",
       sources,
     };
-    let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload) });
+    let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload), signal });
     let body = await res.json();
     if (res.status === 413 && body?.error === "body_too_large" && sources.length) {
       log("warning: project source omitted (request exceeded server upload limit)");
-      res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }) });
+      res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }), signal });
       body = await res.json();
     }
     if (!res.ok) throw new Error(body.message ?? `deploy failed (${res.status})`);
@@ -413,7 +417,12 @@ export function createCresslet(c, opts) {
         return 0;
       }
       if (sub === "deploy") {
-        await deploy(out);
+        // Started by the AI builder (directly or through a script): the user approves each deploy.
+        if (ctx.env.CRESSLET_AI_BUILDER && !(await opts.approveDeploy?.(ctx.signal))) {
+          err("deploy not approved by the user");
+          return 1;
+        }
+        await deploy(out, ctx.signal);
         return 0;
       }
       out("usage: cresslet dev [--port 3000] | build | deploy\r\n(other commands: use the real CLI: npx cresslet, or npm i -g cresslet)");

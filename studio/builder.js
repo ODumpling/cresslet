@@ -52,7 +52,8 @@ export function validate(name, input) {
   return null;
 }
 
-const SECRET = /(?:^|\/)(?:\.env[^/]*|\.envrc[^/]*|\.dev\.vars[^/]*)$/i;
+// Local secret files, or anything inside a directory named like one (as NOT_SOURCE in cresslet-plugin.js).
+const SECRET = /(?:^|\/)(?:\.env[^/]*|\.dev\.vars[^/]*)(?:\/|$)/i;
 const SKIP = /^(?:node_modules|dist|\.cresslet|\.git)(?:\/|$)/;
 
 /** A model-supplied path, confined to the project: relative, no `..`, not a local secret or .git. Throws otherwise. */
@@ -74,6 +75,8 @@ const tail = (s, n = MAX_OUTPUT) => (s.length > n ? `[… ${s.length - n} earlie
 /**
  * The tools, over a cresslet-container (`c.fs`, `c.spawn`, `c.workdir`).
  * `devLog()`: the studio terminal's output so far; `onChange(path)`: after a file was written or deleted.
+ * Commands run with CRESSLET_AI_BUILDER=1, so `cresslet deploy` asks the user first (cresslet-plugin.js), however
+ * it was started (directly, an npm script, `sh -c`).
  */
 export function createTools(c, { devLog = () => "", onChange = () => {}, timeoutMs = COMMAND_TIMEOUT_MS } = {}) {
   const wd = c.workdir;
@@ -86,8 +89,9 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
       const rel = dir ? `${dir}/${e.name}` : e.name;
       if (SKIP.test(rel)) continue;
       if (out.length >= MAX_LIST) break;
-      if (e.isDirectory()) await list(rel, out);
-      else out.push(SECRET.test(rel) ? `${rel} (local secrets, not readable)` : rel);
+      if (SECRET.test(rel)) out.push(`${rel}${e.isDirectory() ? "/" : ""} (local secrets, not readable)`);
+      else if (e.isDirectory()) await list(rel, out);
+      else out.push(rel);
     }
     return out;
   }
@@ -115,9 +119,15 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
   }
 
   async function run(command, signal) {
-    const proc = await c.spawn("jsh", ["-c", command], { cwd: wd });
-    let out = "";
-    const reading = proc.output.pipeTo(new WritableStream({ write: (d) => void (out += d) })).catch(() => {});
+    const proc = await c.spawn("jsh", ["-c", command], { cwd: wd, env: { CRESSLET_AI_BUILDER: "1" } });
+    let out = "", dropped = 0; // only the tail is kept
+    const reading = proc.output.pipeTo(new WritableStream({ write: (d) => {
+      out += d;
+      if (out.length > 2 * MAX_OUTPUT) {
+        dropped += out.length - MAX_OUTPUT;
+        out = out.slice(-MAX_OUTPUT);
+      }
+    } })).catch(() => {});
     await proc.input.close().catch(() => {}); // no stdin: a command that waits for input gets EOF
     let timer, stop;
     const stopped = new Promise((r) => {
@@ -129,11 +139,15 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     const code = await Promise.race([proc.exit, stopped]);
     clearTimeout(timer);
     signal?.removeEventListener("abort", stop);
-    if (typeof code !== "number") proc.kill();
+    if (typeof code !== "number") {
+      proc.kill(); // cooperative: give the command a moment to wind down (a deploy aborts its upload)
+      await Promise.race([proc.exit, new Promise((r) => setTimeout(r, 2000))]);
+    }
     await Promise.race([reading, new Promise((r) => setTimeout(r, 200))]);
-    const text = tail(plain(out).trimEnd());
+    const shown = plain(out).trimEnd();
+    const text = dropped ? `[… ${dropped} earlier characters not shown]\n${tail(shown)}` : tail(shown);
     if (code === "timeout") return { error: true, text: `stopped after ${timeoutMs / 1000}s (still running)\n${text}` };
-    if (code === "stopped") return { error: true, text: `stopped by the user\n${text}` };
+    if (code === "stopped") return { error: true, text: `stopped by the user (anything it had already sent, such as a deploy upload, may still have gone through)\n${text}` };
     return { error: code !== 0, text: `exit code ${code}\n${text}` };
   }
 
@@ -198,7 +212,8 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
 
 /**
  * One conversation. `client()` resolves to an Anthropic client; `tools.execute` runs tool calls.
- * `on(event)`: { type: "text", delta } | { type: "turn" } (a new assistant message starts) | { type: "thinking" } |
+ * `on(event)`: { type: "text", delta } | { type: "turn" } (a new assistant message starts) | { type: "retry" } (drop the
+ * text shown since the last "turn") | { type: "thinking" } |
  * { type: "tool", name, input } | { type: "tool-done", name, summary, error } | { type: "notice", text, error? }.
  * The history is append-only (thinking blocks are passed back unchanged, as the API requires).
  */
@@ -216,6 +231,9 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL }) {
     }));
   }
 
+  // Streams one request. Resolves to the message and the ids of tool calls whose input wasn't valid JSON: with eager
+  // input streaming the API doesn't check it, and the SDK's tolerant parser can turn bad JSON into a shorter valid
+  // input (a truncated file), so the raw input is parsed strictly here.
   async function turn(api, signal) {
     for (let retries = 0; ;) {
       const stream = api.beta.messages.stream({
@@ -231,49 +249,76 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL }) {
         fallbacks: "default",
       }, { signal });
       on({ type: "turn" });
+      const raw = new Map(); // content index → tool input JSON as streamed
       stream.on("text", (delta) => on({ type: "text", delta }));
-      stream.on("streamEvent", (e) => e.type === "content_block_start" && e.content_block.type === "thinking" && on({ type: "thinking" }));
+      stream.on("streamEvent", (e) => {
+        if (e.type === "content_block_start" && e.content_block.type === "thinking") on({ type: "thinking" });
+        else if (e.type === "content_block_start" && e.content_block.type === "tool_use") raw.set(e.index, "");
+        else if (e.type === "content_block_delta" && e.delta.type === "input_json_delta" && raw.has(e.index)) raw.set(e.index, raw.get(e.index) + e.delta.partial_json);
+      });
       try {
-        return await stream.finalMessage();
+        const msg = await stream.finalMessage();
+        const invalid = new Set();
+        for (const [i, json] of raw) {
+          const b = msg.content[i];
+          if (b?.type !== "tool_use" || !json.trim()) continue;
+          try {
+            JSON.parse(json);
+          } catch {
+            invalid.add(b.id);
+          }
+        }
+        return { msg, invalid };
       } catch (e) {
         // API errors (bad key, rate limit, overload after the SDK's own retries) and stops end the turn; a dropped
-        // connection or a tool input that isn't valid JSON is re-issued (the failed turn was never appended).
+        // connection or a tool input the SDK couldn't parse at all is re-issued (the failed turn was never appended).
         if (signal.aborted || e?.status !== undefined || e?.name === "APIUserAbortError" || ++retries > 2) throw e;
+        on({ type: "retry" });
         on({ type: "notice", text: "The connection dropped; trying again." });
       }
     }
   }
+
+  const CUT_OFF = {
+    max_tokens: "The reply hit the length limit",
+    model_context_window_exceeded: "The conversation is too long for Claude (start a new chat)",
+  };
 
   async function send(text) {
     if (ctl) throw new Error("already working");
     ctl = new AbortController();
     const { signal } = ctl;
     const pending = unanswered();
+    const start = messages.length;
     messages.push({ role: "user", content: pending.length ? [...pending, { type: "text", text }] : text });
     try {
       const api = await client();
       for (;;) {
-        const msg = await turn(api, signal);
-        messages.push({ role: "assistant", content: msg.content });
-        if (msg.stop_reason === "pause_turn") continue;
+        const { msg, invalid } = await turn(api, signal);
         if (msg.stop_reason === "refusal") {
+          // A declined reply (and any partial output) stays out of the history.
           on({ type: "notice", text: "Claude declined this request.", error: true });
           return;
         }
+        if (!msg.content.length) return; // an empty message would make every later request fail
+        messages.push({ role: "assistant", content: msg.content });
+        if (msg.stop_reason === "pause_turn") continue;
         const calls = msg.content.filter((b) => b.type === "tool_use");
-        if (!calls.length) {
-          if (msg.stop_reason === "max_tokens") on({ type: "notice", text: "The reply hit the length limit.", error: true });
+        const cut = CUT_OFF[msg.stop_reason] ?? (msg.stop_reason === "end_turn" || msg.stop_reason === "tool_use" || msg.stop_reason === "stop_sequence" ? null : `The reply stopped early (${msg.stop_reason})`);
+        if (cut) {
+          // A cut-off tool input can still look valid: don't run it (the next message answers it as not run).
+          on({ type: "notice", text: calls.length ? `${cut} before its tool calls were complete; they weren't run.` : `${cut}.`, error: true });
           return;
         }
-        if (msg.stop_reason === "max_tokens") {
-          // A cut-off tool input can still look valid: don't run it.
-          on({ type: "notice", text: "The reply hit the length limit before its tool call was complete; ask again in smaller steps.", error: true });
-          return;
-        }
+        if (!calls.length || msg.stop_reason !== "tool_use") return;
         const results = [];
         for (const b of calls) {
           if (signal.aborted) {
             results.push({ type: "tool_result", tool_use_id: b.id, is_error: true, content: "not run: stopped by the user" });
+            continue;
+          }
+          if (invalid.has(b.id)) {
+            results.push({ type: "tool_result", tool_use_id: b.id, is_error: true, content: "not run: INVALID_JSON (the tool input wasn't valid JSON); send the call again" });
             continue;
           }
           on({ type: "tool", name: b.name, input: b.input });
@@ -291,6 +336,8 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL }) {
       if (signal.aborted) on({ type: "notice", text: "Stopped." });
       else on({ type: "notice", text: errorText(e), error: true });
     } finally {
+      // Nothing came back for this message (stopped, failed, declined): drop it, so it isn't sent again with the next.
+      if (messages.length === start + 1) messages.length = start;
       ctl = null;
     }
   }

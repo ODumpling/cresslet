@@ -616,6 +616,8 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
               </button>
             </div>
+            <!-- outside the views it reports on, so it's never hidden when it speaks -->
+            <p class="sr-only" id="builder-status" role="status"></p>
             <form id="builder-key-form" class="builder-setup" hidden>
               <p>Ask Claude to change this project. It edits files, runs commands in this tab's terminal and, when you ask, deploys with your session, like the CLI.</p>
               <div class="field">
@@ -629,10 +631,10 @@
             <div id="builder-chat" class="builder-chat" hidden>
               <ol id="builder-log" class="builder-log" aria-labelledby="builder-title" tabindex="0"></ol>
               <div class="working" id="builder-working" hidden><span class="spinner" aria-hidden="true"></span><span id="builder-working-text">Working…</span></div>
-              <p class="sr-only" id="builder-status" role="status"></p>
               <form id="builder-form" class="builder-form">
                 <label class="sr-only" for="builder-input">Message to Claude</label>
-                <textarea id="builder-input" class="input" rows="3" placeholder="Describe a change…" aria-describedby="builder-hint"></textarea>
+                <p class="muted small" id="builder-locked" hidden>Run the project first (see the preview): the AI builder unlocks with the terminal and Deploy.</p>
+                <textarea id="builder-input" class="input" rows="3" placeholder="Describe a change…" aria-describedby="builder-locked builder-hint"></textarea>
                 <div class="builder-actions">
                   <p class="muted small" id="builder-hint"><kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line.</p>
                   <button class="btn sm" id="builder-forget" type="button">Forget key</button>
