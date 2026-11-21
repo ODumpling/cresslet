@@ -1,5 +1,6 @@
 // Control-plane HTTP API (/v1). Used by cresslet-cli, the studio, and agents.
-import { type Context, Hono } from "hono";
+import { type Context, Hono, type Next } from "hono";
+import { cloneRawRequest } from "hono/request";
 import { cors } from "hono/cors";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { DatabaseSync } from "node:sqlite";
@@ -23,6 +24,7 @@ import {
   type Token,
 } from "./store.ts";
 import type { Runtime } from "./runtime.ts";
+import type { Cluster } from "./cluster.ts";
 import { github } from "./github.ts";
 import { confine } from "./bindings.ts";
 import { normalizeEgress } from "./egress.ts";
@@ -45,9 +47,23 @@ const SECRET_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 /** `remoteAddr`: the TCP peer (main.ts passes it; tests don't). */
 type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
 
-export function api(cfg: Config, store: Store, runtime: Runtime) {
+export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluster) {
   const app = new Hono<Env>().basePath("/v1");
   app.use("*", cors({ origin: "*", allowHeaders: ["authorization", "content-type", "x-cresslet-deploy-key"] }));
+
+  // One app's calls run on the node that owns it (its files, sandbox, logs): forwarded unchanged,
+  // before auth (the owner authorizes). Deleted sites too (admin restore/purge).
+  const forward = async (appId: string, req: Request) => {
+    const res = await cluster.forward(appId, req);
+    return new Response(res.body, res); // mutable headers (CORS)
+  };
+  const toOwner = async (c: Context<Env>, next: Next) => {
+    const a = c.req.method === "OPTIONS" ? undefined : store.appByName(c.req.param("name") ?? "", true);
+    if (a && !cluster.local(a.id)) return forward(a.id, c.req.raw);
+    await next();
+  };
+  app.use("/apps/:name/*", toOwner);
+  app.use("/admin/sites/:name/*", toOwner);
 
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.code, message: err.message }, err.status as 400);
@@ -365,6 +381,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime) {
     const input = await body<DeployInput & { app?: string }>(c);
     const acct = c.get("account");
     let target = input.app ? store.appByName(input.app) : undefined;
+    if (target && !cluster.local(target.id)) return forward(target.id, await cloneRawRequest(c.req));
     let createdKey: string | undefined;
     if (target) {
       await authorize(c, target, "deploy");

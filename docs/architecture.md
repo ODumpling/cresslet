@@ -79,6 +79,42 @@ Previews run on their own origin (`CRESSLET_PREVIEW_HOST`, default `preview.<dom
 
 Project code in workers runs there too: the app's *server* code in `cresslet dev` (a container project worker, `c.projectWorker`) and `node` scripts, npm bins and the CSS worker (container `node` processes) are started by the relay frame on the preview origin, not in Web Workers on the studio origin. So they can't open the studio's IndexedDB (every local project's files, including `.env.cresslet`) or Cache Storage, and requests to the studio are cross-origin; they still get their own project's files through the container. Any `blob:` URL they mint is a preview-origin one. The e2e checks both from a `node` script and from a server route. What's left on the preview origin is one trust boundary: previews can script the relay and so reach those workers (a project's client code can do what its server code can).
 
+## Scaling out
+
+v1 runs one server process. [`server/cluster.ts`](../server/cluster.ts) is the seam a second node would plug into; the default (`singleNode`) owns every app, so nothing changes until another implementation is passed to `createServer`.
+
+What is node-local today:
+
+| State | Where |
+|---|---|
+| Metadata (accounts, tokens, apps, deploys, secrets, domains) | `data/cresslet.db`, `Store` (synchronous `node:sqlite`; all its SQL is in `server/store.ts`) |
+| App files: deploys, `db.sqlite`, `files/` | `data/apps/<appId>/` |
+| Sandboxes | `Runtime`: one process per app on this host |
+| Logs | `Logs`: in-memory ring buffer per app |
+| Crons, reaping (expired and long-deleted apps) | timers in this process |
+| Rate limits, GitHub OAuth state and exchange codes | in memory |
+
+Design: app affinity. Each app has one owner node. The owner holds `data/apps/<appId>/`, runs the sandbox, keeps the app's logs, fires its crons and reaps it. Any node takes any request; one for an app it doesn't own goes to the owner unchanged, and the owner answers it with today's code. `Runtime`, `Logs`, `Scheduler` and `host.ts` stay node-local. Forwarding whole requests, rather than sandbox calls, keeps static files, logging and the in-memory per-app deploy limit on the owner, and avoids sending `AppSpec` (it carries closures over the store).
+
+`Cluster` has three methods: `local(appId)` says whether this node owns the app, `forward(appId, req)` sends an HTTP request to the owner, and `forwardUpgrade(appId, …)` does the same for a WebSocket upgrade. The server calls them in these places:
+
+- App hosts (subdomain or verified custom domain), HTTP and WebSocket upgrades: `main.ts`, after the host name resolves to an app.
+- App-scoped API calls: `/v1/apps/:name[/…]` and `/v1/admin/sites/:name[/…]` (soft-deleted sites included, so restore and purge run where the files are). The API forwards them before auth, and the owner authorizes against the shared metadata. `POST /v1/deploys` names its app in the body, so the API forwards it once it has read the body, before the per-app deploy limit is charged. Deploys, rollbacks, the restarts after claim, secret and egress changes, logs (including `?follow=1`), source, the data browser, usage and purge therefore all run on the owner.
+- Crons: the scheduler only queues apps this node owns, and checks again at dispatch, since a queued run can outlive a move.
+- Reaping: only apps this node owns.
+
+Left before a second node works:
+
+- Shared metadata. Every caller uses `Store` synchronously, on hot paths and inside `AppSpec` closures (`seq`, `secrets`). There are two ways to share it. Replicated SQLite (one writer, read replicas) keeps `Store` synchronous, but writes must reach the primary. A networked database makes `Store` async, and the quota checks inside `createApp` need its transactions.
+- Secrets key: every node needs the same `CRESSLET_SECRETS_KEY`, or a shared `secrets.key`. `data/instance` stays per node.
+- A real `Cluster`, with these pieces:
+  - a node registry and health checks
+  - placement (an owner per app, and an owner chosen when an app is created; new apps are created on the node that took the deploy)
+  - forwarding over HTTP that keeps the client IP for app hosts and streams in both directions, so `logs?follow=1` and cancellation work end to end
+  - a hop guard, so two nodes that disagree about an owner don't forward to each other forever
+  - moving an app, and failover
+- Node-wide state that has to be shared or made sticky: the per-IP limit on new anonymous apps, GitHub OAuth state and exchange codes, and `/v1/admin/sites` usage (it reads local disk for every site).
+
 ## Roadmap
 
 - Stronger isolation: the public instance runs the whole server under gVisor, and any other multi-tenant instance without a gVisor mode gets a startup warning (see [Isolation](#isolation)). Next, where KVM is available: Firecracker microVMs, a guest kernel per app (needs a vsock bridge for the unix sockets, and a kernel and rootfs per sandbox).

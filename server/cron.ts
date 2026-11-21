@@ -72,13 +72,13 @@ const CATCH_UP = 5;
  */
 export class Scheduler {
   #timer: ReturnType<typeof setTimeout> | undefined;
-  #store: Store;
+  #store: Pick<Store, "appsWithCrons">;
   #run: (appId: string, cron: string, at: Date) => Promise<void>;
   #last: number;
   #queues = new Map<string, Promise<void>>();
   #running = new Set<string>();
 
-  constructor(store: Store, run: (appId: string, cron: string, at: Date) => Promise<void>, now = Date.now()) {
+  constructor(store: Pick<Store, "appsWithCrons">, run: (appId: string, cron: string, at: Date) => Promise<void>, now = Date.now()) {
     this.#store = store;
     this.#run = run;
     this.#last = Math.floor(now / MINUTE) * MINUTE;

@@ -178,6 +178,10 @@ export class Store {
     this.#sealSecrets();
   }
 
+  close() {
+    this.db.close();
+  }
+
   /**
    * Sealed values are stored as BLOBs, plaintext ones (older versions, incl. after a rollback) as
    * TEXT, so the storage class alone tells them apart. Seals plaintext rows and re-seals rows under
