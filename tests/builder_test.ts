@@ -337,3 +337,64 @@ test("agent: API errors end the turn with a readable message; dropped connection
   assert.deepEqual(api.calls[2].params.messages, [{ role: "user", content: "hello again" }]);
   assert.equal(agent.messages.at(-1).content[0].text, "Hello");
 });
+
+test("cresslet deploy from the builder: asks first, deploys to the app it named, keeps cresslet.json edits", async () => {
+  const plugin = "../studio/cresslet-plugin.js"; // untyped browser module
+  const { createCresslet } = await import(plugin);
+  const c = fakeContainer({ "cresslet.json": '{"routes":["/api/*"]}' });
+  let command!: (ctx: Json) => Promise<number>;
+  Object.assign(c, {
+    registerCommand: (_name: string, fn: typeof command) => (command = fn),
+    build: async () => ({ files: [] }),
+    export: async () => ({}),
+  });
+  const project: Json = { deploy: null };
+  let running = false;
+  const asked: Json[] = [];
+  let answer = (_ok: boolean) => {};
+  const cresslet = createCresslet(c, {
+    auth: () => ({ token: null }),
+    project: () => project,
+    builderRunning: () => running,
+    approveDeploy: (target: string | null) => {
+      asked.push(target);
+      return new Promise<boolean>((r) => (answer = r));
+    },
+  });
+  assert.ok(cresslet.deploy);
+  const posted: Json[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: Json) => {
+    posted.push({ body: JSON.parse(init.body), key: init.headers["x-cresslet-deploy-key"] });
+    return Response.json({ app: { name: "new-app", url: "http://new-app.test", claimed: true } });
+  }) as typeof fetch;
+  const ctx = (env: Json = {}) => ({ args: ["deploy"], env, stdout: { write() {} }, stderr: { write() {} }, signal: new AbortController().signal });
+  try {
+    // the user's own terminal: no question
+    assert.equal(await command(ctx()), 0);
+    assert.deepEqual(asked, []);
+    assert.equal(JSON.parse(c.files.get("/project/cresslet.json")!).name, "new-app");
+    c.files.set("/project/cresslet.json", '{"routes":["/api/*"]}'); // unnamed again
+    // while a builder command runs, even with the marker unset: asked; declined → nothing sent
+    running = true;
+    const declined = command(ctx());
+    await new Promise((r) => setTimeout(r, 0));
+    answer(false);
+    assert.equal(await declined, 1);
+    assert.equal(posted.length, 1);
+    // approved: the upload goes where the question said, even if the project was attached elsewhere meanwhile;
+    // cresslet.json edits made while asking survive
+    const approved = command(ctx({ CRESSLET_AI_BUILDER: "1" }));
+    await new Promise((r) => setTimeout(r, 0));
+    project.deploy = { name: "other-app", deployKey: "k-other" };
+    c.files.set("/project/cresslet.json", '{"routes":["/x/*"]}');
+    answer(true);
+    assert.equal(await approved, 0);
+    assert.deepEqual(asked, [null, null]);
+    assert.equal(posted[1].body.app, undefined); // a new app, as approved; not other-app
+    assert.equal(posted[1].key, undefined);
+    assert.deepEqual(JSON.parse(c.files.get("/project/cresslet.json")!), { routes: ["/x/*"], name: "new-app" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

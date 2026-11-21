@@ -143,11 +143,13 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     let timer, stop;
     const stopped = new Promise((r) => {
       // Wall-clock time (timers are throttled in background tabs), not counting time spent asking the user.
-      let used = 0, last = performance.now();
+      // Each interval counts by whether the user was being asked when it began (a late tick can't charge the wait).
+      let used = 0, last = performance.now(), asking = paused();
       const tick = () => {
         const now = performance.now();
-        if (!paused()) used += now - last;
+        if (!asking) used += now - last;
         last = now;
+        asking = paused();
         if (used >= timeoutMs) r("timeout");
         else timer = setTimeout(tick, 250);
       };
