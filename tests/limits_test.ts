@@ -106,7 +106,7 @@ test("new apps and pages per account per hour: create/delete loops get 429; rede
     const app = await t.deploy(a, "loop");
     assert.equal(app.status, 429, "deleting doesn't give the allowance back");
     assert.equal(app.body.error, "rate_limited");
-    assert.match(app.body.message, /too many new apps and pages \(3 per hour\)/);
+    assert.match(app.body.message, /too many new apps and artifacts \(3 per hour\)/);
     const p = await page();
     assert.equal(p.status, 429);
     assert.equal(p.body.error, "rate_limited");

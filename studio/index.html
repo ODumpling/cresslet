@@ -63,7 +63,7 @@
           <p class="nav-label" id="nav-workspace">Workspace</p>
           <ul aria-labelledby="nav-workspace">
             <li><a href="#/" data-nav="home"><svg class="icon" aria-hidden="true"><use href="#i-folder" /></svg>Projects</a></li>
-            <li id="nav-pages-item" hidden><a href="#/pages" data-nav="pages"><svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>Pages</a></li>
+            <li id="nav-pages-item"><a href="#/artifacts" data-nav="pages"><svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>Artifacts</a></li>
             <li id="nav-settings-item" hidden><a href="#/settings" data-nav="settings"><svg class="icon" aria-hidden="true"><use href="#i-settings" /></svg>Settings</a></li>
           </ul>
           <div id="recent-wrap" hidden>
@@ -268,6 +268,7 @@
                 <li><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>Same runtime locally, in the browser and in production</li>
                 <li><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>Logs, database and secrets from the command line</li>
                 <li><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>Deploy from CI with a scoped API token</li>
+                <li><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>Share an HTML file privately, with a link or publicly: <code>cresslet deploy report.html</code></li>
               </ul>
             </div>
             <div class="term">
@@ -329,7 +330,7 @@
           <section class="block" id="invites-section" hidden aria-labelledby="invites-title">
             <div class="block-head">
               <h2 id="invites-title" tabindex="-1">Invitations</h2>
-              <p class="muted small">Apps other people shared with you</p>
+              <p class="muted small">Apps and artifacts other people shared with you</p>
             </div>
             <ul class="list" id="invites" aria-labelledby="invites-title"></ul>
           </section>
@@ -359,13 +360,19 @@
         <main id="pages" class="page" hidden aria-labelledby="pages-title">
           <header class="page-head">
             <div>
-              <h1 id="pages-title" tabindex="-1">Pages</h1>
-              <p class="muted">Static HTML you upload and share: one file, or a folder with an index.html.</p>
+              <h1 id="pages-title" tabindex="-1">Artifacts</h1>
+              <p class="muted">Static HTML you share: one file, or a folder with an index.html. You choose who can open it and how long it's kept. Need a server, a database or rollback? Make a <a href="#/">project</a> and deploy it as an app.</p>
             </div>
           </header>
-          <section class="block first">
+          <section class="block first" id="pages-login" hidden>
+            <div class="panel split">
+              <p class="muted small">Log in to deploy artifacts: private to the people you share them with, link-only, or public, and kept for as long as you choose.</p>
+              <button class="btn primary" id="pages-login-btn" type="button"><svg class="icon" aria-hidden="true"><use href="#i-github" /></svg>Log in with GitHub</button>
+            </div>
+          </section>
+          <section class="block first" id="pages-main">
             <form id="page-form" class="panel form page-form" aria-labelledby="page-form-title">
-              <h2 id="page-form-title">Upload a page</h2>
+              <h2 id="page-form-title">Deploy an artifact</h2>
               <div class="page-fields">
                 <fieldset class="field">
                   <legend>Files</legend>
@@ -383,7 +390,7 @@
                     <span class="slug-affix js-slug-after" aria-hidden="true"></span>
                   </div>
                   <p class="slug-status small" id="page-name-status" aria-live="polite"></p>
-                  <p class="muted small" id="page-name-hint">A generated address can't be guessed, so an "Anyone with the link" page stays with the people you send it to. A name of your own is easier to share, and easier to guess.</p>
+                  <p class="muted small" id="page-name-hint">A generated address can't be guessed, so an "Anyone with the link" artifact stays with the people you send it to. A name of your own is easier to share, and easier to guess.</p>
                 </div>
                 <div class="field">
                   <label for="page-visibility">Who can open it</label>
@@ -404,11 +411,11 @@
                   <option value="365">1 year</option>
                   <option value="forever">Forever</option>
                   </select>
-                  <p class="muted small" id="page-retention-hint">Counted from each upload or change. Your defaults are in <a href="#/settings">Settings</a>.</p>
+                  <p class="muted small" id="page-retention-hint">Counted from each deploy or change. Your defaults are in <a href="#/settings">Settings</a>.</p>
                 </div>
               </div>
               <p class="error small" id="page-error" role="alert" hidden></p>
-              <div class="row start"><button class="btn primary" id="page-upload" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Upload</button></div>
+              <div class="row start"><button class="btn primary" id="page-upload" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-rocket" /></svg>Deploy</button></div>
             </form>
             <div id="page-list" class="pages-list"></div>
           </section>
@@ -481,12 +488,12 @@
           </section>
           <section class="block" aria-labelledby="page-defaults-title">
             <div class="block-head">
-              <h2 id="page-defaults-title">Page defaults</h2>
-              <p class="muted small">Used for new pages unless you pick something else when you upload. Change any page later.</p>
+              <h2 id="page-defaults-title">Artifact defaults</h2>
+              <p class="muted small">Used for new artifacts unless you pick something else when you deploy one. Change any artifact later.</p>
             </div>
             <form id="page-defaults-form" class="panel form" aria-labelledby="page-defaults-title">
               <div class="field">
-                <label for="def-visibility">Who can open new pages</label>
+                <label for="def-visibility">Who can open new artifacts</label>
                 <select class="input" id="def-visibility" aria-describedby="vis-hint-def">
                   <option value="private">Private</option>
                   <option value="link">Anyone with the link</option>
@@ -495,7 +502,7 @@
                 <p class="muted small" id="vis-hint-def">Private: you and people you share it with, logged in. Anyone with the link: not listed by search engines. Public: anyone, search engines too.</p>
               </div>
               <div class="field">
-                <label for="def-retention">Keep new pages for</label>
+                <label for="def-retention">Keep new artifacts for</label>
                 <select class="input" id="def-retention" aria-describedby="def-hint">
                   <option value="1">1 day</option>
                   <option value="7">7 days</option>
@@ -504,7 +511,7 @@
                   <option value="365">1 year</option>
                   <option value="forever">Forever</option>
                 </select>
-                <p class="muted small" id="def-hint">Server default: <span id="def-server">—</span>. Expired pages are deleted.</p>
+                <p class="muted small" id="def-hint">Server default: <span id="def-server">—</span>. Expired artifacts are deleted.</p>
               </div>
               <p class="error small" id="page-defaults-error" role="alert" hidden></p>
               <div class="row start">
@@ -557,7 +564,7 @@
         <main id="view" class="page narrow" hidden aria-labelledby="view-title">
           <header class="page-head">
             <div>
-              <h1 id="view-title" tabindex="-1">Private page</h1>
+              <h1 id="view-title" tabindex="-1">Private artifact</h1>
               <p class="muted" id="view-text" aria-live="polite">Opening…</p>
             </div>
           </header>

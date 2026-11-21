@@ -13,9 +13,10 @@
 - Reuse: same body + "app":"<name>" + header X-Cresslet-Deploy-Key.
 - GET /v1/apps/<name>/logs, GET /v1/apps/<name>/db
 
-## Share a static HTML page (account token)
-- POST /v1/pages {"html":"<h1>hi</h1>","visibility":"private|link|public","retentionDays":30|null} → {page.url}
-- CLI: `npx cresslet page upload report.html --visibility link --keep 7`
+## Share a static HTML file or folder as an artifact (account token)
+- An artifact: private, link-only or public, expires (default 30 days); no server. Need a server, database or rollback? Deploy an app (above).
+- CLI: `npx cresslet deploy report.html --visibility link --keep 7 [--name q4-report]`; a folder: `npx cresslet deploy ./site --artifact`. Deploying it again updates the same URL.
+- POST /v1/pages {"html":"<h1>hi</h1>","name":"<optional address>","visibility":"private|link|public","retentionDays":30|null} → {page.url}; PUT /v1/pages/<name> replaces its files
 
 ## Docs
 - [App format](https://github.com/ODumpling/cresslet/blob/main/docs/app-format.md)

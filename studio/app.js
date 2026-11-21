@@ -152,7 +152,6 @@ function renderAccount() {
     ? [auth.email ?? "Account", srOnly(": account settings")]
     : ["Log in with GitHub"]));
   $("nav-settings-item").hidden = !auth.token;
-  $("nav-pages-item").hidden = !auth.token;
 }
 
 // Login is GitHub only: the server redirects back to /#cresslet_login=<one-time code>.
@@ -1156,16 +1155,20 @@ async function copyLink(url) {
   }
 }
 
-/** #/pages: upload and manage static pages (logged in only). */
+/** #/artifacts (was #/pages): deploy and manage artifacts, static HTML with a visibility and a retention. Logged out: what they are, and a login. */
 function renderPagesView() {
-  if (!auth.token) {
-    location.hash = "#/";
-    return;
-  }
   showOnly("pages");
-  document.title = "Pages · Cresslet Studio";
-  renderPages();
+  document.title = "Artifacts · Cresslet Studio";
+  $("pages-login").hidden = !!auth.token;
+  $("pages-main").hidden = !auth.token;
+  if (auth.token) renderPages();
 }
+$("pages-login-btn").addEventListener("click", () => {
+  try {
+    sessionStorage.setItem("cresslet.afterLogin", "#/artifacts");
+  } catch { /* storage blocked: login lands on the home page */ }
+  logIn();
+});
 
 let pageFormTouched = false; // the upload form keeps a choice made before the list (re)loads
 const pageSlug = slugField($("page-name"), "page");
@@ -1177,9 +1180,9 @@ function renderPages() {
       setKeep($("page-retention"), defaults.retentionDays);
     }
     $("page-list").replaceChildren(pages.length
-      ? dataTable("pages-title", [["Page"], ["Who can open it"], ["Keep for"], ["Actions", "actions", true]], pages.map(pageRow))
-      : emptyState("No pages yet", "Upload an HTML file above, or run cresslet page upload <file>."));
-  }).catch((e) => $("page-list").replaceChildren(el("p", { className: "error", textContent: `Could not load pages: ${e.message}` })));
+      ? dataTable("pages-title", [["Artifact"], ["Who can open it"], ["Keep for"], ["Actions", "actions", true]], pages.map(pageRow))
+      : emptyState("No artifacts yet", "Deploy an HTML file above, or run cresslet deploy <file.html>."));
+  }).catch((e) => $("page-list").replaceChildren(el("p", { className: "error", textContent: `Could not load artifacts: ${e.message}` })));
 }
 
 function pageRow(p) {
@@ -1209,7 +1212,7 @@ function pageRow(p) {
         : el("label", { className: "icon-btn file-btn", title: "Replace with a folder (same link)" }, replaceDir, icon("folder"), srOnly(`Replace ${label} with a folder`)),
       manage ? el("a", { className: "icon-btn", href: `#/share/${encodeURIComponent(p.name)}`, title: "Share" }, icon("users"), srOnly(`Share ${label}`)) : null,
       p.access === "owner"
-        ? el("button", { className: "icon-btn danger", type: "button", id: `delete-page-${p.id}`, title: "Delete page", ariaLabel: `Delete ${label}`, onclick: () => deletePage(p) }, icon("trash"))
+        ? el("button", { className: "icon-btn danger", type: "button", id: `delete-page-${p.id}`, title: "Delete artifact", ariaLabel: `Delete ${label}`, onclick: () => deletePage(p) }, icon("trash"))
         : null));
 }
 
@@ -1337,10 +1340,10 @@ $("page-form").addEventListener("submit", async (e) => {
     $("page-name").value = ""; // a new address for the next page
     $("page-picked").textContent = "Nothing chosen";
     await renderPages();
-    toast(el("span", {}, `Uploaded ${pageName(page)}: `, extLink(page.url, page.url.replace(/^https?:\/\//, "")), " ",
+    toast(el("span", {}, `Deployed ${pageName(page)}: `, extLink(page.url, page.url.replace(/^https?:\/\//, "")), " ",
       el("button", { className: "btn sm", type: "button", onclick: () => copyLink(page.url) }, icon("copy"), "Copy link")));
   } catch (err) {
-    pageError(`Could not upload: ${err.message}`);
+    pageError(`Could not deploy: ${err.message}`);
   } finally {
     $("page-upload").disabled = false;
     if (document.activeElement === document.body) $("page-upload").focus();
@@ -1359,7 +1362,7 @@ function showPageDefaults({ pages, defaults }) {
 }
 function renderPageDefaults() {
   pageDefaultsError("");
-  api("/v1/me/settings").then(showPageDefaults, (e) => pageDefaultsError(`Could not load your page defaults: ${e.message}`));
+  api("/v1/me/settings").then(showPageDefaults, (e) => pageDefaultsError(`Could not load your artifact defaults: ${e.message}`));
 }
 async function savePageDefaults(pages, done) {
   pageDefaultsError("");
@@ -1375,9 +1378,9 @@ async function savePageDefaults(pages, done) {
 }
 $("page-defaults-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  savePageDefaults({ visibility: $("def-visibility").value, retentionDays: keepParse($("def-retention").value) }, "Page defaults saved");
+  savePageDefaults({ visibility: $("def-visibility").value, retentionDays: keepParse($("def-retention").value) }, "Artifact defaults saved");
 });
-$("page-defaults-reset").addEventListener("click", () => savePageDefaults(null, "Using the server's page defaults"));
+$("page-defaults-reset").addEventListener("click", () => savePageDefaults(null, "Using the server's artifact defaults"));
 
 let cliToken = null; // the token renderCli named the account of
 /**
@@ -1449,11 +1452,11 @@ $("cli-login-form").addEventListener("submit", async (e) => {
  */
 async function renderView(name, path) {
   showOnly("view");
-  document.title = "Private page · Cresslet Studio";
+  document.title = "Private artifact · Cresslet Studio";
   const text = (t) => ($("view-text").textContent = t);
   $("view-actions").replaceChildren();
   if (!auth.token) {
-    text("This page is private. Log in to open it, if its owner shared it with you.");
+    text("This artifact is private. Log in to open it, if its owner shared it with you.");
     $("view-actions").replaceChildren(el("button", {
       className: "btn primary",
       type: "button",
@@ -1492,9 +1495,9 @@ async function renderView(name, path) {
     const { url } = await api(`/v1/pages/${encodeURIComponent(name)}/view`, { method: "POST", body: JSON.stringify({ path }) });
     location.replace(url);
   } catch (e) {
-    text(e.status === 404 ? "This page doesn't exist, or it expired."
-      : e.status === 403 ? `You don't have access to this page (logged in as ${auth.email}). Ask its owner to share it with you.`
-      : `Could not open the page: ${e.message}`);
+    text(e.status === 404 ? "This artifact doesn't exist, or it expired."
+      : e.status === 403 ? `You don't have access to this artifact (logged in as ${auth.email}). Ask its owner to share it with you.`
+      : `Could not open the artifact: ${e.message}`);
     $("view-actions").replaceChildren(el("a", { className: "btn", href: "#/" }, "Go to Projects"));
   }
 }
@@ -1565,11 +1568,15 @@ async function renderShare(name) {
   document.title = `Share ${name} · Cresslet Studio`;
   $("share-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", `Share ${name}`);
   $("share-sub").textContent = "Invite accounts to this app. Viewers see it; admins can also change it.";
-  // A page: its title, and what sharing means for it.
+  $("invite-role").options[0].textContent = "Viewer: see the app, logs, source and data";
+  $("invite-role-admin").textContent = "Admin: also deploy, roll back, secrets, domains and sharing (not deleting the app)";
+  // An artifact: its title, and what sharing means for it.
   api(`/v1/pages/${encodeURIComponent(name)}`).then(({ page }) => {
     if (shareApp !== name) return;
-    $("share-title").replaceChildren(el("a", { href: "#/pages", textContent: "Pages" }), " / ", `Share ${pageName(page)}`);
-    $("share-sub").textContent = "Invite accounts to this page. Viewers can open it even when it's private; admins can also change it.";
+    $("share-title").replaceChildren(el("a", { href: "#/artifacts", textContent: "Artifacts" }), " / ", `Share ${pageName(page)}`);
+    $("share-sub").textContent = "Invite accounts to this artifact. Viewers can open it even when it's private; admins can also change it.";
+    $("invite-role").options[0].textContent = "Viewer: open it, even when it's private";
+    $("invite-role-admin").textContent = "Admin: also replace its files, change who can open it and how long it's kept, and share it (not deleting it)";
   }, () => {});
   $("invite-form").reset();
   $("invite-form").hidden = true; // until the list loads: only the owner and admins may share
@@ -2600,7 +2607,8 @@ function route() {
   if (m) openProject(m[1], gen);
   else if (booted) reloadForRoute();
   else if (location.hash === "#/settings") renderSettings();
-  else if (location.hash === "#/pages") renderPagesView();
+  else if (location.hash === "#/artifacts") renderPagesView();
+  else if (location.hash === "#/pages") location.replace("#/artifacts"); // artifacts were called pages
   else if (location.hash.startsWith("#/share/")) renderShare(decodeURIComponent(location.hash.slice("#/share/".length)));
   else if (location.hash.startsWith("#/view/")) {
     const [n, q] = location.hash.slice("#/view/".length).split("?");

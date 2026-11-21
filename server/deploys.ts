@@ -219,7 +219,7 @@ export async function writePage(cfg: Config, store: Store, app: App, files: Depl
   if (!Array.isArray(files) || !files.length) throw new HttpError(400, "files must be a non-empty array (or send html)");
   if (files.length > cfg.limits.deployFiles) throw new HttpError(413, `too many files (max ${cfg.limits.deployFiles})`, "too_large");
   const { decoded, bytes } = decodeFiles(cfg, files, { bytes: 0, files: 0 });
-  if (!decoded.some(([p]) => p === "index.html")) throw new HttpError(400, "a page needs an index.html at its root", "no_index");
+  if (!decoded.some(([p]) => p === "index.html")) throw new HttpError(400, "an artifact needs an index.html at its root", "no_index");
   const deployId = id("dep");
   const dir = paths(cfg, app.id).deploy(deployId);
   const pub = join(dir, "public");
