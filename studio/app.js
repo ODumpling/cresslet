@@ -1888,7 +1888,7 @@ async function openPageDialog() {
   pagePick = null;
   showPick(...NO_PICK);
   pageError("");
-  $("page-upload").disabled = false;
+  for (const id of ["page-upload", "page-cancel", "page-close"]) $(id).disabled = false; // a finished deploy may not have yet
   $("page-name").value = "";
   $("page-visibility").value = defaults.visibility;
   setKeep($("page-retention"), defaults.retentionDays);
