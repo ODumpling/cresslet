@@ -3,7 +3,9 @@
 //   HOST     service binding to the control plane, which owns the app's db and files
 //   (secrets are fetched once from HOST /secrets, so they never sit on disk in plaintext)
 //   APP      json binding { id, name, url, deployId }
+// The env is also published for the `cresslet` SDK (cresslet-runtime.js, imported before the app).
 import { Buffer } from "node:buffer";
+import { runtime } from "cresslet-runtime";
 import * as mod from "app";
 
 const exp = mod.default ?? mod;
@@ -50,6 +52,7 @@ async function makeEnv(bindings) {
       first: (sql, ...params) => db("first", { sql, params }),
       run: (sql, ...params) => db("run", { sql, params }),
       exec: async (sql) => void (await db("exec", { sql })),
+      batch: (statements) => db("batch", { statements }),
     },
     files: {
       async put(key, body, opts = {}) {
@@ -90,7 +93,7 @@ async function runScheduled({ cron, scheduledTime }, bindings, ctx) {
   }
   let env;
   try {
-    env = await (appEnv ??= makeEnv(bindings));
+    env = runtime.env = await (appEnv ??= makeEnv(bindings));
   } catch (err) {
     appEnv = undefined;
     console.error(`failed to load secrets: ${err.message}`);
@@ -134,7 +137,7 @@ export default {
     appEnv ??= makeEnv(bindings);
     let env;
     try {
-      env = await appEnv;
+      env = runtime.env = await appEnv;
     } catch (err) {
       appEnv = undefined;
       console.error(`failed to load secrets: ${err.message}`);

@@ -19,6 +19,7 @@ import { createEgressProxy } from "./egress.ts";
 import { adoptListener, instanceId, jail, prepareHost, sweep } from "./sandbox.ts";
 
 const WORKER = join(import.meta.dirname, "../runtime/worker.js");
+const WORKER_RUNTIME = join(import.meta.dirname, "../runtime/cresslet-runtime.js");
 /** Pinned so a workerd upgrade doesn't silently change app semantics. */
 const COMPAT_DATE = "2026-11-01";
 
@@ -90,6 +91,7 @@ const config :Workerd.Config = (
     (name = "app", worker = (
       modules = [
         (name = "worker.js", esModule = embed "worker.js"),
+        (name = "cresslet-runtime", esModule = embed "cresslet-runtime.js"),
         (name = "app", esModule = embed "app.js"),
       ],
       compatibilityDate = "${COMPAT_DATE}",
@@ -468,6 +470,7 @@ export class Runtime {
         await new Promise<void>((res, rej) => eg.once("error", rej).listen(egressSock, res));
       }
       await copyFile(WORKER, join(run, "worker.js"));
+      await copyFile(WORKER_RUNTIME, join(run, "cresslet-runtime.js"));
       await copyFile(join(p.deploy(spec.deployId), "server.js"), join(run, "app.js"));
       await writeFile(
         join(run, "app.json"),

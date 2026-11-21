@@ -8,6 +8,6 @@
     "deploy": "cresslet deploy"
   },
   "devDependencies": {
-    "cresslet": "^0.1.0"
+    "cresslet": "^0.2.0"
   }
 }

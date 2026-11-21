@@ -10,6 +10,10 @@ import initSqlJs from "https://esm.sh/sql.js@1.13.0";
 const SQL_WASM = "https://cdn.jsdelivr.net/npm/sql.js@1.13.0/dist/sql-wasm.wasm";
 let handler;
 let env;
+// Where the `cresslet` SDK (`import { db } from "cresslet"`, cresslet-cli sdk/index.js) finds the env: published once
+// the app's module has loaded (bindings exist only once a handler runs). Contract: runtime/cresslet-runtime.js.
+const runtime = { contract: 1, runtime: "studio preview", paramStyle: "?", env: null };
+globalThis[Symbol.for("cresslet.runtime")] = runtime;
 
 const fmt = (args) =>
   args.map((a) => (typeof a === "string" ? a : a instanceof Error ? (a.stack ?? a.message) : safeJson(a))).join(" ");
@@ -157,42 +161,181 @@ function files(op, payload, transfer = []) {
   });
 }
 
+/**
+ * PRAGMAs that only report when they have no `=` or `(…)`. Any other PRAGMA, or one with `=`, or `(…)` outside
+ * READ_PRAGMAS_WITH_ARG, may change the database (incremental_vacuum, optimize, user_version = 7, user_version(7)): the
+ * preview saves after it.
+ */
+const READ_PRAGMAS = new Set([
+  "application_id", "auto_vacuum", "cache_size", "collation_list", "compile_options", "data_version", "database_list",
+  "encoding", "foreign_key_check", "foreign_key_list", "foreign_keys", "freelist_count", "function_list", "index_info",
+  "index_list", "index_xinfo", "integrity_check", "journal_mode", "module_list", "page_count", "page_size",
+  "pragma_list", "quick_check", "recursive_triggers", "schema_version", "table_info", "table_list", "table_xinfo",
+  "user_version",
+]);
+
+/** Report-only PRAGMAs whose argument names what to report on (`table_info(t)`), not a value to set. */
+const READ_PRAGMAS_WITH_ARG = new Set([
+  "foreign_key_check", "foreign_key_list", "index_info", "index_list", "index_xinfo", "integrity_check", "quick_check",
+  "table_info", "table_list", "table_xinfo",
+]);
+
 function createDb(SQL, bytes) {
   const db = bytes ? new SQL.Database(bytes) : new SQL.Database();
   let timer;
+  let savedRowid = 0;
+  let reopened = false;
+  // One save at a time, 300 ms after the first change that asked for it: later changes don't push it back (steady
+  // traffic would otherwise keep a write from ever being saved).
   const persist = () => {
-    clearTimeout(timer);
+    if (timer) return;
     timer = setTimeout(() => {
+      timer = undefined;
+      // export() closes and reopens the database: not while the app holds a transaction open (exec("BEGIN") across
+      // awaits) or its writes would be lost; and connection settings (foreign_keys) need setting again after.
+      try {
+        db.exec("BEGIN; COMMIT;");
+      } catch {
+        return persist(); // in a transaction: try again later
+      }
+      savedRowid = rowid(); // the live value, or the one kept from before an earlier save
+      const foreignKeys = one("PRAGMA foreign_keys");
       const out = db.export();
+      reopened = true; // last_insert_rowid() is 0 on the new connection until its next insert
+      db.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"};`); // as the app left it
       postMessage({ type: "db", bytes: out }, [out.buffer]);
     }, 300);
   };
-  const norm = (params) => params.map((p) => (typeof p === "bigint" ? Number(p) : p === undefined ? null : p));
-  const all = (sql, params) => {
+  // sql.js binds numbers as doubles: a bigint it can't hold exactly is refused, not rounded.
+  const norm = (params) =>
+    params.map((p) => {
+      if (typeof p !== "bigint") return p === undefined ? null : p;
+      if (p > BigInt(Number.MAX_SAFE_INTEGER) || p < BigInt(Number.MIN_SAFE_INTEGER)) {
+        throw new RangeError(`the studio preview (sql.js) can't store the integer ${p} exactly (beyond ±2^53); the platform and cresslet dev can`);
+      }
+      return Number(p);
+    });
+  /** `max`: stop after that many rows (first(): one, as node:sqlite's get() steps once). */
+  const all = (sql, params, max = Infinity) => {
     const stmt = db.prepare(sql);
     try {
       stmt.bind(norm(params));
       const rows = [];
-      while (stmt.step()) rows.push(stmt.getAsObject());
+      const cols = stmt.getColumnNames();
+      // As node:sqlite (the platform, cresslet dev) does: an integer past 2^53 is an error, not a rounded number, and
+      // every column (`__proto__` too) is an own property.
+      const cell = (v) => {
+        if (typeof v !== "bigint") return v;
+        if (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(Number.MIN_SAFE_INTEGER)) {
+          throw new RangeError(`Value is too large to be represented as a JavaScript number: ${v}`);
+        }
+        return Number(v);
+      };
+      while (rows.length < max && stmt.step()) {
+        const vals = stmt.get(null, { useBigInt: true });
+        rows.push(Object.fromEntries(cols.map((c, i) => [c, cell(vals[i])])));
+      }
       return rows;
     } finally {
       stmt.free();
     }
   };
+  const one = (sql) => db.exec(sql)[0]?.values[0][0] ?? 0;
+  // last_insert_rowid(), kept across snapshots: export() reopens the connection, which resets it to 0
+  const rowid = () => {
+    const v = Number(one("SELECT last_insert_rowid()"));
+    if (!reopened) return v;
+    if (v !== 0) {
+      reopened = false; // an insert on the new connection
+      return v;
+    }
+    return savedRowid;
+  };
+  // Statements that may change the database without changing total_changes() (DDL, PRAGMA, …): not a plain read.
+  // (A save reopens the connection, so plain reads, PRAGMA reads included, don't ask for one.)
+  const mayWrite = (sql) => {
+    const s = sql.replace(/^(?:[\s;(]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
+    if (/^(?:select|values|explain)\b/i.test(s)) return false;
+    if (/^with\b/i.test(s)) return /\b(?:insert|update|delete|replace)\b/i.test(s);
+    if (/^pragma\b/i.test(s)) {
+      // comments anywhere in it out (`PRAGMA main.user_version /* x */ = 7`), then name and what follows
+      const p = /^pragma\s+(?:\w+\s*\.\s*)?(\w+)\s*([=(])?/i.exec(s.replace(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, " "));
+      if (!p) return true; // unsure: save
+      const name = p[1].toLowerCase();
+      if (p[2] === "=") return true;
+      if (p[2] === "(") return !READ_PRAGMAS_WITH_ARG.has(name); // user_version(7) sets it; table_info(t) reports
+      return !READ_PRAGMAS.has(name);
+    }
+    return true;
+  };
+  // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).
+  // Same as server/bindings.ts notInBatch: a batch is one transaction, so no BEGIN/COMMIT/SAVEPOINT/…, PRAGMA, ATTACH or
+  // DETACH in it (after comments and an EXPLAIN prefix).
+  const notInBatch = (sql) =>
+    /^(?:begin|commit|end|rollback|savepoint|release|pragma|attach|detach)\b/i.test(sql.replace(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, " ").replace(/^[\s;]+/, "").replace(/^explain\s+(?:query\s+plan\s+)?/i, ""));
+  const batch = (statements) => {
+    if (!Array.isArray(statements)) throw new TypeError("batch takes an array of { sql, params }");
+    statements.forEach((s, i) => {
+      const { sql, params } = s ?? {};
+      if (typeof sql !== "string") throw new TypeError(`batch statement ${i + 1}: sql required`);
+      if (params !== undefined && !Array.isArray(params)) throw new TypeError(`batch statement ${i + 1}: params must be an array`);
+      if (notInBatch(sql)) throw new TypeError(`batch statement ${i + 1}: transaction control, PRAGMA, ATTACH and DETACH aren't allowed in a batch (it is one transaction; the others aren't rolled back with it)`);
+    });
+    const changesBefore = one("SELECT total_changes()");
+    db.exec("SAVEPOINT cresslet_batch");
+    try {
+      const out = statements.map(({ sql, params = [] } = {}, i) => {
+        try {
+          const before = one("SELECT total_changes()");
+          const rows = all(sql, params);
+          const changed = one("SELECT total_changes()") !== before;
+          return { rows, changes: changed ? db.getRowsModified() : 0, lastInsertRowid: rowid() };
+        } catch (e) {
+          throw new Error(`batch statement ${i + 1}: ${e?.message ?? e}`);
+        }
+      });
+      db.exec("RELEASE cresslet_batch");
+      return out;
+    } catch (e) {
+      try {
+        db.exec("ROLLBACK TO cresslet_batch; RELEASE cresslet_batch");
+      } catch { /* SQLite already rolled back: report the statement's error */ }
+      throw e;
+    } finally {
+      // a read-only batch doesn't ask for a save (one reopens the connection)
+      if (one("SELECT total_changes()") !== changesBefore || statements.some((st) => mayWrite(st.sql))) persist();
+    }
+  };
   db.exec("PRAGMA foreign_keys = ON;");
+  // query/first can write too (INSERT … RETURNING): save when they changed anything
+  const reading = (sql, params, max) => {
+    const before = one("SELECT total_changes()");
+    try {
+      return all(sql, params, max);
+    } finally {
+      // a statement that failed part-way may still have written (INSERT OR FAIL … RETURNING)
+      if (one("SELECT total_changes()") !== before || mayWrite(sql)) persist();
+    }
+  };
   return {
-    query: async (sql, ...params) => all(sql, params),
-    first: async (sql, ...params) => all(sql, params)[0] ?? null,
+    batch: async (statements) => batch(statements),
+    query: async (sql, ...params) => reading(sql, params),
+    first: async (sql, ...params) => reading(sql, params, 1)[0] ?? null,
+    // persist in finally: a statement (or script) that failed part-way may still have written
     run: async (sql, ...params) => {
-      db.run(sql, norm(params));
-      const changes = db.getRowsModified();
-      const lastInsertRowid = Number(db.exec("SELECT last_insert_rowid()")[0]?.values[0][0] ?? 0);
-      persist();
-      return { changes, lastInsertRowid };
+      try {
+        db.run(sql, norm(params));
+        return { changes: db.getRowsModified(), lastInsertRowid: rowid() };
+      } finally {
+        persist();
+      }
     },
     exec: async (sql) => {
-      db.exec(sql);
-      persist();
+      try {
+        db.exec(sql);
+      } finally {
+        persist();
+      }
     },
   };
 }
@@ -230,11 +373,16 @@ onmessage = async ({ data: m, ports }) => {
         app: Object.freeze(m.app),
       };
       const url = URL.createObjectURL(new Blob([m.code], { type: "text/javascript" }));
-      const mod = await import(url);
-      URL.revokeObjectURL(url);
+      let mod;
+      try {
+        mod = await import(url);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
       const exp = mod.default ?? mod;
       handler = typeof exp === "function" ? exp : exp?.fetch?.bind(exp);
       if (!handler) throw new Error("server/index must `export default { fetch(req, env) {} }`");
+      runtime.env = env; // after the module's top level and reading its exports, as on the platform
       postMessage({ type: "ready" });
     } catch (e) {
       postMessage({ type: "fatal", message: e?.stack ?? String(e) });
