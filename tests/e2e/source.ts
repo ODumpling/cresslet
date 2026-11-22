@@ -28,7 +28,10 @@ try {
   }
   console.log("source uploaded:", paths.length, "files");
   const home = await browser.newPage();
-  await home.addInitScript((t) => localStorage.setItem("cresslet.token", t), acct.token);
+  await home.addInitScript((t) => {
+    localStorage.setItem("cresslet.token", t);
+    localStorage.setItem("cresslet.anthropicKey", "sk-ant-e2e-test"); // the AI builder shows its chat (nothing is sent)
+  }, acct.token);
   await home.goto(base + "/");
   const row = home.locator(".list-row", { hasText: app });
   await row.getByRole("button", { name: "Open source" }).click();
@@ -50,7 +53,17 @@ try {
   await home.keyboard.type("echo typed-before-consent\n");
   await home.waitForTimeout(1000);
   if (/typed-before-consent/.test(await home.locator(".xterm-rows").innerText())) throw new Error("terminal accepted input before Run it");
+  // the AI builder takes a draft, but doesn't send it
+  const draft = home.locator("#builder-input");
+  await draft.click();
+  await home.keyboard.type("rename the heading");
+  if ((await draft.inputValue()) !== "rename the heading") throw new Error("AI builder message field didn't take typing before Run it");
+  if (!(await home.locator("#builder-send").isDisabled())) throw new Error("AI builder Send enabled before Run it");
+  await home.keyboard.press("Enter");
+  if ((await draft.inputValue()) !== "rename the heading" || (await home.locator("#builder-log li").count())) throw new Error("AI builder sent before Run it");
   await home.getByRole("button", { name: "Run it" }).click();
+  await home.locator("#builder-send:not([disabled])").waitFor({ timeout: 5000 });
+  if ((await draft.inputValue()) !== "rename the heading") throw new Error("AI builder draft lost on Run it");
   await home.locator("#deploy-btn:not([disabled])").waitFor({ timeout: 5000 });
   await home.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
   // the terminal works again: stop the dev server, run a fresh command

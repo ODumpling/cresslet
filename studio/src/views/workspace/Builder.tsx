@@ -60,7 +60,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
   const [input, setInput] = useState("");
 
   const inputRef = useRef<HTMLTextAreaElement>(null), logRef = useRef<HTMLOListElement>(null);
-  const titleRef = useRef<HTMLHeadingElement>(null), keyRef = useRef<HTMLInputElement>(null), loginRef = useRef<HTMLButtonElement>(null);
+  const keyRef = useRef<HTMLInputElement>(null), loginRef = useRef<HTMLButtonElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   // This request's state: the agent, whether a deploy was approved, Stop pressed; the assistant text and tool step
   // being written; the latest reply text (read out when it ends) and its error.
@@ -127,8 +127,8 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
   };
   const update = (id: number, fn: (i: Item) => Item) => setItems((xs) => xs.map((x) => (x.id === id ? fn(x) : x)));
 
-  // Where focus goes in the chat: the message field, or the heading while it's locked (a disabled field can't take it).
-  const chatFocus = () => (r.locked ? titleRef.current : inputRef.current)?.focus();
+  // Where focus goes in the chat: the message field (it takes a draft while locked; only sending waits).
+  const chatFocus = () => inputRef.current?.focus();
   const setupFocus = () => (creditsOn && !token ? loginRef.current : keyRef.current)?.focus();
 
   function on(ev: AgentEvent) {
@@ -257,7 +257,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
   return (
     <section className="pane builder-pane" id="builder" aria-labelledby="builder-title" hidden={!open}>
       <div className="pane-head">
-        <h2 id="builder-title" className="pane-title" tabIndex={-1} ref={titleRef}>AI builder</h2>
+        <h2 id="builder-title" className="pane-title">AI builder</h2>
         <button className="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat" disabled={busy} onClick={() => {
           if (r.busy) return;
           for (const decline of r.approvals) decline(); // e.g. from a process the builder left running
@@ -336,8 +336,8 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
         <div className="working" id="builder-working" hidden={!working}><span className="spinner" aria-hidden="true" /><span id="builder-working-text">{working || "Working…"}</span></div>
         <form id="builder-form" className="builder-form" ref={formRef} onSubmit={(e) => void send(e)}>
           <label className="sr-only" htmlFor="builder-input">Message to Claude</label>
-          <p className="muted small" id="builder-locked" hidden={!locked}>Run the project first (see the preview): the AI builder unlocks with the terminal and Deploy.</p>
-          <textarea id="builder-input" ref={inputRef} className="input" rows={3} placeholder="Describe a change…" disabled={locked}
+          <p className="muted small" id="builder-locked" hidden={!locked}>Run the project first (see the preview): sending unlocks with the terminal and Deploy.</p>
+          <textarea id="builder-input" ref={inputRef} className="input" rows={3} placeholder="Describe a change…"
             aria-describedby={locked ? "builder-locked builder-hint" : "builder-hint"}
             value={input} onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {

@@ -92,7 +92,7 @@ Both ways:
 
 - Deploys need the user's yes each time: while a builder command runs (or in a process it left running, marked `CRESSLET_AI_BUILDER=1`), the in-browser `cresslet deploy` shows **Approve deploy** / **Decline** in the chat, naming the target app, before it builds, however it was started (directly, an npm script, `sh -c`, with the variable unset). Stop declines it, or aborts an upload already under way. A deploy you start in the terminal while a builder command runs asks too.
 - The file tools take paths inside the project only (no absolute paths, `..` or `.git`) and refuse local secret files and directories (`.env*`, `.envrc`, `.dev.vars`), so their contents aren't sent to Anthropic by a file read. That's a guard against accidents, not a boundary: command output and the dev server's terminal (which includes what the user typed there) go to Anthropic as they are, since the model runs the user's own shell.
-- A project opened from a deployed app's source keeps the builder locked, like the terminal and Deploy, until **Run it**: its files (an `AGENTS.md`, say) could carry instructions for the model, and its commands would run the project's code.
+- A project opened from a deployed app's source keeps the builder locked (a message can be typed but not sent), like the terminal and Deploy, until **Run it**: its files (an `AGENTS.md`, say) could carry instructions for the model, and its commands would run the project's code.
 - The conversation lives in the page (a reload or **New chat** starts over). The SDK bundle (`studio/vendor/anthropic.js`, from `scripts/vendor`) loads on the first message.
 
 ## Scaling out
