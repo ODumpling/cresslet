@@ -28,7 +28,7 @@ npx cresslet deploy                      # → http://<name>.localhost:8787
 npx cresslet logs -f
 ```
 
-Browser: open http://localhost:8787 → pick a template → the **AI builder** chat opens beside the live preview: ask Claude for a change, or switch to **Code** to edit it yourself. `npm install`, the dev server and the preview all run in-browser on cresslet-container → **Deploy**. Claude runs on the account's AI credits when the server has an Anthropic key (`CRESSLET_ANTHROPIC_API_KEY`, metered per token: [docs/api.md#ai-credits](docs/api.md#ai-credits)), or on your own Anthropic API key, called straight from the browser ([docs/architecture.md#ai-builder](docs/architecture.md#ai-builder)).
+Browser: open http://localhost:8787 → pick a template → the **AI builder** chat opens beside the live preview: ask Claude for a change, or switch to **Code** to edit it yourself (**Database**: the preview's tables, and SQL on them). `npm install`, the dev server and the preview all run in-browser on cresslet-container → **Deploy**. Claude runs on the account's AI credits when the server has an Anthropic key (`CRESSLET_ANTHROPIC_API_KEY`, metered per token: [docs/api.md#ai-credits](docs/api.md#ai-credits)), or on your own Anthropic API key, called straight from the browser ([docs/architecture.md#ai-builder](docs/architecture.md#ai-builder)).
 
 Artifacts: deploy a static HTML file or folder (studio **Artifacts**, or `cresslet deploy report.html`; a folder with `--artifact`) and share it: private (you and people you invite), anyone with the link, or public; kept 30 days unless you or your account defaults say otherwise. Deploy it again to update the same URL; `--name` picks the address ([docs/api.md#artifacts](docs/api.md#artifacts)).
 

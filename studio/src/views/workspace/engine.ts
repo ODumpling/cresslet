@@ -309,6 +309,7 @@ export class Engine {
     c.on("server-ready", (port, url) => {
       if (port !== 3000 && this.previewBase) return;
       this.previewBase = url;
+      this.previewPort = port;
       cb.status("Running", "ready");
       cb.previewReady(url);
     });
@@ -326,6 +327,8 @@ export class Engine {
     if (project.trusted !== false) this.start();
   }
   private previewBase: string | null = null;
+  /** The port the preview shows (the one `cresslet dev` starts on, until a server is ready). */
+  previewPort = 3000;
 
   /** Installs the dependencies and starts the dev server (the preview). */
   start() {

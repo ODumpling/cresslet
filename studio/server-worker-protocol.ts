@@ -53,6 +53,8 @@ export type ToWorker =
   | { type: "request"; id: number; url: string; method: string; headers: HeaderList; body: ArrayBuffer | null }
   /** With a MessagePort to the preview's socket after a 101, or none (the preview gave up). */
   | { type: "socket"; id: number }
+  /** The studio's Database view: a script of one or more statements, run on the app's database. */
+  | { type: "sql"; id: number; sql: string }
   | ({ type: "files-result"; id: number; error?: string } & FileResult);
 
 /** A response to a request: `body` null for a 101 (WebSocket), which has the accepted `protocol`. */
@@ -65,10 +67,28 @@ export interface ResponseMessage {
   protocol?: string;
 }
 
+/** A cell as the Database view shows it: a blob as its size, an integer past ±2^53 as its digits. */
+export type SqlCell = number | string | null | { blob: number };
+
+/** What a script did: the last statement that returns columns (a query, or `… RETURNING`), and every change. */
+export interface SqlResult {
+  columns: string[];
+  rows: SqlCell[][];
+  /** More rows than `rows` (the worker keeps the first 1,000). */
+  truncated: boolean;
+  /** Rows inserted, updated or deleted by the script (total_changes(), triggers and cascades too). */
+  changes: number;
+  statements: number;
+  /** The script left a transaction open: nothing is saved until a COMMIT or ROLLBACK. */
+  transaction: boolean;
+}
+
 export type FromWorker =
   | { type: "ready" }
   | { type: "fatal"; message: string }
   | { type: "log"; level: "log" | "info" | "warn" | "error" | "debug"; msg: string }
   | { type: "db"; bytes: Uint8Array }
   | ResponseMessage
+  /** `snapshot`: the script's writes were posted as a `db` snapshot (just before this). */
+  | ({ type: "sql-result"; id: number; snapshot: boolean } & ({ result: SqlResult } | { error: string }))
   | ({ type: "files"; id: number } & FileOp);

@@ -4,7 +4,7 @@ import { createStartBuilder, isStartApp } from "./start-build.js";
 import { staticUrl } from "./static-url.js";
 import type { CommandContext, Container, FileSystemTree, ProjectWorker } from "./vendor/cresslet-container/cresslet-container.js";
 import type { Plugin } from "./vendor/cresslet-container/types/vendor/esbuild-wasm.js";
-import type { FileItem, FileOp, FileResult, FileResults, FromWorker, HeaderList, ResponseMessage, ToWorker } from "./server-worker-protocol.ts";
+import type { FileItem, FileOp, FileResult, FileResults, FromWorker, HeaderList, ResponseMessage, SqlResult, ToWorker } from "./server-worker-protocol.ts";
 import type { Project } from "./store.js";
 
 const enc = new TextEncoder();
@@ -361,6 +361,18 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     return body;
   }
 
+  /** Each serving `cresslet dev`'s database runner (the workspace's Database view), in the order they started. */
+  const devSql: { port: number; run: (sql: string) => Promise<SqlResult> }[] = [];
+  /**
+   * Runs a script on the database of the `cresslet dev` serving `port` (the preview's): the one its server worker has
+   * open (studio/server-worker.ts). The latest started there serves the port.
+   */
+  async function sql(script: string, port: number): Promise<SqlResult> {
+    const dev = devSql.findLast((d) => d.port === port);
+    if (!dev) throw new Error("the dev server isn't running (it starts with the project; or run `cresslet dev` in the terminal)");
+    return dev.run(script);
+  }
+
   // ---- dev: container dev server for the client, a project Worker (on the preview origin) for the server handler.
   // TanStack Start apps: their production build (start-build.ts), rebuilt on save (the preview then reloads itself).
   async function dev(ctx: CommandContext, port: number) {
@@ -401,6 +413,35 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     /** A worker's response, or the 503 `retire` makes; `body` may be swapped for one made here. */
     type Res = Omit<ResponseMessage, "type" | "id" | "body"> & { body: ArrayBuffer | Uint8Array<ArrayBuffer> | null };
     const waiting = new Map<number, { w: ProjectWorker; done: (m: Res) => void }>(); // request id → { w, done }
+    // Database view scripts sent to a worker, by id (the same counter as requests), until answered (and saved)
+    // (`stale`: the starts that read the database while it still ran, and may serve without it)
+    const scripts = new Map<number, { w: ProjectWorker; done: Promise<unknown>; stale?: number; resolve: (r: SqlResult) => void; reject: (e: Error) => void }>();
+    // The workers' database snapshots, written in order; each step: the error if the last one wasn't written.
+    let saved: Promise<Error | null> = Promise.resolve(null);
+    // Workers loading the database, by start (from reading it until it serves, or fails, or a later one serves):
+    // scripts wait for them, so none lands on the worker one replaces after it read the database.
+    const loads = new Map<number, { done: Promise<void>; end: () => void }>();
+    const endLoads = (upTo: number) => {
+      for (const [s, l] of loads) if (s <= upTo) (l.end(), loads.delete(s));
+    };
+    /** `p`, or after `ms`: done then, or failed with `msg`. */
+    const within = <T,>(p: Promise<T>, ms: number, msg?: string) => {
+      let t: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([p, new Promise<void>((ok, fail) => (t = setTimeout(() => (msg ? fail(new Error(msg)) : ok()), ms)))]).finally(() => clearTimeout(t));
+    };
+    const runSql = async (script: string) => {
+      // (a replacement stuck starting: not for ever)
+      while (loads.size) await within(Promise.all([...loads.values()].map((l) => l.done)), 15_000, "the server is restarting: try again in a moment");
+      if (stopped) throw new Error("the dev server stopped");
+      const w = worker;
+      if (!w) throw new Error(workerError ?? ((await hasServer()) ? "the server is starting" : "this project has no server (server/index.ts), so no database"));
+      const id = ++reqId;
+      let settle!: { resolve: (r: SqlResult) => void; reject: (e: Error) => void };
+      const done = new Promise<SqlResult>((resolve, reject) => (settle = { resolve, reject }));
+      scripts.set(id, { w, done: done.catch(() => {}), ...settle });
+      w.postMessage({ type: "sql", id, sql: script } satisfies ToWorker);
+      return done;
+    };
 
     async function fileOp(m: FileOp & { key?: unknown }): Promise<FileResult> {
       const indexPath = `${filesDir}/index.json`;
@@ -474,6 +515,9 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       for (const [id, r] of waiting) {
         if (r.w === w) (waiting.delete(id), r.done({ status: 503, headers: [["content-type", "text/plain"]], body: body() }));
       }
+      for (const [id, r] of scripts) {
+        if (r.w === w) (scripts.delete(id), r.reject(new Error(message)));
+      }
       w.terminate();
     }
 
@@ -489,6 +533,22 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       }
       if (!code) return;
       const bundles = lastBundles;
+      if (stopped || seq < readySeq) return; // dev ended, or a later save's worker serves already
+      let end!: () => void;
+      loads.set(seq, { done: new Promise<void>((resolve) => (end = resolve)), end });
+      const loaded = () => {
+        loads.get(seq)?.end();
+        loads.delete(seq);
+      };
+      // Scripts already sent (to the serving worker) first, then the latest snapshot: this one starts from them.
+      // (One stuck in a long statement: not for ever; it's told its changes may be lost, unless this start doesn't
+      // serve after all.)
+      const sent = [...scripts.values()];
+      await within(Promise.all(sent.map((s) => s.done)), 10_000);
+      const marked = seq > readySeq ? sent.filter((s) => [...scripts.values()].includes(s)) : [];
+      for (const s of marked) s.stale = (s.stale ?? 0) + 1;
+      const unmark = () => marked.splice(0).forEach((s) => s.stale!--); // (once)
+      await saved;
       let db: Uint8Array | null = null;
       try {
         db = await c.fs.readFile(dbPath);
@@ -499,8 +559,10 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       let w: ProjectWorker;
       try {
         w = await c.projectWorker(staticUrl("server-worker.js"), { name: "cresslet-server" });
-        if (stopped) return w.terminate(); // dev ended meanwhile
+        if (stopped) return (unmark(), loaded(), w.terminate()); // dev ended meanwhile
       } catch (e) {
+        unmark();
+        loaded();
         workerError = `server failed to start:\n${(e as Error).message}`;
         out(`\x1b[31m${workerError}\x1b[0m`);
         return;
@@ -521,10 +583,28 @@ export function createCresslet(c: Container, opts: CressletOptions) {
           if (m.type === "ready") resolve();
           else if (m.type === "fatal") reject(new Error(m.message));
           else if (m.type === "log") out(`${m.level === "error" ? "\x1b[31m" : "\x1b[2m"}[server] ${m.msg}\x1b[0m`);
-          else if (m.type === "db") c.fs.writeFile(dbPath, m.bytes);
+          else if (m.type === "db") {
+            saved = saved.then(() => c.fs.writeFile(dbPath, m.bytes)).then(() => null, (e: Error) => {
+              out(`\x1b[31mcouldn't save the preview's database (${dbPath}): ${e.message}\x1b[0m`);
+              return e;
+            });
+          }
           else if (m.type === "response") {
             waiting.get(m.id)?.done(m);
             waiting.delete(m.id);
+          } else if (m.type === "sql-result") {
+            const r = scripts.get(m.id);
+            scripts.delete(m.id);
+            // After its writes are saved (posted just before the result), so a restart or stop now keeps them. The last
+            // snapshot then is the script's own, if it posted one: it fails only such a script.
+            void saved.then((e) => {
+              if (!r) return;
+              const unsaved = e && m.snapshot ? `not saved (a restart loses it): ${e.message}` : null;
+              if ("error" in m) r.reject(new Error(unsaved ? `${m.error}; what ran before it was ${unsaved}` : m.error));
+              else if (unsaved) r.reject(new Error(`done in the running preview, but ${unsaved}`));
+              else if (r.stale && m.snapshot) r.reject(new Error("done, but the server restarted from the database as it was before it finished: its changes may be lost (check before running it again)"));
+              else r.resolve(m.result);
+            });
           } else if (m.type === "files") {
             try {
               const r = await fileOp(m);
@@ -546,8 +626,9 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       } satisfies ToWorker);
       try {
         await ready.finally(() => initializing.delete(w));
-        if (stopped || seq < readySeq) return w.terminate(); // dev ended, or a later save's worker got ready first
+        if (stopped || seq < readySeq) return (unmark(), w.terminate()); // dev ended, or a later save's worker got ready first
         readySeq = seq;
+        endLoads(seq); // earlier starts (stuck, say) are moot now
         retire(worker, 1012, "server restarting", "server restarted");
         worker = w;
         activeBundles = bundles;
@@ -555,10 +636,13 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         out("\x1b[32m✔\x1b[0m server ready");
         reloads?.postMessage({ type: "cresslet-start-reload" }); // a new client build too
       } catch (e) {
+        unmark(); // the worker it would replace still serves, with their changes
         w.terminate();
         if (seq < readySeq) return; // a later save's worker serves already
         workerError = `server failed to start:\n${(e as Error).message}`;
         out(`\x1b[31m${workerError}\x1b[0m`);
+      } finally {
+        loaded();
       }
     }
 
@@ -694,11 +778,15 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         : await c.createDevServer({ root: wd, port, middleware });
       out(`\x1b[32m✔\x1b[0m dev server on port ${port}`);
     }
+    const runner = { port, run: runSql };
+    if (!ctx.signal.aborted) devSql.push(runner); // serving now (nothing below throws before it's taken out)
     await aborted;
     stopped = true;
+    if (devSql.includes(runner)) devSql.splice(devSql.indexOf(runner), 1);
     clearTimeout(timer);
     for (const w of watchers) w.close();
     for (const w of initializing) w.terminate();
+    endLoads(Infinity); // (terminated: they never get ready to end theirs)
     server?.close();
     builder?.close();
     reloads?.close();
@@ -741,5 +829,5 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     }
   });
 
-  return { build, deploy, config };
+  return { build, deploy, config, sql };
 }

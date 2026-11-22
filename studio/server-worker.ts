@@ -4,19 +4,20 @@
 //        serial: one request at a time (each to its whole response body): the app's AsyncLocalStorage is a one-store
 //        shim here (TanStack Start, start-build.ts)
 //   in:  {type:"request", id, url, method, headers, body}        → out: {type:"response", id, status, headers, body}
+//   in:  {type:"sql", id, sql} (the studio's Database view)       → out: {type:"sql-result", id, result | error}
 //   out: {type:"log", level, msg}  {type:"db", bytes}  {type:"files", id, op, ...} ← in: {type:"files-result", id, ...}
 //   WebSockets: a 101 response is {type:"response", id, status: 101, headers, body: null, protocol}; then
 //   in:  {type:"socket", id} + a MessagePort to the preview's socket (no port: the preview gave up)
 import initSqlJs from "https://esm.sh/sql.js@1.13.0";
 import type { Database, SqlJsStatic, SqlValue } from "https://esm.sh/sql.js@1.13.0";
-import type { AppInfo, FileItem, FileOp, FileResult, FileResults, FromWorker, ToWorker } from "./server-worker-protocol.ts";
+import type { AppInfo, FileItem, FileOp, FileResult, FileResults, FromWorker, SqlCell, SqlResult, ToWorker } from "./server-worker-protocol.ts";
 
 /** This worker's postMessage, typed to the protocol (the global one). */
 declare function postMessage(message: FromWorker, transfer?: Transferable[]): void;
 
 /** The app's `env` (docs/app-format.md), as this preview implements it. */
 interface Env {
-  db: ReturnType<typeof createDb>;
+  db: ReturnType<typeof createDb>["binding"];
   files: {
     put(key: string, body: BodyInit | null, opts?: { contentType?: string }): Promise<void>;
     get(key: string): Promise<Response | null>;
@@ -32,6 +33,8 @@ type Handler = (req: Request, env: Env, ctx: { waitUntil(p: unknown): void }) =>
 const SQL_WASM = "https://cdn.jsdelivr.net/npm/sql.js@1.13.0/dist/sql-wasm.wasm";
 let handler: Handler | undefined;
 let env: Env;
+let studioSql: ((sql: string) => SqlResult) | undefined; // the Database view's runner (init sets it)
+let snapshotsPosted = 0; // database snapshots posted (a Database view result says whether it posted one)
 let serial: Promise<unknown> | null = null; // with init's `serial`: the request being handled (a promise), the next one waits for it
 // Where the `cresslet` SDK (`import { db } from "cresslet"`, cresslet-cli sdk/index.js) finds the env: published once
 // the app's module has loaded (bindings exist only once a handler runs). Contract: runtime/cresslet-runtime.ts.
@@ -230,31 +233,51 @@ const READ_PRAGMAS_WITH_ARG = new Set([
 /** What apps bind: JS values sql.js can store (bigints within ±2^53, undefined as null). */
 type Param = SqlValue | undefined;
 type Row = Record<string, SqlValue>;
+const SQL_MAX_ROWS = 1000; // a Database view result's rows (protocol: SqlResult)
 
 function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
   const db: Database = bytes ? new SQL.Database(bytes) : new SQL.Database();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let savedRowid = 0;
   let reopened = false;
+  const inTransaction = () => {
+    // (an empty transaction's COMMIT ends defer_foreign_keys: set again as the app left it, for its next one)
+    const defer = one("PRAGMA defer_foreign_keys");
+    try {
+      db.exec("BEGIN; COMMIT;");
+      if (defer) db.exec("PRAGMA defer_foreign_keys = ON;");
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  // Posts a snapshot; false (nothing saved) while a transaction is open.
+  const save = () => {
+    // export() closes and reopens the database: not while the app holds a transaction open (exec("BEGIN") across
+    // awaits) or its writes would be lost; and connection settings (foreign_keys) need setting again after.
+    if (inTransaction()) return false;
+    savedRowid = rowid(); // the live value, or the one kept from before an earlier save
+    const foreignKeys = one("PRAGMA foreign_keys");
+    const out = db.export();
+    reopened = true; // last_insert_rowid() is 0 on the new connection until its next insert
+    db.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"};`); // as the app left it
+    postMessage({ type: "db", bytes: out }, [out.buffer]);
+    snapshotsPosted++;
+    return true;
+  };
   // One save at a time, 300 ms after the first change that asked for it: later changes don't push it back (steady
-  // traffic would otherwise keep a write from ever being saved).
-  const persist = (): void => {
+  // traffic would otherwise keep a write from ever being saved). `now`: save at once (the Database view's writes,
+  // saved before it hears they're done), or later as usual while a transaction is open.
+  const persist = (now = false): void => {
+    if (now && save()) {
+      clearTimeout(timer);
+      timer = undefined;
+      return;
+    }
     if (timer) return;
     timer = setTimeout(() => {
       timer = undefined;
-      // export() closes and reopens the database: not while the app holds a transaction open (exec("BEGIN") across
-      // awaits) or its writes would be lost; and connection settings (foreign_keys) need setting again after.
-      try {
-        db.exec("BEGIN; COMMIT;");
-      } catch {
-        return persist(); // in a transaction: try again later
-      }
-      savedRowid = rowid(); // the live value, or the one kept from before an earlier save
-      const foreignKeys = one("PRAGMA foreign_keys");
-      const out = db.export();
-      reopened = true; // last_insert_rowid() is 0 on the new connection until its next insert
-      db.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"};`); // as the app left it
-      postMessage({ type: "db", bytes: out }, [out.buffer]);
+      if (!save()) persist(); // in a transaction: try again later
     }, 300);
   };
   // sql.js binds numbers as doubles: a bigint it can't hold exactly is refused, not rounded.
@@ -368,7 +391,73 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
       if (one("SELECT total_changes()") !== before || mayWrite(sql)) persist();
     }
   };
-  return {
+  // The studio's Database view: each statement of a script in turn, on this same connection (so the app sees the
+  // change at once), saved before the result goes back. Its result: the last statement with columns, its first
+  // SQL_MAX_ROWS rows (a write still runs to its end, so its error isn't cut off with its rows). A statement that
+  // fails stops the script: those before it stay done, as in sqlite3, unless they opened a transaction (rolled back
+  // then: one left open would hold every later save).
+  let viewTransaction = false; // a view script left a transaction open (until one ends with none)
+  // Whether a statement writes to a table: its program opens one for writing (a recursive CTE's queue is an
+  // ephemeral table, opened otherwise). Not sure (it won't EXPLAIN): no.
+  const writesTables = (sql: string) => {
+    try {
+      return db.exec(`EXPLAIN ${sql}`)[0]?.values.some((op) => op[1] === "OpenWrite" || op[1] === "VUpdate") ?? false;
+    } catch {
+      return false;
+    }
+  };
+  const studio = (sql: string): SqlResult => {
+    const changesBefore = one("SELECT total_changes()");
+    const openBefore = inTransaction();
+    // The app's own (exec("BEGIN") across awaits, a request mid-way): the script would join it, and its ROLLBACK
+    // would undo the script's writes too.
+    if (openBefore && !viewTransaction) throw new Error("the app has a transaction open (a request is mid-way): try again in a moment");
+    let out: Pick<SqlResult, "columns" | "rows" | "truncated"> = { columns: [], rows: [], truncated: false };
+    let statements = 0, written = false, changes = 0;
+    const cell = (v: SqlValue): SqlCell =>
+      v instanceof Uint8Array ? { blob: v.byteLength }
+        : typeof v === "bigint" ? (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(Number.MIN_SAFE_INTEGER) ? String(v) : Number(v))
+        : v;
+    try {
+      // (A statement that fails as it runs leaves the iterator's copy of the script in the wasm heap: sql.js's
+      // finalize() isn't exported. Bytes per failed run, and the worker is replaced on every server change.)
+      for (const stmt of db.iterateStatements(sql)) {
+        try {
+          statements++;
+          written ||= mayWrite(stmt.getSQL());
+          const columns = stmt.getColumnNames();
+          const rows: SqlCell[][] = [];
+          let truncated = false;
+          while (stmt.step()) {
+            if (rows.length < SQL_MAX_ROWS) rows.push(stmt.get(null, { useBigInt: true }).map(cell));
+            else if (!truncated) {
+              truncated = true;
+              // A read stops there (an endless one too); a write … RETURNING runs to its end, where its errors (a
+              // deferred foreign key) are.
+              if (!writesTables(stmt.getSQL())) break;
+            }
+          }
+          if (columns.length) out = { columns, rows, truncated };
+        } finally {
+          stmt.free(); // (the iterator frees it too, on to the next: a no-op then)
+        }
+      }
+    } catch (e) {
+      const msg = (e as { message?: string } | null)?.message ?? String(e);
+      if (!openBefore && inTransaction()) {
+        db.exec("ROLLBACK");
+        throw new Error(`${msg} (the transaction the script began was rolled back)`);
+      }
+      if (viewTransaction && inTransaction()) throw new Error(`${msg} (a transaction is still open: nothing is saved until COMMIT or ROLLBACK)`);
+      throw e;
+    } finally {
+      viewTransaction = inTransaction(); // (one open before was the view's: above)
+      changes = Number(one("SELECT total_changes()")) - Number(changesBefore); // before a save (it reopens: total 0)
+      if (changes || written) persist(true);
+    }
+    return { ...out, changes, statements, transaction: viewTransaction };
+  };
+  const binding = {
     batch: async (statements: { sql: string; params?: Param[] }[]) => batch(statements),
     query: async (sql: string, ...params: Param[]) => reading(sql, params),
     first: async (sql: string, ...params: Param[]) => reading(sql, params, 1)[0] ?? null,
@@ -389,6 +478,7 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
       }
     },
   };
+  return { binding, studio };
 }
 
 onmessage = async ({ data: m, ports }: MessageEvent<ToWorker>) => {
@@ -400,8 +490,10 @@ onmessage = async ({ data: m, ports }: MessageEvent<ToWorker>) => {
   if (m.type === "init") {
     try {
       const SQL = await initSqlJs({ locateFile: () => SQL_WASM });
+      const database = createDb(SQL, m.db);
+      studioSql = database.studio;
       env = {
-        db: createDb(SQL, m.db),
+        db: database.binding,
         files: {
           async put(key, body, opts = {}) {
             const bytes = new Uint8Array(await new Response(body).arrayBuffer());
@@ -439,6 +531,18 @@ onmessage = async ({ data: m, ports }: MessageEvent<ToWorker>) => {
       postMessage({ type: "ready" });
     } catch (e) {
       postMessage({ type: "fatal", message: (e as { stack?: string } | null)?.stack ?? String(e) });
+    }
+    return;
+  }
+  if (m.type === "sql") {
+    // Synchronous: no request's code runs in between (a request awaiting something sees the change after).
+    const posted = snapshotsPosted;
+    try {
+      if (!studioSql) throw new Error("the server isn't ready");
+      const result = studioSql(String(m.sql));
+      postMessage({ type: "sql-result", id: m.id, snapshot: snapshotsPosted !== posted, result });
+    } catch (e) {
+      postMessage({ type: "sql-result", id: m.id, snapshot: snapshotsPosted !== posted, error: (e as { message?: string } | null)?.message ?? String(e) });
     }
     return;
   }
