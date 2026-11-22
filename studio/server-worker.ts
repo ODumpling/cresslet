@@ -388,14 +388,18 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
   };
   // The studio's Database view: each statement of a script in turn, on this same connection (so the app sees the
   // change at once), saved before the result goes back. Its result: the last statement with columns, its first
-  // SQL_MAX_ROWS rows (each statement still runs to its end, so a write's error isn't cut off with its rows). A
-  // statement that fails stops the script: those before it stay done, as in sqlite3, unless they opened a transaction
-  // (rolled back then: one left open would hold every later save).
+  // SQL_MAX_ROWS rows (a write still runs to its end, so its error isn't cut off with its rows). A statement that
+  // fails stops the script: those before it stay done, as in sqlite3, unless they opened a transaction (rolled back
+  // then: one left open would hold every later save).
+  let viewTransaction = false; // a view script left a transaction open (until one ends with none)
   const studio = (sql: string): SqlResult => {
     const changesBefore = one("SELECT total_changes()");
-    const openBefore = inTransaction(); // the app's own (exec("BEGIN") across awaits): left alone
+    // The probe (BEGIN; COMMIT) ends per-transaction settings (defer_foreign_keys): only when the script may open a
+    // transaction, or one the view opened may still be.
+    const mayOpen = /\b(?:begin|savepoint)\b/i.test(sql);
+    const openBefore = mayOpen && inTransaction(); // the app's own (exec("BEGIN") across awaits): left alone
     let out: Pick<SqlResult, "columns" | "rows" | "truncated"> = { columns: [], rows: [], truncated: false };
-    let statements = 0, written = false, failed = true, transaction = false, changes = 0;
+    let statements = 0, written = false, changes = 0;
     const cell = (v: SqlValue): SqlCell =>
       v instanceof Uint8Array ? { blob: v.byteLength }
         : typeof v === "bigint" ? (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(Number.MIN_SAFE_INTEGER) ? String(v) : Number(v))
@@ -406,32 +410,34 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
       for (const stmt of db.iterateStatements(sql)) {
         try {
           statements++;
-          written ||= mayWrite(stmt.getSQL());
+          const writes = mayWrite(stmt.getSQL());
+          written ||= writes;
           const columns = stmt.getColumnNames();
           const rows: SqlCell[][] = [];
           let truncated = false;
           while (stmt.step()) {
             if (rows.length < SQL_MAX_ROWS) rows.push(stmt.get(null, { useBigInt: true }).map(cell));
-            else truncated = true;
+            else if (((truncated = true), !writes)) break; // a read stops there (an endless one too)
           }
           if (columns.length) out = { columns, rows, truncated };
         } finally {
           stmt.free(); // (the iterator frees it too, on to the next: a no-op then)
         }
       }
-      failed = false;
     } catch (e) {
-      if (!openBefore && inTransaction()) {
+      const msg = (e as { message?: string } | null)?.message ?? String(e);
+      if (mayOpen && !openBefore && inTransaction()) {
         db.exec("ROLLBACK");
-        throw new Error(`${(e as { message?: string } | null)?.message ?? e} (the transaction the script began was rolled back)`);
+        throw new Error(`${msg} (the transaction the script began was rolled back)`);
       }
+      if (viewTransaction && inTransaction()) throw new Error(`${msg} (a transaction is still open: nothing is saved until COMMIT or ROLLBACK)`);
       throw e;
     } finally {
-      transaction = !failed && !openBefore && inTransaction();
+      if (mayOpen || viewTransaction) viewTransaction = inTransaction();
       changes = Number(one("SELECT total_changes()")) - Number(changesBefore); // before a save (it reopens: total 0)
       if (changes || written) persist(true);
     }
-    return { ...out, changes, statements, transaction };
+    return { ...out, changes, statements, transaction: viewTransaction };
   };
   const binding = {
     batch: async (statements: { sql: string; params?: Param[] }[]) => batch(statements),

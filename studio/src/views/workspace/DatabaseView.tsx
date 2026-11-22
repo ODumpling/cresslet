@@ -17,8 +17,8 @@ type Out = { running: true } | { result: SqlResult; ms: number } | { error: stri
 /** A table of the main database (not a temp one of the same name). */
 const tableRef = (name: string) => `main.${quoteIdent(name)}`;
 
-/** The tables and views, each table with its row count when it can be read. */
-async function listTables(run: RunSql): Promise<Table[]> {
+/** The tables and views (the first 1,000: `truncated`), each table with its row count when it can be read. */
+async function listTables(run: RunSql): Promise<{ list: Table[]; truncated: boolean }> {
   const r = await run("SELECT name, type FROM main.sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name");
   const all = r.rows.map(([name, type]) => ({ name: String(name), view: type === "view", count: null as number | null }));
   const tables = all.filter((t) => !t.view);
@@ -30,13 +30,13 @@ async function listTables(run: RunSql): Promise<Table[]> {
     const by = new Map(counts?.rows.map(([n, c]) => [String(n), Number(c)]));
     for (const t of chunk) t.count = by.get(t.name) ?? null;
   }
-  return all;
+  return { list: all, truncated: r.truncated };
 }
 
 /** `run`: null until the project's container is up. `shown`: the view is on screen (it reads the tables then). */
 export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolean }) {
   const alive = useAlive();
-  const [tables, setTables] = useState<{ list: Table[] } | { error: string } | null>(null);
+  const [tables, setTables] = useState<{ list: Table[]; truncated: boolean } | { error: string } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [sql, setSql] = useState("");
   const [out, setOut] = useState<Out>(null);
@@ -46,8 +46,8 @@ export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolea
   const refresh = useCallback(async () => {
     if (!run) return;
     try {
-      const list = await listTables(run);
-      if (alive.current) setTables({ list });
+      const got = await listTables(run);
+      if (alive.current) setTables(got);
     } catch (e) {
       if (alive.current) setTables({ error: errorMessage(e) });
     }
@@ -115,6 +115,7 @@ export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolea
                 ))}
               </ul>
             )}
+          {list && tables && "truncated" in tables && tables.truncated ? <p className="muted small db-note">Only the first 1,000 are listed: query sqlite_schema for the rest.</p> : null}
         </nav>
       </section>
       <section className="pane db-pane" id="db-pane" aria-labelledby="db-title" hidden={!shown}>

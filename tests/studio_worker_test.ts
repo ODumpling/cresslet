@@ -307,6 +307,10 @@ export default { async fetch() { return Response.json(await db.query("SELECT v F
       columns: ["b", "big"], rows: [[{ blob: 2 }, "9007199254740993"]], truncated: false, changes: 0, statements: 1, transaction: false,
     });
     assert.deepEqual((await w.sql("SELECT v FROM t WHERE 0")).columns, ["v"]);
+    // a read stops at the cap, an endless one too
+    const endless = await w.sql("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT i FROM n");
+    assert.equal(endless.rows.length, 1000);
+    assert.equal(endless.truncated, true);
     assert.equal(w.saving(), false, "reads don't ask for a save");
     // at most 1,000 rows
     const many = await w.sql("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1500) SELECT i FROM n");
@@ -327,6 +331,8 @@ export default { async fetch() { return Response.json(await db.query("SELECT v F
     // a transaction left open is reported (saves wait for it); one a failing script began is rolled back
     const open = await w.sql("BEGIN; INSERT INTO t VALUES (5, NULL)");
     assert.equal(open.transaction, true);
+    assert.equal((await w.sql("SELECT 1")).transaction, true, "still open on the next script");
+    assert.match((await w.sql("SELECT nope")).error, /still open/);
     assert.equal((await w.sql("COMMIT")).transaction, false);
     assert.deepEqual((await w.saved()).exec("SELECT v FROM t ORDER BY v")[0].values, [[1], [5]]);
     const rolled = await w.sql("BEGIN; INSERT INTO t VALUES (6, NULL); SELECT nope");

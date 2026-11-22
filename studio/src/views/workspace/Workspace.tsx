@@ -106,9 +106,9 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const { token } = useSession();
   // The preview's database, through the running `cresslet dev` (null until the container is up).
   const runSql = useCallback<RunSql>(async (sql) => {
-    const c = engine.current?.cresslet;
-    if (!c) throw new Error("the project isn't running");
-    return c.sql(sql);
+    const e = engine.current;
+    if (!e?.cresslet) throw new Error("the project isn't running");
+    return e.cresslet.sql(sql, e.previewPort); // the database of the dev server the preview shows
   }, []);
   const sqlRunner = container && !locked ? runSql : null;
 
