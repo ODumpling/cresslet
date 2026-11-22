@@ -439,11 +439,12 @@ test("stack: a pull request merged by hand is said, not opened again; a reused o
   assert.match(t.provider.pulls[1].body, /^> ask @\u200bocto-cat about it/);
   t.provider.pulls[1].merged = true;
   t.provider.pulls[1].state = "closed";
+  t.provider.pulls[0].base = "main"; // GitHub moved it on when the one below merged
   const again = await submitStack(t.ctx, c1.stack.id);
   assert.deepEqual(again.pulls.map((x) => [x.number, !!x.merged, x.error]), [[2, true, undefined], [1, false, undefined]]);
   assert.equal(t.provider.pulls.length, 2);
   // The change above one merged already: its base is left as it was (landing part of a stack is a later step).
-  assert.equal(t.provider.pulls[0].base, c1.branch);
+  assert.equal(t.provider.pulls[0].base, "main");
   // Source control's view of a change: a merged one is shown (not offered again), a closed one isn't, a set-aside
   // one has none, another branch isn't a change.
   assert.equal((await changePull(t.ctx, c1.branch, false))?.pull?.number, 2);
