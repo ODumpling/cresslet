@@ -243,6 +243,7 @@ On a clean host (or the same one), as root, with Docker and rclone (from rclone.
 | `CRESSLET_GITHUB_URL` / `CRESSLET_GITHUB_API_URL` | github.com / api.github.com | GitHub Enterprise Server |
 | `CRESSLET_GITHUB_APP_ID` / `_CLIENT_ID` / `_CLIENT_SECRET` / `_SLUG` | — | GitHub App for [source control](#source-control): apps sync with GitHub repositories as the signed-in user. Unset = off (unless the fallback below) |
 | `CRESSLET_GITHUB_SYNC_OAUTH_FALLBACK` | false | true, without a GitHub App: source control through the login OAuth App with the `repo` scope (every repository the user can push to) |
+| `CRESSLET_GITHUB_WEBHOOK_SECRET` | — | the GitHub App's webhook secret: pushes to linked repositories' default branches show in open studios (`POST /v1/webhooks/github`). Unset = webhooks answer 404 |
 | `CRESSLET_MAX_DEPLOY_MB` / `_FILES` / `CRESSLET_MAX_SERVER_MB` | 25 / 2000 / 5 | |
 | `CRESSLET_REQUEST_TIMEOUT_MS` | 30000 | |
 | `CRESSLET_SANDBOX_UID_BASE` | — | Linux: run each sandbox as uid/gid `base + n` (e.g. `100000`; reserve that range, ≥ 1000). Needs the server to run as root, `CRESSLET_SOCK_DIR` (and its parents) root-owned, and the workerd binary executable by those uids |
@@ -289,8 +290,8 @@ Accounts are keyed by GitHub user id. First GitHub login links to an existing (o
 Apps can sync with a GitHub repository ([architecture.md](architecture.md#source-control)): Cresslet acts strictly as each signed-in user (their own token, their commits), and the tokens stay on the server, sealed like app secrets (`CRESSLET_SECRETS_KEY`). Signing in keeps asking only for `read:user user:email`; repository access is asked for when someone connects source control (studio: Settings → Account → Source control).
 
 1. GitHub → Settings → Developer settings → **GitHub Apps** → New.
-   - Callback URL: `<root URL>/v1/git/github/callback`. Tick **Expire user authorization tokens** (Cresslet refreshes them). Leave **Request user authorization (OAuth) during installation** off, and the webhook off.
-   - Repository permissions: **Contents** read and write, **Pull requests** read and write, **Metadata** read. Add **Administration** read and write to let users create repositories from the studio. Account permissions: **Email addresses** read (commits are authored with the user's verified email; without it, their GitHub noreply address).
+   - Callback URL: `<root URL>/v1/git/github/callback`. Tick **Expire user authorization tokens** (Cresslet refreshes them). Leave **Request user authorization (OAuth) during installation** off. Webhook (optional): URL `<root URL>/v1/webhooks/github`, a secret (`CRESSLET_GITHUB_WEBHOOK_SECRET`), and subscribe to **Push** events, so studios see when a repository's default branch moves.
+   - Repository permissions: **Contents** read and write, **Pull requests** read and write, **Metadata** read, **Checks** read (a pull request's checks; without it they show as unknown). Add **Administration** read and write to let users create repositories from the studio. Account permissions: **Email addresses** read (commits are authored with the user's verified email; without it, their GitHub noreply address).
    - Where it can be installed: any account, if your users' repositories aren't all yours.
 2. Generate a client secret. Set `CRESSLET_GITHUB_APP_ID`, `CRESSLET_GITHUB_APP_CLIENT_ID`, `CRESSLET_GITHUB_APP_CLIENT_SECRET` and `CRESSLET_GITHUB_APP_SLUG` (the app's URL name: the studio links to `github.com/apps/<slug>/installations/new` so users pick which repositories it reaches).
 

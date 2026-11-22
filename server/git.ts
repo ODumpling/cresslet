@@ -4,7 +4,7 @@
 // (Store.upsertGitConnection) and never leave the server. Every call uses the acting account's own token, never the
 // app owner's, so GitHub's permissions and attribution are that user's. Commits go through the Git Data API (blobs,
 // trees, commits, refs): there's no `git` here or in the studio's container.
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
@@ -64,7 +64,8 @@ export interface SourceControlProvider {
   /** The project's files at `sha` (under `subdir`), as the studio and deploys see source (sanitized). */
   readTree(r: Repo, sha: string, subdir: string): Promise<DeployFile[]>;
   /** One commit on `branch` (whose head must still be `baseSha`) making `subdir` hold exactly `files`. */
-  commitTree(r: Repo, input: { branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author }): Promise<{ sha: string; changed: boolean }>;
+  /** `mergeParent`: a second parent (a merge of that commit, its conflicts resolved in `files`). */
+  commitTree(r: Repo, input: { branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author; mergeParent?: string }): Promise<{ sha: string; changed: boolean }>;
   /** `expect`: the head commit the caller built from; if the branch moved past it, 409 and nothing merged. */
   merge(r: Repo, input: { into: string; head: string; message: string; expect?: string }): Promise<MergeResult>;
 }
@@ -203,6 +204,32 @@ export class GitHub implements SourceControlProvider {
     return new Uint8Array(Buffer.from(b.content, b.encoding === "base64" ? "base64" : "utf8"));
   }
 
+  /** Every entry of a commit's tree that isn't a folder (files, symlinks, submodules), by path. */
+  async #entries(r: Repo, sha: string) {
+    return new Map((await this.#tree(r, sha)).entries.filter((e) => e.type !== "tree").map((e) => [e.path, e]));
+  }
+
+  /**
+   * Merging `theirs` into `ours` (their merge base `base`), for what the studio doesn't hold (outside `subdir`,
+   * never-source files, symlinks, dotenv files: see `studioHolds`): the tree entries to take from `theirs`, and the
+   * paths both sides changed (which the studio can't resolve).
+   */
+  #mergeOutside(subdir: string, base: Map<string, GhEntry>, ours: Map<string, GhEntry>, theirs: Map<string, GhEntry>) {
+    const same = (x?: GhEntry, y?: GhEntry) => x?.sha === y?.sha && x?.mode === y?.mode;
+    const take: { path: string; mode: string; type: string; sha: string | null }[] = [], both: string[] = [];
+    // Held only if it's a file the studio holds on every side that has it (a regular file turned symlink isn't).
+    const outside = new Set<string>();
+    for (const path of new Set([...base.keys(), ...ours.keys(), ...theirs.keys()])) {
+      const [b, o, t] = [base.get(path), ours.get(path), theirs.get(path)];
+      if ([b, o, t].every((e) => !e || studioHolds(path, e, subdir))) continue;
+      outside.add(path);
+      if (same(o, t) || same(t, b)) continue;
+      if (same(o, b)) take.push(t ? { path, mode: t.mode, type: t.type, sha: t.sha } : { path, mode: o!.mode, type: o!.type, sha: null });
+      else both.push(path);
+    }
+    return { take, both: both.sort(), outside };
+  }
+
   async readTree(r: Repo, sha: string, subdir: string): Promise<DeployFile[]> {
     const { entries } = await this.#tree(r, sha);
     const files = sourceEntries(entries, subdir).filter((e) => !NOT_SOURCE.test(e.rel));
@@ -222,11 +249,45 @@ export class GitHub implements SourceControlProvider {
     return out.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
   }
 
-  async commitTree(r: Repo, input: { branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author }) {
+  async commitTree(r: Repo, input: { branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author; mergeParent?: string }) {
     const { treeSha, entries } = await this.#tree(r, input.baseSha);
     const prefix = input.subdir ? input.subdir + "/" : "";
     const base = new Map(entries.filter((e) => e.type === "blob").map((e) => [e.path, e]));
-    const want = new Map(input.files.map(([p, d]) => [prefix + p, d]));
+    // A merge (`mergeParent`): the studio's files are the resolution of what it holds; everything else (outside
+    // subdir, dotenv files…) is merged here, and both sides changing one of those stops it.
+    let outside: { path: string; mode: string; type: string; sha: string | null }[] = [];
+    let notHeld = new Set<string>();
+    if (input.mergeParent) {
+      const cmp = await this.ok<{ merge_base_commit: { sha: string } }>("GET", this.#path(r, `/compare/${input.mergeParent}...${input.baseSha}`));
+      const [b, t] = await Promise.all([this.#entries(r, cmp.merge_base_commit.sha), this.#entries(r, input.mergeParent)]);
+      const ours = new Map(entries.filter((e) => e.type !== "tree").map((e) => [e.path, e]));
+      const m = this.#mergeOutside(input.subdir, b, ours, t);
+      if (m.both.length) throw unresolvable(m.both);
+      outside = m.take;
+      notHeld = m.outside;
+      // Dotenv files are merged here: the studio's copy must be the merged one's public entries (an edit made while
+      // resolving would be lost otherwise: commit it afterwards).
+      const taken = new Map(m.take.map((x) => [x.path, x]));
+      const result = (path: string) => (taken.has(path) ? taken.get(path)! : ours.get(path));
+      const sent = new Map(input.files.filter(([p]) => DOTENV.test(prefix + p)).map(([p, d]) => [prefix + p, d]));
+      const changed = (p: string) => Object.assign(new HttpError(409, `${p.slice(prefix.length)} was changed while merging: commit the merge first, then that change`, "merge_dotenv_changed"), { extra: { paths: [p.slice(prefix.length)] } });
+      for (const [path, d] of sent) {
+        const e = result(path);
+        // Gone upstream (or not a file the workspace holds), kept here with only private lines: not committed.
+        if (!e?.sha || !workspaceEnv(e, path, prefix)) {
+          if (new TextDecoder().decode(publicDotenv(d)).trim()) throw changed(path);
+          continue;
+        }
+        if (!Buffer.from(publicDotenv(await this.#blob(r, e.sha))).equals(Buffer.from(d))) throw changed(path);
+      }
+      // …and none deleted here meanwhile.
+      for (const path of new Set([...taken.keys(), ...ours.keys()])) {
+        const e = result(path);
+        if (e?.sha && workspaceEnv(e, path, prefix) && !sent.has(path)) throw changed(path);
+      }
+    }
+    const held = (path: string) => !input.mergeParent || (!DOTENV.test(path) && !notHeld.has(path));
+    const want = new Map(input.files.map(([p, d]) => [prefix + p, d] as const).filter(([p]) => held(p)));
     const changes: { path: string; mode: string; data: Uint8Array }[] = [];
     for (const [path, data] of want) {
       const b = base.get(path);
@@ -239,20 +300,22 @@ export class GitHub implements SourceControlProvider {
     }
     // Under subdir, files the studio was never sent stay: never-source ones, symlinks, names it can't hold.
     const gone = [...base.values()].filter((e) => e.path.startsWith(prefix) && !want.has(e.path) && sourceEntries([e], input.subdir).length &&
-      !NOT_SOURCE.test(e.path.slice(prefix.length))).map((e) => e.path);
-    if (!changes.length && !gone.length) return { sha: input.baseSha, changed: false };
+      !NOT_SOURCE.test(e.path.slice(prefix.length)) && held(e.path)).map((e) => e.path);
+    if (!changes.length && !gone.length && !input.mergeParent) return { sha: input.baseSha, changed: false };
     const blobs = await pool(changes, 8, (ch) =>
       this.ok<{ sha: string }>("POST", this.#path(r, "/git/blobs"), { content: Buffer.from(ch.data).toString("base64"), encoding: "base64" }));
-    const tree = await this.ok<{ sha: string }>("POST", this.#path(r, "/git/trees"), {
+    const tree = !changes.length && !gone.length && !outside.length ? { sha: treeSha } : await this.ok<{ sha: string }>("POST", this.#path(r, "/git/trees"), {
       base_tree: treeSha,
       tree: [
         ...changes.map((ch, i) => ({ path: ch.path, mode: ch.mode, type: "blob", sha: blobs[i].sha })),
         ...gone.map((path) => ({ path, mode: "100644", type: "blob", sha: null })),
+        ...outside,
       ],
     });
     const who = { name: input.author.name, email: input.author.email };
     const commit = await this.ok<{ sha: string }>("POST", this.#path(r, "/git/commits"), {
-      message: input.message, tree: tree.sha, parents: [input.baseSha], author: who, committer: who,
+      message: input.message, tree: tree.sha, parents: input.mergeParent ? [input.baseSha, input.mergeParent] : [input.baseSha],
+      author: who, committer: who,
     });
     // Never forced: if the branch moved since baseSha, this fails and nothing changed.
     const res = await this.req<{ message?: string }>("PATCH", this.#path(r, `/git/refs/heads/${this.#ref(input.branch)}`), { sha: commit.sha, force: false });
@@ -320,6 +383,115 @@ export class GitHub implements SourceControlProvider {
     return (ours.files ?? []).map((f) => f.filename).filter((f) => changed.has(f)).sort();
   }
 
+  /**
+   * `head` merged with `into` (where it would go), for resolving their conflicts on `head`: every file of the
+   * result under `subdir`, as the workspace holds them. A file both changed since they split is a conflict: text
+   * gets both versions between `<<<<<<<` / `=======` / `>>>>>>>` lines; binary ones, and anything the studio doesn't
+   * hold, can't be resolved here (409 merge_unresolvable). Committed with `into`'s
+   * head as a second parent, `head` then merges into `into` as a fast-forward.
+   */
+  async conflicts(r: Repo, input: { into: string; head: string; subdir: string }) {
+    const [intoSha, headSha] = await Promise.all([this.branchHead(r, input.into), this.branchHead(r, input.head)]);
+    if (!intoSha || !headSha) throw new HttpError(404, `no branch ${!intoSha ? input.into : input.head} on GitHub`, "branch_not_found");
+    const cmp = await this.ok<{ merge_base_commit: { sha: string } }>("GET", this.#path(r, `/compare/${intoSha}...${headSha}`));
+    const full = await Promise.all([cmp.merge_base_commit.sha, headSha, intoSha].map((sha) => this.#entries(r, sha)));
+    // What the studio doesn't hold must merge by itself (else: a pull request).
+    const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
+    if (outside.both.length) throw unresolvable(outside.both);
+    const prefix = input.subdir ? input.subdir + "/" : "";
+    const [base, ours, theirs] = full.map((m) => new Map([...m.values()].filter((e) => !outside.outside.has(e.path) && studioHolds(e.path, e, input.subdir)).map((e) => [e.path.slice(prefix.length), { ...e, rel: e.path.slice(prefix.length) }])));
+    const out = new Map<string, Uint8Array>(), conflicts: string[] = [];
+    const read = (e: GhEntry) => this.#blob(r, e.sha).then((d) => (DOTENV.test(e.path) ? publicDotenv(d) : d));
+    const text = (d: Uint8Array) => {
+      if (d.includes(0)) return null; // binary, even if it decodes
+      try {
+        return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(d);
+      } catch {
+        return null;
+      }
+    };
+    const paths = [...new Set([...base.keys(), ...ours.keys(), ...theirs.keys()])];
+    // Dotenv files (merged by mergeOutside): the result's, read below for their public entries.
+    const taken = new Map(outside.take.map((x) => [x.path, x]));
+    for (const [path, e] of full[1]) if (!taken.has(path) && path.startsWith(prefix) && DOTENV.test(path)) taken.set(path, { path, mode: e.mode, type: e.type, sha: e.sha });
+    // …and files the merge takes from the default branch that the workspace holds (a symlink there turned into a file).
+    const envs = [...taken.values()].filter((x) => !!x.sha && workspaceFile(x, x.path, prefix) && (DOTENV.test(x.path) || outside.take.includes(x)));
+    if (paths.length + envs.length > this.limits.files) throw new HttpError(413, `the repository has more than ${this.limits.files} files`, "too_large");
+    const sizeOf = (sha: string) => [...full[1].values(), ...full[2].values()].find((e) => e.sha === sha)?.size ?? 0;
+    // What's read: one side of a file only one side changed, both of a conflict, and the dotenv files.
+    const size = paths.reduce((n, p) => {
+      const [b, o, t] = [base.get(p), ours.get(p), theirs.get(p)];
+      if (o?.sha === t?.sha || t?.sha === b?.sha) return n + (o?.size ?? 0);
+      if (o?.sha === b?.sha) return n + (t?.size ?? 0);
+      return n + (o?.size ?? 0) + (t?.size ?? 0);
+    }, envs.reduce((n, x) => n + sizeOf(x.sha!), 0));
+    if (size > this.limits.bytes) throw new HttpError(413, `the merge's files exceed ${this.limits.bytes} bytes`, "too_large");
+    // Binary files both sides changed: no markers to resolve them with.
+    const binary: string[] = [];
+    await pool(paths, 8, async (p) => {
+      const [b, o, t] = [base.get(p)?.sha, ours.get(p)?.sha, theirs.get(p)?.sha];
+      const pick = o === t || t === b ? ours.get(p) : o === b ? theirs.get(p) : undefined;
+      if (o === t || t === b || o === b) {
+        if (pick) out.set(p, await read(pick));
+        return;
+      }
+      conflicts.push(p);
+      const [od, td] = await Promise.all([ours.get(p) ? read(ours.get(p)!) : null, theirs.get(p) ? read(theirs.get(p)!) : null]);
+      const [ot, tt] = [od ? text(od) : "", td ? text(td) : ""];
+      if (ot === null || tt === null) {
+        binary.push(p);
+        return;
+      }
+      const nl = (x: string) => (x && !x.endsWith("\n") ? x + "\n" : x);
+      out.set(p, new TextEncoder().encode(`<<<<<<< ${input.head}\n${nl(ot)}=======\n${nl(tt)}>>>>>>> ${input.into}\n`));
+    });
+    if (binary.length) throw unresolvable(binary.map((p) => prefix + p));
+    // Dotenv files (merged outside the studio's part): the result's public entries, as the workspace holds them.
+    for (const x of envs) {
+      const d = await this.#blob(r, x.sha!);
+      out.set(x.path.slice(prefix.length), DOTENV.test(x.path) ? publicDotenv(d) : d);
+    }
+    const files: DeployFile[] = [...out].sort(([x], [y]) => (x < y ? -1 : 1)).map(([path, d]) => {
+      const t = text(d);
+      return t === null ? { path, data: Buffer.from(d).toString("base64"), encoding: "base64" } : { path, data: t, encoding: "utf8" };
+    });
+    return { intoSha, headSha, conflicts: conflicts.sort(), files };
+  }
+
+  /** The open pull request from `head` into `base`, if any. */
+  async pull(r: Repo, head: string, base: string): Promise<PullInfo | null> {
+    const list = await this.ok<GhPull[]>("GET", this.#path(r, `/pulls?state=open&head=${encodeURIComponent(`${r.owner}:${head}`)}&base=${encodeURIComponent(base)}`));
+    return list[0] ? this.#pullInfo(r, list[0]) : null;
+  }
+
+  async openPull(r: Repo, input: { head: string; base: string; title: string; body: string }): Promise<{ pull: PullInfo; created: boolean }> {
+    const existing = await this.pull(r, input.head, input.base);
+    if (existing) return { pull: existing, created: false };
+    const res = await this.req<GhPull & { message?: string; errors?: { message?: string }[] }>("POST", this.#path(r, "/pulls"), input);
+    if (res.status === 422) throw new HttpError(422, res.body?.errors?.[0]?.message ?? res.body?.message ?? "GitHub wouldn't open that pull request", "pull_invalid");
+    if (res.status !== 201) throw ghError(res.status, res.body?.message);
+    return { pull: await this.#pullInfo(r, res.body), created: true };
+  }
+
+  /** A pull request with its review decision (latest review per reviewer) and its head's checks. */
+  async #pullInfo(r: Repo, p: GhPull): Promise<PullInfo> {
+    const [reviews, checks] = await Promise.all([
+      this.ok<{ user: { login: string } | null; state: string }[]>("GET", this.#path(r, `/pulls/${p.number}/reviews?per_page=100`)).catch(() => []),
+      // Needs the GitHub App's Checks: read permission; without it, unknown rather than "none".
+      this.ok<{ check_runs: { status: string; conclusion: string | null }[] }>("GET", this.#path(r, `/commits/${p.head.sha}/check-runs?per_page=100`)).catch(() => null),
+    ]);
+    const latest = new Map<string, string>();
+    for (const x of reviews) if (x.user && x.state !== "COMMENTED") latest.set(x.user.login, x.state);
+    const states = [...latest.values()];
+    const runs = checks?.check_runs ?? [];
+    return {
+      number: p.number, url: p.html_url, title: p.title, draft: !!p.draft, headSha: p.head.sha,
+      review: states.includes("CHANGES_REQUESTED") ? "changes_requested" : states.includes("APPROVED") ? "approved" : "pending",
+      checks: !checks ? "unknown" : !runs.length ? "none" : runs.some((x) => x.status !== "completed") ? "pending"
+        : runs.every((x) => ["success", "neutral", "skipped"].includes(x.conclusion ?? "")) ? "success" : "failure",
+    };
+  }
+
   /** A first commit in an empty repository (the Git Data API needs one), on its default branch. */
   async initialize(r: Repo, branch: string, author: Author): Promise<string> {
     const res = await this.req<{ commit?: { sha: string }; message?: string }>("PUT", this.#path(r, "/contents/.gitkeep"), {
@@ -335,6 +507,16 @@ type GhRepo = {
   owner: { login: string }; permissions?: { push?: boolean };
 };
 type GhEntry = { path: string; mode: string; type: string; sha: string; size?: number };
+type GhPull = { number: number; html_url: string; title: string; draft?: boolean; head: { sha: string } };
+export interface PullInfo {
+  number: number;
+  url: string;
+  title: string;
+  draft: boolean;
+  headSha: string;
+  review: "approved" | "changes_requested" | "pending";
+  checks: "success" | "failure" | "pending" | "none" | "unknown";
+}
 
 /** The tree's regular files under `subdir`, with their paths relative to it (names a deploy can't hold left out). */
 function sourceEntries(entries: GhEntry[], subdir: string) {
@@ -366,6 +548,30 @@ async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Prom
   return out;
 }
 
+/**
+ * A path the studio holds and resolves itself in a merge: a regular file under subdir it can hold, not never-source,
+ * not a dotenv file (it only ever has their public entries).
+ */
+function studioHolds(path: string, e: GhEntry, subdir: string) {
+  const prefix = subdir ? subdir + "/" : "";
+  if (!path.startsWith(prefix) || DOTENV.test(path)) return false;
+  return sourceEntries([{ ...e, path }], subdir).length > 0 && !NOT_SOURCE.test(path.slice(prefix.length));
+}
+/** A regular file under subdir the workspace can hold (not never-source, a valid path): what it's sent and sends back. */
+function workspaceFile(e: { type: string; mode: string }, path: string, prefix: string) {
+  const rel = path.slice(prefix.length);
+  if (!path.startsWith(prefix) || NOT_SOURCE.test(rel) || e.type !== "blob" || e.mode === "120000") return false;
+  try {
+    return safePath(rel) === rel;
+  } catch {
+    return false;
+  }
+}
+const workspaceEnv = (e: { type: string; mode: string }, path: string, prefix: string) => DOTENV.test(path) && workspaceFile(e, path, prefix);
+const unresolvable = (paths: string[]) => Object.assign(
+  new HttpError(409, `both sides changed ${paths.join(", ")}, which can't be resolved in the studio: merge it on GitHub (a pull request)`, "merge_unresolvable"),
+  { extra: { paths } },
+);
 const reauth = () => new HttpError(401, "GitHub access expired or was revoked: connect GitHub again", "git_reauth_required");
 const conflict = (message: string) => new HttpError(409, message, "conflict");
 const notFastForward = (status: number, m?: string) => status === 422 && /fast.?forward/i.test(m ?? "");
@@ -410,10 +616,12 @@ export function githubSync(cfg: Config) {
 
 export function gitRoutes(
   app: Hono<Env>,
-  { cfg, store, body, accountWide, authorize, getApp, deployBodyLimit }: {
+  { cfg, store, body, readBody, accountWide, authorize, getApp, deployBodyLimit }: {
     cfg: Config;
     store: Store;
     body: <T>(c: Context<Env>, maxBytes?: number) => Promise<T>;
+    /** A request's raw body, refused (413) past `maxBytes` while it's read. */
+    readBody: (req: Request, maxBytes: number) => Promise<Uint8Array>;
     accountWide: (c: Context<Env>, role: Role) => Account;
     authorize: (c: Context<Env>, a: App, role: Role, opts?: { owner?: boolean; account?: boolean }) => Promise<unknown>;
     getApp: (name: string) => Promise<App>;
@@ -516,6 +724,8 @@ export function gitRoutes(
     subdir: r.subdir,
     deleteBranch: !!r.delete_branch,
     lastSyncedSha: r.last_synced_sha,
+    /** The default branch's latest commit a webhook reported (null: none, or webhooks off). */
+    upstreamSha: r.upstream_sha ?? null,
     connectedAt: new Date(r.connected_at).toISOString(),
   });
 
@@ -754,8 +964,10 @@ export function gitRoutes(
   // if the branch has moved since, 409 and nothing is written (pull, then sync again).
   app.post("/apps/:name/git/sync", async (c) => {
     await linked(c, "deploy"); // before reading what may be a large body
-    const input = await body<{ branch?: unknown; baseSha?: unknown; files?: unknown; message?: unknown } | null>(c, deployBodyLimit) ?? {};
+    const input = await body<{ branch?: unknown; baseSha?: unknown; files?: unknown; message?: unknown; mergeParent?: unknown } | null>(c, deployBodyLimit) ?? {};
     const { a, r, repo, client, author } = await linked(c, "deploy");
+    const mergeParent = input.mergeParent != null ? shaOf(input.mergeParent, "mergeParent") : undefined;
+    if (mergeParent && mergeParent === input.baseSha) throw new HttpError(400, "mergeParent must be another commit than baseSha");
     const branch = branchName(input.branch);
     const baseSha = shaOf(input.baseSha, "baseSha");
     const files = sourceFiles(cfg, input.files as DeployFile[]);
@@ -764,8 +976,8 @@ export function gitRoutes(
     if (head !== baseSha) {
       throw Object.assign(conflict(`${branch} moved on GitHub since this workspace loaded it: pull first`), { extra: { headSha: head } });
     }
-    const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, message: message(input.message, `Update ${a.name}`) });
-    if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha });
+    const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
+    if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
     return c.json({ branch, ...out });
   });
 
@@ -779,7 +991,7 @@ export function gitRoutes(
     const into = input.into != null ? branchName(input.into, "into") : repo.default_branch;
     const expect = input.headSha != null ? shaOf(input.headSha, "headSha") : undefined;
     const m = await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
-    if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha }).catch((e) => console.error(e));
+    if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha, upstream: m.mergedSha }).catch((e) => console.error(e));
     // The merge happened: from here on it's reported, whatever else fails. Its files (when they differ from the
     // branch's) before the branch goes, so a failure to load them leaves the branch to retry from.
     let files: DeployFile[] | undefined, filesError: string | undefined;
@@ -798,6 +1010,59 @@ export function gitRoutes(
     }
     const { headSha: _, ...out } = m;
     return c.json({ ...out, branch: into, deletedBranch, ...(files ? { files } : {}), ...(filesError ? { filesError } : {}) });
+  });
+
+  // The default branch merged into `branch`, conflicts marked, for the workspace to resolve (then sync with
+  // `mergeParent: intoSha`, and Deploy fast-forwards).
+  app.get("/apps/:name/git/conflicts", async (c) => {
+    const { r, repo, client } = await linked(c, "deploy");
+    const branch = branchName(c.req.query("branch"));
+    if (branch === repo.default_branch) throw new HttpError(400, `${branch} is the default branch: there's nothing to merge into it`);
+    const out = await client.conflicts(r, { into: repo.default_branch, head: branch, subdir: repo.subdir });
+    c.header("cache-control", "no-store");
+    return c.json({ branch, into: repo.default_branch, ...out });
+  });
+
+  // Pull requests, when the default branch takes no direct merges (protection, required reviews or checks).
+  app.get("/apps/:name/git/pulls", async (c) => {
+    const { r, repo, client } = await linked(c, "read");
+    const branch = branchName(c.req.query("branch"));
+    return c.json({ pull: await client.pull(r, branch, repo.default_branch) });
+  });
+  app.post("/apps/:name/git/pulls", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ branch?: unknown; title?: unknown; body?: unknown } | null>(c) ?? {};
+    const branch = branchName(input.branch);
+    if (branch === repo.default_branch) throw new HttpError(400, `a pull request needs a branch other than ${branch}`);
+    const { pull, created } = await client.openPull(r, {
+      head: branch, base: repo.default_branch,
+      title: message(input.title, `Update ${a.name} (${branch})`).split("\n")[0].slice(0, 200),
+      body: typeof input.body === "string" ? input.body.slice(0, 10_000) : `Opened from Cresslet: merging it lets ${a.name} deploy from ${repo.default_branch}.`,
+    });
+    return c.json({ pull }, created ? 201 : 200);
+  });
+
+  // GitHub's webhook (the GitHub App's, or a repository's): pushes to a linked repository's default branch are
+  // noted, so open studios can say it moved. Signed with CRESSLET_GITHUB_WEBHOOK_SECRET.
+  app.post("/webhooks/github", async (c) => {
+    const secret = cfg.git.webhookSecret;
+    if (!secret) throw new HttpError(404, "webhooks aren't set up on this server", "not_found");
+    const raw = await readBody(c.req.raw, 5 * 1024 * 1024); // capped while it's read: anyone can send this
+    const sig = Buffer.from(c.req.header("x-hub-signature-256") ?? "");
+    const want = Buffer.from("sha256=" + createHmac("sha256", secret).update(raw).digest("hex"));
+    if (sig.byteLength !== want.byteLength || !timingSafeEqual(sig, want)) throw new HttpError(401, "bad signature", "unauthorized");
+    const event = c.req.header("x-github-event");
+    if (event !== "push") return c.json({ ok: true, ignored: event ?? null });
+    let p: { ref?: string; after?: string; deleted?: boolean; repository?: { id?: number } };
+    try {
+      p = JSON.parse(new TextDecoder().decode(raw));
+    } catch {
+      throw new HttpError(400, "invalid JSON body", "bad_request");
+    }
+    const branch = p.ref?.startsWith("refs/heads/") ? p.ref.slice(11) : null;
+    if (!branch || !p.repository?.id || p.deleted || !p.after || !SHA_RE.test(p.after)) return c.json({ ok: true, ignored: "push" });
+    const apps = await store.noteUpstreamPush(String(p.repository.id), branch, p.after);
+    return c.json({ ok: true, apps });
   });
 
   return { repoView, callback };

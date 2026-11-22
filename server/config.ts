@@ -71,6 +71,8 @@ export interface Config {
   git: {
     githubApp: { appId: string; clientId: string; clientSecret: string; slug: string } | null;
     oauthFallback: boolean;
+    /** Verifies GitHub's webhook deliveries (`CRESSLET_GITHUB_WEBHOOK_SECRET`; POST /v1/webhooks/github). Null = off. */
+    webhookSecret: string | null;
     /** github.com and its API (`CRESSLET_GITHUB_URL`, `CRESSLET_GITHUB_API_URL`, as for login). */
     webUrl: string;
     apiUrl: string;
@@ -199,6 +201,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
         }
         : null,
       oauthFallback: env("CRESSLET_GITHUB_SYNC_OAUTH_FALLBACK", "false") === "true",
+      webhookSecret: process.env.CRESSLET_GITHUB_WEBHOOK_SECRET || null,
       webUrl: env("CRESSLET_GITHUB_URL", "https://github.com").replace(/\/+$/, ""),
       apiUrl: env("CRESSLET_GITHUB_API_URL", "https://api.github.com").replace(/\/+$/, ""),
     },

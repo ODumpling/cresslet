@@ -20,6 +20,21 @@ export interface ProjectGitState {
   headSha: string;
   /** Files changed here since `headSha`. */
   dirty: boolean;
+  /**
+   * Resolving a merge of the default branch into this one (its head then): committed as the second parent, and the
+   * files that conflicted (they hold `<<<<<<<` markers until resolved).
+   */
+  mergeParent?: string;
+  conflicts?: string[];
+}
+
+/** An open pull request (GET /v1/apps/:name/git/pulls). */
+export interface PullRequest {
+  number: number;
+  url: string;
+  title: string;
+  review: "approved" | "changes_requested" | "pending";
+  checks: "success" | "failure" | "pending" | "none" | "unknown";
 }
 
 /** A file as the API takes and returns them (POST /v1/deploys's shape). */
@@ -104,16 +119,25 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     if (!s) throw new Error("not connected to a repository");
     const rev = revision(); // before the snapshot: a change after it keeps the workspace dirty
     const files = await o.files();
+    // A merge being resolved: not committed while a conflicted file still has its markers.
+    const left = (s.conflicts ?? []).filter((p) => files.some((f) => f.path === p && f.encoding !== "base64" && /^(?:<<<<<<<|>>>>>>>) /m.test(f.data)));
+    if (left.length) throw Object.assign(new Error(`resolve the merge conflicts first (markers left in ${left.join(", ")})`), { code: "conflicts_left" });
     let r: { sha: string; changed: boolean };
     try {
-      r = await post<{ sha: string; changed: boolean }>("/sync", { branch: s.activeBranch, baseSha: s.headSha, files, message });
+      r = await post<{ sha: string; changed: boolean }>("/sync", {
+        branch: s.activeBranch, baseSha: s.headSha, files, message, ...(s.mergeParent ? { mergeParent: s.mergeParent } : {}),
+      });
     } catch (e) {
       if (gitCode(e) === "branch_not_found") {
         throw Object.assign(new Error(`${s.activeBranch} is gone on GitHub (merged and deleted?). Switch to ${s.defaultBranch} in Source control, or push these changes to a new branch.`), { code: "branch_not_found" });
       }
       throw e;
     }
-    await set({ headSha: r.sha, dirty: revision() !== rev, ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : {}) });
+    await set({
+      headSha: r.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined,
+      // A merge of the default branch committed: the branch is on top of that now.
+      ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : s.mergeParent ? { baseSha: s.mergeParent } : {}),
+    });
     return { ...r, files };
   }
 
@@ -129,7 +153,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     const t = await o.api<{ sha: string; files: GitFile[] }>(path(`/tree?ref=${encodeURIComponent(branch)}`));
     unchangedSince(rev, `loading ${branch}`);
     // Edited while it loaded (npm install, say): those are changes, kept dirty.
-    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
+    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
     try {
       await o.hydrate(t.files);
     } catch (e) {
@@ -200,6 +224,39 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         if (!(e as { filesWritten?: boolean }).filesWritten) await o.save(undefined); // not loaded: not linked here either
         throw e;
       }
+    }),
+    /**
+     * The default branch merged into this branch here, for its conflicts to be resolved (by hand or by the AI
+     * builder): the merged files are loaded, conflicted ones with markers. The next sync commits the merge.
+     * Resolves to the conflicted paths.
+     */
+    resolveConflicts: () => serial(async () => {
+      const s = o.state()!;
+      if (s.dirty) await syncNow(`Work in progress on ${s.activeBranch}`);
+      if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: try again"), { code: "changed" });
+      const rev = revision();
+      const r = await o.api<{ intoSha: string; headSha: string; conflicts: string[]; files: GitFile[] }>(path(`/conflicts?branch=${encodeURIComponent(s.activeBranch)}`));
+      unchangedSince(rev, "loading the merge"); // not over an edit made meanwhile
+      const merging = () => set({ headSha: r.headSha, mergeParent: r.intoSha, conflicts: r.conflicts, dirty: true });
+      try {
+        await o.hydrate(r.files);
+      } catch (e) {
+        if (!(e as { filesWritten?: boolean }).filesWritten) throw e;
+        await merging(); // its files are in: the merge is loaded either way
+        // A conflicted package.json can't install until it's resolved: expected. Anything else is said.
+        if (!r.conflicts.some((p) => /(?:^|\/)package(?:-lock)?\.json$/.test(p))) throw e;
+        return r.conflicts;
+      }
+      await merging();
+      return r.conflicts;
+    }),
+    /** The active branch's open pull request, if any. */
+    pullRequest: () => o.api<{ pull: PullRequest | null }>(path(`/pulls?branch=${encodeURIComponent(o.state()!.activeBranch)}`)).then((r) => r.pull),
+    /** Opens (or finds) the active branch's pull request, its changes pushed first. */
+    openPullRequest: (title?: string) => serial(async () => {
+      const s = o.state()!;
+      if (s.dirty) await syncNow(`Update ${s.activeBranch}`);
+      return (await post<{ pull: PullRequest }>("/pulls", { branch: s.activeBranch, ...(title ? { title } : {}) })).pull;
     }),
     /** The workspace's change count (studio/src/views/workspace/engine.ts bumps it). */
     get revision() {

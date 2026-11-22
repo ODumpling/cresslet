@@ -133,6 +133,8 @@ export interface AppRepo {
   delete_branch: number;
   connected_by: string | null;
   last_synced_sha: string | null;
+  /** The default branch's head a webhook last reported (migration 5; undefined before it). */
+  upstream_sha?: string | null;
   connected_at: number;
   updated_at: number;
 }
@@ -1126,10 +1128,17 @@ export class Store implements RateHits {
        ON CONFLICT (app_id) DO UPDATE SET provider = excluded.provider, repo_id = excluded.repo_id, owner = excluded.owner,
          name = excluded.name, default_branch = excluded.default_branch, subdir = excluded.subdir,
          delete_branch = excluded.delete_branch, connected_by = excluded.connected_by,
-         last_synced_sha = excluded.last_synced_sha, connected_at = excluded.connected_at, updated_at = excluded.updated_at`,
+         last_synced_sha = excluded.last_synced_sha, upstream_sha = NULL, connected_at = excluded.connected_at, updated_at = excluded.updated_at`,
       r.app_id, r.provider, r.repo_id, r.owner, r.name, r.default_branch, r.subdir, r.delete_branch, r.connected_by,
       r.last_synced_sha, now, now,
     );
+  }
+  /** A push to a repository's `branch` (webhook): noted on the apps linked to it with that default branch. */
+  async noteUpstreamPush(repoId: string, branch: string, sha: string): Promise<number> {
+    return (await this.db.run(
+      "UPDATE app_repos SET upstream_sha = ?, updated_at = ? WHERE provider = 'github' AND repo_id = ? AND default_branch = ?",
+      sha, Date.now(), repoId, branch,
+    )).changes;
   }
   async deleteAppRepo(appId: string): Promise<boolean> {
     return (await this.db.run("DELETE FROM app_repos WHERE app_id = ?", appId)).changes > 0;
@@ -1138,13 +1147,17 @@ export class Store implements RateHits {
    * The last commit Cresslet wrote or read, and what the provider says about the repository now (renamed,
    * transferred, a new default branch). Only onto the link `was` (one relinked meanwhile is left alone).
    */
-  async updateAppRepoSync(was: AppRepo, p: { sha?: string | null; owner?: string; name?: string; defaultBranch?: string }) {
+  async updateAppRepoSync(was: AppRepo, p: { sha?: string | null; owner?: string; name?: string; defaultBranch?: string; upstream?: string }) {
     await this.db.run(
       `UPDATE app_repos SET last_synced_sha = COALESCE(?, last_synced_sha), owner = COALESCE(?, owner), name = COALESCE(?, name),
          default_branch = COALESCE(?, default_branch), updated_at = ?
        WHERE app_id = ? AND repo_id = ? AND connected_at = ?`,
       p.sha ?? null, p.owner ?? null, p.name ?? null, p.defaultBranch ?? null, Date.now(), was.app_id, was.repo_id, was.connected_at,
     );
+    // Cresslet moved the default branch itself: that's where it is now (a webhook's older report doesn't count).
+    if (p.upstream) {
+      await this.db.run("UPDATE app_repos SET upstream_sha = ? WHERE app_id = ? AND repo_id = ? AND connected_at = ?", p.upstream, was.app_id, was.repo_id, was.connected_at);
+    }
   }
 
   // ---- AI credits (millicredits; server/credits.ts)

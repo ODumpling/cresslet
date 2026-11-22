@@ -8,7 +8,7 @@ import { projects, type Deploy, type StoredProject } from "../../../store.ts";
 import type { CressletConfig } from "../../../cresslet-plugin.ts";
 import type * as API from "../../../api-types.ts";
 import { api, errorMessage, meta, mustLogIn } from "../../lib/api.ts";
-import type { ProjectGitState } from "../../../git.ts";
+import type { ProjectGitState, PullRequest } from "../../../git.ts";
 import { viewShown } from "../../lib/focus.ts";
 import { useView } from "../../lib/hooks.ts";
 import { projectsChanged } from "../../lib/projects.ts";
@@ -156,6 +156,30 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     void meta().then((m) => live && setGitOn(!!m.git?.github));
     return () => void (live = false);
   }, []);
+  // Checked every minute: the default branch moved on GitHub (a webhook said: GET /v1/apps/:name `repo.upstreamSha`),
+  // and the active branch's pull request (its review and checks).
+  const [upstream, setUpstream] = useState<string | null>(null);
+  const [pull, setPull] = useState<PullRequest | null>(null);
+  const [gitTick, setGitTick] = useState(0);
+  const onBranch = !!gitState && gitState.activeBranch !== gitState.defaultBranch;
+  useEffect(() => {
+    const name = deploy?.name;
+    setPull(null);
+    if (!gitState || !token || !name) return;
+    let live = true;
+    const check = () => {
+      void api<API.AppDetail>(`/v1/apps/${encodeURIComponent(name)}`).then((d) => live && setUpstream(d.repo?.upstreamSha ?? null), () => {});
+      if (onBranch) void engine.current?.git.pullRequest().then((p) => live && setPull(p), () => {});
+    };
+    check();
+    const t = setInterval(check, 60_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [gitState?.owner, gitState?.repo, gitState?.activeBranch, token, deploy?.name, gitTick]);
+  const upstreamMoved = !!gitState && !!upstream && ![gitState.baseSha, gitState.headSha, gitState.mergeParent].includes(upstream);
+
   // Back from connecting GitHub (server/git.ts redirects here with the outcome in the hash): once the project runs,
   // the dialog opens again where it left off.
   useEffect(() => {
@@ -244,6 +268,36 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (focus) document.getElementById(`tab-${t}`)?.focus();
   }
 
+  /** Loads the default branch merged into this one, conflicts marked, and asks the AI builder to resolve them. */
+  async function resolveConflicts() {
+    const g = engine.current?.git;
+    if (!g?.connected) return;
+    try {
+      const paths = await g.resolveConflicts();
+      const s = g.state!;
+      if (!paths.length) return toast(`${s.defaultBranch} merged into ${s.activeBranch} without conflicts: deploy again`, 8000);
+      builder.current?.prefill(`Merging ${s.defaultBranch} into ${s.activeBranch} conflicts in ${paths.join(", ")}. Each of those files holds both versions between <<<<<<< ${s.activeBranch}, ======= and >>>>>>> ${s.defaultBranch} lines. Resolve them: keep what both sides meant, remove the marker lines, and check the dev server builds. Then I'll deploy.`);
+      toast(`Conflicts in ${paths.join(", ")}: resolve them (the AI builder can), then deploy`, 10000);
+    } catch (e) {
+      // Loaded, but npm install failed (not because of a conflicted package.json): resolve, then fix the install.
+      if ((e as { filesWritten?: boolean }).filesWritten && g.state?.conflicts?.length) {
+        builder.current?.prefill(`Merging ${g.state.defaultBranch} into ${g.state.activeBranch} conflicts in ${g.state.conflicts.join(", ")}: resolve them (remove the conflict markers). npm install also failed: check the terminal.`);
+      }
+      toast(`Couldn't load the merge: ${errorMessage(e)}`, 10000);
+    }
+  }
+  async function openPullRequest() {
+    const g = engine.current?.git;
+    if (!g?.connected) return;
+    try {
+      const pr = await g.openPullRequest();
+      setGitTick((n) => n + 1);
+      toast(<span>{`Pull request #${pr.number}: `}<ExtLink href={pr.url}>{pr.title}</ExtLink></span>, 15000);
+    } catch (e) {
+      toast(`Couldn't open a pull request: ${errorMessage(e)}`, 10000);
+    }
+  }
+
   /** A new app's address, reserved with nothing deployed (to link a repository first). */
   async function reserveApp(): Promise<string | null> {
     const name = await dialog.current!.ask({ reserve: true }); // mounted
@@ -288,11 +342,15 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       toast(<span>Deployed: <ExtLink href={r.app.url}>{r.app.url}</ExtLink></span>, 10000);
     } catch (err) {
       setDeployLog((l) => l + `\nerror: ${errorMessage(err)}\n`);
-      // A merge that can't go through (conflict, protected branch): nothing was deployed; a pull request can do it.
-      const compare = (err as { compare?: string }).compare;
-      toast(compare
-        ? <span>{`Not deployed: ${errorMessage(err).split(". ")[0]}. `}<ExtLink href={compare}>Open a pull request</ExtLink></span>
-        : `Deploy failed: ${errorMessage(err)}`, 12000);
+      // A merge that can't go through (conflict, protected branch): nothing was deployed. A conflict can be resolved
+      // here (the AI builder, or by hand); a protected branch takes a pull request.
+      const code = (err as { code?: string }).code;
+      if (code === "merge_conflict" || code === "branch_protected") {
+        toast(<span>{`Not deployed: ${errorMessage(err).split(". ")[0]}. `}
+          {code === "merge_conflict" ? <><button type="button" className="btn sm" onClick={() => void resolveConflicts()}>Resolve with the AI builder</button>{" "}</> : null}
+          <button type="button" className="btn sm" onClick={() => void openPullRequest()}>Open a pull request</button>
+        </span>, 20000);
+      } else toast(`Deploy failed: ${errorMessage(err)}`, 10000);
     } finally {
       setDeploying(false);
     }
@@ -326,11 +384,18 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             <button className="btn git-pill" id="git-btn" type="button" title={`${gitState.owner}/${gitState.repo}`} onClick={() => gitDialog.current?.open()}>
               <Icon name="branch" /><span id="git-btn-branch">{gitState.activeBranch}</span>
               {gitState.dirty ? <span className="git-dirty" aria-hidden="true" /> : null}
+              {upstreamMoved ? <span className="git-upstream" title={`${gitState.defaultBranch} was updated on GitHub`}>{`↓ ${gitState.defaultBranch}`}</span> : null}
+              {upstreamMoved ? <SrOnly>{` (${gitState.defaultBranch} was updated on GitHub: pull, or deploy to merge it)`}</SrOnly> : null}
               <SrOnly>{gitState.dirty ? " (changes not pushed)" : ""}</SrOnly><span aria-hidden="true">· Sync</span><SrOnly>: source control</SrOnly>
             </button>
           ) : (
             <button className="btn" id="git-btn" type="button" onClick={() => gitDialog.current?.open()}><Icon name="branch" />Connect Git</button>
           )
+        ) : null}
+        {pull && gitOn && token && container && !locked ? (
+          <ExtLink className="btn git-pr" id="git-pr-link" href={pull.url} title={pull.title}>
+            {`PR #${pull.number}`}<span className="muted small">{` · ${pull.review.replace("_", " ")} · checks ${pull.checks}`}</span>
+          </ExtLink>
         ) : null}
         <button className="btn" id="builder-btn" type="button" ref={builderBtn} aria-expanded={chat} aria-controls="builder" hidden={!container} onClick={() => setBuilderOpen(!chat)}>
           <Icon name="sparkles" />AI builder
@@ -428,7 +493,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       </main>
       <DeployDialog ref={dialog} />
       <GitDialog ref={gitDialog} git={engine.current?.git ?? null} app={deploy?.name}
-        files={() => engine.current!.sources()} hydrate={(f) => engine.current!.hydrate(f)} reserve={reserveApp} />
+        files={() => engine.current!.sources()} hydrate={(f) => engine.current!.hydrate(f)} reserve={reserveApp}
+        onPull={() => setGitTick((n) => n + 1)} />
     </>
   );
 }

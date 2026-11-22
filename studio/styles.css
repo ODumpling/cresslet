@@ -947,3 +947,4 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 #git-dialog fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
 #git-dialog legend { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
 #git-dialog .kv { margin: 4px 0 8px; }
+.git-pill .git-upstream { font-size: 11.5px; padding: 0 5px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-text); }

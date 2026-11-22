@@ -458,16 +458,19 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       return merge ?? { mergedSha: "c".repeat(40), fastForward: true, treeChanged: false, branch: "main", deletedBranch: true };
     }
     if (path.includes("/git/tree")) return { sha: "d".repeat(40), files: [{ path: "a.txt", data: "pulled" }] };
+    if (path.includes("/git/conflicts")) return { intoSha: "f".repeat(40), headSha: "9".repeat(40), conflicts: ["app.txt"], files: [{ path: "app.txt", data: "<<<<<<< feat/x\na\n=======\nb\n>>>>>>> main\n" }] };
+    if (path.includes("/git/pulls")) return init.method === "POST" ? { pull: { number: 7, url: "u", title: "t", review: "pending", checks: "none" } } : { pull: null };
     throw new Error(`unexpected ${path}`);
   };
   const rev = { n: 0 };
+  const files = { list: [{ path: "index.html", data: "<h1>hi</h1>" }] as Json[] };
   const git = createGitWorkspace({
     app: () => "shop", api, state: () => state, save: (s: Json) => void (state = s),
-    files: async () => [{ path: "index.html", data: "<h1>hi</h1>" }],
+    files: async () => files.list,
     hydrate: hydrate ?? (async (f: Json) => void hydrated.push(f)),
     revision: () => rev.n,
   });
-  return { git, calls, hydrated, rev, get state() { return state; }, set state(s: Json) { state = s; } };
+  return { git, calls, hydrated, rev, files, get state() { return state; }, set state(s: Json) { state = s; } };
 }
 
 test("git: branch names and commit messages come from the prompt", () => {
@@ -702,4 +705,37 @@ test("dotenv hydration: the repository's public entries exactly, the file's own 
   assert.equal(publicDotenv(mergeDotenv("SECRET=s\n", "VITE_A=1")), "VITE_A=1");
   // Nothing private: the incoming file as is.
   assert.equal(mergeDotenv("VITE_A=0\n", "VITE_A=1\n"), "VITE_A=1\n");
+});
+
+test("merge conflicts resolved here: main's merge loaded with markers, not committed until they're gone, then committed with main as a parent", async () => {
+  const g = fakeGit({ onDefault: false });
+  const paths = await g.git.resolveConflicts();
+  assert.deepEqual(paths, ["app.txt"]);
+  assert.match(g.hydrated[0][0].data, /^<<<<<<< feat\/x/);
+  assert.deepEqual([g.state.mergeParent, g.state.headSha, g.state.dirty], ["f".repeat(40), "9".repeat(40), true]);
+  g.files.list = g.hydrated[0];
+  await assert.rejects(g.git.sync("resolve"), /markers left in app\.txt/);
+  g.files.list = [{ path: "app.txt", data: "a and b\n" }];
+  await g.git.sync("resolve");
+  const sync = g.calls.at(-1)!;
+  assert.equal(sync.body.mergeParent, "f".repeat(40));
+  assert.equal(sync.body.baseSha, "9".repeat(40));
+  assert.equal(g.state.mergeParent, undefined);
+  assert.equal(g.state.conflicts, undefined);
+});
+
+test("pull requests from the active branch: pushed first, then opened", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.dirty = true;
+  const pr = await g.git.openPullRequest();
+  assert.equal(pr.number, 7);
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1]), ["/sync", "/pulls"]);
+  assert.equal(g.calls[1].body.branch, "feat/x");
+  assert.equal(await g.git.pullRequest(), null);
+});
+
+test("merge conflicts: npm install failing after the merge's files are in still leaves the merge loaded (and says so unless package.json conflicted)", async () => {
+  const g = fakeGit({ onDefault: false, hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  await assert.rejects(g.git.resolveConflicts(), /npm install failed/); // app.txt conflicted, not package.json: said
+  assert.equal(g.state.mergeParent, "f".repeat(40)); // but loaded
 });

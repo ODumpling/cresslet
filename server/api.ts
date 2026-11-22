@@ -393,7 +393,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   };
 
   // ---- source control (server/git.ts)
-  const git = gitRoutes(app, { cfg, store, body, accountWide, authorize, getApp, deployBodyLimit });
+  const git = gitRoutes(app, { cfg, store, body, readBody: readCappedBytes, accountWide, authorize, getApp, deployBodyLimit });
 
   // ---- meta
   app.get("/", (c) =>

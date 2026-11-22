@@ -8,7 +8,11 @@ import type { AddressInfo } from "node:net";
 export type GhUser = { id: number; login: string; email: string };
 type Entry = { mode: string; sha: string };
 type Commit = { tree: Map<string, Entry>; parents: string[]; message: string; author: { name: string; email: string } | null; by: string };
-type Repo = { id: number; owner: string; name: string; private: boolean; default_branch: string; push: Set<string>; refs: Map<string, string>; protected: Set<string>; rulesets?: boolean };
+type Pull = { number: number; head: string; base: string; title: string; body: string; state: "open" | "closed"; reviews: { user: { login: string }; state: string }[] };
+type Repo = {
+  id: number; owner: string; name: string; private: boolean; default_branch: string; push: Set<string>; refs: Map<string, string>;
+  protected: Set<string>; rulesets?: boolean; pulls: Pull[];
+};
 
 const sha1 = (s: string | Buffer) => createHash("sha1").update(s).digest("hex");
 const blobId = (b: Buffer) => sha1(Buffer.concat([Buffer.from(`blob ${b.length}\0`), b]));
@@ -25,6 +29,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
   const stats = { refreshes: 0, calls: [] as { login: string; method: string; path: string }[] };
   let expiresIn = 0; // seconds; 0 = tokens don't expire
   let badSecret = false;
+  const checks = new Map<string, { status: string; conclusion: string | null }[]>(); // commit → check runs
   let authorizeAs: GhUser | null = null;
   let n = 0;
 
@@ -86,7 +91,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
     html_url: `https://github.example/${r.owner}/${r.name}`, owner: { login: r.owner }, permissions: { push: r.push.has(u.login) },
   });
   const addRepo = (owner: string, name: string, push: string[], init = true) => {
-    const r: Repo = { id: ++n, owner, name, private: true, default_branch: "main", push: new Set(push), refs: new Map(), protected: new Set() };
+    const r: Repo = { id: ++n, owner, name, private: true, default_branch: "main", push: new Set(push), refs: new Map(), protected: new Set(), pulls: [] };
     if (init) {
       const b = Buffer.from("# " + name + "\n");
       blobs.set(blobId(b), b);
@@ -262,6 +267,19 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       r.refs.set(body.base, sha);
       return json(201, { sha, commit: { tree: { sha: treeId(out) } } });
     }
+    const pullJson = (pr: Pull) => ({ number: pr.number, html_url: `https://github.example/${r.owner}/${r.name}/pull/${pr.number}`, title: pr.title, draft: false, head: { sha: r.refs.get(pr.head) ?? "" } });
+    if (rest === "/pulls" && req.method === "GET") {
+      const head = url.searchParams.get("head")?.split(":")[1], base = url.searchParams.get("base");
+      return json(200, r.pulls.filter((x) => x.state === "open" && (!head || x.head === head) && (!base || x.base === base)).map(pullJson));
+    }
+    if (rest === "/pulls" && req.method === "POST") {
+      if (!r.refs.has(body.head)) return json(422, { message: "Validation Failed", errors: [{ message: `No commits between ${body.base} and ${body.head}` }] });
+      const pr: Pull = { number: r.pulls.length + 1, head: body.head, base: body.base, title: body.title, body: body.body, state: "open", reviews: [] };
+      r.pulls.push(pr);
+      return json(201, pullJson(pr));
+    }
+    if ((x = /^\/pulls\/(\d+)\/reviews$/.exec(rest))) return json(200, r.pulls[Number(x[1]) - 1]?.reviews ?? []);
+    if ((x = /^\/commits\/([0-9a-f]+)\/check-runs$/.exec(rest))) return json(200, { check_runs: checks.get(x[1]) ?? [] });
     if (rest.startsWith("/contents/") && req.method === "PUT") {
       const path = decodeURIComponent(rest.slice("/contents/".length));
       const b = Buffer.from(body.content, "base64");
@@ -308,6 +326,8 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       repos.set(`${r.owner}/${name}`, r);
       return r;
     },
+    /** A commit's check run (replacing the one before). */
+    check: (sha: string, status: string, conclusion: string | null) => checks.set(sha, [{ status, conclusion }]),
     /** Make the token endpoint fail the way a wrong client secret does. */
     breakClientSecret: (on: boolean) => { badSecret = on; },
     /** The files at a branch's head (utf8). */

@@ -270,12 +270,19 @@ async function git(db: Db) {
   await addCol("deploys", "git_repo", "TEXT");
 }
 
+/** Source control webhooks: the default branch's head GitHub last reported (an older server ignores it). */
+async function gitUpstream(db: Db) {
+  if (db.dialect === "postgres") return db.exec("ALTER TABLE app_repos ADD COLUMN IF NOT EXISTS upstream_sha TEXT");
+  if (!(await cols(db, "app_repos")).includes("upstream_sha")) await db.exec("ALTER TABLE app_repos ADD COLUMN upstream_sha TEXT");
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
   { version: 2, name: "orgs", up: orgs },
   { version: 3, name: "cron_pauses", up: cronPauses },
   { version: 4, name: "git", up: git },
+  { version: 5, name: "git_upstream", up: gitUpstream },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */

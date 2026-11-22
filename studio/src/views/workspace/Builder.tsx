@@ -37,6 +37,8 @@ export interface BuilderHandle {
   running(): boolean;
   /** Focus into the pane (it was just opened). */
   focusIn(): void;
+  /** Opens the pane with a message written for the user to send (or change first). */
+  prefill(text: string): void;
 }
 
 export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, ref }: {
@@ -279,6 +281,12 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
   useImperativeHandle(ref, () => ({
     running: () => tools.running > 0,
     focusIn: () => (sourceRef.current ? chatFocus() : setupFocus()),
+    prefill(text) {
+      setOpen(true, { focus: false });
+      flushSync(() => setInput(text));
+      if (sourceRef.current) chatFocus();
+      else setupFocus();
+    },
     approve(text, signal) {
       return new Promise<boolean>((resolve) => {
         if (signal?.aborted) return resolve(false);

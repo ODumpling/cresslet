@@ -1,4 +1,5 @@
 // Source control (server/git.ts) against a fake GitHub (tests/fake_github.ts).
+import { createHmac } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -542,4 +543,206 @@ test("migration 4 re-runs cleanly, and an older server's deploy rows (no git col
   const r = await t.send("GET", "/v1/apps/shop", tok);
   assert.equal(r.body.deploys[0].id, "dep_old");
   assert.equal(r.body.deploys[0].git, null);
+}));
+
+// ---- pull requests, webhooks, conflicts (#104)
+
+async function linkedShop(t: T) {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "pull" });
+  return { tok, linked: linked.body as { sha: string; files: { path: string; data: string }[] } };
+}
+
+test("pull requests: opened once from a branch as the user, with its review and checks", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/a" });
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/a", baseSha: linked.sha, files: [...linked.files, { path: "a", data: "1" }] });
+  assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/pulls?branch=feat/a", tok)).body, { pull: null });
+  const opened = await t.send("POST", "/v1/apps/shop/git/pulls", tok, { branch: "feat/a" });
+  assert.equal(opened.status, 201, JSON.stringify(opened.body));
+  assert.equal(opened.body.pull.number, 1);
+  assert.equal(opened.body.pull.review, "pending");
+  assert.equal(opened.body.pull.checks, "none");
+  assert.equal(t.gh.repo("octo/shop").pulls[0].base, "main");
+  // Asked again: the same one.
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/pulls", tok, { branch: "feat/a" })).status, 200);
+  assert.equal(t.gh.repo("octo/shop").pulls.length, 1);
+  t.gh.repo("octo/shop").pulls[0].reviews.push({ user: { login: "rev" }, state: "APPROVED" });
+  t.gh.check(s.body.sha, "in_progress", null);
+  let p = (await t.send("GET", "/v1/apps/shop/git/pulls?branch=feat/a", tok)).body.pull;
+  assert.deepEqual([p.review, p.checks], ["approved", "pending"]);
+  t.gh.repo("octo/shop").pulls[0].reviews.push({ user: { login: "rev" }, state: "CHANGES_REQUESTED" });
+  t.gh.check(s.body.sha, "completed", "failure");
+  p = (await t.send("GET", "/v1/apps/shop/git/pulls?branch=feat/a", tok)).body.pull;
+  assert.deepEqual([p.review, p.checks], ["changes_requested", "failure"]);
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/pulls", tok, { branch: "main" })).status, 400);
+}));
+
+test("webhooks: signed pushes to a linked repository's default branch are noted; anything else isn't", withServer(async (t) => {
+  const { tok } = await linkedShop(t);
+  const repo = t.gh.repo("octo/shop");
+  const hook = (payload: unknown, secret = "whsec", event = "push") => {
+    const raw = JSON.stringify(payload);
+    const sig = "sha256=" + createHmac("sha256", secret).update(raw).digest("hex");
+    return t.call("/v1/webhooks/github", { method: "POST", headers: { "x-hub-signature-256": sig, "x-github-event": event }, body: raw });
+  };
+  const after = "f".repeat(40);
+  assert.equal((await hook({ ref: "refs/heads/main", after, repository: { id: repo.id } }, "wrong")).status, 401);
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.repo.upstreamSha, null);
+  assert.equal((await hook({ zen: "hi" }, "whsec", "ping")).status, 200);
+  const other = await hook({ ref: "refs/heads/feat/x", after, repository: { id: repo.id } });
+  assert.equal((await other.json()).apps, 0); // not the default branch
+  const ok = await hook({ ref: "refs/heads/main", after, repository: { id: repo.id } });
+  assert.deepEqual(await ok.json(), { ok: true, apps: 1 });
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.repo.upstreamSha, after);
+}, { webhookSecret: "whsec" }));
+
+test("webhooks off: 404", withServer(async (t) => {
+  assert.equal((await t.call("/v1/webhooks/github", { method: "POST", body: "{}" })).status, 404);
+}));
+
+test("conflicts: main merged into the branch with markers; resolved and committed with main as a parent, the deploy merge fast-forwards", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const base = [...linked.files, { path: "app.txt", data: "hello\n" }, { path: "keep.txt", data: "k\n" }];
+  const m0 = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "main", baseSha: linked.sha, files: base });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/c" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/c", baseSha: m0.body.sha, files: base.map((f) => (f.path === "app.txt" ? { ...f, data: "hello from the branch\n" } : f)).concat([{ path: "new.txt", data: "n\n" }]),
+  });
+  const theirs = t.gh.write(t.gh.repo("octo/shop"), "main", { "app.txt": "hello from main\n", "keep.txt": null, "upstream.txt": "u\n" });
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: "feat/c" })).body.error, "merge_conflict");
+
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/c", tok);
+  assert.equal(cf.status, 200, JSON.stringify(cf.body));
+  assert.deepEqual(cf.body.conflicts, ["app.txt"]);
+  assert.equal(cf.body.intoSha, theirs);
+  assert.equal(cf.body.headSha, mine.body.sha);
+  const files = Object.fromEntries(cf.body.files.map((f: { path: string; data: string }) => [f.path, f.data]));
+  assert.equal(files["app.txt"], "<<<<<<< feat/c\nhello from the branch\n=======\nhello from main\n>>>>>>> main\n");
+  assert.equal(files["new.txt"], "n\n"); // the branch's own
+  assert.equal(files["upstream.txt"], "u\n"); // main's own
+  assert.equal(files["keep.txt"], undefined); // main deleted it, the branch didn't touch it
+
+  // Resolved, committed as a merge of main into the branch; then the deploy's merge is a fast-forward.
+  const resolved = cf.body.files.map((f: { path: string; data: string }) => (f.path === "app.txt" ? { ...f, data: "hello from both\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/c", baseSha: mine.body.sha, files: resolved, mergeParent: theirs });
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  assert.deepEqual(t.gh.commit(s.body.sha).parents, [mine.body.sha, theirs]);
+  const m = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: "feat/c" });
+  assert.equal(m.status, 200, JSON.stringify(m.body));
+  assert.equal(m.body.fastForward, true);
+  assert.equal(t.gh.files("octo/shop")["app.txt"], "hello from both\n");
+  assert.equal(t.gh.files("octo/shop")["upstream.txt"], "u\n");
+}));
+
+test("conflicts in a subfolder app: the resolved merge keeps the default branch's changes elsewhere; ones the studio can't resolve are refused", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const repo = t.gh.repo("octo/shop");
+  t.gh.write(repo, "main", { "app/app.txt": "hello\n", "app/.env": "VITE_A=1\n", "other/x.txt": "x\n" });
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", subdir: "app", initialSync: "pull" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/c" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/c", baseSha: linked.body.sha, files: linked.body.files.map((f: { path: string }) => (f.path === "app.txt" ? { ...f, data: "mine\n" } : f)),
+  });
+  // main: the same file (a conflict to resolve), plus a file outside the app and its .env (merged by themselves).
+  const theirs = t.gh.write(repo, "main", { "app/app.txt": "theirs\n", "other/x.txt": "x2\n", "app/.env": "VITE_A=2\nSECRET=s\n" });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/c", tok);
+  assert.equal(cf.status, 200, JSON.stringify(cf.body));
+  assert.deepEqual(cf.body.conflicts, ["app.txt"]);
+  assert.equal(cf.body.files.find((f: { path: string }) => f.path === ".env").data, "VITE_A=2\n"); // main's, sanitized
+  const resolved = cf.body.files.map((f: { path: string }) => (f.path === "app.txt" ? { ...f, data: "both\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/c", baseSha: mine.body.sha, files: resolved, mergeParent: theirs });
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  const m = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: "feat/c" });
+  assert.equal(m.body.fastForward, true);
+  const files = t.gh.files("octo/shop");
+  assert.equal(files["app/app.txt"], "both\n");
+  assert.equal(files["other/x.txt"], "x2\n"); // main's change outside the app kept
+  assert.equal(files["app/.env"], "VITE_A=2\nSECRET=s\n"); // main's own .env, secret line and all
+
+  // Both sides change a file outside the app: not resolvable here.
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/d" });
+  await t.gh.write(repo, "feat/d", { "other/x.txt": "branch\n" });
+  t.gh.write(repo, "main", { "other/x.txt": "main\n" });
+  const un = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/d", tok);
+  assert.equal(un.status, 409);
+  assert.equal(un.body.error, "merge_unresolvable");
+  assert.deepEqual(un.body.paths, ["other/x.txt"]);
+  assert.equal((await t.send("GET", "/v1/apps/shop/git/conflicts?branch=main", tok)).status, 400);
+}));
+
+test("conflict resolution: a .env edited meanwhile, and binary files (NUL bytes) both sides changed, are refused", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const repo = t.gh.repo("octo/shop");
+  t.gh.write(repo, "main", { "a.txt": "a\n", ".env": "VITE_A=1\n", "img.bin": "x\u0000y" });
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "pull" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/e" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/e", baseSha: linked.body.sha, files: linked.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "mine\n" } : f)),
+  });
+  const theirs = t.gh.write(repo, "main", { "a.txt": "theirs\n" });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/e", tok);
+  assert.deepEqual(cf.body.conflicts, ["a.txt"]);
+  const edited = cf.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "both\n" } : f.path === ".env" ? { ...f, data: "VITE_A=9\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/e", baseSha: mine.body.sha, files: edited, mergeParent: theirs });
+  assert.equal(s.status, 409);
+  assert.equal(s.body.error, "merge_dotenv_changed");
+
+  // A binary file both sides changed: no markers, refused.
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/b" });
+  t.gh.write(repo, "feat/b", { "img.bin": "x\u0000mine" });
+  t.gh.write(repo, "main", { "img.bin": "x\u0000theirs" });
+  const bin = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/b", tok);
+  assert.equal(bin.body.error, "merge_unresolvable");
+  assert.deepEqual(bin.body.paths, ["img.bin"]);
+}));
+
+test("conflict resolution: dotenv files deleted on one side are handled both ways", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const repo = t.gh.repo("octo/shop");
+  t.gh.write(repo, "main", { "a.txt": "a\n", ".env": "VITE_A=1\n" });
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "pull" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/g" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/g", baseSha: linked.body.sha, files: linked.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "mine\n" } : f)),
+  });
+  // main deletes .env (and conflicts on a.txt): the workspace keeps an empty (private-only) one: fine.
+  const theirs = t.gh.write(repo, "main", { "a.txt": "theirs\n", ".env": null });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/g", tok);
+  assert.equal(cf.body.files.some((f: { path: string }) => f.path === ".env"), false);
+  const files = [...cf.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "both\n" } : f)), { path: ".env", data: "" }];
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/g", baseSha: mine.body.sha, files, mergeParent: theirs });
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  assert.equal(t.gh.files("octo/shop", "feat/g")[".env"], undefined);
+}));
+
+test("conflict resolution: a .env deleted in the workspace while merging is refused", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const repo = t.gh.repo("octo/shop");
+  t.gh.write(repo, "main", { "a.txt": "a\n", ".env": "VITE_A=1\n" });
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "pull" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/h" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/h", baseSha: linked.body.sha, files: linked.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "mine\n" } : f)),
+  });
+  const theirs = t.gh.write(repo, "main", { "a.txt": "theirs\n" });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/h", tok);
+  const files = cf.body.files.filter((f: { path: string }) => f.path !== ".env").map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "both\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/h", baseSha: mine.body.sha, files, mergeParent: theirs });
+  assert.equal(s.body.error, "merge_dotenv_changed");
 }));
