@@ -268,7 +268,10 @@ export class Engine {
       // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
       beforeDeploy: async (log, signal, app) => {
         if (this.git.connected && (!app || app === project.deploy?.name)) {
-          const { files, ...p } = await this.git.prepareDeploy(log, signal, { turn: () => cb.builderTurn(), running: () => cb.builderRunning() });
+          // Where it came from, as it was asked for (a builder command's, approved; or by hand): not when its queued
+          // step runs, when another command of a request started since may be running.
+          const fromBuilder = cb.builderRunning();
+          const { files, ...p } = await this.git.prepareDeploy(log, signal, { turn: () => cb.builderTurn(), running: () => fromBuilder });
           return { ...p, source: sourceDigest(files) };
         }
         // Linked to a repository elsewhere (another browser, the CLI), not here: deploying this workspace would skip it.

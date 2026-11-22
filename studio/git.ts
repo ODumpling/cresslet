@@ -344,6 +344,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * of its own, and resolves to the commit to build and record. Throws, before anything is built, on a conflict
      * or a protected branch.
      */
+    /** `builder.running`: the deploy was asked for by one of the AI builder's commands (as opposed to by hand). */
     prepareDeploy: (log: (line: string) => void = () => {}, signal?: AbortSignal, builder?: { turn: () => { title: string; prompt: string } | null; running: () => boolean }) => serial(async (): Promise<Provenance> => {
       signal?.throwIfAborted();
       // The AI builder's request, as of now (this step may have waited for others): a deploy from one of its commands
