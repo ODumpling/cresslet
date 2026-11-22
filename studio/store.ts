@@ -1,6 +1,7 @@
 // Browser-local project storage (IndexedDB). A project = { id, name, template, files, deploy, updatedAt }.
 // `files` is a flat map path → string | Uint8Array, excluding node_modules / build output.
 import type { FileSystemTree } from "./vendor/cresslet-container/cresslet-container.js";
+import type { ProjectGitState } from "./git.ts";
 
 export type Files = Record<string, string | Uint8Array>;
 /** Where the project was last deployed. `deployKey` (anonymous apps) lives in localStorage, never in IndexedDB. */
@@ -17,6 +18,8 @@ export interface Project {
   deploy: Deploy | null;
   /** false: opened from a deployed app's source; nothing runs until the user says so. */
   trusted?: boolean;
+  /** Its app's repository and the branch it's on (source control, studio/git.ts). No tokens. */
+  git?: ProjectGitState;
   /** Set by `projects.put`. */
   updatedAt?: number;
 }

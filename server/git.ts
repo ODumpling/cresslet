@@ -65,7 +65,8 @@ export interface SourceControlProvider {
   readTree(r: Repo, sha: string, subdir: string): Promise<DeployFile[]>;
   /** One commit on `branch` (whose head must still be `baseSha`) making `subdir` hold exactly `files`. */
   commitTree(r: Repo, input: { branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author }): Promise<{ sha: string; changed: boolean }>;
-  merge(r: Repo, input: { into: string; head: string; message: string }): Promise<MergeResult>;
+  /** `expect`: the head commit the caller built from; if the branch moved past it, 409 and nothing merged. */
+  merge(r: Repo, input: { into: string; head: string; message: string; expect?: string }): Promise<MergeResult>;
 }
 
 /** GitHub's REST API with one user's token. `unauthorized`: GitHub rejected the token (revoked meanwhile). */
@@ -266,10 +267,13 @@ export class GitHub implements SourceControlProvider {
     return { sha: commit.sha, changed: true };
   }
 
-  async merge(r: Repo, input: { into: string; head: string; message: string }): Promise<MergeResult> {
+  async merge(r: Repo, input: { into: string; head: string; message: string; expect?: string }): Promise<MergeResult> {
     const [intoSha, headSha] = await Promise.all([this.branchHead(r, input.into), this.branchHead(r, input.head)]);
     if (!intoSha) throw new HttpError(404, `no branch ${input.into} on GitHub`, "branch_not_found");
     if (!headSha) throw new HttpError(404, `no branch ${input.head} on GitHub`, "branch_not_found");
+    if (input.expect && headSha !== input.expect) {
+      throw Object.assign(conflict(`${input.head} moved on GitHub since it was synced: pull it first`), { extra: { headSha } });
+    }
     if (intoSha === headSha) return { mergedSha: intoSha, headSha, fastForward: true, treeChanged: false };
     const cmp = await this.ok<{ status: string }>("GET", this.#path(r, `/compare/${intoSha}...${headSha}`));
     if (cmp.status === "identical") return { mergedSha: intoSha, headSha, fastForward: true, treeChanged: false };
@@ -770,10 +774,11 @@ export function gitRoutes(
   // files come back for the workspace to build from.
   app.post("/apps/:name/git/merge", async (c) => {
     const { r, repo, client } = await linked(c, "deploy");
-    const input = await body<{ branch?: unknown; into?: unknown; message?: unknown } | null>(c) ?? {};
+    const input = await body<{ branch?: unknown; into?: unknown; message?: unknown; headSha?: unknown } | null>(c) ?? {};
     const branch = branchName(input.branch);
     const into = input.into != null ? branchName(input.into, "into") : repo.default_branch;
-    const m = await client.merge(r, { into, head: branch, message: message(input.message, `Merge ${branch} into ${into}`) });
+    const expect = input.headSha != null ? shaOf(input.headSha, "headSha") : undefined;
+    const m = await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
     if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha }).catch((e) => console.error(e));
     // The merge happened: from here on it's reported, whatever else fails. Its files (when they differ from the
     // branch's) before the branch goes, so a failure to load them leaves the branch to retry from.

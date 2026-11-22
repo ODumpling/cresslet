@@ -7,7 +7,8 @@ import type { Container } from "../../../vendor/cresslet-container/cresslet-cont
 import { projects, type Deploy, type StoredProject } from "../../../store.ts";
 import type { CressletConfig } from "../../../cresslet-plugin.ts";
 import type * as API from "../../../api-types.ts";
-import { api, errorMessage, mustLogIn } from "../../lib/api.ts";
+import { api, errorMessage, meta, mustLogIn } from "../../lib/api.ts";
+import type { ProjectGitState } from "../../../git.ts";
 import { viewShown } from "../../lib/focus.ts";
 import { useView } from "../../lib/hooks.ts";
 import { projectsChanged } from "../../lib/projects.ts";
@@ -16,6 +17,7 @@ import { toast } from "../../lib/toast.tsx";
 import { ExtLink, Icon, SrOnly } from "../../ui/icons.tsx";
 import { Builder, type BuilderHandle } from "./Builder.tsx";
 import { DeployDialog, type DeployDialogHandle } from "./DeployDialog.tsx";
+import { GitDialog, type GitDialogHandle } from "./GitDialog.tsx";
 import { Engine, type TreeItem } from "./engine.ts";
 
 /** The project, once loaded; keyed by its id, so opening another project starts over (and disposes of this one). */
@@ -85,6 +87,10 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const [container, setContainer] = useState<Container | null>(null);
   const [preview, setPreview] = useState<{ ready: boolean; spinner: boolean; msg: ReactNode }>({ ready: false, spinner: true, msg: "Booting runtime…" });
   const [previewPath, setPreviewPath] = useState("/");
+  // Source control: whether this server has it, and the project's repository and branch.
+  const [gitOn, setGitOn] = useState(false);
+  const [gitState, setGitState] = useState<ProjectGitState | undefined>(project.git);
+  const gitDialog = useRef<GitDialogHandle>(null);
 
   const editorEl = useRef<HTMLDivElement>(null), termEl = useRef<HTMLDivElement>(null), drawerEl = useRef<HTMLElement>(null);
   const iframe = useRef<HTMLIFrameElement>(null), previewMsg = useRef<HTMLParagraphElement>(null), previewEmpty = useRef<HTMLDivElement>(null);
@@ -131,6 +137,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         if (project.trusted !== false) setPreview((p) => ({ ...p, msg: "Installing dependencies…" }));
       },
       deployed: setDeploy,
+      git: setGitState,
+      notice: (text) => toast(text, 8000),
       builderRunning: () => builder.current?.running() ?? false,
       approveDeploy: (text, signal) => builder.current?.approve(text, signal) ?? Promise.resolve(false),
     }, editorEl.current!); // mounted
@@ -142,6 +150,23 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       projectsChanged(); // its edits and when it was saved
     };
   }, [project, loadPreview]);
+
+  useEffect(() => {
+    let live = true;
+    void meta().then((m) => live && setGitOn(!!m.git?.github));
+    return () => void (live = false);
+  }, []);
+  // Back from connecting GitHub (server/git.ts redirects here with the outcome in the hash): once the project runs,
+  // the dialog opens again where it left off.
+  useEffect(() => {
+    if (!container) return;
+    const h = new URLSearchParams(location.hash.slice(1));
+    const ok = h.get("cresslet_git"), err = h.get("cresslet_git_error");
+    if (!ok && !err) return;
+    history.replaceState(null, "", location.pathname + location.search);
+    if (err) toast(`GitHub didn't connect: ${err}`, 10000);
+    else gitDialog.current?.open();
+  }, [container]);
 
   // Opened from a deployed app's source: its code (and npm deps, and a deploy's build: PostCSS/Tailwind plugins)
   // would run in this browser. Nothing runs, Deploy and the AI builder included, until the user says so.
@@ -219,6 +244,17 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (focus) document.getElementById(`tab-${t}`)?.focus();
   }
 
+  /** A new app's address, reserved with nothing deployed (to link a repository first). */
+  async function reserveApp(): Promise<string | null> {
+    const name = await dialog.current!.ask({ reserve: true }); // mounted
+    if (!name) return null;
+    const r = await api<{ app: { name: string; url: string } }>("/v1/apps", { method: "POST", body: JSON.stringify({ name }) });
+    project.deploy = { name: r.app.name, url: r.app.url };
+    await projects.put(project);
+    setDeploy(project.deploy);
+    return r.app.name;
+  }
+
   async function onDeploy() {
     const btn = deployBtn.current!, e = engine.current;
     if (!e?.cresslet) return;
@@ -252,7 +288,11 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       toast(<span>Deployed: <ExtLink href={r.app.url}>{r.app.url}</ExtLink></span>, 10000);
     } catch (err) {
       setDeployLog((l) => l + `\nerror: ${errorMessage(err)}\n`);
-      toast(`Deploy failed: ${errorMessage(err)}`, 10000);
+      // A merge that can't go through (conflict, protected branch): nothing was deployed; a pull request can do it.
+      const compare = (err as { compare?: string }).compare;
+      toast(compare
+        ? <span>{`Not deployed: ${errorMessage(err).split(". ")[0]}. `}<ExtLink href={compare}>Open a pull request</ExtLink></span>
+        : `Deploy failed: ${errorMessage(err)}`, 12000);
     } finally {
       setDeploying(false);
     }
@@ -281,6 +321,17 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             <Icon name="globe" /><span className="deploy-url">{deploy.url.replace(/^https?:\/\//, "")}</span><SrOnly> (live app, opens in a new tab)</SrOnly>
           </a>
         ) : null}
+        {gitOn && token && container && !locked ? (
+          gitState ? (
+            <button className="btn git-pill" id="git-btn" type="button" title={`${gitState.owner}/${gitState.repo}`} onClick={() => gitDialog.current?.open()}>
+              <Icon name="branch" /><span id="git-btn-branch">{gitState.activeBranch}</span>
+              {gitState.dirty ? <span className="git-dirty" aria-hidden="true" /> : null}
+              <SrOnly>{gitState.dirty ? " (changes not pushed)" : ""}</SrOnly><span aria-hidden="true">· Sync</span><SrOnly>: source control</SrOnly>
+            </button>
+          ) : (
+            <button className="btn" id="git-btn" type="button" onClick={() => gitDialog.current?.open()}><Icon name="branch" />Connect Git</button>
+          )
+        ) : null}
         <button className="btn" id="builder-btn" type="button" ref={builderBtn} aria-expanded={chat} aria-controls="builder" hidden={!container} onClick={() => setBuilderOpen(!chat)}>
           <Icon name="sparkles" />AI builder
         </button>
@@ -295,10 +346,13 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       <main id="workspace" className="workspace" aria-labelledby="workspace-title" data-view={view} data-drawer={drawer ? "open" : ""} data-builder={container && chat ? "open" : ""}>
         <h1 className="sr-only" id="workspace-title" tabIndex={-1}>{`${name}: AI builder, preview and code`}</h1>
         {container ? (
-          <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen}
+          <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
             devLog={() => engine.current?.termOut ?? ""}
             // A file the builder changed is the one in the editor: show the new contents.
-            onChange={(path) => path === engine.current?.current && engine.current.openFile(path)} />
+            onChange={(path) => {
+              engine.current?.changed(); // counted at once (the watcher's report may fall in a pull's quiet window)
+              return path === engine.current?.current && engine.current.openFile(path);
+            }} />
         ) : null}
         <section className="pane files" id="files-pane" aria-labelledby="files-title" hidden={view !== "code"}>
           <div className="pane-head">
@@ -373,6 +427,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         </section>
       </main>
       <DeployDialog ref={dialog} />
+      <GitDialog ref={gitDialog} git={engine.current?.git ?? null} app={deploy?.name}
+        files={() => engine.current!.sources()} hydrate={(f) => engine.current!.hydrate(f)} reserve={reserveApp} />
     </>
   );
 }

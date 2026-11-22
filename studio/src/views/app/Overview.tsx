@@ -99,6 +99,7 @@ function Body({ m }: { m: API.Metrics }) {
           <KvList pairs={[
             ["URL", <ExtLink href={a.url}>{a.url.replace(/^https?:\/\//, "")}</ExtLink>],
             ["Domains", domains.length ? <span>{domains.map((x, i) => <span key={x.domain}>{i ? ", " : null}<ExtLink href={`https://${x.domain}`}>{x.domain}</ExtLink></span>)}</span> : "—"],
+            ["Repository", d.repo ? <ExtLink href={d.repo.url} id="app-repo">{d.repo.fullName}</ExtLink> : "Not linked"],
             ["Server", a.config?.server ? `Yes${a.config.crons?.length ? ` · ${plural(a.config.crons.length, "cron")}` : ""}` : "Static only"],
             ["Secrets", <Link to="/apps/$name/secrets" params={{ name }}>{d.secrets.length ? plural(d.secrets.length, "secret") : "None"}</Link>],
             ["Egress", a.egress === null ? "Any public host" : a.egress.length ? a.egress.join(", ") : "None"],
@@ -188,7 +189,11 @@ function Deploys({ manage }: { manage: boolean }) {
                   <td>
                     <span className="mono">{x.id}</span>
                     {x.current ? <span className="badge">live</span> : null}
-                    <span className="sub"><TimeAgo iso={x.createdAt} />{` · ${fmtBytes(x.bytes)} · ${plural(x.files, "file")} · via ${x.source}`}</span>
+                    <span className="sub"><TimeAgo iso={x.createdAt} />{` · ${fmtBytes(x.bytes)} · ${plural(x.files, "file")} · via ${x.source}`}
+                      {x.git ? <>{" · "}{x.git.url
+                        ? <ExtLink className="mono git-ref" href={x.git.url} title={`Built from ${x.git.repo} ${x.git.branch ?? ""} @ ${x.git.sha}`}>{`${x.git.branch ?? "commit"} @ ${x.git.sha.slice(0, 7)}`}</ExtLink>
+                        : <span className="mono git-ref">{`${x.git.branch ?? "commit"} @ ${x.git.sha.slice(0, 7)}`}</span>}</> : null}
+                    </span>
                   </td>
                   <td className="actions">
                     {manage && !x.current ? (

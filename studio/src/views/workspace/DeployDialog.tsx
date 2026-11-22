@@ -4,19 +4,24 @@ import { Icon } from "../../ui/icons.tsx";
 import { SlugField, useSlug } from "../../ui/SlugField.tsx";
 
 export interface DeployDialogHandle {
-  /** Asks for a new app's address (a generated one to start with). Resolves to the name, or null if cancelled. */
-  ask(): Promise<string | null>;
+  /**
+   * Asks for a new app's address (a generated one to start with). Resolves to the name, or null if cancelled.
+   * `reserve`: only the address (source control links a repository before the first deploy).
+   */
+  ask(opts?: { reserve?: boolean }): Promise<string | null>;
 }
 
 export function DeployDialog({ ref }: { ref: Ref<DeployDialogHandle> }) {
   const dlg = useRef<HTMLDialogElement>(null);
   const slug = useSlug("app");
   const [checking, setChecking] = useState(false);
+  const [reserving, setReserving] = useState(false);
   // The ask in progress: its number (a later ask supersedes it), what was picked, and how to answer it.
   const asking = useRef({ n: 0, picked: null as string | null, resolve: null as ((name: string | null) => void) | null });
 
   useImperativeHandle(ref, () => ({
-    ask() {
+    ask(opts) {
+      setReserving(!!opts?.reserve);
       const a = asking.current;
       a.n++;
       a.resolve?.(null);
@@ -58,13 +63,15 @@ export function DeployDialog({ ref }: { ref: Ref<DeployDialogHandle> }) {
       }}>
       <form className="form" id="deploy-form" method="dialog" onSubmit={(e) => void submit(e)}>
         <div>
-          <h2 id="deploy-dialog-title">Deploy a new app</h2>
-          <p className="muted" id="deploy-dialog-desc">It goes live at this address. Keep the one we picked or choose your own; it stays the same for every later deploy.</p>
+          <h2 id="deploy-dialog-title">{reserving ? "Choose the app's address" : "Deploy a new app"}</h2>
+          <p className="muted" id="deploy-dialog-desc">{reserving
+            ? "The app gets this address; nothing goes live until you deploy. Keep the one we picked or choose your own."
+            : "It goes live at this address. Keep the one we picked or choose your own; it stays the same for every later deploy."}</p>
         </div>
         <SlugField slug={slug} id="deploy-name" hint="Lowercase letters, numbers and single dashes, up to 40." />
         <div className="row">
           <button className="btn" type="button" id="deploy-cancel" onClick={() => dlg.current?.close()}>Cancel</button>
-          <button className="btn primary" type="submit" id="deploy-confirm" disabled={checking}><Icon name="rocket" />Deploy</button>
+          <button className="btn primary" type="submit" id="deploy-confirm" disabled={checking}>{reserving ? <><Icon name="globe" />Reserve</> : <><Icon name="rocket" />Deploy</>}</button>
         </div>
       </form>
     </dialog>

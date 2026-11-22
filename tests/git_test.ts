@@ -435,6 +435,27 @@ test("a refresh GitHub refuses for the server's own reasons (wrong client secret
   assert.equal((await t.send("GET", "/v1/git/github/repos", tok)).status, 200);
 }));
 
+test("an app's address can be reserved with nothing deployed, then linked; a merge refuses a branch that moved past what was synced", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  const r = await t.send("POST", "/v1/apps", tok, { name: "fresh" });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.app.currentDeployId, null);
+  assert.equal((await t.send("POST", "/v1/apps", tok, { name: "fresh" })).status, 409);
+  assert.equal((await t.send("POST", "/v1/apps", tok, { name: "Bad Name" })).status, 400);
+  assert.equal((await t.send("POST", "/v1/apps", undefined, { name: "anon" })).status, 401);
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "fresh", ["octo"]);
+  const linked = await t.send("POST", "/v1/apps/fresh/git/connect", tok, { owner: "octo", repo: "fresh", initialSync: "push", files: [{ path: "index.html", data: "x" }] });
+  assert.equal(linked.status, 201);
+  await t.send("POST", "/v1/apps/fresh/git/branches", tok, { name: "feat/a" });
+  const s1 = await t.send("POST", "/v1/apps/fresh/git/sync", tok, { branch: "feat/a", baseSha: linked.body.sha, files: [{ path: "index.html", data: "y" }] });
+  t.gh.write(t.gh.repo("octo/fresh"), "feat/a", { "late.txt": "pushed meanwhile" });
+  const m = await t.send("POST", "/v1/apps/fresh/git/merge", tok, { branch: "feat/a", headSha: s1.body.sha });
+  assert.equal(m.status, 409);
+  assert.equal(m.body.error, "conflict");
+  assert.equal(t.gh.repo("octo/fresh").refs.get("main"), linked.body.sha); // nothing merged
+}));
+
 test("collaborators act with their own GitHub token, never the owner's", withServer(async (t) => {
   const owner = await t.account("own@b.co");
   await t.deploy(owner, "shop");
@@ -481,7 +502,7 @@ test("deploys record the commit they were built from", withServer(async (t) => {
   assert.equal(d.status, 201);
   await t.deploy(tok, "shop");
   const app = await t.send("GET", "/v1/apps/shop", tok);
-  assert.deepEqual(app.body.deploys.map((x: { git: unknown }) => x.git), [null, { sha, branch: "main", repo: "octo/shop" }]);
+  assert.deepEqual(app.body.deploys.map((x: { git: unknown }) => x.git), [null, { sha, branch: "main", repo: "octo/shop", url: `${t.gh.base}/octo/shop/commit/${sha}` }]);
   assert.equal(app.body.repo, null);
   for (const git of [{ sha: "nope" }, { sha, branch: "a b" }, { sha, repo: "no-slash" }, "x"]) {
     assert.equal((await t.deploy(tok, "shop", { git })).status, 400, JSON.stringify(git));

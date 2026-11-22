@@ -426,3 +426,280 @@ test("cresslet deploy from the builder: asks first, deploys to the app it named,
     globalThis.fetch = realFetch;
   }
 });
+
+// ---- source control (studio/git.ts): branch first, merge then deploy
+
+const gitMod = "../studio/git.ts"; // browser module: typed by studio/tsconfig.json, not this program
+const { createGitWorkspace, branchSlug, commitMessage } = await import(gitMod);
+
+/** A linked project over a scripted /v1/apps/:name/git API: the calls it made, its state, what was loaded. */
+function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true, hydrate = null as null | ((f: Json) => Promise<void>), duringSync = () => {} } = {}) {
+  const calls: { path: string; body?: Json }[] = [];
+  const hydrated: Json[] = [];
+  let state: Json = {
+    provider: "github", owner: "octo", repo: "shop", url: "https://github.example/octo/shop", defaultBranch: "main",
+    activeBranch: onDefault ? "main" : "feat/x", baseSha: "a".repeat(40), headSha: "a".repeat(40), dirty: false,
+  };
+  let n = 0;
+  const api = async (path: string, init: Json = {}) => {
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path.endsWith("/git/branches")) {
+      if (taken.includes(body.name)) throw Object.assign(new Error("exists"), { status: 409, code: "branch_exists" });
+      return { branch: { name: body.name, sha: body.from } };
+    }
+    if (path.endsWith("/git/sync")) {
+      duringSync();
+      if (body.branch === "gone") throw Object.assign(new Error("no branch"), { status: 404, code: "branch_not_found" });
+      return { branch: body.branch, sha: String(++n).padStart(40, "b"), changed: true };
+    }
+    if (path.endsWith("/git/merge")) {
+      if (merge?.error) throw Object.assign(new Error(merge.error), { status: merge.status, code: merge.error, body: merge.body ?? {} });
+      return merge ?? { mergedSha: "c".repeat(40), fastForward: true, treeChanged: false, branch: "main", deletedBranch: true };
+    }
+    if (path.includes("/git/tree")) return { sha: "d".repeat(40), files: [{ path: "a.txt", data: "pulled" }] };
+    throw new Error(`unexpected ${path}`);
+  };
+  const rev = { n: 0 };
+  const git = createGitWorkspace({
+    app: () => "shop", api, state: () => state, save: (s: Json) => void (state = s),
+    files: async () => [{ path: "index.html", data: "<h1>hi</h1>" }],
+    hydrate: hydrate ?? (async (f: Json) => void hydrated.push(f)),
+    revision: () => rev.n,
+  });
+  return { git, calls, hydrated, rev, get state() { return state; }, set state(s: Json) { state = s; } };
+}
+
+test("git: branch names and commit messages come from the prompt", () => {
+  assert.equal(branchSlug("Add a dark-mode toggle to the header, please!"), "add-a-dark-mode-toggle-to-the-header");
+  assert.equal(branchSlug("¿Qué?"), "que");
+  assert.equal(branchSlug("!!!"), "change");
+  assert.equal(commitMessage("  Fix the footer\nand more"), "Fix the footer");
+  assert.equal(commitMessage("x".repeat(100)).length, 72);
+});
+
+test("AI builder on a linked app: a change cuts a feature branch before the first write; follow-ups stay on it; questions don't branch", async () => {
+  const c = fakeContainer({ "src/App.tsx": "<h1>Todos</h1>" });
+  const g = fakeGit({ taken: ["feat/rename-the-heading"] });
+  let prompt = "Rename the heading";
+  const order: string[] = [];
+  const tools = createTools(c, {
+    beforeChange: async () => void (await g.git.ensureBranch("feat", prompt), order.push("branch")),
+    onChange: (p: string) => order.push(`change ${p}`),
+  });
+  // Reading isn't a change: no branch.
+  assert.equal((await tools.execute("read_file", { path: "src/App.tsx" })).error, undefined);
+  assert.equal((await tools.execute("list_files", {})).error, undefined);
+  assert.equal(g.calls.length, 0);
+  assert.equal(g.state.activeBranch, "main");
+
+  await tools.execute("edit_file", { path: "src/App.tsx", old_text: "Todos", new_text: "Tasks" });
+  assert.deepEqual(order, ["branch", "change src/App.tsx"]); // the branch first
+  assert.deepEqual(g.calls.map((x) => x.body?.name), ["feat/rename-the-heading", "feat/rename-the-heading-2"]); // taken → -2
+  assert.equal(g.calls[1].body.from, "a".repeat(40)); // from the workspace's commit
+  assert.equal(g.state.activeBranch, "feat/rename-the-heading-2");
+  assert.equal(c.files.get("/project/src/App.tsx"), "<h1>Tasks</h1>");
+
+  // A follow-up in the same chat stays on that branch.
+  prompt = "Now make it blue";
+  await tools.execute("write_file", { path: "src/style.css", content: "h1{color:blue}" });
+  await tools.execute("delete_file", { path: "src/style.css" });
+  assert.equal(g.calls.length, 2);
+  assert.equal(g.state.activeBranch, "feat/rename-the-heading-2");
+
+  // Branching fails: the file isn't changed and the tool says why.
+  const failing = createTools(c, { beforeChange: async () => { throw new Error("GitHub is down"); } });
+  const r = await failing.execute("write_file", { path: "x.txt", content: "x" });
+  assert.equal(r.error, true);
+  assert.match(r.text, /GitHub is down/);
+  assert.equal(c.files.has("/project/x.txt"), false);
+});
+
+test("AI builder: the repository and branch go to Claude with each message", async () => {
+  const api = fakeClient([{ text: ["ok"], content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }]);
+  const agent = createAgent({ client: async () => api, tools: createTools(fakeContainer()), context: () => "[Source control: on feat/x]" });
+  await agent.send("hi");
+  assert.deepEqual(api.calls[0].params.messages[0].content, [{ type: "text", text: "[Source control: on feat/x]" }, { type: "text", text: "hi" }]);
+  assert.equal(api.calls[0].params.system, SYSTEM); // the cached prefix doesn't change
+});
+
+test("deploy on a linked app: commit the branch, merge it into main, build main (loading its files if main moved)", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.dirty = true;
+  const prov = await g.git.prepareDeploy();
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1]), ["/sync", "/merge"]);
+  assert.equal(g.calls[0].body.branch, "feat/x");
+  assert.deepEqual(g.calls[0].body.files, [{ path: "index.html", data: "<h1>hi</h1>" }]);
+  assert.deepEqual(prov, { sha: "c".repeat(40), branch: "main", repo: "octo/shop", files: [{ path: "index.html", data: "<h1>hi</h1>" }] });
+  assert.equal(g.state.activeBranch, "main"); // back on main, at the merge
+  assert.equal(g.state.headSha, "c".repeat(40));
+  assert.equal(g.state.dirty, false);
+  assert.deepEqual(g.hydrated, []);
+
+  // main had commits of its own: its merged files are loaded before the build.
+  const moved = fakeGit({ onDefault: false, merge: { mergedSha: "e".repeat(40), fastForward: false, treeChanged: true, files: [{ path: "NOTES.md", data: "up" }] } });
+  const movedProv = await moved.git.prepareDeploy();
+  assert.deepEqual(moved.hydrated, [[{ path: "NOTES.md", data: "up" }]]);
+  assert.deepEqual(movedProv.files, [{ path: "NOTES.md", data: "up" }]); // the merge's own files, not the workspace after npm install
+
+  // On main already: just the commit.
+  const main = fakeGit();
+  const p2 = await main.git.prepareDeploy();
+  assert.deepEqual(main.calls.map((x) => x.path.split("/git")[1]), ["/sync"]);
+  assert.equal(p2.branch, "main");
+});
+
+test("deploy on a linked app: a conflict or a protected main stops it, with a pull request link", async () => {
+  const cf = fakeGit({ onDefault: false, merge: { error: "merge_conflict", status: 409, body: { paths: ["src/App.tsx"] } } });
+  await assert.rejects(cf.git.prepareDeploy(), (e: Json) => {
+    assert.match(e.message, /doesn't merge cleanly.*src\/App\.tsx.*Nothing was deployed/);
+    assert.equal(e.compare, "https://github.example/octo/shop/compare/main...feat%2Fx?expand=1");
+    return true;
+  });
+  assert.equal(cf.state.activeBranch, "feat/x"); // still on the branch, to fix it
+  const big = fakeGit({ onDefault: false, merge: { mergedSha: "e".repeat(40), fastForward: false, treeChanged: true, filesError: "too many files" } });
+  await assert.rejects(big.git.prepareDeploy(), /couldn't load the result \(too many files\)\. Nothing was deployed/);
+  assert.equal(big.state.activeBranch, "feat/x");
+  const pr = fakeGit({ onDefault: false, merge: { error: "branch_protected", status: 422 } });
+  await assert.rejects(pr.git.prepareDeploy(), /protected on GitHub.*pull request/);
+});
+
+test("git: steps run one at a time; switching branches pushes changes first; New chat's way back to main", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.dirty = true;
+  await Promise.all([g.git.ensureBranch("feat", "x"), g.git.switchTo("main")]);
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1].split("?")[0]), ["/sync", "/tree"]);
+  assert.equal(g.state.activeBranch, "main");
+  assert.equal(g.state.baseSha, "d".repeat(40));
+  assert.deepEqual(g.hydrated, [[{ path: "a.txt", data: "pulled" }]]);
+});
+
+test("git: an edit made while a sync is on its way keeps the workspace dirty (a branch switch then pushes it)", async () => {
+  let g: Json;
+  g = fakeGit({ onDefault: false, duringSync: () => void g.rev.n++ });
+  g.state.dirty = true;
+  await g.git.sync("x");
+  assert.equal(g.state.dirty, true);
+  const quiet = fakeGit({ onDefault: false });
+  quiet.state.dirty = true;
+  await quiet.git.sync("x");
+  assert.equal(quiet.state.dirty, false);
+});
+
+test("deploy on a linked app: merges exactly the commit it synced; stopped before the merge, nothing merges", async () => {
+  const g = fakeGit({ onDefault: false });
+  await g.git.prepareDeploy();
+  assert.equal(g.calls[1].body.headSha, "1".padStart(40, "b")); // the sync's commit
+  const stopped = fakeGit({ onDefault: false });
+  const ctl = new AbortController();
+  ctl.abort();
+  await assert.rejects(stopped.git.prepareDeploy(() => {}, ctl.signal));
+  assert.deepEqual(stopped.calls, []);
+});
+
+test("deploy on a linked app: npm install failing after the merged files are in leaves the workspace on main", async () => {
+  const g = fakeGit({
+    onDefault: false,
+    merge: { mergedSha: "e".repeat(40), fastForward: false, treeChanged: true, files: [{ path: "a", data: "1" }] },
+    hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); },
+  });
+  await assert.rejects(g.git.prepareDeploy(), /npm install failed/);
+  assert.deepEqual([g.state.activeBranch, g.state.headSha], ["main", "e".repeat(40)]);
+  // A branch merged and deleted on GitHub meanwhile: said plainly.
+  const gone = fakeGit({ onDefault: false });
+  gone.state = { ...gone.state, activeBranch: "gone" };
+  await assert.rejects(gone.git.prepareDeploy(), /gone is gone on GitHub .*Switch to main/);
+});
+
+test("git: an app linked elsewhere is adopted by loading its default branch", async () => {
+  const g = fakeGit();
+  g.state = undefined;
+  await g.git.adopt({ provider: "github", owner: "octo", name: "shop", url: "https://github.example/octo/shop", defaultBranch: "main" });
+  assert.deepEqual(g.hydrated, [[{ path: "a.txt", data: "pulled" }]]);
+  assert.deepEqual([g.state.activeBranch, g.state.headSha, g.state.baseSha], ["main", "d".repeat(40), "d".repeat(40)]);
+});
+
+test("git: a pull or switch whose npm install fails is still on the branch whose files it wrote; changes made meanwhile stop it", async () => {
+  const g = fakeGit({ onDefault: false, hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  await assert.rejects(g.git.switchTo("main"), /npm install failed/);
+  assert.deepEqual([g.state.activeBranch, g.state.headSha], ["main", "d".repeat(40)]);
+  const adopted = fakeGit({ hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  adopted.state = undefined;
+  await assert.rejects(adopted.git.adopt({ provider: "github", owner: "o", name: "r", url: "u", defaultBranch: "main" }));
+  assert.equal(adopted.state.activeBranch, "main"); // still linked: its files are in
+
+  // An edit while the switch's push was on its way: the switch stops, nothing is overwritten.
+  let busy: Json;
+  busy = fakeGit({ onDefault: false, duringSync: () => void busy.rev.n++ });
+  busy.state.dirty = true;
+  await assert.rejects(busy.git.switchTo("main"), /changed while/);
+  assert.deepEqual(busy.hydrated, []);
+  assert.equal(busy.state.activeBranch, "feat/x");
+});
+
+test("deploy on a linked app: an edit made while it syncs stops it before the merge", async () => {
+  let g: Json;
+  g = fakeGit({ onDefault: false, duringSync: () => void g.rev.n++ });
+  await assert.rejects(g.git.prepareDeploy(), /changed while deploying/);
+  assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/sync"]);
+  assert.equal(g.state.dirty, true);
+});
+
+test("dotenv: a file's private lines are exactly those the deploy filter doesn't keep", async () => {
+  const { privateDotenvLines, publicDotenv } = await import("../studio/cresslet-plugin.ts" as string);
+  const text = "# config\nVITE_A=1 # note\nSECRET=s\n\nVITE_B=2\nKEY=\"-----BEGIN\nVITE_INSIDE=1\n-----END\"\nVITE_AFTER=3\n";
+  assert.equal(publicDotenv(text), "VITE_A=1\n\nVITE_B=2");
+  // Everything publicDotenv drops is kept as written: comments, private entries, and all lines from the multi-line
+  // value on (its VITE_ lines are part of a private value, not entries).
+  assert.deepEqual(privateDotenvLines(text), ["# config", "SECRET=s", "KEY=\"-----BEGIN", "VITE_INSIDE=1", "-----END\"", "VITE_AFTER=3", ""]);
+});
+
+test("cresslet deploy on a linked app: the upload is refused if the source isn't what was committed", async () => {
+  const { createCresslet, sourceDigest } = await import("../studio/cresslet-plugin.ts" as string);
+  const c = fakeContainer({ "index.html": "<h1>v2</h1>", "cresslet.json": "{}" });
+  const realFetch = globalThis.fetch;
+  const posted: Json[] = [];
+  globalThis.fetch = (async (_u: string, init: Json) => (posted.push(init), new Response(JSON.stringify({ app: { name: "a", url: "u", claimed: true } }), { status: 201 }))) as typeof fetch;
+  Object.assign(c, {
+    async build() { return { files: [] }; },
+    async bundle() { return { outputFiles: [] }; },
+    async export() { return { "index.html": { file: { contents: c.files.get("/project/index.html") } }, "cresslet.json": { file: { contents: "{}" } } }; },
+    registerCommand() {},
+  });
+  try {
+    const committed = sourceDigest([{ path: "cresslet.json", data: "{}" }, { path: "index.html", data: "<h1>v1</h1>" }]);
+    const cr = createCresslet(c as Json, { auth: () => ({}), project: () => ({ deploy: { name: "a" } }), beforeDeploy: async () => ({ sha: "a".repeat(40), branch: "main", repo: "o/r", source: committed }) });
+    await assert.rejects(cr.deploy(), /changed while building/);
+    assert.equal(posted.length, 0);
+    const same = createCresslet(c as Json, { auth: () => ({}), project: () => ({ deploy: { name: "a" } }), beforeDeploy: async () => ({ sha: "a".repeat(40), branch: "main", repo: "o/r", source: sourceDigest([{ path: "cresslet.json", data: "{}" }, { path: "index.html", data: "<h1>v2</h1>" }]) }) });
+    await same.deploy();
+    assert.equal(posted.length, 1);
+    assert.deepEqual(JSON.parse(posted[0].body).git, { sha: "a".repeat(40), branch: "main", repo: "o/r" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("source digests compare bytes, whichever way a file was sent", async () => {
+  const { sourceDigest } = await import("../studio/cresslet-plugin.ts" as string);
+  assert.equal(sourceDigest([{ path: "a", data: "héllo" }]), sourceDigest([{ path: "a", data: Buffer.from("héllo").toString("base64"), encoding: "base64" }]));
+  assert.notEqual(sourceDigest([{ path: "a", data: "x" }]), sourceDigest([{ path: "a", data: "y" }]));
+});
+
+test("dotenv hydration: the repository's public entries exactly, the file's own private lines kept", async () => {
+  const { mergeDotenv, publicDotenv } = await import("../studio/cresslet-plugin.ts" as string);
+  // Plain: private kept, public replaced (a stale one among the private lines dropped).
+  const out = mergeDotenv("VITE_API=old\nSECRET=s\nVITE_MODE=stale\n", "VITE_API=new\nVITE_MODE=new\n");
+  assert.equal(publicDotenv(out), "VITE_API=new\nVITE_MODE=new\n");
+  assert.match(out, /SECRET=s/);
+  assert.doesNotMatch(out, /stale|old/);
+  // A multi-line private value: kept intact, after the public entries, and the export is still exactly the incoming.
+  const pem = "KEY=\"-----BEGIN\nabc\n-----END\"\n";
+  const merged = mergeDotenv(pem, "VITE_API=new\n");
+  assert.equal(publicDotenv(merged), "VITE_API=new\n");
+  assert.ok(merged.includes(pem.trimEnd()));
+  // No final newline upstream: still exact.
+  assert.equal(publicDotenv(mergeDotenv("SECRET=s\n", "VITE_A=1")), "VITE_A=1");
+  // Nothing private: the incoming file as is.
+  assert.equal(mergeDotenv("VITE_A=0\n", "VITE_A=1\n"), "VITE_A=1\n");
+});

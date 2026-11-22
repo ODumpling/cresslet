@@ -6,7 +6,8 @@ import { flushSync } from "react-dom";
 import type { Container } from "../../../vendor/cresslet-container/cresslet-container.js";
 import { anthropicClient, apiKey, createAgent, createTools, creditsClient, errorText, type AgentEvent } from "../../../builder.ts";
 import type * as API from "../../../api-types.ts";
-import { api, meta } from "../../lib/api.ts";
+import { commitMessage, type GitWorkspace } from "../../../git.ts";
+import { api, errorMessage, meta } from "../../lib/api.ts";
 import { logIn, session, useSession } from "../../lib/session.ts";
 import { Icon, SrOnly } from "../../ui/icons.tsx";
 
@@ -38,8 +39,12 @@ export interface BuilderHandle {
   focusIn(): void;
 }
 
-export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
+export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, ref }: {
   c: Container;
+  /** Source control: the project's repository, when linked (changes go on a branch; a finished turn is committed). */
+  git: GitWorkspace | null;
+  /** Workspace changes that weren't hand edits (a command's), counted (engine.ts). */
+  commandRev?: () => number;
   devLog: () => string;
   onChange: (path: string) => unknown;
   locked: boolean;
@@ -70,10 +75,33 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
     approved: false, stopped: false, busy: false, locked,
     bubble: null as number | null, step: null as number | null,
     replied: "", failed: "", id: 0, stick: false,
+    prompt: "", git, // the message being worked on (a new branch is named after it); the project's repository
+    // This turn changed files (its file tools); branching failed; the count of non-hand changes when it was sent
+    // (commands': `commandRev`, studio/src/views/workspace/engine.ts).
+    turnChanged: false, branchFailed: false, cmdRev: 0,
     gone: false, // unmounted (the user left the project): no more UI updates
   }).current;
   r.locked = locked;
-  const [tools] = useState(() => createTools(c, { devLog, onChange, paused: () => r.approvals.size > 0 }));
+  r.git = git;
+  const [tools] = useState(() => createTools(c, {
+    devLog,
+    onChange: (path) => {
+      r.turnChanged = true;
+      return onChange(path);
+    },
+    // Branch first: on the default branch of a linked repository, a new branch before the first change. If GitHub
+    // can't be reached the change still happens here (nothing reaches GitHub unpushed); the turn's commit tries again.
+    beforeChange: async () => {
+      try {
+        const b = await r.git?.ensureBranch("feat", r.prompt);
+        if (b) on({ type: "notice", text: `Working on a new branch, ${b}. ${r.git!.state!.defaultBranch} stays as deployed until you deploy.` });
+      } catch (e) {
+        if (!r.branchFailed) on({ type: "notice", text: `Couldn't start a branch on GitHub (${errorMessage(e)}): changing files here only.`, error: true });
+        r.branchFailed = true;
+      }
+    },
+    paused: () => r.approvals.size > 0,
+  }));
 
   // Where Claude is reached: "key" (the user's own key), "credits" (this server; logged in), or null (set one up).
   void keyVersion;
@@ -193,6 +221,10 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
       errorText: (x) => errorText(x, { credits: sourceRef.current !== "key" }),
       tools,
       on,
+      context: () => {
+        const s = r.git?.connected ? r.git.state : undefined;
+        return s ? `[Source control: this project is linked to the GitHub repository ${s.owner}/${s.repo}. The workspace is on branch ${s.activeBranch} (default branch: ${s.defaultBranch})${s.dirty ? ", with changes not committed yet" : ""}.]` : null;
+      },
     });
     r.stick = true;
     add({ kind: "user", text });
@@ -206,8 +238,12 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
     if (fromSend) inputRef.current?.focus(); // Send is disabled while Claude works
     setWorking("Thinking…");
     setStatus("Sent. Claude is working on it.");
+    r.prompt = text;
+    r.turnChanged = r.branchFailed = false;
+    r.cmdRev = commandRev();
     try {
       await r.agent.send(text);
+      await commitTurn(text);
     } finally {
       for (const decline of r.approvals) decline(); // its command is gone (stopped, timed out, or left running)
       if (r.approved && r.stopped) on({ type: "notice", text: "If the deploy had started uploading, it may still go live: check the app.", error: true });
@@ -218,6 +254,25 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
       if (r.replied) setStatus(`Claude: ${r.replied}${r.failed ? ` (${r.failed})` : ""}`);
       else if (!r.failed) setStatus("Claude finished");
       if (!r.gone) void refreshCredits();
+    }
+  }
+
+  /**
+   * Linked to a repository: what the turn changed (files, or a command such as npm install) is committed to the
+   * active branch, which is a new one if the turn started on the default branch. Kept here (and said) if that fails.
+   */
+  async function commitTurn(text: string) {
+    const g = r.git;
+    if (!g?.connected || r.gone) return;
+    await new Promise((res) => setTimeout(res, 500)); // the file watcher reports a command's changes a moment later
+    // This turn changed nothing (earlier or hand changes aren't its own): its tools didn't, nor did its commands.
+    if (!g.state?.dirty || !(r.turnChanged || commandRev() !== r.cmdRev)) return;
+    try {
+      await g.ensureBranch("feat", text);
+      const out = await g.sync(commitMessage(text));
+      if (out.changed) on({ type: "notice", text: `Committed to ${g.state!.activeBranch}.` });
+    } catch (e) {
+      on({ type: "notice", text: `Couldn't commit to GitHub: ${errorMessage(e)}. The changes are kept here (push them from the branch menu).`, error: true });
     }
   }
 
@@ -260,6 +315,23 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
         <h2 id="builder-title" className="pane-title">AI builder</h2>
         <button className="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat" disabled={busy} onClick={() => {
           if (r.busy) return;
+          // A new feature starts from the default branch: offer to go back to it (this branch stays on GitHub).
+          const g = r.git, s = g?.connected ? g.state : undefined;
+          if (s && s.activeBranch !== s.defaultBranch &&
+              confirm(`Go back to ${s.defaultBranch} for the next change? ${s.activeBranch} stays on GitHub${s.dirty ? " (its changes here are pushed to it first)" : ""}.`)) {
+            // Nothing is sent until the workspace holds the default branch.
+            r.busy = true;
+            setBusy(true);
+            queueMicrotask(() => setWorking(`Switching to ${s.defaultBranch}…`)); // after the reset below
+            void g!.switchTo(s.defaultBranch).then(
+              () => setStatus(`On ${s.defaultBranch}`),
+              (e) => add({ kind: "notice", text: `Couldn't switch to ${s.defaultBranch}: ${errorMessage(e)}`, error: true }),
+            ).finally(() => {
+              r.busy = false;
+              setBusy(false);
+              setWorking("");
+            });
+          }
           for (const decline of r.approvals) decline(); // e.g. from a process the builder left running
           setWorking("");
           r.agent = null;

@@ -13,6 +13,8 @@ export interface Meta {
   anonDeploys?: boolean;
   auth?: { github?: boolean };
   ai?: { credits?: boolean };
+  /** Source control: apps can sync with GitHub. */
+  git?: { github?: boolean };
   limits?: { anonTtlMs?: number };
 }
 
@@ -102,6 +104,50 @@ export interface DeployInfo {
   bytes: number;
   files: number;
   source: string;
+  /** The commit it was built from (source control). */
+  git?: { sha: string; branch: string | null; repo: string | null; url: string | null } | null;
+}
+
+/** An app's linked repository (source control). */
+export interface AppRepo {
+  provider: "github";
+  owner: string;
+  name: string;
+  fullName: string;
+  url: string;
+  defaultBranch: string;
+  subdir: string;
+  deleteBranch: boolean;
+  lastSyncedSha: string | null;
+  connectedAt: string;
+}
+/** GET /v1/me/git */
+export interface MeGit {
+  provider: "github";
+  available: boolean;
+  kind: "app" | "oauth" | null;
+  connected: boolean;
+  login: string | null;
+  status: "active" | "expired" | null;
+  installUrl: string | null;
+}
+/** GET /v1/git/github/repos */
+export interface GitRepo {
+  id: string;
+  owner: string;
+  name: string;
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  url: string;
+  push: boolean;
+}
+/** GET /v1/apps/:name/git/status */
+export interface GitStatus {
+  repo: AppRepo;
+  defaultBranch: string;
+  mainSha: string | null;
+  branches: { name: string; sha: string; protected: boolean }[];
 }
 
 /** GET /v1/apps/:name */
@@ -117,6 +163,8 @@ export interface AppDetail {
   runtime: { running: boolean };
   deploys: DeployInfo[];
   secrets: string[];
+  /** Its linked repository, if any. */
+  repo?: AppRepo | null;
 }
 
 export interface Domain {
