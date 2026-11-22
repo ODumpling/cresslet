@@ -241,7 +241,7 @@ test("AI credits: a reply the client stops is still read to the end and charged;
 
 test("AI builder on credits: the studio's agent loop through the real endpoint with the vendored SDK", async () => {
   const { serve } = await import("@hono/node-server");
-  const mod = "../studio/builder.js"; // untyped browser module
+  const mod = "../studio/builder.ts"; // browser module: typed by studio/tsconfig.json, not this program
   const { createAgent, creditsClient, errorText } = await import(mod);
   const t = await setup({ monthlyCredits: 5 });
   const http = serve({ fetch: t.srv.handler, port: 0, hostname: "127.0.0.1" });

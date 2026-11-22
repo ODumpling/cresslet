@@ -2,34 +2,54 @@
 // Protocol (postMessage):
 //   in:  {type:"init", code, app, secrets, db: Uint8Array|null, serial?}  → out: {type:"ready"} | {type:"fatal", message}
 //        serial: one request at a time (each to its whole response body): the app's AsyncLocalStorage is a one-store
-//        shim here (TanStack Start, start-build.js)
+//        shim here (TanStack Start, start-build.ts)
 //   in:  {type:"request", id, url, method, headers, body}        → out: {type:"response", id, status, headers, body}
 //   out: {type:"log", level, msg}  {type:"db", bytes}  {type:"files", id, op, ...} ← in: {type:"files-result", id, ...}
 //   WebSockets: a 101 response is {type:"response", id, status: 101, headers, body: null, protocol}; then
 //   in:  {type:"socket", id} + a MessagePort to the preview's socket (no port: the preview gave up)
 import initSqlJs from "https://esm.sh/sql.js@1.13.0";
+import type { Database, SqlJsStatic, SqlValue } from "https://esm.sh/sql.js@1.13.0";
+import type { AppInfo, FileItem, FileOp, FileResult, FileResults, FromWorker, ToWorker } from "./server-worker-protocol.ts";
+
+/** This worker's postMessage, typed to the protocol (the global one). */
+declare function postMessage(message: FromWorker, transfer?: Transferable[]): void;
+
+/** The app's `env` (docs/app-format.md), as this preview implements it. */
+interface Env {
+  db: ReturnType<typeof createDb>;
+  files: {
+    put(key: string, body: BodyInit | null, opts?: { contentType?: string }): Promise<void>;
+    get(key: string): Promise<Response | null>;
+    delete(key: string): Promise<void>;
+    list(prefix?: string): Promise<FileItem[]>;
+  };
+  secrets: Readonly<Record<string, string>>;
+  app: Readonly<AppInfo>;
+}
+/** The app's fetch handler (the server bundle's default export, or its `fetch`). */
+type Handler = (req: Request, env: Env, ctx: { waitUntil(p: unknown): void }) => unknown;
 
 const SQL_WASM = "https://cdn.jsdelivr.net/npm/sql.js@1.13.0/dist/sql-wasm.wasm";
-let handler;
-let env;
-let serial = null; // with init's `serial`: the request being handled (a promise), the next one waits for it
+let handler: Handler | undefined;
+let env: Env;
+let serial: Promise<unknown> | null = null; // with init's `serial`: the request being handled (a promise), the next one waits for it
 // Where the `cresslet` SDK (`import { db } from "cresslet"`, cresslet-cli sdk/index.js) finds the env: published once
-// the app's module has loaded (bindings exist only once a handler runs). Contract: runtime/cresslet-runtime.js.
-const runtime = { contract: 1, runtime: "studio preview", paramStyle: "?", env: null };
-globalThis[Symbol.for("cresslet.runtime")] = runtime;
+// the app's module has loaded (bindings exist only once a handler runs). Contract: runtime/cresslet-runtime.ts.
+const runtime: { contract: number; runtime: string; paramStyle: string; env: Env | null } = { contract: 1, runtime: "studio preview", paramStyle: "?", env: null };
+(globalThis as unknown as Record<symbol, unknown>)[Symbol.for("cresslet.runtime")] = runtime;
 
-const fmt = (args) =>
+const fmt = (args: unknown[]) =>
   args.map((a) => (typeof a === "string" ? a : a instanceof Error ? (a.stack ?? a.message) : safeJson(a))).join(" ");
-const safeJson = (v) => {
+const safeJson = (v: unknown) => {
   try {
     return JSON.stringify(v);
   } catch {
     return String(v);
   }
 };
-for (const level of ["log", "info", "warn", "error", "debug"]) {
+for (const level of ["log", "info", "warn", "error", "debug"] as const) {
   const orig = console[level].bind(console);
-  console[level] = (...args) => {
+  console[level] = (...args: unknown[]) => {
     postMessage({ type: "log", level, msg: fmt(args) });
     orig(...args);
   };
@@ -50,22 +70,22 @@ addEventListener("unhandledrejection", (e) => {
 // (their Response rejects 101). The pair's client end is glued to a MessagePort to the preview's socket
 // (cresslet-container's upgradeWebSocket): {type:"message", data: string|ArrayBuffer} and {type:"close", code, reason}.
 class PairSocket extends EventTarget {
-  peer = null;
+  peer: PairSocket | null = null; // the other end: set by WebSocketPair right after both are made
   readyState = 1; // OPEN
-  binaryType = "blob"; // binary messages arrive as Blobs unless "arraybuffer", as on the platform (its compat date)
+  binaryType: BinaryType = "blob"; // binary messages arrive as Blobs unless "arraybuffer", as on the platform (its compat date)
   protocol = "";
   extensions = "";
   url = null;
   #accepted = false;
-  #queue = [];
-  #handlers = {};
+  #queue: Event[] = [];
+  #handlers: Record<string, Function | null> = {};
   constructor() {
     super();
     for (const type of ["message", "close", "error"]) {
       this.addEventListener(type, (e) => this.#handlers[type]?.call(this, e));
       Object.defineProperty(this, `on${type}`, {
         get: () => this.#handlers[type] ?? null,
-        set: (f) => (this.#handlers[type] = typeof f === "function" ? f : null),
+        set: (f: unknown) => (this.#handlers[type] = typeof f === "function" ? f : null),
       });
     }
   }
@@ -74,34 +94,36 @@ class PairSocket extends EventTarget {
     this.#accepted = true;
     for (const e of this.#queue.splice(0)) this.#emit(e);
   }
-  deliver(e) {
+  deliver(e: Event) {
     if (this.#accepted) this.#emit(e);
     else this.#queue.push(e);
   }
-  #emit(e) {
-    if (e.type === "message" && e.data instanceof ArrayBuffer && this.binaryType !== "arraybuffer") {
-      e = new MessageEvent("message", { data: new Blob([e.data]) });
+  #emit(e: Event) {
+    if (e.type === "message" && (e as MessageEvent).data instanceof ArrayBuffer && this.binaryType !== "arraybuffer") {
+      e = new MessageEvent("message", { data: new Blob([(e as MessageEvent).data]) });
     }
     this.dispatchEvent(e);
   }
-  send(data) {
+  send(data: unknown) {
     if (this.readyState !== 1) throw new TypeError("Can't call WebSocket send() after close().");
     if (data instanceof ArrayBuffer) data = data.slice(0);
     else if (ArrayBuffer.isView(data)) data = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
     else if (typeof data !== "string") throw new TypeError("WebSocket send() takes a string, ArrayBuffer or ArrayBufferView");
-    this.peer.deliver(new MessageEvent("message", { data }));
+    this.peer!.deliver(new MessageEvent("message", { data }));
   }
-  close(code, reason = "") {
+  close(code?: number, reason: unknown = "") {
     if (this.readyState !== 1) return;
     this.readyState = 2; // CLOSING
-    this.peer.readyState = 3; // CLOSED
+    this.peer!.readyState = 3; // CLOSED
     const event = () => new CloseEvent("close", { code: code ?? 1005, reason: String(reason), wasClean: true });
-    this.peer.deliver(event());
+    this.peer!.deliver(event());
     // and this end, later, as when the peer's close frame comes back
     setTimeout(() => ((this.readyState = 3), this.deliver(event())));
   }
 }
-globalThis.WebSocketPair = class WebSocketPair {
+(globalThis as unknown as { WebSocketPair: unknown }).WebSocketPair = class WebSocketPair {
+  declare 0: PairSocket;
+  declare 1: PairSocket;
   constructor() {
     const a = new PairSocket();
     const b = new PairSocket();
@@ -112,27 +134,28 @@ globalThis.WebSocketPair = class WebSocketPair {
   }
 };
 const NativeResponse = Response;
-const ownHeaders = (res, headers) => Object.defineProperty(res, "headers", { value: new Headers(headers), configurable: true });
+const ownHeaders = <R extends Response>(res: R, headers: HeadersInit): R => Object.defineProperty(res, "headers", { value: new Headers(headers), configurable: true });
 globalThis.Response = class Response extends NativeResponse {
   // fetch(), Response.json(), clone()… return native ones: still `instanceof Response` (Hono checks). Apps' own
   // subclasses keep the usual check.
-  static [Symbol.hasInstance](v) {
+  static override [Symbol.hasInstance](v: unknown) {
     return this === globalThis.Response ? v instanceof NativeResponse : Function.prototype[Symbol.hasInstance].call(this, v);
   }
   // Browsers drop Set-Cookie from a Response's headers (a forbidden response header): an app's cookies (sessions)
   // would never reach the studio. Responses made here keep all their headers, Set-Cookie included, on a Headers of
   // their own (later appends too), which the studio reads.
-  static json(data, init) {
+  static override json(data: unknown, init?: ResponseInit) {
     const body = JSON.stringify(data);
     if (body === undefined) throw new TypeError("Value is not JSON serializable");
     const headers = new Headers(init?.headers);
     if (!headers.has("content-type")) headers.set("content-type", "application/json");
     return new this(body, { ...init, headers });
   }
-  clone() {
+  override clone() {
     return ownHeaders(super.clone(), this.headers);
   }
-  constructor(body, init) {
+  declare webSocket?: PairSocket;
+  constructor(body?: BodyInit | null, init?: ResponseInit & { webSocket?: PairSocket }) {
     if (init?.status !== 101) {
       super(body, init);
       const headers = new Headers(super.headers); // with the defaults the body gave (content-type)
@@ -152,13 +175,13 @@ globalThis.Response = class Response extends NativeResponse {
     this.webSocket = init.webSocket;
   }
 };
-const accepted = new Map(); // request id → the pair's client end, until its port arrives
+const accepted = new Map<number, PairSocket>(); // request id → the pair's client end, until its port arrives
 
 // Whoever sends `close` is done with the port; whoever gets it closes it.
-function connect(client, port) {
+function connect(client: PairSocket, port: MessagePort) {
   client.binaryType = "arraybuffer";
-  client.addEventListener("message", (e) => port.postMessage({ type: "message", data: e.data }));
-  client.addEventListener("close", (e) => port.postMessage({ type: "close", code: e.code, reason: e.reason }));
+  client.addEventListener("message", (e) => port.postMessage({ type: "message", data: (e as MessageEvent).data }));
+  client.addEventListener("close", (e) => port.postMessage({ type: "close", code: (e as CloseEvent).code, reason: (e as CloseEvent).reason }));
   port.onmessage = ({ data: d }) => {
     // From the preview (untrusted, like its requests).
     if (d?.type === "message" && (typeof d.data === "string" || d.data instanceof ArrayBuffer)) {
@@ -166,9 +189,9 @@ function connect(client, port) {
     } else if (d?.type === "close") {
       port.close();
       if (client.readyState !== 1) return; // the app closed it too
-      client.readyState = client.peer.readyState = 3;
+      client.readyState = client.peer!.readyState = 3;
       const code = Number.isInteger(d.code) ? d.code : 1005;
-      client.peer.deliver(new CloseEvent("close", { code, reason: String(d.reason ?? ""), wasClean: true }));
+      client.peer!.deliver(new CloseEvent("close", { code, reason: String(d.reason ?? ""), wasClean: true }));
     }
   };
   client.accept();
@@ -176,12 +199,12 @@ function connect(client, port) {
 
 // ---- files RPC to the main thread (stored in the VFS)
 let rpcId = 0;
-const pending = new Map();
-function files(op, payload, transfer = []) {
+const pending = new Map<number, { resolve: (r: FileResult) => void; reject: (e: unknown) => void }>();
+function files<O extends FileOp>(msg: O, transfer: Transferable[] = []) {
   const id = ++rpcId;
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    postMessage({ type: "files", id, op, ...payload }, transfer);
+  return new Promise<FileResults[O["op"]]>((resolve, reject) => {
+    pending.set(id, { resolve: (r) => resolve(r as FileResults[O["op"]]), reject }); // the page answers `op` with its fields
+    postMessage({ type: "files", id, ...msg }, transfer);
   });
 }
 
@@ -204,14 +227,18 @@ const READ_PRAGMAS_WITH_ARG = new Set([
   "table_info", "table_list", "table_xinfo",
 ]);
 
-function createDb(SQL, bytes) {
-  const db = bytes ? new SQL.Database(bytes) : new SQL.Database();
-  let timer;
+/** What apps bind: JS values sql.js can store (bigints within ±2^53, undefined as null). */
+type Param = SqlValue | undefined;
+type Row = Record<string, SqlValue>;
+
+function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
+  const db: Database = bytes ? new SQL.Database(bytes) : new SQL.Database();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let savedRowid = 0;
   let reopened = false;
   // One save at a time, 300 ms after the first change that asked for it: later changes don't push it back (steady
   // traffic would otherwise keep a write from ever being saved).
-  const persist = () => {
+  const persist = (): void => {
     if (timer) return;
     timer = setTimeout(() => {
       timer = undefined;
@@ -231,7 +258,7 @@ function createDb(SQL, bytes) {
     }, 300);
   };
   // sql.js binds numbers as doubles: a bigint it can't hold exactly is refused, not rounded.
-  const norm = (params) =>
+  const norm = (params: Param[]) =>
     params.map((p) => {
       if (typeof p !== "bigint") return p === undefined ? null : p;
       if (p > BigInt(Number.MAX_SAFE_INTEGER) || p < BigInt(Number.MIN_SAFE_INTEGER)) {
@@ -240,15 +267,15 @@ function createDb(SQL, bytes) {
       return Number(p);
     });
   /** `max`: stop after that many rows (first(): one, as node:sqlite's get() steps once). */
-  const all = (sql, params, max = Infinity) => {
+  const all = (sql: string, params: Param[], max = Infinity) => {
     const stmt = db.prepare(sql);
     try {
       stmt.bind(norm(params));
-      const rows = [];
+      const rows: Row[] = [];
       const cols = stmt.getColumnNames();
       // As node:sqlite (the platform, cresslet dev) does: an integer past 2^53 is an error, not a rounded number, and
       // every column (`__proto__` too) is an own property.
-      const cell = (v) => {
+      const cell = (v: SqlValue) => {
         if (typeof v !== "bigint") return v;
         if (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(Number.MIN_SAFE_INTEGER)) {
           throw new RangeError(`Value is too large to be represented as a JavaScript number: ${v}`);
@@ -264,7 +291,7 @@ function createDb(SQL, bytes) {
       stmt.free();
     }
   };
-  const one = (sql) => db.exec(sql)[0]?.values[0][0] ?? 0;
+  const one = (sql: string) => db.exec(sql)[0]?.values[0][0] ?? 0;
   // last_insert_rowid(), kept across snapshots: export() reopens the connection, which resets it to 0
   const rowid = () => {
     const v = Number(one("SELECT last_insert_rowid()"));
@@ -277,7 +304,7 @@ function createDb(SQL, bytes) {
   };
   // Statements that may change the database without changing total_changes() (DDL, PRAGMA, …): not a plain read.
   // (A save reopens the connection, so plain reads, PRAGMA reads included, don't ask for one.)
-  const mayWrite = (sql) => {
+  const mayWrite = (sql: string) => {
     const s = sql.replace(/^(?:[\s;(]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?(?:\*\/|$))*/, "");
     if (/^(?:select|values|explain)\b/i.test(s)) return false;
     if (/^with\b/i.test(s)) return /\b(?:insert|update|delete|replace)\b/i.test(s);
@@ -285,7 +312,7 @@ function createDb(SQL, bytes) {
       // comments anywhere in it out (`PRAGMA main.user_version /* x */ = 7`), then name and what follows
       const p = /^pragma\s+(?:\w+\s*\.\s*)?(\w+)\s*([=(])?/i.exec(s.replace(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, " "));
       if (!p) return true; // unsure: save
-      const name = p[1].toLowerCase();
+      const name = p[1]!.toLowerCase(); // the regex's (\w+) matched
       if (p[2] === "=") return true;
       if (p[2] === "(") return !READ_PRAGMAS_WITH_ARG.has(name); // user_version(7) sets it; table_info(t) reports
       return !READ_PRAGMAS.has(name);
@@ -295,9 +322,9 @@ function createDb(SQL, bytes) {
   // Same as server/bindings.ts batch: a savepoint, run synchronously (nothing else runs in between).
   // Same as server/bindings.ts notInBatch: a batch is one transaction, so no BEGIN/COMMIT/SAVEPOINT/…, PRAGMA, ATTACH or
   // DETACH in it (after comments and an EXPLAIN prefix).
-  const notInBatch = (sql) =>
+  const notInBatch = (sql: string) =>
     /^(?:begin|commit|end|rollback|savepoint|release|pragma|attach|detach)\b/i.test(sql.replace(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, " ").replace(/^[\s;]+/, "").replace(/^explain\s+(?:query\s+plan\s+)?/i, ""));
-  const batch = (statements) => {
+  const batch = (statements: { sql: string; params?: Param[] }[]) => {
     if (!Array.isArray(statements)) throw new TypeError("batch takes an array of { sql, params }");
     statements.forEach((s, i) => {
       const { sql, params } = s ?? {};
@@ -308,14 +335,14 @@ function createDb(SQL, bytes) {
     const changesBefore = one("SELECT total_changes()");
     db.exec("SAVEPOINT cresslet_batch");
     try {
-      const out = statements.map(({ sql, params = [] } = {}, i) => {
+      const out = statements.map(({ sql, params = [] }, i) => {
         try {
           const before = one("SELECT total_changes()");
           const rows = all(sql, params);
           const changed = one("SELECT total_changes()") !== before;
           return { rows, changes: changed ? db.getRowsModified() : 0, lastInsertRowid: rowid() };
         } catch (e) {
-          throw new Error(`batch statement ${i + 1}: ${e?.message ?? e}`);
+          throw new Error(`batch statement ${i + 1}: ${(e as { message?: string } | null)?.message ?? e}`);
         }
       });
       db.exec("RELEASE cresslet_batch");
@@ -332,7 +359,7 @@ function createDb(SQL, bytes) {
   };
   db.exec("PRAGMA foreign_keys = ON;");
   // query/first can write too (INSERT … RETURNING): save when they changed anything
-  const reading = (sql, params, max) => {
+  const reading = (sql: string, params: Param[], max?: number) => {
     const before = one("SELECT total_changes()");
     try {
       return all(sql, params, max);
@@ -342,11 +369,11 @@ function createDb(SQL, bytes) {
     }
   };
   return {
-    batch: async (statements) => batch(statements),
-    query: async (sql, ...params) => reading(sql, params),
-    first: async (sql, ...params) => reading(sql, params, 1)[0] ?? null,
+    batch: async (statements: { sql: string; params?: Param[] }[]) => batch(statements),
+    query: async (sql: string, ...params: Param[]) => reading(sql, params),
+    first: async (sql: string, ...params: Param[]) => reading(sql, params, 1)[0] ?? null,
     // persist in finally: a statement (or script) that failed part-way may still have written
-    run: async (sql, ...params) => {
+    run: async (sql: string, ...params: Param[]) => {
       try {
         db.run(sql, norm(params));
         return { changes: db.getRowsModified(), lastInsertRowid: rowid() };
@@ -354,7 +381,7 @@ function createDb(SQL, bytes) {
         persist();
       }
     },
-    exec: async (sql) => {
+    exec: async (sql: string) => {
       try {
         db.exec(sql);
       } finally {
@@ -364,7 +391,7 @@ function createDb(SQL, bytes) {
   };
 }
 
-onmessage = async ({ data: m, ports }) => {
+onmessage = async ({ data: m, ports }: MessageEvent<ToWorker>) => {
   if (m.type === "files-result") {
     const p = pending.get(m.id);
     pending.delete(m.id);
@@ -378,39 +405,40 @@ onmessage = async ({ data: m, ports }) => {
         files: {
           async put(key, body, opts = {}) {
             const bytes = new Uint8Array(await new Response(body).arrayBuffer());
-            const contentType = opts.contentType ?? (body instanceof Blob && body.type) ?? "application/octet-stream";
-            await files("put", { key, bytes, contentType }, [bytes.buffer]);
+            // `||`: not a Blob (or an untyped one) is octet-stream, as on the platform (runtime/worker.ts), not `false`
+            const contentType = (opts.contentType ?? (body instanceof Blob && body.type)) || "application/octet-stream";
+            await files({ op: "put", key, bytes, contentType }, [bytes.buffer]);
           },
           async get(key) {
-            const r = await files("get", { key });
+            const r = await files({ op: "get", key });
             if (!r.found) return null;
             return new Response(r.bytes, { headers: { "content-type": r.contentType, "content-length": String(r.bytes.byteLength) } });
           },
           async delete(key) {
-            await files("delete", { key });
+            await files({ op: "delete", key });
           },
           async list(prefix = "") {
-            return (await files("list", { prefix })).items;
+            return (await files({ op: "list", prefix })).items;
           },
         },
         secrets: Object.freeze({ ...m.secrets }),
         app: Object.freeze(m.app),
       };
       const url = URL.createObjectURL(new Blob([m.code], { type: "text/javascript" }));
-      let mod;
+      let mod: { default?: unknown; fetch?: unknown };
       try {
         mod = await import(url);
       } finally {
         URL.revokeObjectURL(url);
       }
-      const exp = mod.default ?? mod;
+      const exp = (mod.default ?? mod) as Handler | { fetch?: Handler } | null | undefined; // the app's exports
       handler = typeof exp === "function" ? exp : exp?.fetch?.bind(exp);
       if (!handler) throw new Error("server/index must `export default { fetch(req, env) {} }`");
       runtime.env = env; // after the module's top level and reading its exports, as on the platform
       if (m.serial) serial = Promise.resolve();
       postMessage({ type: "ready" });
     } catch (e) {
-      postMessage({ type: "fatal", message: e?.stack ?? String(e) });
+      postMessage({ type: "fatal", message: (e as { stack?: string } | null)?.stack ?? String(e) });
     }
     return;
   }
@@ -432,7 +460,7 @@ onmessage = async ({ data: m, ports }) => {
   }
 };
 
-async function handle(m) {
+async function handle(m: Extract<ToWorker, { type: "request" }>) {
   try {
     const req = new Request(m.url, {
       method: m.method,
@@ -442,7 +470,7 @@ async function handle(m) {
     const upgrade = new Headers(m.headers).get("upgrade")?.toLowerCase() === "websocket";
     // `Request` drops Upgrade, Connection, Sec-WebSocket-*, Origin, Cookie (which apps' sessions, CSRF and WebSocket
     // checks read).
-    const shadow = (r, headers) => {
+    const shadow = (r: Request, headers: HeadersInit): Request => {
       const clone = r.clone.bind(r);
       return Object.defineProperties(r, {
         headers: { value: new Headers(headers) },
@@ -450,13 +478,14 @@ async function handle(m) {
       });
     };
     if (m.headers.some(([k]) => !req.headers.has(k))) shadow(req, m.headers); // e.g. Origin, Cookie: dropped
-    const res = await handler(req, env, { waitUntil() {} });
+    const res = await handler!(req, env, { waitUntil() {} }); // requests come after init (which sets it)
     if (!(res instanceof NativeResponse)) throw new Error("fetch handler must return a Response");
     if (res.status === 101) {
-      if (!upgrade || !(res.webSocket instanceof PairSocket)) {
+      const webSocket = (res as Response & { webSocket?: unknown }).webSocket; // our Response's, for a 101
+      if (!upgrade || !(webSocket instanceof PairSocket)) {
         throw new Error("a 101 response needs `webSocket` (a WebSocketPair end) and a WebSocket upgrade request");
       }
-      accepted.set(m.id, res.webSocket);
+      accepted.set(m.id, webSocket);
       const protocol = res.headers.get("sec-websocket-protocol") ?? undefined;
       postMessage({ type: "response", id: m.id, status: 101, headers: [...res.headers], body: null, protocol });
       return;
@@ -465,7 +494,7 @@ async function handle(m) {
     postMessage({ type: "response", id: m.id, status: res.status, headers: [...res.headers], body }, [body]);
   } catch (e) {
     console.error(e);
-    const body = new TextEncoder().encode(`Internal Server Error\n\n${e?.stack ?? e}`).buffer;
+    const body = new TextEncoder().encode(`Internal Server Error\n\n${(e as { stack?: string } | null)?.stack ?? e}`).buffer;
     postMessage({ type: "response", id: m.id, status: 500, headers: [["content-type", "text/plain"]], body }, [body]);
   }
 }

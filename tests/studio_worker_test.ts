@@ -1,4 +1,4 @@
-// The studio preview's server worker (studio/server-worker.js) under Node: the shared SDK contract cases
+// The studio preview's server worker (studio/server-worker.ts) under Node: the shared SDK contract cases
 // (tests/fixtures/sdk-contract.js) and its sql.js database, with the sql.js version the studio pins (a devDependency
 // here). The worker runs in a worker thread: it patches globals (Response, console, WebSocketPair) as in the browser.
 import { test } from "node:test";
@@ -8,19 +8,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
+import { stripTypes } from "../server/strip.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const SDK = await readFile(join(ROOT, "studio/vendor/cresslet-sdk.js"), "utf8");
 const CONTRACT = await readFile(join(ROOT, "tests/fixtures/sdk-contract.js"), "utf8");
 
-/** studio/server-worker.js with sql.js from node_modules and the worker-thread port as its postMessage/onmessage. */
+/** studio/server-worker.ts (as the browser gets it: types stripped) with sql.js from node_modules and the worker-thread
+ *  port as its postMessage/onmessage. */
 async function workerSource() {
-  const src = await readFile(join(ROOT, "studio/server-worker.js"), "utf8");
+  const src = stripTypes(await readFile(join(ROOT, "studio/server-worker.ts"), "utf8"));
   const sqlJs = import.meta.resolve("sql.js");
   const wasm = fileURLToPath(new URL("sql-wasm.wasm", sqlJs));
   const swap = (s: string, from: string | RegExp, to: string) => {
     const out = s.replace(from, to);
-    assert.notEqual(out, s, `server-worker.js changed: ${from}`);
+    assert.notEqual(out, s, `server-worker.ts changed: ${from}`);
     return out;
   };
   let out = swap(src, /^import initSqlJs from "[^"]+";$/m, `import initSqlJs from ${JSON.stringify(sqlJs)};`);
@@ -60,7 +62,7 @@ async function startWorker(code: string, { serial = false } = {}) {
     else if (m.type === "db") snapshot = m.bytes;
     else if (m.type === "response") responses.get(m.id)?.(m);
     else if (m.type === "files") {
-      // the studio keeps these in the project's VFS (cresslet-plugin.js fileOp); a Map does here
+      // the studio keeps these in the project's VFS (cresslet-plugin.ts fileOp); a Map does here
       const r: Record<string, unknown> = { type: "files-result", id: m.id };
       if (m.op === "put") files.set(m.key, { bytes: m.bytes, contentType: m.contentType, updatedAt: Date.now() });
       else if (m.op === "get") Object.assign(r, files.has(m.key) ? { found: true, ...files.get(m.key) } : { found: false });
@@ -250,7 +252,7 @@ export default { async fetch(req) {
   }
 });
 
-// TanStack Start apps (studio/start-build.js): AsyncLocalStorage is a one-store shim in the preview, so the worker
+// TanStack Start apps (studio/start-build.ts): AsyncLocalStorage is a one-store shim in the preview, so the worker
 // handles one request at a time, each to the end of its response body.
 test("studio worker: `serial` handles one request at a time", async () => {
   const app = `let current = null;

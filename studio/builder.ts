@@ -2,7 +2,9 @@
 // credits (`/v1/ai`, server/credits.ts: the operator's key, metered) or straight from this browser with the user's own
 // Anthropic API key. Its tools act on the same things the user does: the project's files in the container, the
 // in-browser shell, and `cresslet deploy` (the same control-plane API the CLI uses).
-// No DOM here (app.js renders): the loop and the tools also run under node for tests/builder_test.ts.
+// No DOM here (app.ts renders): the loop and the tools also run under node for tests/builder_test.ts.
+import type { Container } from "./vendor/cresslet-container/cresslet-container.js";
+import type { Anthropic, ContentBlockParam, MessageParam, MessageStream, StopReason, Tool, ToolResultBlockParam } from "./vendor/anthropic.js";
 
 export const MODEL = "claude-opus-5-5";
 const MAX_TOKENS = 64000;
@@ -27,14 +29,15 @@ How you work:
 - Prefer small, targeted edits (edit_file) to rewriting whole files.
 - When you're done, say briefly what you changed. The user sees the preview update by itself.`;
 
-const str = (description) => ({ type: "string", description });
-const tool = (name, description, properties = {}, required = Object.keys(properties)) => ({
+const str = (description: string) => ({ type: "string", description });
+type Schema = ReturnType<typeof str>;
+const tool = (name: string, description: string, properties: Record<string, Schema> = {}, required = Object.keys(properties)) => ({
   name,
   description,
   // Large inputs (file contents) stream as they're generated; inputs are then validated here (validate below).
   eager_input_streaming: true,
-  input_schema: { type: "object", properties, required, additionalProperties: false },
-});
+  input_schema: { type: "object" as const, properties, required, additionalProperties: false },
+}) satisfies Tool;
 
 export const TOOLS = [
   tool("list_files", "List the project's files (recursively, without node_modules, dist and .cresslet).", { dir: str("Directory to list, relative to the project root. Omit for the whole project.") }, []),
@@ -47,7 +50,7 @@ export const TOOLS = [
 ];
 
 /** The tool's input against its schema (eager input streaming means the API no longer checks it). */
-export function validate(name, input) {
+export function validate(name: string, input: unknown): string | null {
   const t = TOOLS.find((x) => x.name === name);
   if (!t) return `unknown tool: ${name}`;
   if (!input || typeof input !== "object" || Array.isArray(input)) return "input must be an object";
@@ -58,12 +61,12 @@ export function validate(name, input) {
   return null;
 }
 
-// Local secret files, or anything inside a directory named like one (as NOT_SOURCE in cresslet-plugin.js).
+// Local secret files, or anything inside a directory named like one (as NOT_SOURCE in cresslet-plugin.ts).
 const SECRET = /(?:^|\/)(?:\.env[^/]*|\.dev\.vars[^/]*)(?:\/|$)/i;
 const SKIP = /^(?:node_modules|dist|\.cresslet|\.git)(?:\/|$)/;
 
 /** A model-supplied path, confined to the project: relative, no `..`, not a local secret or .git. Throws otherwise. */
-export function projectPath(p, { dir = false } = {}) {
+export function projectPath(p: unknown, { dir = false } = {}): string {
   if (typeof p !== "string") throw new Error("path must be a string");
   const parts = p.replace(/\\/g, "/").split("/").filter((s) => s && s !== ".");
   if (p.startsWith("/") || parts.includes("..")) throw new Error(`path must stay inside the project: ${p}`);
@@ -75,22 +78,41 @@ export function projectPath(p, { dir = false } = {}) {
 }
 
 const ANSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\r(?!\n)/g;
-export const plain = (s) => s.replace(ANSI, "");
-const tail = (s, n = MAX_OUTPUT) => (s.length > n ? `[… ${s.length - n} earlier characters not shown]\n${s.slice(-n)}` : s);
+export const plain = (s: string) => s.replace(ANSI, "");
+const tail = (s: string, n = MAX_OUTPUT) => (s.length > n ? `[… ${s.length - n} earlier characters not shown]\n${s.slice(-n)}` : s);
 
 /**
  * The tools, over a cresslet-container (`c.fs`, `c.spawn`, `c.workdir`).
  * `devLog()`: the studio terminal's output so far; `onChange(path)`: after a file was written or deleted.
- * `cresslet deploy` asks the user first while one of these commands runs (`running`; cresslet-plugin.js), however it
+ * `cresslet deploy` asks the user first while one of these commands runs (`running`; cresslet-plugin.ts), however it
  * was started (directly, an npm script, `sh -c`). Commands also get CRESSLET_AI_BUILDER=1, for one left in the
  * background. `paused()`: true while the user is being asked; that time doesn't count toward the timeout.
  */
-export function createTools(c, { devLog = () => "", onChange = () => {}, timeoutMs = COMMAND_TIMEOUT_MS, paused = () => false, clock = () => performance.now() } = {}) {
+export interface ToolsOptions {
+  devLog?: () => string;
+  onChange?: (path: string) => void;
+  timeoutMs?: number;
+  paused?: () => boolean;
+  clock?: () => number;
+}
+
+/** What a tool call resolves to. */
+export interface ToolResult {
+  text: string;
+  error?: boolean;
+  /** One line for the chat. */
+  summary?: string;
+}
+
+/** Tool inputs after `validate`: an object of strings. */
+type Input = Record<string, string>;
+
+export function createTools(c: Pick<Container, "fs" | "spawn" | "workdir">, { devLog = () => "", onChange = () => {}, timeoutMs = COMMAND_TIMEOUT_MS, paused = () => false, clock = () => performance.now() }: ToolsOptions = {}) {
   const wd = c.workdir;
   let running = 0;
-  const abs = (rel) => (rel ? `${wd}/${rel}` : wd);
+  const abs = (rel: string) => (rel ? `${wd}/${rel}` : wd);
 
-  async function list(dir, out = []) {
+  async function list(dir: string, out: string[] = []): Promise<string[]> {
     const entries = await c.fs.readdir(abs(dir), { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const e of entries) {
@@ -104,7 +126,7 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     return out;
   }
 
-  async function exists(rel) {
+  async function exists(rel: string) {
     try {
       return await c.fs.exists(abs(rel));
     } catch {
@@ -112,21 +134,21 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     }
   }
 
-  async function readText(rel) {
+  async function readText(rel: string) {
     if (!(await exists(rel))) throw new Error(`no such file: ${rel}`);
     const text = await c.fs.readFile(abs(rel), "utf8");
     if (text.includes("\u0000")) throw new Error(`${rel} looks like a binary file`);
     return text;
   }
 
-  async function write(rel, content) {
+  async function write(rel: string, content: string) {
     const i = rel.lastIndexOf("/");
     if (i > 0) await c.fs.mkdir(abs(rel.slice(0, i)), { recursive: true });
     await c.fs.writeFile(abs(rel), content);
     onChange(rel);
   }
 
-  async function run(command, signal) {
+  async function run(command: string, signal?: AbortSignal) {
     running++;
     try {
       return await runOne(command, signal);
@@ -135,7 +157,7 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
     }
   }
 
-  async function runOne(command, signal) {
+  async function runOne(command: string, signal?: AbortSignal): Promise<ToolResult> {
     const proc = await c.spawn("jsh", ["-c", command], { cwd: wd, env: { CRESSLET_AI_BUILDER: "1" } });
     let out = "", dropped = 0; // only the tail is kept
     const reading = proc.output.pipeTo(new WritableStream({ write: (d) => {
@@ -146,8 +168,9 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
       }
     } })).catch(() => {});
     await proc.input.close().catch(() => {}); // no stdin: a command that waits for input gets EOF
-    let timer, stop;
-    const stopped = new Promise((r) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stop = () => {};
+    const stopped = new Promise<"timeout" | "stopped">((r) => {
       // Wall-clock time (timers are throttled in background tabs), not counting time spent asking the user.
       // An interval in which the user was being asked at either end counts at most one normal tick (a throttled,
       // late tick can't charge the wait), and it never times out while they're being asked.
@@ -182,9 +205,10 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
   }
 
   /** Runs one tool call. Resolves to { text, error, summary } (summary: one line for the chat). Never throws. */
-  async function execute(name, input, signal) {
-    const bad = validate(name, input);
+  async function execute(name: string, raw: unknown, signal?: AbortSignal): Promise<ToolResult & { summary: string }> {
+    const bad = validate(name, raw);
     if (bad) return { error: true, text: `invalid input: ${bad}`, summary: `${name}: invalid input` };
+    const input = raw as Input; // validated: an object of strings
     try {
       switch (name) {
         case "list_files": {
@@ -232,7 +256,8 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
           return { text: tail(plain(devLog()).trimEnd()) || "(no output yet)", summary: "Read the dev server output" };
       }
     } catch (e) {
-      return { error: true, text: e?.message ?? String(e), summary: `${name}: ${e?.message ?? e}` };
+      const msg = (e as { message?: string } | null)?.message;
+      return { error: true, text: msg ?? String(e), summary: `${name}: ${msg ?? e}` };
     }
     return { error: true, text: `unknown tool: ${name}`, summary: `unknown tool: ${name}` };
   }
@@ -253,26 +278,46 @@ export function createTools(c, { devLog = () => "", onChange = () => {}, timeout
  * { type: "tool", name, input } | { type: "tool-done", name, summary, error } | { type: "notice", text, error? }.
  * The history is append-only (thinking blocks are passed back unchanged, as the API requires).
  */
-export function createAgent({ client, tools, on = () => {}, model = MODEL, errorText: describe = errorText }) {
-  const messages = [];
-  let ctl = null;
+export type AgentEvent =
+  | { type: "text"; delta: string }
+  | { type: "turn" }
+  | { type: "retry" }
+  | { type: "thinking" }
+  | { type: "tool"; name: string; input: unknown }
+  | { type: "tool-done"; name: string; summary: string; error: boolean }
+  | { type: "notice"; text: string; error?: boolean };
+
+/** The client surface the agent uses (tests pass a fake). */
+export type Api = Pick<Anthropic, "beta">;
+
+export interface AgentOptions {
+  client: () => Promise<Api>;
+  tools: { execute(name: string, input: unknown, signal?: AbortSignal): Promise<ToolResult & { summary: string }> };
+  on?: (event: AgentEvent) => void;
+  model?: string;
+  errorText?: (e: unknown) => string;
+}
+
+export function createAgent({ client, tools, on = () => {}, model = MODEL, errorText: describe = errorText }: AgentOptions) {
+  const messages: MessageParam[] = [];
+  let ctl: AbortController | null = null;
 
   // Tool calls the last assistant turn made but that never ran (stopped, refused, cut off): the API needs a result
   // for each before the next user text.
-  function unanswered() {
+  function unanswered(): ToolResultBlockParam[] {
     const last = messages.at(-1);
     if (last?.role !== "assistant" || !Array.isArray(last.content)) return [];
     return last.content.filter((b) => b.type === "tool_use").map((b) => ({
-      type: "tool_result", tool_use_id: b.id, is_error: true, content: "not run: the turn ended before this tool ran",
+      type: "tool_result" as const, tool_use_id: b.id, is_error: true, content: "not run: the turn ended before this tool ran",
     }));
   }
 
   // Streams one request. Resolves to the message and the ids of tool calls whose input wasn't valid JSON: with eager
   // input streaming the API doesn't check it, and the SDK's tolerant parser can turn bad JSON into a shorter valid
   // input (a truncated file), so the raw input is parsed strictly here.
-  async function turn(api, signal) {
+  async function turn(api: Api, signal: AbortSignal) {
     for (let retries = 0; ;) {
-      const stream = api.beta.messages.stream({
+      const stream: MessageStream = api.beta.messages.stream({
         model,
         max_tokens: MAX_TOKENS,
         system: SYSTEM,
@@ -285,7 +330,7 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL, error
         fallbacks: "default",
       }, { signal });
       on({ type: "turn" });
-      const raw = new Map(); // content index → tool input JSON as streamed
+      const raw = new Map<number, string>(); // content index → tool input JSON as streamed
       stream.on("text", (delta) => on({ type: "text", delta }));
       stream.on("streamEvent", (e) => {
         if (e.type === "content_block_start" && e.content_block.type === "thinking") on({ type: "thinking" });
@@ -294,7 +339,7 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL, error
       });
       try {
         const msg = await stream.finalMessage();
-        const invalid = new Set();
+        const invalid = new Set<string>();
         for (const [i, json] of raw) {
           const b = msg.content[i];
           if (b?.type !== "tool_use" || !json.trim()) continue;
@@ -308,19 +353,20 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL, error
       } catch (e) {
         // API errors (bad key, rate limit, overload after the SDK's own retries) and stops end the turn; a dropped
         // connection or a tool input the SDK couldn't parse at all is re-issued (the failed turn was never appended).
-        if (signal.aborted || e?.status !== undefined || e?.name === "APIUserAbortError" || ++retries > 2) throw e;
+        const err = e as { status?: number; name?: string } | null;
+        if (signal.aborted || err?.status !== undefined || err?.name === "APIUserAbortError" || ++retries > 2) throw e;
         on({ type: "retry" });
         on({ type: "notice", text: "The connection dropped; trying again." });
       }
     }
   }
 
-  const CUT_OFF = {
+  const CUT_OFF: Partial<Record<StopReason, string>> = {
     max_tokens: "The reply hit the length limit",
     model_context_window_exceeded: "The conversation is too long for Claude (start a new chat)",
   };
 
-  async function send(text) {
+  async function send(text: string) {
     if (ctl) throw new Error("already working");
     ctl = new AbortController();
     const { signal } = ctl;
@@ -336,7 +382,8 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL, error
           on({ type: "notice", text: "Claude declined this request.", error: true });
           return;
         }
-        const cut = CUT_OFF[msg.stop_reason] ?? (["end_turn", "tool_use", "stop_sequence", "pause_turn"].includes(msg.stop_reason) ? null : `The reply stopped early (${msg.stop_reason})`);
+        const stop = msg.stop_reason;
+        const cut = (stop && CUT_OFF[stop]) ?? (stop && ["end_turn", "tool_use", "stop_sequence", "pause_turn"].includes(stop) ? null : `The reply stopped early (${stop})`);
         if (!msg.content.length) {
           // an empty message would make every later request fail: not kept
           if (cut) on({ type: "notice", text: `${cut}.`, error: true });
@@ -351,7 +398,7 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL, error
           return;
         }
         if (!calls.length || msg.stop_reason !== "tool_use") return;
-        const results = [];
+        const results: ContentBlockParam[] = [];
         for (const b of calls) {
           if (signal.aborted) {
             results.push({ type: "tool_result", tool_use_id: b.id, is_error: true, content: "not run: stopped by the user" });
@@ -395,9 +442,11 @@ export function createAgent({ client, tools, on = () => {}, model = MODEL, error
 }
 
 /** `credits`: the request went through this server on AI credits (not the user's own key). */
-export function errorText(e, { credits = false } = {}) {
-  const s = e?.status;
-  const m = e?.error?.error?.message ?? e?.message ?? String(e);
+export function errorText(e: unknown, { credits = false } = {}): string {
+  // An Anthropic SDK APIError (status, the API's error body), or anything else thrown.
+  const err = e as { status?: number; message?: string; error?: { error?: { message?: string } } } | null | undefined;
+  const s = err?.status;
+  const m = err?.error?.error?.message ?? err?.message ?? String(e);
   if (credits) {
     if (s === 401) return "Your Cresslet session expired. Log in again to use your AI credits.";
     if (s === 402 || s === 403 || s === 400) return m;
@@ -422,7 +471,7 @@ export const apiKey = {
     }
   },
   /** True if stored. */
-  set(v) {
+  set(v: string | null) {
     try {
       v ? localStorage.setItem(KEY, v) : localStorage.removeItem(KEY);
       return localStorage.getItem(KEY) === (v || null);
@@ -433,7 +482,7 @@ export const apiKey = {
 };
 
 /** An Anthropic client for this browser; the SDK bundle loads on first use. */
-export async function anthropicClient(key) {
+export async function anthropicClient(key: string) {
   const { Anthropic } = await import("./vendor/anthropic.js");
   return new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true });
 }
@@ -442,7 +491,7 @@ export async function anthropicClient(key) {
  * An Anthropic client that goes through this server on the account's AI credits: the same Messages API at
  * `<origin>/v1/ai`, authenticated with the Cresslet session token (it never reaches Anthropic).
  */
-export async function creditsClient(token, origin = globalThis.location?.origin) {
+export async function creditsClient(token: string, origin: string | undefined = globalThis.location?.origin) {
   const { Anthropic } = await import("./vendor/anthropic.js");
   return new Anthropic({ apiKey: null, authToken: token, baseURL: `${origin}/v1/ai`, dangerouslyAllowBrowser: true });
 }

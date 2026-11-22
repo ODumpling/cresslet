@@ -4,19 +4,29 @@ import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWith
 import { FitAddon, Terminal } from "./vendor/terminal.js";
 import { auth, fromTree, ignored, migrateDeployKeys, projects, toTree } from "./store.js";
 import { createCresslet } from "./cresslet-plugin.js";
+import type { CressletConfig } from "./cresslet-plugin.js";
 import { anthropicClient, apiKey, createAgent, createTools, creditsClient, errorText } from "./builder.js";
+import type { AgentEvent } from "./builder.js";
+import type { Deploy as LocalDeploy, StoredProject } from "./store.js";
+import type * as API from "./api-types.ts";
 
-const $ = (id) => document.getElementById(id);
-const el = (tag, { dataset, ...props } = {}, ...children) => {
+/** An element of index.html by id; `T`: its element type, when more than HTMLElement's members are used. */
+const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+type Child = Node | string | null | undefined | false;
+/** Properties `el` sets (Object.assign): any of the element's own, `dataset` merged in. */
+type Props<K extends keyof HTMLElementTagNameMap> = Partial<Omit<HTMLElementTagNameMap[K], "dataset" | "style">> & { dataset?: Record<string, string> };
+const el = <K extends keyof HTMLElementTagNameMap>(tag: K, { dataset, ...props }: Props<K> = {}, ...children: Child[]): HTMLElementTagNameMap[K] => {
   const n = Object.assign(document.createElement(tag), props);
   if (dataset) Object.assign(n.dataset, dataset);
-  n.append(...children.filter((c) => c != null));
+  n.append(...children.filter((c): c is Node | string => c != null));
   return n;
 };
+/** What was thrown, as its message (an Error, or the API's error: `api` below). */
+const errorMessage = (e: unknown): string => (e as Error).message;
 
 const SVG = "http://www.w3.org/2000/svg";
 /** A decorative icon from the sprite in index.html; the control around it carries the accessible name. */
-const icon = (name, className = "icon") => {
+const icon = (name: string, className = "icon") => {
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", className);
   svg.setAttribute("aria-hidden", "true");
@@ -25,15 +35,15 @@ const icon = (name, className = "icon") => {
   svg.append(use);
   return svg;
 };
-const srOnly = (text) => el("span", { className: "sr-only", textContent: text });
+const srOnly = (text: string) => el("span", { className: "sr-only", textContent: text });
 /** A link that opens in a new tab, and says so to screen readers. */
-const extLink = (href, text, className = "ext") =>
+const extLink = (href: string, text: Child, className = "ext") =>
   el("a", { href, target: "_blank", rel: "noopener", className }, text, srOnly(" (opens in a new tab)"), icon("external"));
 
 // ------------------------------------------------------------------ shared UI
 // The toast's body is a live region that stays in the page (one that appears with its message may not be
 // announced). It stays open while hovered or focused (WCAG 2.2.1), and Escape or × dismisses it.
-function toast(content, ms = 6000) {
+function toast(content: Node | string, ms = 6000) {
   $("toast-body").replaceChildren(content);
   $("toast").dataset.open = "true";
   $("toast-close").hidden = false;
@@ -85,6 +95,9 @@ function closeToast() {
   $("toast-body").replaceChildren();
   if (hadFocus) focusView();
 }
+// Its timer and how long it stays (set by each toast).
+toast.ms = undefined as number | undefined;
+toast.timer = undefined as ReturnType<typeof setTimeout> | undefined;
 {
   const t = $("toast");
   t.addEventListener("pointerenter", () => clearTimeout(toast.timer));
@@ -96,33 +109,33 @@ function closeToast() {
   addEventListener("keydown", (e) => e.key === "Escape" && t.dataset.open === "true" && closeToast(), true);
 }
 
-function setStatus(text, state = "busy") {
+function setStatus(text: string, state = "busy") {
   $("status-text").textContent = text;
   $("status").dataset.state = state;
 }
 
 /** Moves focus to the visible view's heading (after navigation, so screen readers hear where they are). */
 function focusView({ scroll = false } = {}) {
-  const h = document.querySelector("main:not([hidden]) h1");
+  const h = document.querySelector<HTMLElement>("main:not([hidden]) h1");
   h?.focus({ preventScroll: true });
   if (scroll) h?.scrollIntoView({ block: "nearest" });
 }
 // The last focused control, as a selector that still finds it after a re-render rebuilds it.
 // (Per-item controls get unique ids, e.g. revoke-<token id>: labels like "Revoke Studio (GitHub login)" repeat.)
-let lastFocusKey = null, lastFocusEl = null;
+let lastFocusKey: string | null = null, lastFocusEl: Element | null = null;
 addEventListener("focusin", (e) => {
-  const t = e.target, label = t.getAttribute?.("aria-label");
+  const t = e.target as Element, label = t.getAttribute?.("aria-label"); // focusin targets are elements
   lastFocusEl = t;
   lastFocusKey = t.id ? `#${CSS.escape(t.id)}` : label ? `[aria-label="${CSS.escape(label)}"]` : null;
 });
 /** After a re-render removed the focused control: focus its rebuilt twin if there is one, else `target`, else the
  *  view's heading. Does nothing if focus is still on a control in the page (the user moved it meanwhile). */
-function refocus(target) {
+function refocus(target?: HTMLElement | null) {
   const a = document.activeElement;
   if (a && a !== document.body && a.isConnected) return;
   // only when the last focused control was removed (a click in Safari/Firefox doesn't focus buttons, so the
   // last focusin may be an older control that's still here)
-  const twin = lastFocusEl && !lastFocusEl.isConnected && lastFocusKey && document.querySelector(`main:not([hidden]) ${lastFocusKey}`);
+  const twin = lastFocusEl && !lastFocusEl.isConnected && lastFocusKey && document.querySelector<HTMLElement>(`main:not([hidden]) ${lastFocusKey}`);
   if (twin) twin.focus();
   else if (target) target.focus();
   else focusView();
@@ -132,15 +145,19 @@ $("skip-link").addEventListener("click", (e) => {
   focusView({ scroll: true });
 });
 
-async function api(path, init = {}) {
-  const headers = { "content-type": "application/json", ...init.headers };
+/** An API error: the server's message, and the HTTP status. */
+type ApiError = Error & { status: number };
+
+/** A JSON API call; `T`: the response's shape (api-types.ts). Throws an ApiError when it isn't ok. */
+async function api<T = unknown>(path: string, init: Omit<RequestInit, "headers"> & { headers?: Record<string, string> } = {}): Promise<T> {
+  const headers: Record<string, string> = { "content-type": "application/json", ...init.headers };
   if (auth.token) headers.authorization = `Bearer ${auth.token}`;
   const res = await fetch(path, { ...init, headers });
   if (res.status === 401 && headers.authorization && auth.token) {
     // Token revoked (e.g. regenerated elsewhere): drop it and retry logged out.
     logOut();
     toast("Your session expired. Log in again.");
-    return api(path, init);
+    return api<T>(path, init);
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(body.message ?? `${res.status}`), { status: res.status });
@@ -155,35 +172,41 @@ function renderAccount() {
 }
 
 // Login is GitHub only: the server redirects back to /#cresslet_login=<one-time code>.
-const meta = fetch("/v1").then((r) => r.json()).catch(() => ({}));
+const meta: Promise<API.Meta> = fetch("/v1").then((r) => r.json()).catch(() => ({}));
 
 // ------------------------------------------------------------------ subdomain picker
 // A new app's or page's address: generated by the server (GET /v1/names?kind=…), editable, checked as you type
 // (GET /v1/names/:name). Same rules as server/deploys.ts validName.
 const NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
-function slugField(input, kind) {
-  const field = input.closest(".slug-field");
-  const status = field.querySelector(".slug-status");
+/** A check's outcome; `retry`: it failed (network, 429), ask again. */
+interface SlugCheck {
+  name: string;
+  ok: boolean;
+  retry?: boolean;
+}
+function slugField(input: HTMLInputElement, kind: "app" | "page") {
+  const field = input.closest(".slug-field")!; // index.html: every slug input is in one
+  const status = field.querySelector<HTMLElement>(".slug-status")!;
   meta.then((m) => {
     const [before, after] = (m.appUrlTemplate ?? "").split("{name}");
-    field.querySelector(".js-slug-before").textContent = before ?? "";
-    field.querySelector(".js-slug-after").textContent = after ?? "";
+    field.querySelector(".js-slug-before")!.textContent = before ?? "";
+    field.querySelector(".js-slug-after")!.textContent = after ?? "";
   });
   // `seq` counts edits: an answer for an older value is dropped. `last`: the latest check (or suggestion);
   // `retry` marks one that failed (network, 429), so submitting asks again.
-  field.querySelector(".slug-input").addEventListener("mousedown", (e) => {
+  field.querySelector(".slug-input")!.addEventListener("mousedown", (e) => {
     if (e.target !== input) {
       e.preventDefault();
       input.focus();
     }
   });
-  let seq = 0, timer = null, last = null;
-  const show = (state, text) => {
+  let seq = 0, timer: ReturnType<typeof setTimeout> | undefined, last: Promise<SlugCheck> | null = null;
+  const show = (state: string, text: string) => {
     status.dataset.state = state;
     status.replaceChildren(...(state === "ok" ? [icon("check")] : state === "bad" ? [icon("x")] : []), text);
     input.setAttribute("aria-invalid", state === "bad" ? "true" : "false");
   };
-  const settle = (my, name, ok, state, text) => {
+  const settle = (my: number, name: string, ok: boolean, state: string, text: string): SlugCheck => {
     if (my === seq) show(state, text);
     return { name, ok };
   };
@@ -195,7 +218,7 @@ function slugField(input, kind) {
       last = Promise.resolve(settle(my, name, false, "bad", "Use lowercase letters, numbers and single dashes, not at the start or end."));
     } else {
       show("", "Checking…");
-      last = api(`/v1/names/${encodeURIComponent(name)}`).then(
+      last = api<{ available: boolean; reason?: string; message?: string }>(`/v1/names/${encodeURIComponent(name)}`).then(
         (r) => r.available
           ? settle(my, name, true, "ok", `${name} is available`)
           : settle(my, name, false, "bad", r.reason === "taken" ? `${name} is taken. Try another.` : r.message ?? "Not a valid address."),
@@ -224,7 +247,7 @@ function slugField(input, kind) {
       const my = ++seq;
       clearTimeout(timer);
       show("", "Picking an address…");
-      last = api(`/v1/names?kind=${kind}`).then(
+      last = api<{ name: string }>(`/v1/names?kind=${kind}`).then(
         ({ name }) => {
           if (my !== seq) return { name, ok: false };
           input.value = name;
@@ -243,7 +266,7 @@ function slugField(input, kind) {
   };
 }
 // What sharing an app lets each role do (the Share page swaps in an artifact's).
-const INVITE_VIEWER_APP = $("invite-role").options[0].textContent;
+const INVITE_VIEWER_APP = $<HTMLSelectElement>("invite-role").options[0]!.textContent; // index.html: viewer first
 let inviteAdminApp = $("invite-role-admin").textContent;
 // Custom domains off on this server (CRESSLET_CUSTOM_DOMAINS=false): don't offer them in the role descriptions.
 meta.then((m) => {
@@ -260,7 +283,7 @@ meta.then((m) => {
 const loginRequired = meta.then((m) => !!m.auth?.github);
 const mustLogIn = async () => !auth.token && await loginRequired;
 /** Back to the landing page; `after`: where to return once logged in. */
-function toLanding(after) {
+function toLanding(after?: string) {
   try {
     if (after) sessionStorage.setItem("cresslet.afterLogin", after);
   } catch { /* storage blocked: login lands on the home page */ }
@@ -277,8 +300,8 @@ $("account-btn").addEventListener("click", () => {
 });
 $("landing-login").addEventListener("click", logIn);
 
-let myAccountId = null; // tells your own row apart on the Share page
-function setAccount(r) {
+let myAccountId: string | null = null; // tells your own row apart on the Share page
+function setAccount(r: { token?: string; account: API.Account }) {
   auth.token = r.token ?? auth.token;
   myAccountId = r.account.id;
   auth.email = r.account.github ?? r.account.email;
@@ -312,7 +335,7 @@ function logOut() {
     history.replaceState(null, "", location.pathname + location.search);
     if (err) toast(`GitHub login failed: ${err}`);
     else {
-      api("/v1/auth/exchange", { method: "POST", body: JSON.stringify({ code }) }).then((r) => {
+      api<{ token: string; account: API.Account }>("/v1/auth/exchange", { method: "POST", body: JSON.stringify({ code }) }).then((r) => {
         setAccount(r);
         // Back to what needed the login (a private page).
         let after = null;
@@ -333,7 +356,7 @@ function logOut() {
 
 // ------------------------------------------------------------------ settings
 let focusOnShow = false; // set by in-app navigation; the first page load keeps the browser's own focus
-function showOnly(id) {
+function showOnly(id: string) {
   for (const m of ["landing", "home", "pages", "settings", "share", "view", "cli-login", "admin", "site", "workspace"]) $(m).hidden = m !== id;
   $("app").dataset.view = id;
   $("topbar").hidden = id !== "workspace";
@@ -343,7 +366,7 @@ function showOnly(id) {
   $("deploy-link").hidden = true;
   $("view-switch").hidden = true;
   $("drawer-btn").hidden = true;
-  for (const a of document.querySelectorAll("[data-nav]")) {
+  for (const a of document.querySelectorAll<HTMLElement>("[data-nav]")) {
     if (a.dataset.nav === id) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
@@ -370,8 +393,8 @@ function renderSettings() {
   showOnly("settings");
   document.title = "Settings · Cresslet Studio";
   $("token-new").hidden = true;
-  $("token-new-value").value = "";
-  api("/v1/me").then(({ account }) => {
+  $<HTMLInputElement>("token-new-value").value = "";
+  api<{ account: API.Account }>("/v1/me").then(({ account }) => {
     $("set-github").textContent = account.github ?? "—";
     $("set-email").textContent = account.email;
     setAccount({ account });
@@ -382,14 +405,14 @@ function renderSettings() {
   renderTokens();
   renderCredits();
   renderPageDefaults();
-  api("/v1/apps").then(({ apps }) => {
+  api<{ apps: API.AppSummary[] }>("/v1/apps").then(({ apps }) => {
     $("token-apps").replaceChildren(...(apps.length ? apps.map((a) =>
       el("label", { className: "check" }, el("input", { type: "checkbox", value: a.name }), el("span", { textContent: a.name }))
     ) : [el("p", { className: "muted small", textContent: "No apps yet." })]));
   }, () => {});
 }
 
-const when = (iso) => iso ? new Date(iso).toLocaleString() : "never";
+const when = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : "never";
 
 // AI credits (when the server offers them): what's left, this month's free credits, and recent use.
 async function renderCredits() {
@@ -398,15 +421,15 @@ async function renderCredits() {
   if (!on) return;
   let r;
   try {
-    r = await api("/v1/me/credits");
+    r = await api<API.MyCredits>("/v1/me/credits");
   } catch (e) {
-    $("credits-history").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load AI credits: ${e.message}` }));
+    $("credits-history").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load AI credits: ${errorMessage(e)}` }));
     return;
   }
   if (!r.enabled) return void ($("credits-section").hidden = true);
   const num = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
   const tokens = new Intl.NumberFormat();
-  const amount = (x) => `${num.format(x)} ${num.format(x) === "1" ? "credit" : "credits"}`;
+  const amount = (x: number) => `${num.format(x)} ${num.format(x) === "1" ? "credit" : "credits"}`;
   $("credits-available").textContent = amount(Math.max(0, r.available));
   $("credits-monthly").textContent = r.monthly.allowance
     ? `${num.format(r.monthly.remaining)} of ${num.format(r.monthly.allowance)} left, renews ${new Date(r.monthly.resetsAt).toLocaleDateString()}`
@@ -431,11 +454,11 @@ async function renderCredits() {
 }
 
 async function renderTokens() {
-  let tokens;
+  let tokens: API.Token[];
   try {
-    ({ tokens } = await api("/v1/me/tokens"));
+    ({ tokens } = await api<{ tokens: API.Token[] }>("/v1/me/tokens"));
   } catch (e) {
-    $("tokens").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load tokens: ${e.message}` }));
+    $("tokens").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load tokens: ${errorMessage(e)}` }));
     return;
   }
   if (!tokens.length) {
@@ -459,7 +482,7 @@ async function renderTokens() {
   ));
 }
 
-async function revokeToken(t) {
+async function revokeToken(t: API.Token) {
   const msg = t.current
     ? `Revoke "${t.name}"? This browser's session uses it, so you'll be logged out.`
     : `Revoke "${t.name}"? Anything using it stops working.`;
@@ -467,7 +490,7 @@ async function revokeToken(t) {
   try {
     await api(`/v1/me/tokens/${encodeURIComponent(t.id)}`, { method: "DELETE" });
   } catch (e) {
-    toast(`Could not revoke: ${e.message}`);
+    toast(`Could not revoke: ${errorMessage(e)}`);
     return;
   }
   if (t.current) {
@@ -482,53 +505,53 @@ async function revokeToken(t) {
 }
 
 // Form errors stay beside the form (not a timed toast) until the user changes it.
-function tokenError(text) {
+function tokenError(text: string) {
   $("token-error").textContent = text;
   $("token-error").hidden = !text;
 }
 $("token-form").addEventListener("change", () => tokenError(""));
-for (const r of document.querySelectorAll('input[name="token-scope"]')) {
+for (const r of document.querySelectorAll<HTMLInputElement>('input[name="token-scope"]')) {
   r.addEventListener("change", () => ($("token-apps").hidden = r.value === "all" ? r.checked : !r.checked));
 }
 
 $("token-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const some = document.querySelector('input[name="token-scope"]:checked').value === "some";
-  const apps = some ? [...$("token-apps").querySelectorAll("input:checked")].map((x) => x.value) : null;
-  if (some && !apps.length) {
+  const some = document.querySelector<HTMLInputElement>('input[name="token-scope"]:checked')!.value === "some"; // one is always checked
+  const apps = some ? [...$("token-apps").querySelectorAll<HTMLInputElement>("input:checked")].map((x) => x.value) : null;
+  if (some && !apps!.length) {
     tokenError("Pick at least one app, or choose All apps.");
     $("token-apps").querySelector("input")?.focus();
     return;
   }
   tokenError("");
-  $("token-create").disabled = true;
+  $<HTMLButtonElement>("token-create").disabled = true;
   try {
-    const r = await api("/v1/me/tokens", {
+    const r = await api<{ info: API.Token; token: string }>("/v1/me/tokens", {
       method: "POST",
-      body: JSON.stringify({ name: $("token-name").value, role: $("token-role").value, apps }),
+      body: JSON.stringify({ name: $<HTMLInputElement>("token-name").value, role: $<HTMLSelectElement>("token-role").value, apps }),
     });
     $("token-new-name").textContent = r.info.name;
-    $("token-new-value").value = r.token;
+    $<HTMLInputElement>("token-new-value").value = r.token;
     $("token-new").hidden = false;
     $("token-new-value").focus();
-    $("token-new-value").select();
-    $("token-form").reset();
+    $<HTMLInputElement>("token-new-value").select();
+    $<HTMLFormElement>("token-form").reset();
     $("token-apps").hidden = true;
     renderTokens();
   } catch (err) {
-    tokenError(`Could not create token: ${err.message}`);
+    tokenError(`Could not create token: ${errorMessage(err)}`);
   } finally {
-    $("token-create").disabled = false;
+    $<HTMLButtonElement>("token-create").disabled = false;
     if (document.activeElement === document.body) $("token-create").focus(); // disabling it dropped focus
   }
 });
 
 $("token-copy").addEventListener("click", async () => {
   try {
-    await navigator.clipboard.writeText($("token-new-value").value);
+    await navigator.clipboard.writeText($<HTMLInputElement>("token-new-value").value);
     toast("Token copied");
   } catch {
-    $("token-new-value").select();
+    $<HTMLInputElement>("token-new-value").select();
     toast("Copy failed: select the token and copy it manually.");
   }
 });
@@ -539,7 +562,7 @@ $("logout-btn").addEventListener("click", () => {
 });
 
 // ------------------------------------------------------------------ admin (site admins only)
-const fmtBytes = (n) => {
+const fmtBytes = (n: number) => {
   if (n < 1024) return `${n} B`;
   const u = ["KB", "MB", "GB", "TB"];
   let i = -1;
@@ -547,25 +570,25 @@ const fmtBytes = (n) => {
   return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)} ${u[i]}`;
 };
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
-const ago = (iso) => {
+const ago = (iso: string | number | null | undefined) => {
   if (!iso) return "—";
-  const s = (new Date(iso) - Date.now()) / 1000;
-  for (const [unit, sec] of [["year", 31536000], ["month", 2592000], ["day", 86400], ["hour", 3600], ["minute", 60]]) {
+  const s = (new Date(iso).getTime() - Date.now()) / 1000;
+  for (const [unit, sec] of [["year", 31536000], ["month", 2592000], ["day", 86400], ["hour", 3600], ["minute", 60]] as const) {
     if (Math.abs(s) >= sec) return rtf.format(Math.round(s / sec), unit);
   }
   return rtf.format(Math.round(s), "second");
 };
-const STATUS = { running: "Running", idle: "Idle", empty: "Not deployed", deleted: "Deleted" };
-const statusPill = (s, text = STATUS[s] ?? s) => el("span", { className: "pill", dataset: { s } }, el("i", { className: "dot", ariaHidden: "true" }), text);
-const ownerText = (o) => (o ? o.github ?? o.email : "Anonymous");
-const stat = (label, value, sub, extra) =>
+const STATUS: Record<string, string> = { running: "Running", idle: "Idle", empty: "Not deployed", deleted: "Deleted" };
+const statusPill = (s: string, text = STATUS[s] ?? s) => el("span", { className: "pill", dataset: { s } }, el("i", { className: "dot", ariaHidden: "true" }), text);
+const ownerText = (o: API.Owner | null | undefined) => (o ? o.github ?? o.email : "Anonymous");
+const stat = (label: string, value: Child[], sub: string, extra?: Child) =>
   el("div", { className: "stat" },
     el("div", { className: "label", textContent: label }),
-    el("div", { className: "value" }, extra, ...[].concat(value)),
+    el("div", { className: "value" }, extra, ...value),
     el("div", { className: "sub", textContent: sub }));
 
-function usageBar(u) {
-  const parts = [["deploys", "Site"], ["database", "Database"], ["files", "Files"]];
+function usageBar(u: API.Usage) {
+  const parts = [["deploys", "Site"], ["database", "Database"], ["files", "Files"]] as const;
   const total = u.total || 1;
   return el("div", {},
     el("div", { className: "usage-bar", role: "img", ariaLabel: parts.map(([k, l]) => `${l} ${fmtBytes(u[k])}`).join(", ") },
@@ -580,7 +603,7 @@ function usageBar(u) {
 
 const adminView = { filter: "live", q: "", gen: 0 };
 
-async function adminAction(site, action) {
+async function adminAction(site: API.Site, action: "delete" | "restore" | "purge") {
   try {
     if (action === "delete") {
       if (!confirm(`Delete ${site.name}? It goes offline now and can be restored until it's purged.`)) return false;
@@ -601,20 +624,20 @@ async function adminAction(site, action) {
     }
     return true;
   } catch (e) {
-    toast(`Could not ${action} ${site.name}: ${e.message}`);
+    toast(`Could not ${action} ${site.name}: ${errorMessage(e)}`);
     return false;
   }
 }
 
-function siteActions(site, after) {
-  const btn = (label, action, danger) =>
+function siteActions(site: API.Site, after: (action: "delete" | "restore" | "purge") => unknown) {
+  const btn = (label: string, action: "delete" | "restore" | "purge", danger?: boolean) =>
     el("button", {
       className: `btn sm${danger ? " danger" : ""}`,
       type: "button",
       textContent: label,
       ariaLabel: `${label} ${site.name}`,
       onclick: async (e) => {
-        const b = e.currentTarget; // null after the await
+        const b = e.currentTarget as HTMLButtonElement; // this button; null after the await
         const gen = routeGen;
         b.disabled = true;
         const done = await adminAction(site, action);
@@ -635,12 +658,12 @@ function siteActions(site, after) {
 /** Resolves true if this render is still the current view (no later route or admin render), so callers may move focus.
  *  `credits`: the AI credits pages (`name`: an account id); `section` "users" or "orgs": those pages; else the
  *  sites pages (`name`: a site). */
-async function renderAdmin(name, { credits = false, section = credits ? "credits" : "sites" } = {}) {
+async function renderAdmin(name?: string, { credits = false, section = credits ? "credits" : "sites" }: { credits?: boolean; section?: string } = {}): Promise<boolean> {
   if (!auth.token) {
     location.hash = "#/";
     return false;
   }
-  const TITLES = { credits: "AI credits", users: "Users", orgs: "Organizations" };
+  const TITLES: Record<string, string> = { credits: "AI credits", users: "Users", orgs: "Organizations" };
   $("admin-title").replaceChildren(TITLES[section] ?? (name || "Sites")); // before showOnly() focuses it
   $("admin-sub").textContent = "";
   showOnly("admin");
@@ -658,8 +681,9 @@ async function renderAdmin(name, { credits = false, section = credits ? "credits
   } catch (e) {
     if (!current()) return false;
     if (TITLES[section]) $("admin-title").replaceChildren(TITLES[section]);
-    $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 403 ? "Only site admins can see this page." : `Could not load: ${e.message}` }));
-    if (e.status !== 403) {
+    const err = e as ApiError;
+    $("admin-body").replaceChildren(el("p", { className: "error", textContent: err.status === 403 ? "Only site admins can see this page." : `Could not load: ${err.message}` }));
+    if (err.status !== 403) {
       const retry = el("button", { className: "btn", type: "button", onclick: () => renderAdmin(name, { credits, section }).then((ok) => ok && refocus(name ? null : $("admin-actions").querySelector("button"))) }, icon("refresh"), "Retry");
       $("admin-actions").replaceChildren(retry);
       refocus(retry); // the Refresh/Retry that was clicked is gone
@@ -673,7 +697,7 @@ async function renderAdminSites() {
   $("admin-title").replaceChildren("Sites");
   $("admin-sub").textContent = "Every site on this server";
   const gen = adminView.gen, route = routeGen;
-  const { totals, sites, retentionDays } = await api("/v1/admin/sites");
+  const { totals, sites, retentionDays } = await api<API.AdminSites>("/v1/admin/sites");
   if (gen !== adminView.gen || route !== routeGen) return; // navigated away or re-rendered meanwhile
   $("admin-actions").replaceChildren(el("button", {
     className: "btn",
@@ -692,13 +716,13 @@ async function renderAdminSites() {
   const tbody = el("tbody");
   const counts = { live: totals.live, deleted: totals.deleted, all: totals.sites };
   const seg = el("div", { className: "seg", role: "group", ariaLabel: "Show" },
-    ...[["live", "Live"], ["deleted", "Deleted"], ["all", "All"]].map(([k, l]) =>
+    ...([["live", "Live"], ["deleted", "Deleted"], ["all", "All"]] as const).map(([k, l]) =>
       el("button", { type: "button", id: `filter-${k}`, textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminView.filter = k; draw(); } })));
   const search = el("input", { type: "search", className: "input", placeholder: "Search sites, owners, domains", ariaLabel: "Search sites", value: adminView.q, oninput: () => { adminView.q = search.value; draw(); } });
   const shown = el("p", { className: "sr-only", role: "status" });
 
   function draw() {
-    for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === adminView.filter));
+    for (const b of seg.children as HTMLCollectionOf<HTMLElement>) b.setAttribute("aria-pressed", String(b.dataset.k === adminView.filter));
     const q = adminView.q.trim().toLowerCase();
     const rows = sites.filter((s) =>
       (adminView.filter === "all" || (adminView.filter === "deleted") === (s.status === "deleted")) &&
@@ -731,11 +755,11 @@ async function renderAdminSites() {
     el("p", { className: "muted small", textContent: `Deleted sites go offline and can be restored for ${retentionDays} days, then they're purged with their data.` }));
 }
 
-async function renderAdminSite(name) {
+async function renderAdminSite(name: string) {
   document.title = `${name} · Admin · Cresslet Studio`;
   $("admin-title").replaceChildren(el("a", { href: "#/admin", textContent: "Sites" }), " / ", name);
   const gen = adminView.gen, route = routeGen;
-  const [d, { customDomains }] = await Promise.all([api(`/v1/admin/sites/${encodeURIComponent(name)}`), meta]);
+  const [d, { customDomains }] = await Promise.all([api<API.AdminSite>(`/v1/admin/sites/${encodeURIComponent(name)}`), meta]);
   if (gen !== adminView.gen || route !== routeGen) return;
   const s = d.site;
   $("admin-sub").textContent = s.owner ? `Owned by ${ownerText(s.owner)}` : "Anonymous site";
@@ -761,8 +785,8 @@ async function renderAdminSite(name) {
     stat("Database", [s.usage.database ? fmtBytes(s.usage.database) : "—"], !d.database ? (s.usage.database ? "Tables visible to the owner and its admins" : "No database yet") : d.database.error ? "Couldn't read" : !d.database.tables.length ? "No database yet" : `${d.database.tables.length} tables · ${d.database.tables.reduce((n, t) => n + t.rows, 0).toLocaleString()} rows`),
     stat("Files", [fmtBytes(s.usage.files)], `${fmtBytes(s.usage.total)} total on disk`));
 
-  const kv = (pairs) => el("dl", { className: "kv" }, ...pairs.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
-  const link = (href, text) => extLink(href, text);
+  const kv = (pairs: [string, Child][]) => el("dl", { className: "kv" }, ...pairs.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
+  const link = (href: string, text: string) => extLink(href, text);
   const info = el("div", { className: "panel" }, el("h2", { textContent: "Overview" }), kv([
     ["URL", s.status === "deleted" ? s.url : link(s.url, s.url.replace(/^https?:\/\//, ""))],
     ["Domains", d.domains.length
@@ -776,7 +800,7 @@ async function renderAdminSite(name) {
     ["App ID", el("span", { className: "mono", textContent: s.id })],
   ]), el("h2", { className: "mt", textContent: "Storage" }), usageBar(s.usage));
 
-  const tableOf = (heads, rows, empty) =>
+  const tableOf = (heads: string[], rows: Child[][], empty: string) =>
     rows.length
       // Focusable, so a keyboard can scroll it when it's wider than the panel.
       ? el("div", { className: "scroll-x", tabIndex: 0, role: "region", ariaLabel: `${heads[0]}s` }, el("table", { className: "table" },
@@ -798,15 +822,15 @@ async function renderAdminSite(name) {
 // One deployed app: status, requests, storage, deploys (with rollback), its database, secrets and logs.
 // Viewers see it all read only; the owner and admins can roll back and change secrets.
 const SITE_TABS = [["", "Overview", "server"], ["database", "Database", "database"], ["secrets", "Secrets", "key"], ["logs", "Logs", "terminal"]];
-/** `stop`: ends the open logs stream (set by the Logs tab, called on every route). */
-const appDash = { gen: 0, stop: null, page: {} };
-const siteHref = (name, ...rest) => `#/apps/${[name, ...rest].map(encodeURIComponent).join("/")}`;
-const appPath = (name, rest = "") => `/v1/apps/${encodeURIComponent(name)}${rest}`;
-const canManage = (access) => access === "owner" || access === "admin";
-const plural = (n, one, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+/** `stop`: ends the open logs stream (set by the Logs tab, called on every route). `page`: a table's offset, by app + table. */
+const appDash: { gen: number; stop: (() => void) | null; page: Record<string, number> } = { gen: 0, stop: null, page: {} };
+const siteHref = (name: string, ...rest: string[]) => `#/apps/${[name, ...rest].map(encodeURIComponent).join("/")}`;
+const appPath = (name: string, rest = "") => `/v1/apps/${encodeURIComponent(name)}${rest}`;
+const canManage = (access: string | undefined) => access === "owner" || access === "admin";
+const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
 
 /** Resolves true if this render is still current (no later route or re-render), so callers may move focus. */
-async function renderSite(name, tab = "", arg = "") {
+async function renderSite(name: string, tab = "", arg = ""): Promise<boolean> {
   if (!auth.token) {
     location.hash = "#/";
     return false;
@@ -825,7 +849,7 @@ async function renderSite(name, tab = "", arg = "") {
   document.title = `${name} · Cresslet Studio`;
   showOnly("site");
   try {
-    const d = await api(appPath(name));
+    const d = await api<API.AppDetail>(appPath(name));
     if (!current()) return false;
     const a = d.app;
     $("site-sub").textContent = [ACCESS_LABEL[a.access] ? `You're ${a.access === "owner" ? (a.org ? "an owner" : "the owner") : `${a.access === "admin" ? "an" : "a"} ${a.access}`}` : null,
@@ -838,19 +862,21 @@ async function renderSite(name, tab = "", arg = "") {
     $("site-actions").replaceChildren(
       extLink(a.url, "Visit", "btn"),
       el("button", { className: "btn", type: "button", title: "Open the deployed source as a new project", onclick: () => openDeployed(a) }, icon("download"), "Open source"),
-      canManage(a.access) ? el("a", { className: "btn", href: `#/share/${encodeURIComponent(name)}` }, icon("users"), "Share") : null,
+      // (a null here was inserted as the text "null": viewers saw it beside Visit)
+      ...(canManage(a.access) ? [el("a", { className: "btn", href: `#/share/${encodeURIComponent(name)}` }, icon("users"), "Share")] : []),
       refresh);
     if (tab === "database") await siteDatabase(name, arg, current);
-    else if (tab === "secrets") siteSecrets(name, d, current);
+    else if (tab === "secrets") siteSecrets(name, d);
     else if (tab === "logs") siteLogs(name, current);
     else await siteOverview(name, d, current);
   } catch (e) {
     if (!current()) return false;
+    const err = e as ApiError;
     $("site-body").replaceChildren(el("p", {
       className: "error",
-      textContent: e.status === 404 || e.status === 403 ? `There's no app named ${name} that you can see.` : `Could not load: ${e.message}`,
+      textContent: err.status === 404 || err.status === 403 ? `There's no app named ${name} that you can see.` : `Could not load: ${err.message}`,
     }));
-    if (e.status !== 404 && e.status !== 403) {
+    if (err.status !== 404 && err.status !== 403) {
       const retry = el("button", { className: "btn", type: "button", onclick: () => renderSite(name, tab, arg).then((ok) => ok && refocus($("site-actions").querySelector("button"))) }, icon("refresh"), "Retry");
       $("site-actions").replaceChildren(retry);
       refocus(retry);
@@ -860,17 +886,17 @@ async function renderSite(name, tab = "", arg = "") {
 }
 
 /** Requests per hour over the last 24 hours (the 5-minute buckets summed), errors shown at the foot of each bar. */
-function requestChart(series, bucketMs) {
+function requestChart(series: API.Metrics["series"], bucketMs: number) {
   const per = Math.max(1, Math.round(3_600_000 / bucketMs));
-  const hours = [];
+  const hours: API.Metrics["series"] = [];
   for (let i = 0; i < series.length; i += per) {
     const part = series.slice(i, i + per);
-    hours.push({ t: part[0].t, requests: part.reduce((n, b) => n + b.requests, 0), errors: part.reduce((n, b) => n + b.errors, 0) });
+    hours.push({ t: part[0]!.t, requests: part.reduce((n, b) => n + b.requests, 0), errors: part.reduce((n, b) => n + b.errors, 0) });
   }
   const max = Math.max(...hours.map((h) => h.requests));
   const total = hours.reduce((n, h) => n + h.requests, 0), errors = hours.reduce((n, h) => n + h.errors, 0);
-  const fmt = (iso) => new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  const peak = hours.reduce((a, h) => (h.requests > a.requests ? h : a), hours[0]);
+  const fmt = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const peak = hours.reduce((a, h) => (h.requests > a.requests ? h : a), hours[0]!); // 24 hours of buckets
   const label = max
     ? `Requests per hour over the last 24 hours: ${plural(total, "request")}, ${plural(errors, "server error")}; busiest hour from ${fmt(peak.t)} (${peak.requests.toLocaleString()})`
     : "No requests in the last 24 hours";
@@ -890,10 +916,10 @@ function requestChart(series, bucketMs) {
       el("span", { textContent: "24 hours ago" }), el("span", { textContent: max ? `peak ${peak.requests.toLocaleString()}/h` : "" }), el("span", { textContent: "Now" })));
 }
 
-const kvList = (pairs) => el("dl", { className: "kv" }, ...pairs.filter(Boolean).flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
+const kvList = (pairs: ([string, Child] | null)[]) => el("dl", { className: "kv" }, ...pairs.filter((x) => x !== null).flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
 
-async function siteOverview(name, d, current) {
-  const m = await api(appPath(name, "/metrics"));
+async function siteOverview(name: string, d: API.AppDetail, current: () => boolean) {
+  const m = await api<API.Metrics>(appPath(name, "/metrics"));
   if (!current()) return;
   const a = d.app, rt = d.runtime, dep = d.deploys.find((x) => x.current);
   const status = rt.running ? "running" : a.currentDeployId ? "idle" : "empty";
@@ -917,7 +943,7 @@ async function siteOverview(name, d, current) {
     stat("Storage", [fmtBytes(m.usage.total)],
       db.error ? "Database couldn't be read" : db.tables.length ? `Database ${fmtBytes(m.usage.database)} · ${plural(db.tables.length, "table")}` : "No database yet"));
 
-  const sinceRestart = Date.now() - new Date(m.since) < 86_400_000;
+  const sinceRestart = Date.now() - new Date(m.since).getTime() < 86_400_000;
   const traffic = el("div", { className: "panel" },
     el("div", { className: "panel-head" }, el("h2", { textContent: "Requests" }),
       el("span", { className: "muted small", textContent: sinceRestart ? `Counted since the server started ${ago(m.since)}` : "Last 24 hours" })),
@@ -960,7 +986,7 @@ async function siteOverview(name, d, current) {
             x.current ? el("span", { className: "badge", textContent: "live" }) : null,
             el("span", { className: "sub" }, timeAgo(x.createdAt), ` · ${fmtBytes(x.bytes)} · ${plural(x.files, "file")} · via ${x.source}`)),
           el("td", { className: "actions" }, manage && !x.current
-            ? el("button", { className: "btn sm", type: "button", id: `rollback-${x.id}`, ariaLabel: `Roll back to ${x.id}`, onclick: (e) => rollback(name, x, e.currentTarget) }, "Roll back")
+            ? el("button", { className: "btn sm", type: "button", id: `rollback-${x.id}`, ariaLabel: `Roll back to ${x.id}`, onclick: (e) => rollback(name, x, e.currentTarget as HTMLButtonElement) }, "Roll back")
             : null))))))
       : el("p", { className: "muted small", textContent: "No deploys." }));
 
@@ -968,7 +994,7 @@ async function siteOverview(name, d, current) {
     el("div", { className: "detail-grid mt" }, info, el("div", { className: "stack" }, tablesPanel, deploys)));
 }
 
-async function rollback(name, dep, btn) {
+async function rollback(name: string, dep: API.DeployInfo, btn: HTMLButtonElement) {
   if (!confirm(`Roll ${name} back to ${dep.id} (deployed ${ago(dep.createdAt)})?\n\nIt serves that deploy's files and server from the next request. Its database, files and secrets stay as they are.`)) return;
   const gen = routeGen;
   btn.disabled = true;
@@ -977,7 +1003,7 @@ async function rollback(name, dep, btn) {
     toast(`${name} rolled back to ${dep.id}`);
     if (gen === routeGen) renderSite(name).then((ok) => ok && refocus($("deploys-title")));
   } catch (e) {
-    toast(`Could not roll back: ${e.message}`);
+    toast(`Could not roll back: ${errorMessage(e)}`);
     if (gen === routeGen && btn.isConnected) {
       btn.disabled = false;
       btn.focus();
@@ -987,24 +1013,27 @@ async function rollback(name, dep, btn) {
 
 // ---- database explorer
 const DB_PAGE = 50;
-const quoteIdent = (n) => `"${n.replace(/"/g, '""')}"`;
+const quoteIdent = (n: string) => `"${n.replace(/"/g, '""')}"`;
 
 /** A cell's value: NULL, a blob's size, or the text (long text cut, the whole value in its title). */
-function cellValue(v) {
+function cellValue(v: unknown) {
   if (v === null || v === undefined) return el("span", { className: "null", textContent: "NULL" });
-  if (typeof v === "object" && typeof v.$bytes === "string") {
-    return el("span", { className: "null", textContent: `BLOB ${fmtBytes(Math.floor((v.$bytes.length * 3) / 4) - (v.$bytes.match(/=*$/)[0].length))}` });
+  if (typeof v === "object" && typeof (v as { $bytes?: unknown }).$bytes === "string") {
+    const b64 = (v as { $bytes: string }).$bytes;
+    return el("span", { className: "null", textContent: `BLOB ${fmtBytes(Math.floor((b64.length * 3) / 4) - (b64.match(/=*$/)![0].length))}` }); // /=*$/ always matches
   }
-  const s = typeof v === "string" ? v : JSON.stringify(v);
+  const s: string = typeof v === "string" ? v : JSON.stringify(v); // a JSON value from the API
   return s.length > 120 ? el("span", { title: s.slice(0, 4000), textContent: `${s.slice(0, 120)}…` }) : s;
 }
 
-function resultTable(rows, label, columns = null) {
-  const cols = columns ?? [...new Set(rows.flatMap((r) => Object.keys(r)))];
+/** A column from pragma_table_info, or just a name. */
+type Column = string | { name: string; type?: string; pk?: number };
+function resultTable(rows: API.DbRows["rows"], label: string, columns: Column[] | null = null) {
+  const cols: Column[] = columns ?? [...new Set(rows.flatMap((r) => Object.keys(r)))];
   if (!cols.length) return el("p", { className: "muted small", textContent: "No rows." });
   return el("div", { className: "table-wrap result", tabIndex: 0, role: "region", ariaLabel: label },
     el("table", { className: "table data" },
-      el("thead", {}, el("tr", {}, ...cols.map((c) => el("th", { scope: "col", textContent: typeof c === "string" ? c : c.name, className: /INT|REAL|FLOA|DOUB|NUM|DEC/i.test(c.type ?? "") ? "num" : "" },
+      el("thead", {}, el("tr", {}, ...cols.map((c) => el("th", { scope: "col", textContent: typeof c === "string" ? c : c.name, className: /INT|REAL|FLOA|DOUB|NUM|DEC/i.test((c as { type?: string }).type ?? "") ? "num" : "" },
         typeof c === "object" && (c.pk || c.type) ? el("span", { className: "col-type", textContent: [c.pk ? "PK" : null, c.type].filter(Boolean).join(" ") }) : null)))),
       el("tbody", {}, ...(rows.length
         ? rows.map((r) => el("tr", {}, ...cols.map((c) => {
@@ -1014,15 +1043,15 @@ function resultTable(rows, label, columns = null) {
         : [el("tr", {}, el("td", { colSpan: cols.length, className: "empty", textContent: "No rows." }))]))));
 }
 
-async function siteDatabase(name, table, current) {
-  const db = await api(appPath(name, "/db?limit=0"));
+async function siteDatabase(name: string, table: string, current: () => boolean) {
+  const db = await api<API.DbTables>(appPath(name, "/db?limit=0"));
   if (!current()) return;
   const tables = Object.entries(db.tables).map(([n, t]) => ({ name: n, ...t }));
   if (!tables.length) {
     $("site-body").replaceChildren(emptyState("No database yet", "It's made the first time the app's server uses env.db."));
     return;
   }
-  const sel = tables.find((t) => t.name === table) ?? tables[0];
+  const sel = tables.find((t) => t.name === table) ?? tables[0]!; // not empty (above)
   const list = el("nav", { className: "db-tables panel", ariaLabel: "Tables" },
     el("h2", { textContent: "Tables" }),
     el("ul", {}, ...tables.map((t) => {
@@ -1037,14 +1066,14 @@ async function siteDatabase(name, table, current) {
   const grid = el("div", {}, el("p", { className: "muted small", textContent: "Loading rows…" }));
   const pagerStatus = el("span", { className: "muted small", role: "status" });
   const pager = el("div", { className: "row start pager" }, pagerStatus);
-  let columns = null;
-  async function page(offset, moved = false) {
+  let columns: Column[] | null = null;
+  async function page(offset: number, moved = false) {
     appDash.page[key] = offset;
     const gen = appDash.gen;
     try {
       const [cols, r] = await Promise.all([
-        columns ?? api(appPath(name, "/db/query"), { method: "POST", body: JSON.stringify({ sql: "SELECT name, type, pk FROM pragma_table_info(?) ORDER BY cid", params: [sel.name] }) }).then((x) => x.rows),
-        api(appPath(name, "/db/query"), { method: "POST", body: JSON.stringify({ sql: `SELECT * FROM ${quoteIdent(sel.name)} LIMIT ? OFFSET ?`, params: [DB_PAGE, offset] }) }),
+        columns ?? api<{ rows: { name: string; type: string; pk: number }[] }>(appPath(name, "/db/query"), { method: "POST", body: JSON.stringify({ sql: "SELECT name, type, pk FROM pragma_table_info(?) ORDER BY cid", params: [sel.name] }) }).then((x) => x.rows),
+        api<API.DbRows>(appPath(name, "/db/query"), { method: "POST", body: JSON.stringify({ sql: `SELECT * FROM ${quoteIdent(sel.name)} LIMIT ? OFFSET ?`, params: [DB_PAGE, offset] }) }),
       ]);
       if (gen !== appDash.gen || !grid.isConnected) return;
       columns = cols;
@@ -1056,7 +1085,7 @@ async function siteDatabase(name, table, current) {
       pager.replaceChildren(pagerStatus, prev, next);
       if (moved) refocus();
     } catch (e) {
-      if (gen === appDash.gen && grid.isConnected) grid.replaceChildren(el("p", { className: "error small", textContent: `Could not read ${sel.name}: ${e.message}` }));
+      if (gen === appDash.gen && grid.isConnected) grid.replaceChildren(el("p", { className: "error small", textContent: `Could not read ${sel.name}: ${errorMessage(e)}` }));
     }
   }
   const browse = el("div", { className: "panel" },
@@ -1075,20 +1104,21 @@ async function siteDatabase(name, table, current) {
   const run = el("button", { className: "btn primary", type: "submit" }, icon("zap"), "Run");
   const form = el("form", {
     className: "query",
-    onsubmit: async (e) => {
+    onsubmit: async (e: SubmitEvent) => {
       e.preventDefault();
       if (!sql.value.trim()) return;
       const gen = appDash.gen, started = performance.now();
       run.disabled = true;
       out.replaceChildren(el("p", { className: "muted small", textContent: "Running…" }));
       try {
-        const r = await api(appPath(name, "/db/query"), { method: "POST", body: JSON.stringify({ sql: sql.value }) });
+        const r = await api<API.DbRows>(appPath(name, "/db/query"), { method: "POST", body: JSON.stringify({ sql: sql.value }) });
         if (gen !== appDash.gen) return;
         out.replaceChildren(
           el("p", { className: "muted small", textContent: `${plural(r.rows.length, "row")}${r.truncated ? " (cut off: at most 1,000 rows or 4 MB)" : ""} in ${Math.round(performance.now() - started)} ms` }),
-          r.rows.length ? resultTable(r.rows, "Query result") : null);
+          // (a null here was inserted as the text "null" under a query with no rows)
+          ...(r.rows.length ? [resultTable(r.rows, "Query result")] : []));
       } catch (err) {
-        if (gen === appDash.gen) out.replaceChildren(el("p", { className: "error small", textContent: err.message }));
+        if (gen === appDash.gen) out.replaceChildren(el("p", { className: "error small", textContent: errorMessage(err) }));
       } finally {
         run.disabled = false;
       }
@@ -1110,9 +1140,9 @@ async function siteDatabase(name, table, current) {
 
 // ---- secrets (values are write-only: they can be replaced, never read back)
 const SECRET_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
-const labelled = (node, id) => (node.setAttribute("aria-labelledby", id), node);
+const labelled = <N extends Element>(node: N, id: string) => (node.setAttribute("aria-labelledby", id), node);
 
-function siteSecrets(name, d) {
+function siteSecrets(name: string, d: API.AppDetail) {
   const a = d.app, manage = canManage(a.access) && a.claimed;
   let keys = d.secrets;
   const tbody = el("tbody");
@@ -1133,8 +1163,8 @@ function siteSecrets(name, d) {
     setMode();
   });
 
-  async function put(body, msg) {
-    const r = await api(appPath(name, "/secrets"), { method: "PUT", body: JSON.stringify(body) });
+  async function put(body: Record<string, string>, msg: string) {
+    const r = await api<{ keys: string[] }>(appPath(name, "/secrets"), { method: "PUT", body: JSON.stringify(body) });
     keys = r.keys;
     draw();
     status.textContent = msg;
@@ -1154,7 +1184,7 @@ function siteSecrets(name, d) {
         } }, "Replace"),
         el("button", { className: "btn sm danger", type: "button", id: `delete-${k}`, ariaLabel: `Delete ${k}`, onclick: async (e) => {
           if (!confirm(`Delete secret ${k} from ${name}? The app restarts without it.`)) return;
-          const b = e.currentTarget;
+          const b = e.currentTarget as HTMLButtonElement;
           b.disabled = true;
           try {
             await api(appPath(name, `/secrets/${encodeURIComponent(k)}`), { method: "DELETE" });
@@ -1166,7 +1196,7 @@ function siteSecrets(name, d) {
             refocus($("secrets-title"));
           } catch (e2) {
             b.disabled = false;
-            toast(`Could not delete ${k}: ${e2.message}`);
+            toast(`Could not delete ${k}: ${errorMessage(e2)}`);
           }
         } }, icon("trash"), "Delete"),
       ] : []))))
@@ -1176,7 +1206,7 @@ function siteSecrets(name, d) {
 
   const form = manage && el("form", {
     className: "panel secret-form",
-    onsubmit: async (e) => {
+    onsubmit: async (e: SubmitEvent) => {
       e.preventDefault();
       const k = keyIn.value.trim().toUpperCase();
       if (!SECRET_RE.test(k)) {
@@ -1192,7 +1222,7 @@ function siteSecrets(name, d) {
         setMode();
         keyIn.focus();
       } catch (e2) {
-        err.textContent = `Could not save: ${e2.message}`;
+        err.textContent = `Could not save: ${errorMessage(e2)}`;
       } finally {
         save.disabled = false;
       }
@@ -1219,11 +1249,11 @@ function siteSecrets(name, d) {
           el("thead", {}, el("tr", {}, el("th", { scope: "col", textContent: "Name" }), el("th", { scope: "col", textContent: "Value" }), el("th", { scope: "col", className: "actions" }, srOnly("Actions")))),
           tbody), "secrets-title"))),
       form ? labelled(form, "secret-form-title") : null),
-    status].filter(Boolean));
+    status].filter((n) => n !== null));
 }
 
 // ---- logs: the last 200 lines, then live
-function siteLogs(name, current) {
+function siteLogs(name: string, current: () => boolean) {
   const list = el("ol", { className: "log-lines mono", ariaLabel: "Log lines", tabIndex: 0 });
   const state = el("span", { className: "muted small", role: "status", textContent: "Connecting…" });
   const kinds = { all: "All", request: "Requests", app: "App output", system: "System" };
@@ -1231,24 +1261,24 @@ function siteLogs(name, current) {
   const seg = el("div", { className: "seg", role: "group", ariaLabel: "Show" },
     ...Object.entries(kinds).map(([k, l]) => el("button", { type: "button", textContent: l, dataset: { k }, onclick: () => {
       filter = k;
-      for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === k));
+      for (const b of seg.children as HTMLCollectionOf<HTMLElement>) b.setAttribute("aria-pressed", String(b.dataset.k === k));
       list.dataset.filter = k;
     } })));
-  for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === filter));
+  for (const b of seg.children as HTMLCollectionOf<HTMLElement>) b.setAttribute("aria-pressed", String(b.dataset.k === filter));
   list.dataset.filter = filter;
   const clear = el("button", { className: "btn sm", type: "button", onclick: () => list.replaceChildren() }, "Clear");
   $("site-body").replaceChildren(el("div", { className: "toolbar flush" }, seg, clear, state), el("div", { className: "panel log-panel" }, list));
 
   const ctrl = new AbortController();
   appDash.stop = () => ctrl.abort();
-  const add = (l) => {
+  const add = (l: API.LogLine) => {
     const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
     const kind = l.kind === "stdout" || l.kind === "stderr" ? "app" : l.kind;
     list.append(el("li", { dataset: { kind, k: l.kind } },
       el("time", { dateTime: new Date(l.t).toISOString(), textContent: new Date(l.t).toLocaleTimeString() }),
       el("span", { className: "kind", textContent: l.kind }),
       el("span", { className: "msg", textContent: l.msg })));
-    while (list.children.length > 1000) list.firstChild.remove();
+    while (list.children.length > 1000) list.firstChild!.remove(); // children: it has one
     if (atEnd) list.scrollTop = list.scrollHeight;
   };
   (async () => {
@@ -1256,7 +1286,7 @@ function siteLogs(name, current) {
       const res = await fetch(appPath(name, "/logs?n=200&follow=1"), { headers: { authorization: `Bearer ${auth.token}` }, signal: ctrl.signal });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message ?? `${res.status}`);
       if (current()) state.textContent = "Live";
-      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+      const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader(); // an ok GET's body
       let buf = "";
       for (;;) {
         const { value, done } = await reader.read();
@@ -1271,18 +1301,18 @@ function siteLogs(name, current) {
       }
       if (current()) state.textContent = "Disconnected";
     } catch (e) {
-      if (!ctrl.signal.aborted && current()) state.textContent = `Disconnected: ${e.message}`;
+      if (!ctrl.signal.aborted && current()) state.textContent = `Disconnected: ${errorMessage(e)}`;
     }
   })();
 }
 
 // ------------------------------------------------------------------ admin: users (#/admin-users)
-const ACCOUNT_STATUS = { active: ["live", "Active"], invited: ["idle", "Invited"], disabled: ["deleted", "Disabled"] };
+const ACCOUNT_STATUS: Record<API.AccountStatus, [string, string]> = { active: ["live", "Active"], invited: ["idle", "Invited"], disabled: ["deleted", "Disabled"] };
 const adminUsersView = { filter: "all", q: "" };
-const field = (label, input, hint) => el("div", { className: "field" },
+const field = (label: string, input: HTMLElement, hint?: string) => el("div", { className: "field" },
   el("label", { htmlFor: input.id, textContent: label }), input, hint ? el("p", { className: "muted small", id: `${input.id}-hint`, textContent: hint }) : null);
 const formError = () => el("p", { className: "error small", role: "alert", hidden: true });
-const showError = (err, text) => {
+const showError = (err: HTMLElement, text: string) => {
   err.textContent = text;
   err.hidden = !text;
 };
@@ -1290,13 +1320,13 @@ const showError = (err, text) => {
 /** Thrown by a row action's `run` when its confirmation is declined: nothing to report. */
 const CANCELLED = Symbol("cancelled");
 /** Runs a row action: disables the button meanwhile, toasts the outcome, re-renders on success. */
-async function rowAction(b, run, done, after) {
+async function rowAction(b: HTMLButtonElement, run: () => Promise<unknown>, done: string, after: () => unknown) {
   const gen = routeGen;
   b.disabled = true;
   try {
     await run();
   } catch (e) {
-    if (e !== CANCELLED) toast(e.message);
+    if (e !== CANCELLED) toast(errorMessage(e));
     if (gen === routeGen) {
       b.disabled = false;
       refocus(b.isConnected ? b : null);
@@ -1312,9 +1342,9 @@ async function renderAdminUsers() {
   $("admin-title").replaceChildren("Users");
   $("admin-sub").textContent = "Every account on this server";
   const gen = adminView.gen, route = routeGen;
-  const [d, orgs] = await Promise.all([api("/v1/admin/accounts"), api("/v1/admin/orgs").then((r) => r.orgs, () => [])]);
+  const [d, orgs] = await Promise.all([api<API.AdminAccounts>("/v1/admin/accounts"), api<{ orgs: API.AdminOrg[] }>("/v1/admin/orgs").then((r) => r.orgs, (): API.AdminOrg[] => [])]);
   if (gen !== adminView.gen || route !== routeGen) return;
-  const again = (focus) => renderAdmin("", { section: "users" }).then((ok) => ok && refocus(focus?.()));
+  const again = (focus?: () => HTMLElement | null) => renderAdmin("", { section: "users" }).then((ok) => ok && refocus(focus?.()));
   $("admin-actions").replaceChildren(el("button", { className: "btn", type: "button", onclick: () => again(() => $("admin-actions").querySelector("button")) }, icon("refresh"), "Refresh"));
 
   const t = d.totals;
@@ -1352,7 +1382,7 @@ async function renderAdminUsers() {
     const gen = routeGen;
     submit.disabled = true;
     try {
-      const r = await api("/v1/admin/accounts", {
+      const r = await api<{ account: { email: string } }>("/v1/admin/accounts", {
         method: "POST",
         body: JSON.stringify({ email: email.value.trim(), siteAdmin: asAdmin.checked, ...(org.value ? { org: org.value, orgRole: orgRole.value } : {}) }),
       });
@@ -1360,20 +1390,20 @@ async function renderAdminUsers() {
       if (gen === routeGen) again(() => $("invite-account-email"));
     } catch (x) {
       if (gen !== routeGen) return;
-      if (!form.isConnected) return void toast(`Could not invite: ${x.message}`);
-      showError(err, `Could not invite: ${x.message}`);
+      if (!form.isConnected) return void toast(`Could not invite: ${errorMessage(x)}`);
+      showError(err, `Could not invite: ${errorMessage(x)}`);
       submit.disabled = false;
       email.focus();
     }
   });
 
-  const actions = (a) => {
-    const btn = (label, aria, run, done, danger) => el("button", {
+  const actions = (a: API.AdminAccounts["accounts"][number]) => {
+    const btn = (label: string, aria: string, run: () => Promise<unknown>, done: string, danger?: boolean) => el("button", {
       className: `btn sm${danger ? " danger" : ""}`, type: "button", textContent: label, ariaLabel: `${aria} ${a.email}`,
-      onclick: (e) => rowAction(e.currentTarget, run, done, () => again()),
+      onclick: (e) => rowAction(e.currentTarget as HTMLButtonElement, run, done, () => again()),
     });
-    const patch = (input) => () => api(`/v1/admin/accounts/${encodeURIComponent(a.id)}`, { method: "PATCH", body: JSON.stringify(input) });
-    const me = a.id === myAccountId, out = [];
+    const patch = (input: { siteAdmin?: boolean; disabled?: boolean }) => () => api(`/v1/admin/accounts/${encodeURIComponent(a.id)}`, { method: "PATCH", body: JSON.stringify(input) });
+    const me = a.id === myAccountId, out: HTMLButtonElement[] = [];
     if (a.status === "invited") {
       out.push(btn("Withdraw invite", "Withdraw the invite for", async () => {
         if (!confirm(`Withdraw the invite for ${a.email}? They won't be able to sign in.`)) throw CANCELLED;
@@ -1398,12 +1428,12 @@ async function renderAdminUsers() {
   const tbody = el("tbody");
   const counts = { all: t.accounts, active: t.active, invited: t.invited, disabled: t.disabled };
   const seg = el("div", { className: "seg", role: "group", ariaLabel: "Show" },
-    ...[["all", "All"], ["active", "Active"], ["invited", "Invited"], ["disabled", "Disabled"]].map(([k, l]) =>
+    ...([["all", "All"], ["active", "Active"], ["invited", "Invited"], ["disabled", "Disabled"]] as const).map(([k, l]) =>
       el("button", { type: "button", textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminUsersView.filter = k; draw(); } })));
   const search = el("input", { type: "search", className: "input", placeholder: "Search accounts, organizations", ariaLabel: "Search accounts", value: adminUsersView.q, oninput: () => { adminUsersView.q = search.value; draw(); } });
   const shown = el("p", { className: "sr-only", role: "status" });
   function draw() {
-    for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === adminUsersView.filter));
+    for (const b of seg.children as HTMLCollectionOf<HTMLElement>) b.setAttribute("aria-pressed", String(b.dataset.k === adminUsersView.filter));
     const q = adminUsersView.q.trim().toLowerCase();
     const rows = d.accounts.filter((a) => (adminUsersView.filter === "all" || a.status === adminUsersView.filter) &&
       (!q || [a.email, a.github, ...a.orgs.map((o) => o.name)].some((v) => v?.toLowerCase().includes(q))));
@@ -1449,9 +1479,9 @@ async function renderAdminOrgs() {
   $("admin-title").replaceChildren("Organizations");
   $("admin-sub").textContent = "Teams whose members share apps";
   const gen = adminView.gen, route = routeGen;
-  const { orgs } = await api("/v1/admin/orgs");
+  const { orgs } = await api<{ orgs: API.AdminOrg[] }>("/v1/admin/orgs");
   if (gen !== adminView.gen || route !== routeGen) return;
-  const again = (focus) => renderAdmin("", { section: "orgs" }).then((ok) => ok && refocus(focus?.()));
+  const again = (focus?: () => HTMLElement | null) => renderAdmin("", { section: "orgs" }).then((ok) => ok && refocus(focus?.()));
   $("admin-actions").replaceChildren(el("button", { className: "btn", type: "button", onclick: () => again(() => $("admin-actions").querySelector("button")) }, icon("refresh"), "Refresh"));
 
   const name = el("input", { className: "input mono", id: "org-name", required: true, maxLength: 40, pattern: "[a-z0-9](?:[a-z0-9]|-(?!-))*[a-z0-9]|[a-z0-9]", autocomplete: "off", spellcheck: false, placeholder: "acme" });
@@ -1475,7 +1505,7 @@ async function renderAdminOrgs() {
     const gen = routeGen;
     submit.disabled = true;
     try {
-      const r = await api("/v1/admin/orgs", {
+      const r = await api<{ org: { name: string } }>("/v1/admin/orgs", {
         method: "POST",
         body: JSON.stringify({ name: name.value.trim(), ...(title.value.trim() ? { title: title.value.trim() } : {}), admin: admin.value.trim() }),
       });
@@ -1483,10 +1513,10 @@ async function renderAdminOrgs() {
       if (gen === routeGen) again(() => $("org-name"));
     } catch (x) {
       if (gen !== routeGen) return;
-      if (!form.isConnected) return void toast(`Could not create it: ${x.message}`);
-      showError(err, `Could not create it: ${x.message}`);
+      if (!form.isConnected) return void toast(`Could not create it: ${errorMessage(x)}`);
+      showError(err, `Could not create it: ${errorMessage(x)}`);
       submit.disabled = false;
-      (x.status === 404 ? admin : name).focus();
+      ((x as ApiError).status === 404 ? admin : name).focus();
     }
   });
 
@@ -1498,7 +1528,7 @@ async function renderAdminOrgs() {
       el("td", {}, timeAgo(o.createdAt)),
       el("td", { className: "actions" }, el("button", {
         className: "btn sm danger", type: "button", textContent: "Delete", ariaLabel: `Delete ${o.name}`,
-        onclick: (e) => rowAction(e.currentTarget, async () => {
+        onclick: (e) => rowAction(e.currentTarget as HTMLButtonElement, async () => {
           if (!confirm(`Delete the organization ${o.name}? Its members lose its apps' access; apps must be moved out first.`)) throw CANCELLED;
           await api(`/v1/admin/orgs/${encodeURIComponent(o.name)}`, { method: "DELETE" });
         }, `Deleted ${o.name}`, () => again()),
@@ -1520,16 +1550,16 @@ async function renderAdminOrgs() {
 }
 
 // ------------------------------------------------------------------ organizations (#/orgs[/<name>])
-const ORG_ROLE_LABEL = { admin: "Admin", member: "Member" };
-let myOrgs = [];
+const ORG_ROLE_LABEL: Record<API.OrgRole, string> = { admin: "Admin", member: "Member" };
+let myOrgs: API.MyOrg[] = [];
 async function loadMyOrgs() {
-  myOrgs = auth.token ? await api("/v1/orgs").then((r) => r.orgs, () => []) : [];
+  myOrgs = auth.token ? await api<{ orgs: API.MyOrg[] }>("/v1/orgs").then((r) => r.orgs, (): API.MyOrg[] => []) : [];
   $("nav-orgs-item").hidden = !myOrgs.length;
   return myOrgs;
 }
 
 /** Your organizations, or one of them (members, apps; admins manage members). Uses the admin page's layout. */
-async function renderOrg(name) {
+async function renderOrg(name: string): Promise<boolean> {
   if (!auth.token) {
     location.hash = "#/";
     return false;
@@ -1556,43 +1586,43 @@ async function renderOrg(name) {
           el("span", { textContent: "A site admin creates organizations, and their admins add members." })));
       return current();
     }
-    const d = await api(`/v1/orgs/${encodeURIComponent(name)}`);
+    const d = await api<API.OrgDetail>(`/v1/orgs/${encodeURIComponent(name)}`);
     if (!current()) return false;
     drawOrg(d);
   } catch (e) {
     if (!current()) return false;
-    $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 404 ? "This organization doesn't exist, or you're not in it." : `Could not load: ${e.message}` }));
+    $("admin-body").replaceChildren(el("p", { className: "error", textContent: (e as ApiError).status === 404 ? "This organization doesn't exist, or you're not in it." : `Could not load: ${errorMessage(e)}` }));
   }
   return current();
 }
 
-function drawOrg(d) {
+function drawOrg(d: API.OrgDetail) {
   const o = d.org, name = o.name;
   document.title = `${o.title ?? name} · Organizations · Cresslet Studio`;
   $("admin-title").replaceChildren(el("a", { href: "#/orgs", textContent: "Organizations" }), " / ", o.title ?? name);
   $("admin-sub").textContent = [o.title ? name : null, d.role ? `You're ${d.role === "admin" ? "an admin" : "a member"}` : "You manage it as a site admin"].filter(Boolean).join(" · ");
-  const again = (focus) => renderOrg(name).then((ok) => ok && refocus(focus?.()));
+  const again = (focus?: () => HTMLElement | null) => renderOrg(name).then((ok) => ok && refocus(focus?.()));
   $("admin-actions").replaceChildren(el("button", { className: "btn", type: "button", onclick: () => again(() => $("admin-actions").querySelector("button")) }, icon("refresh"), "Refresh"));
-  const memberUrl = (id) => `/v1/orgs/${encodeURIComponent(name)}/members/${encodeURIComponent(id)}`;
+  const memberUrl = (id: string) => `/v1/orgs/${encodeURIComponent(name)}/members/${encodeURIComponent(id)}`;
 
   const members = el("ul", { className: "list", ariaLabel: "Members" }, ...d.members.map((m) => {
     const me = m.id === myAccountId;
     const meta = [ORG_ROLE_LABEL[m.role], m.disabled ? "disabled" : null, `added ${when(m.createdAt)}`].filter(Boolean).join(" · ");
-    const row = [el("div", { className: "tok" },
+    const row: HTMLElement[] = [el("div", { className: "tok" },
       el("strong", { textContent: personText(m) }, me ? el("span", { className: "badge", textContent: "you" }) : null),
       el("span", { className: "meta", textContent: meta }))];
     if (d.canManage) {
       const role = el("select", { className: "input role-select", ariaLabel: `Role for ${personText(m)}` },
-        ...["member", "admin"].map((v) => el("option", { value: v, textContent: ORG_ROLE_LABEL[v], selected: v === m.role })));
+        ...(["member", "admin"] as const).map((v) => el("option", { value: v, textContent: ORG_ROLE_LABEL[v], selected: v === m.role })));
       role.addEventListener("change", async () => {
         if (me && role.value === "member" && !confirm(`Make yourself a member of ${name}? You won't be able to manage it any more.`)) return void (role.value = m.role);
         const gen = routeGen;
         try {
-          m.role = (await api(memberUrl(m.id), { method: "PUT", body: JSON.stringify({ role: role.value }) })).role;
+          m.role = (await api<{ role: API.OrgRole }>(memberUrl(m.id), { method: "PUT", body: JSON.stringify({ role: role.value }) })).role;
           toast(`${personText(m)} is now ${ORG_ROLE_LABEL[m.role].toLowerCase()}`);
           if (gen === routeGen) again(); // its subtitle, and (yourself) what you can still do
         } catch (e) {
-          toast(`Could not change the role: ${e.message}`);
+          toast(`Could not change the role: ${errorMessage(e)}`);
           role.value = m.role;
         }
       });
@@ -1601,7 +1631,7 @@ function drawOrg(d) {
     if (d.canManage || me) {
       row.push(el("button", {
         className: "btn sm danger", type: "button", textContent: me ? "Leave" : "Remove", ariaLabel: me ? `Leave ${name}` : `Remove ${personText(m)}`,
-        onclick: (e) => rowAction(e.currentTarget, async () => {
+        onclick: (e) => rowAction(e.currentTarget as HTMLButtonElement, async () => {
           if (!confirm(me ? `Leave ${name}? You lose access to its apps.` : `Remove ${personText(m)} from ${name}? They lose access to its apps.`)) throw CANCELLED;
           await api(memberUrl(m.id), { method: "DELETE" });
         }, me ? `You left ${name}` : `Removed ${personText(m)}`, () => {
@@ -1615,7 +1645,7 @@ function drawOrg(d) {
     return el("li", { className: "list-row" }, ...row);
   }));
 
-  let form = null;
+  let form: HTMLFormElement | null = null;
   if (d.canManage) {
     const email = el("input", { className: "input", id: "org-member-email", type: "email", required: true, maxLength: 254, autocomplete: "off", spellcheck: false });
     email.setAttribute("aria-describedby", "org-member-email-hint");
@@ -1637,13 +1667,13 @@ function drawOrg(d) {
       const gen = routeGen;
       submit.disabled = true;
       try {
-        const r = await api(`/v1/orgs/${encodeURIComponent(name)}/members`, { method: "POST", body: JSON.stringify({ email: email.value.trim(), role: role.value }) });
+        const r = await api<{ member: { email: string; role: API.OrgRole } }>(`/v1/orgs/${encodeURIComponent(name)}/members`, { method: "POST", body: JSON.stringify({ email: email.value.trim(), role: role.value }) });
         toast(`Added ${r.member.email} as ${ORG_ROLE_LABEL[r.member.role].toLowerCase()}`);
         if (gen === routeGen) again(() => $("org-member-email"));
       } catch (x) {
         if (gen !== routeGen) return;
-        if (!form.isConnected) return void toast(`Could not add them: ${x.message}`);
-        showError(err, x.message);
+        if (!form!.isConnected) return void toast(`Could not add them: ${errorMessage(x)}`); // set above
+        showError(err, errorMessage(x));
         submit.disabled = false;
         email.focus();
       }
@@ -1666,28 +1696,28 @@ function drawOrg(d) {
 }
 
 /** Marks the sidebar link for `key` (its data-nav) as the current page. */
-function navCurrent(key) {
-  for (const a of document.querySelectorAll("[data-nav]")) {
+function navCurrent(key: string) {
+  for (const a of document.querySelectorAll<HTMLElement>("[data-nav]")) {
     if (a.dataset.nav === key) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
 }
 
 // ------------------------------------------------------------------ admin: AI credits (#/admin-credits[/<account id>])
-const creditNum = (x) => new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(x); // millicredits: exact
-const creditsText = (x) => `${creditNum(x)} ${creditNum(x) === "1" ? "credit" : "credits"}`;
-const signed = (x) => `${x > 0 ? "+" : x < 0 ? "−" : ""}${creditNum(Math.abs(x))}`;
-const usd = (x) => new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: x && Math.abs(x) < 1 ? 4 : 2 }).format(x);
+const creditNum = (x: number) => new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(x); // millicredits: exact
+const creditsText = (x: number) => `${creditNum(x)} ${creditNum(x) === "1" ? "credit" : "credits"}`;
+const signed = (x: number) => `${x > 0 ? "+" : x < 0 ? "−" : ""}${creditNum(Math.abs(x))}`;
+const usd = (x: number) => new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: x && Math.abs(x) < 1 ? 4 : 2 }).format(x);
 const tokenNum = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
-const ledgerWhat = (h) => h.kind === "usage"
+const ledgerWhat = (h: API.LedgerEntry): [string, string] => h.kind === "usage"
   ? [h.model ?? "Claude",
     `${tokenNum.format(h.inputTokens + h.cacheReadTokens + h.cacheWriteTokens)} in · ${tokenNum.format(h.outputTokens)} out${h.usd != null ? ` · ${usd(h.usd)}` : ""}${h.free ? ` · ${creditNum(h.free)} free` : ""}${h.estimated ? " · estimated (cut off)" : ""}`]
   : [h.credits > 0 ? "Credits given" : "Credits taken back", [h.by && `by ${h.by}`, h.note].filter(Boolean).join(": ") || "by the operator"];
 
 let grantBusy = false;
 /** Give (or, negative, take back) credits. `email` fixed: for one account's page; else typed, with `emails` suggested. */
-function grantForm({ email = null, emails = [], after }) {
-  const field = (label, input, hint) => el("div", { className: "field" },
+function grantForm({ email = null, emails = [], after }: { email?: string | null; emails?: string[]; after: () => unknown }) {
+  const field = (label: string, input: HTMLElement, hint?: string) => el("div", { className: "field" },
     el("label", { htmlFor: input.id, textContent: label }), input, hint && el("p", { className: "muted small", id: `${input.id}-hint`, textContent: hint }));
   const err = el("p", { className: "error small", role: "alert", hidden: true });
   const to = el("input", { className: "input", id: "grant-email", type: "email", required: true, autocomplete: "off", spellcheck: false, placeholder: "name@example.com" });
@@ -1724,32 +1754,32 @@ function grantForm({ email = null, emails = [], after }) {
     const gen = routeGen;
     submit.disabled = grantBusy = true;
     try {
-      const r = await api("/v1/admin/accounts/credits", { method: "POST", body: JSON.stringify({ email: who, credits, ...(note.value.trim() ? { note: note.value.trim() } : {}) }) });
+      const r = await api<{ account: { email: string }; balance: number }>("/v1/admin/accounts/credits", { method: "POST", body: JSON.stringify({ email: who, credits, ...(note.value.trim() ? { note: note.value.trim() } : {}) }) });
       toast(`${credits > 0 ? "Gave" : "Took back"} ${creditsText(Math.abs(credits))} ${credits > 0 ? "to" : "from"} ${r.account.email}. Granted balance: ${creditNum(r.balance)}.`);
       if (gen === routeGen) after();
     } catch (x) {
       if (gen !== routeGen) return;
-      const msg = x.status === 404 ? `No account with the email ${who}.` : `Could not give credits: ${x.message}`;
+      const msg = (x as ApiError).status === 404 ? `No account with the email ${who}.` : `Could not give credits: ${errorMessage(x)}`;
       if (!form.isConnected) return void toast(msg); // a Refresh replaced this form meanwhile
       err.textContent = msg;
       err.hidden = false;
       submit.disabled = false;
-      (x.status === 404 && !email ? to : amount).focus();
+      ((x as ApiError).status === 404 && !email ? to : amount).focus();
     } finally {
       grantBusy = false;
     }
   });
-  return Object.assign(form, { fill: (e) => { to.value = e; amount.focus(); } });
+  return Object.assign(form, { fill: (e: string) => { to.value = e; amount.focus(); } });
 }
 
 /** Credits used per day: bars, named by a summary (and each bar's own title). */
-function dayChart(days) {
+function dayChart(days: API.AdminCredits["days"]) {
   const max = Math.max(...days.map((d) => d.credits));
   const total = days.reduce((n, d) => n + d.credits, 0);
-  const fmt = (iso) => new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
-  const peak = days.reduce((a, d) => (d.credits > a.credits ? d : a), days[0]);
+  const fmt = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+  const peak = days.reduce((a, d) => (d.credits > a.credits ? d : a), days[0]!); // 30 days
   const label = max
-    ? `Credits used per day, ${fmt(days[0].date)} to ${fmt(days.at(-1).date)}: ${creditsText(total)} in all, most on ${fmt(peak.date)} (${creditNum(peak.credits)})`
+    ? `Credits used per day, ${fmt(days[0]!.date)} to ${fmt(days.at(-1)!.date)}: ${creditsText(total)} in all, most on ${fmt(peak.date)} (${creditNum(peak.credits)})`
     : "No credits used in the last 30 days";
   return el("div", {},
     el("div", { className: "day-chart", role: "img", ariaLabel: label },
@@ -1759,7 +1789,7 @@ function dayChart(days) {
         return b;
       })),
     el("div", { className: "day-axis", ariaHidden: "true" },
-      el("span", { textContent: fmt(days[0].date) }), el("span", { textContent: max ? `peak ${creditNum(max)}` : "" }), el("span", { textContent: "Today" })),
+      el("span", { textContent: fmt(days[0]!.date) }), el("span", { textContent: max ? `peak ${creditNum(max)}` : "" }), el("span", { textContent: "Today" })),
     // Each day's numbers, for keyboards, touch and screen readers (the bars' titles need a pointer).
     max ? el("details", { className: "day-table" }, el("summary", { textContent: "Days with use" }),
       el("table", { className: "table" },
@@ -1770,7 +1800,7 @@ function dayChart(days) {
           el("td", { className: "num", textContent: d.requests.toLocaleString() })))))) : null);
 }
 
-const ledgerTable = (rows, { account = false } = {}) =>
+const ledgerTable = (rows: API.LedgerEntry[], { account = false } = {}) =>
   el("div", { className: "table-wrap", tabIndex: 0, role: "region", ariaLabel: "Credit activity" },
     el("table", { className: "table" },
       el("caption", { className: "sr-only", textContent: "Credit activity, newest first" }),
@@ -1799,7 +1829,7 @@ async function renderAdminCredits() {
   $("admin-title").replaceChildren("AI credits");
   $("admin-sub").textContent = "Credit use across every account on this server";
   const gen = adminView.gen, route = routeGen;
-  const d = await api("/v1/admin/credits");
+  const d = await api<API.AdminCredits>("/v1/admin/credits");
   if (gen !== adminView.gen || route !== routeGen) return;
   const again = () => renderAdmin("", { credits: true }).then((ok) => ok && refocus());
   $("admin-actions").replaceChildren(el("button", {
@@ -1871,11 +1901,11 @@ async function renderAdminCredits() {
     ledgerTable(d.recent, { account: true }));
 }
 
-async function renderAdminCreditsAccount(id) {
+async function renderAdminCreditsAccount(id: string) {
   document.title = "AI credits · Admin · Cresslet Studio";
   $("admin-title").replaceChildren(el("a", { href: "#/admin-credits", textContent: "AI credits" }), " / …");
   const gen = adminView.gen, route = routeGen;
-  const d = await api(`/v1/admin/credits/accounts/${encodeURIComponent(id)}`);
+  const d = await api<API.AdminCreditsAccount>(`/v1/admin/credits/accounts/${encodeURIComponent(id)}`);
   if (gen !== adminView.gen || route !== routeGen) return;
   const again = () => renderAdmin(id, { credits: true }).then((ok) => ok && refocus());
   $("admin-actions").replaceChildren(el("button", {
@@ -1901,10 +1931,11 @@ async function renderAdminCreditsAccount(id) {
 }
 
 // ------------------------------------------------------------------ home
-const TEMPLATE_ICONS = { react: "atom", vanilla: "zap", "tanstack-start": "server" };
-const emptyState = (title, text) => el("div", { className: "empty-state" }, el("strong", { textContent: title }), el("span", { textContent: text }));
-const timeAgo = (iso) => el("time", { dateTime: new Date(iso).toISOString(), title: new Date(iso).toLocaleString(), textContent: ago(iso) });
-function dataTable(labelledBy, heads, rows) {
+const TEMPLATE_ICONS: Record<string, string> = { react: "atom", vanilla: "zap", "tanstack-start": "server" };
+const emptyState = (title: string, text: string) => el("div", { className: "empty-state" }, el("strong", { textContent: title }), el("span", { textContent: text }));
+const timeAgo = (iso: string | number) => el("time", { dateTime: new Date(iso).toISOString(), title: new Date(iso).toLocaleString(), textContent: ago(iso) });
+/** `heads`: [text, class?, visually hidden?] per column. */
+function dataTable(labelledBy: string, heads: [string, string?, boolean?][], rows: HTMLElement[]) {
   const t = el("table", { className: "table" },
     el("thead", {}, el("tr", {}, ...heads.map(([h, cls, hide]) => el("th", { scope: "col", className: cls ?? "" }, hide ? srOnly(h) : h)))),
     el("tbody", {}, ...rows));
@@ -1914,7 +1945,7 @@ function dataTable(labelledBy, heads, rows) {
 }
 
 /** Its name is all its visible text (WCAG 2.5.3), with a pause between the template and its description. */
-const templateCard = (t) =>
+const templateCard = (t: API.Template) =>
   el("button", { className: "card", type: "button", onclick: () => createProject(t.name) },
     el("span", { className: "card-icon" }, icon(TEMPLATE_ICONS[t.name] ?? "code")),
     el("strong", { textContent: t.name }),
@@ -1922,9 +1953,9 @@ const templateCard = (t) =>
     el("span", { className: "desc", textContent: t.description ?? "" }),
     icon("arrow", "icon go"));
 
-let templatesReq;
-function renderTemplates(into) {
-  (templatesReq ??= api("/v1/templates")).then(({ templates }) => {
+let templatesReq: Promise<{ templates: API.Template[] }> | null | undefined;
+function renderTemplates(into: HTMLElement) {
+  (templatesReq ??= api<{ templates: API.Template[] }>("/v1/templates")).then(({ templates }) => {
     // `studio: false`: a CLI-only template (its framework's build doesn't run in the browser runtime)
     into.replaceChildren(...templates.filter((t) => t.studio !== false).map(templateCard));
   }).catch((e) => {
@@ -1985,7 +2016,7 @@ async function renderProjects() {
 }
 
 function renderApps() {
-  return api("/v1/apps").then(({ apps }) => {
+  return api<{ apps: API.AppSummary[] }>("/v1/apps").then(({ apps }) => {
     $("apps").replaceChildren(apps.length
       ? dataTable("apps-title", [["App"], ["Access"], ["Updated"], ["Actions", "actions", true]], apps.map((a) =>
         el("tr", { className: "list-row" },
@@ -2007,32 +2038,32 @@ function renderApps() {
 }
 
 // ------------------------------------------------------------------ pages (uploaded static HTML)
-const VIS_LABEL = { private: "Private", link: "Anyone with the link", public: "Public" };
-const keepText = (d) => (d === null ? "Forever" : d === 365 ? "1 year" : `${d} day${d === 1 ? "" : "s"}`);
-const keepValue = (d) => (d === null ? "forever" : String(d));
-const keepParse = (v) => (v === "forever" ? null : Number(v));
+const VIS_LABEL: Record<API.Visibility, string> = { private: "Private", link: "Anyone with the link", public: "Public" };
+const keepText = (d: number | null) => (d === null ? "Forever" : d === 365 ? "1 year" : `${d} day${d === 1 ? "" : "s"}`);
+const keepValue = (d: number | null) => (d === null ? "forever" : String(d));
+const keepParse = (v: string) => (v === "forever" ? null : Number(v));
 /** Selects `days`, adding an option for a value set elsewhere (CLI or API), in order. */
-function setKeep(select, days) {
+function setKeep(select: HTMLSelectElement, days: number | null) {
   const v = keepValue(days);
   if (![...select.options].some((o) => o.value === v)) {
-    const after = [...select.options].find((o) => o.value === "forever" || Number(o.value) > days);
+    const after = [...select.options].find((o) => o.value === "forever" || Number(o.value) > days!); // not null: "forever" is an option
     select.add(new Option(keepText(days), v), after ?? null);
   }
   select.value = v;
 }
-const keepSelect = (attrs, days) => {
+const keepSelect = (attrs: Props<"select">, days: number | null) => {
   const s = el("select", { className: "input role-select", ...attrs },
     ...["1", "7", "30", "90", "365", "forever"].map((v) => el("option", { value: v, textContent: keepText(keepParse(v)) })));
   setKeep(s, days);
   return s;
 };
-const visSelect = (attrs, value) =>
+const visSelect = (attrs: Props<"select">, value: API.Visibility) =>
   el("select", { className: "input role-select", ...attrs },
     ...Object.entries(VIS_LABEL).map(([v, t]) => el("option", { value: v, textContent: t, selected: v === value })));
-const pageName = (p) => p.title ?? p.name;
-const untilText = (p) => (p.expiresAt ? `until ${new Date(p.expiresAt).toLocaleDateString()}` : "no expiry");
+const pageName = (p: API.Page) => p.title ?? p.name;
+const untilText = (p: API.Page) => (p.expiresAt ? `until ${new Date(p.expiresAt).toLocaleDateString()}` : "no expiry");
 
-async function copyLink(url) {
+async function copyLink(url: string) {
   try {
     await navigator.clipboard.writeText(url);
     toast("Link copied");
@@ -2064,10 +2095,10 @@ const pageSlug = slugField($("page-name"), "page");
 let pagesReq = 0; // only the latest list request is shown (an older, slower one would hide a newer artifact)
 function renderPages() {
   const mine = ++pagesReq;
-  return api("/v1/pages").then(({ pages }) => {
+  return api<{ pages: API.Page[] }>("/v1/pages").then(({ pages }) => {
     if (mine !== pagesReq) return;
     // Closed before their rows go, so their scroll/resize listeners go with them.
-    for (const m of $("page-list").querySelectorAll(".menu:popover-open")) m.hidePopover();
+    for (const m of $("page-list").querySelectorAll<HTMLElement>(".menu:popover-open")) m.hidePopover();
     $("page-list").replaceChildren(pages.length
       ? el("ul", { className: "list art-list", ariaLabel: "Your artifacts" }, ...pages.map(pageRow))
       : el("div", { className: "empty-state" },
@@ -2078,7 +2109,7 @@ function renderPages() {
 }
 
 /** A popover menu under its button (native popover: Escape and a click outside close it, focus returns to the button). */
-function rowMenu(id, label, items) {
+function rowMenu(id: string, label: string, items: HTMLElement[]) {
   const menu = el("div", { id, className: "menu" }, ...items);
   menu.setAttribute("popover", "");
   const btn = el("button", { className: "icon-btn row-more", type: "button", title: "More actions", ariaLabel: `More actions for ${label}` }, icon("more"));
@@ -2105,28 +2136,28 @@ function rowMenu(id, label, items) {
     if (r.bottom + 4 + menu.offsetHeight > innerHeight) menu.style.top = `${Math.max(8, r.top - 4 - menu.offsetHeight)}px`;
     addEventListener("scroll", hide, true); // placed once: it closes rather than drift away from its row
     addEventListener("resize", hide);
-    menu.querySelector("button, a")?.focus();
+    menu.querySelector<HTMLElement>("button, a")?.focus();
   });
   // Closed before the item acts, so a confirm() or a file picker isn't drawn over an open menu.
-  menu.addEventListener("click", (e) => e.target.closest("button, a") && hide(), true);
+  menu.addEventListener("click", (e) => (e.target as Element).closest("button, a") && hide(), true); // a click lands on an element
   // Tabbing out of it closes it too, so it doesn't sit over the rows focus moved on to.
-  menu.addEventListener("focusout", (e) => e.relatedTarget && !menu.contains(e.relatedTarget) && e.relatedTarget !== btn && hide());
-  btn.addEventListener("focusout", (e) => e.relatedTarget && !menu.contains(e.relatedTarget) && hide());
+  menu.addEventListener("focusout", (e) => e.relatedTarget && !menu.contains(e.relatedTarget as Node) && e.relatedTarget !== btn && hide());
+  btn.addEventListener("focusout", (e) => e.relatedTarget && !menu.contains(e.relatedTarget as Node) && hide());
   return [btn, menu];
 }
-const menuItem = (iconName, text, srText, attrs = {}) =>
+const menuItem = (iconName: string, text: string, srText: string | null, attrs: Props<"a"> & Props<"button"> = {}) =>
   el(attrs.href ? "a" : "button", { className: "menu-item", ...(attrs.href ? {} : { type: "button" }), ...attrs }, icon(iconName), text, srText ? srOnly(srText) : null);
 
-function pageRow(p) {
+function pageRow(p: API.Page) {
   const manage = p.access === "owner" || p.access === "admin";
   const label = pageName(p);
   const until = el("span", { textContent: untilText(p) });
   const ico = el("span", { className: "file-ico", title: VIS_LABEL[p.visibility] }, icon(p.visibility === "private" ? "shield" : "globe"));
   const vis = manage
-    ? visSelect({ id: `vis-${p.id}`, title: "Who can open it", ariaLabel: `Who can open ${label}`, onchange: () => changePage(p, { visibility: vis.value }, vis, until, ico) }, p.visibility)
+    ? visSelect({ id: `vis-${p.id}`, title: "Who can open it", ariaLabel: `Who can open ${label}`, onchange: () => changePage(p, { visibility: (vis as HTMLSelectElement).value as API.Visibility }, vis as HTMLSelectElement, until, ico) }, p.visibility) // (manage: vis is this select)
     : el("span", { className: "muted small", textContent: VIS_LABEL[p.visibility] });
   const keep = manage
-    ? keepSelect({ id: `keep-${p.id}`, title: "Keep for", ariaLabel: `Keep ${label} for`, onchange: () => changePage(p, { retentionDays: keepParse(keep.value) }, keep, until) }, p.retentionDays)
+    ? keepSelect({ id: `keep-${p.id}`, title: "Keep for", ariaLabel: `Keep ${label} for`, onchange: () => changePage(p, { retentionDays: keepParse((keep as HTMLSelectElement).value) }, keep as HTMLSelectElement, until) }, p.retentionDays) // (manage: keep is this select)
     : el("span", { className: "muted small", textContent: keepText(p.retentionDays) });
   const replace = el("input", { type: "file", hidden: true, accept: ".html,.htm,text/html", onchange: () => replacePage(p, replace) });
   const replaceDir = el("input", { type: "file", hidden: true, webkitdirectory: true, multiple: true, onchange: () => replacePage(p, replaceDir) });
@@ -2136,7 +2167,7 @@ function pageRow(p) {
     manage ? menuItem("users", "Share", ` ${label}`, { href: `#/share/${encodeURIComponent(p.name)}` }) : null,
     p.access === "owner" ? el("hr", { className: "menu-sep" }) : null,
     p.access === "owner" ? menuItem("trash", "Delete", ` ${label}`, { id: `delete-page-${p.id}`, className: "menu-item danger", onclick: () => deletePage(p) }) : null,
-  ].filter(Boolean);
+  ].filter((x) => x !== null);
   return el("li", { className: "art-row" },
     el("div", { className: "art-main" },
       ico,
@@ -2150,10 +2181,10 @@ function pageRow(p) {
       replace, replaceDir));
 }
 
-async function changePage(p, change, select, until, ico) {
+async function changePage(p: API.Page, change: { visibility?: API.Visibility; retentionDays?: number | null }, select: HTMLSelectElement, until: HTMLElement, ico?: HTMLElement) {
   select.disabled = true;
   try {
-    const { page } = await api(`/v1/pages/${encodeURIComponent(p.name)}`, { method: "PATCH", body: JSON.stringify(change) });
+    const { page } = await api<{ page: API.Page }>(`/v1/pages/${encodeURIComponent(p.name)}`, { method: "PATCH", body: JSON.stringify(change) });
     Object.assign(p, page);
     until.textContent = untilText(page);
     if (ico) {
@@ -2164,7 +2195,7 @@ async function changePage(p, change, select, until, ico) {
       ? `${pageName(page)}: ${VIS_LABEL[page.visibility].toLowerCase()}`
       : `${pageName(page)} is kept ${page.retentionDays === null ? "forever" : untilText(page)}`);
   } catch (e) {
-    toast(`Could not change ${pageName(p)}: ${e.message}`);
+    toast(`Could not change ${pageName(p)}: ${errorMessage(e)}`);
     if (change.visibility) select.value = p.visibility;
     else setKeep(select, p.retentionDays);
   } finally {
@@ -2173,31 +2204,31 @@ async function changePage(p, change, select, until, ico) {
 }
 
 /** New files at the same link: one HTML file, or a folder (all of the page's files are replaced). */
-async function replacePage(p, input) {
-  if (!input.files.length) return;
+async function replacePage(p: API.Page, input: HTMLInputElement) {
+  if (!input.files!.length) return; // a file input's
   try {
     let content;
     if (input.webkitdirectory) {
-      const { files } = folderFiles(input.files);
+      const { files } = folderFiles(input.files!);
       if (!files.some((x) => x.path === "index.html")) throw new Error("that folder has no index.html at its top level");
       content = await folderBody(files);
-    } else content = { html: await input.files[0].text() };
+    } else content = { html: await input.files![0]!.text() }; // at least one (above)
     await api(`/v1/pages/${encodeURIComponent(p.name)}`, { method: "PUT", body: JSON.stringify({ ...content, source: "studio" }) });
     toast(`Replaced ${pageName(p)} (same link)`);
   } catch (e) {
-    toast(`Could not replace ${pageName(p)}: ${e.message}`);
+    toast(`Could not replace ${pageName(p)}: ${errorMessage(e)}`);
   }
   input.value = "";
   await renderPages();
   refocus($("pages-title"));
 }
 
-async function deletePage(p) {
+async function deletePage(p: API.Page) {
   if (!confirm(`Delete ${pageName(p)}? Its link stops working.`)) return;
   try {
     await api(`/v1/pages/${encodeURIComponent(p.name)}`, { method: "DELETE" });
   } catch (e) {
-    toast(`Could not delete ${pageName(p)}: ${e.message}`);
+    toast(`Could not delete ${pageName(p)}: ${errorMessage(e)}`);
     return;
   }
   toast(`Deleted ${pageName(p)}`);
@@ -2206,52 +2237,57 @@ async function deletePage(p) {
 }
 
 /** What the new-artifact dialog will send: one HTML file, or a folder's files (its top directory stripped). */
-let pagePick = null;
-const b64 = async (file) => {
+let pagePick: { title: string | null; html: File; files?: undefined } | { title: string | null; files: PickedFile[]; html?: undefined } | null = null;
+const b64 = async (file: File) => {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let s = "";
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(s);
 };
-function pageError(text) {
+function pageError(text: string) {
   $("page-error").textContent = text;
   $("page-error").hidden = !text;
 }
-const VIS_HINT = {
+const VIS_HINT: Record<string, string> = {
   private: "Only you and the people you share it with, logged in.",
   link: "Anyone who has the link. Search engines don't list it.",
   public: "Anyone. Search engines can list it.",
 };
-const showVisHint = () => ($("vis-hint").textContent = VIS_HINT[$("page-visibility").value]);
+const showVisHint = () => ($("vis-hint").textContent = VIS_HINT[$<HTMLSelectElement>("page-visibility").value]);
 $("page-visibility").addEventListener("change", showVisHint);
-function showPick(title, sub) {
+function showPick(title: string, sub: string) {
   $("page-picked").textContent = title;
   $("page-picked-sub").textContent = sub;
   $("page-drop").dataset.picked = String(!!pagePick);
 }
-const NO_PICK = ["Nothing chosen", "Drop an HTML file here, or choose one."];
-function pickHtml(f) {
-  $("page-dir").value = "";
+const NO_PICK = ["Nothing chosen", "Drop an HTML file here, or choose one."] as const;
+function pickHtml(f: File | undefined) {
+  $<HTMLInputElement>("page-dir").value = "";
   pagePick = f ? { title: f.name.replace(/\.html?$/i, ""), html: f } : null;
-  showPick(...(f ? [f.name, f.size < 1024 ? `${f.size} bytes` : `${(f.size / 1024).toFixed(f.size < 10240 ? 1 : 0)} KB`] : NO_PICK));
+  showPick(...(f ? [f.name, f.size < 1024 ? `${f.size} bytes` : `${(f.size / 1024).toFixed(f.size < 10240 ? 1 : 0)} KB`] as const : NO_PICK));
   pageError("");
 }
-$("page-file").addEventListener("change", () => pickHtml($("page-file").files[0]));
+$("page-file").addEventListener("change", () => pickHtml($<HTMLInputElement>("page-file").files![0]));
 /** A picked folder's files, its top directory stripped; hidden files and folders (.git, .DS_Store) stay behind. */
-function folderFiles(list) {
+interface PickedFile {
+  f: File;
+  path: string;
+}
+function folderFiles(list: FileList) {
   const files = [...list]
     .map((f) => ({ f, path: f.webkitRelativePath.split("/").slice(1).join("/") }))
     .filter(({ path }) => path && !path.split("/").some((seg) => seg.startsWith(".")));
   return { dir: list[0]?.webkitRelativePath.split("/")[0] ?? null, files };
 }
-const folderBody = async (files) =>
+const folderBody = async (files: PickedFile[]) =>
   ({ files: await Promise.all(files.map(async ({ f, path }) => ({ path, data: await b64(f), encoding: "base64" }))) });
 $("page-dir").addEventListener("change", () => {
-  $("page-file").value = "";
-  const { dir, files } = folderFiles($("page-dir").files);
+  $<HTMLInputElement>("page-file").value = "";
+  const { dir, files } = folderFiles($<HTMLInputElement>("page-dir").files!);
   const noIndex = files.length && !files.some((x) => x.path === "index.html");
   pagePick = files.length && !noIndex ? { title: dir, files } : null;
-  showPick(...(pagePick ? [`${dir}/`, `${files.length} file${files.length === 1 ? "" : "s"}`] : NO_PICK));
+  const shown: readonly [string, string] = pagePick ? [`${dir}/`, `${files.length} file${files.length === 1 ? "" : "s"}`] : NO_PICK;
+  showPick(...shown);
   pageError(noIndex ? "That folder has no index.html at its top level." : "");
 });
 // Dropping a file: an HTML file is picked; a folder needs the Folder button (a dropped folder can't be read as one here).
@@ -2260,16 +2296,16 @@ drop.addEventListener("dragover", (e) => {
   e.preventDefault();
   drop.dataset.over = "true";
 });
-drop.addEventListener("dragleave", (e) => !drop.contains(e.relatedTarget) && delete drop.dataset.over);
+drop.addEventListener("dragleave", (e) => !drop.contains(e.relatedTarget as Node | null) && delete drop.dataset.over);
 drop.addEventListener("drop", (e) => {
   e.preventDefault();
   delete drop.dataset.over;
   if (pageUploading) return;
-  const item = e.dataTransfer.items?.[0];
-  const f = e.dataTransfer.files[0];
+  const item = e.dataTransfer!.items?.[0]; // a drop event's
+  const f = e.dataTransfer!.files[0];
   if (item?.webkitGetAsEntry?.()?.isDirectory) return pageError("To deploy a folder, choose it with the Folder button.");
   if (!f || !/\.html?$/i.test(f.name)) return pageError("Drop an .html file.");
-  $("page-file").value = "";
+  $<HTMLInputElement>("page-file").value = "";
   pickHtml(f);
 });
 
@@ -2277,38 +2313,38 @@ drop.addEventListener("drop", (e) => {
  * elsewhere counts, and it never starts at the first option), with a new generated address. */
 let pageDialogOpening = false;
 async function openPageDialog() {
-  const dlg = $("page-dialog");
+  const dlg = $<HTMLDialogElement>("page-dialog");
   if (dlg.open || pageDialogOpening) return;
   // Left the page mid-deploy and came back: that deploy still owns the dialog (it closes it and clears its pick).
   if (pageUploading) return toast("Still deploying your last artifact…");
   pageDialogOpening = true;
   let defaults;
   try {
-    defaults = (await api("/v1/me/settings")).pages;
+    defaults = (await api<API.Settings>("/v1/me/settings")).pages;
   } catch (e) {
-    return toast(`Could not load your artifact defaults: ${e.message}`);
+    return toast(`Could not load your artifact defaults: ${errorMessage(e)}`);
   } finally {
     pageDialogOpening = false;
   }
   if (dlg.open || location.hash !== "#/artifacts") return; // left the page meanwhile
-  $("page-form").reset();
+  $<HTMLFormElement>("page-form").reset();
   pagePick = null;
   showPick(...NO_PICK);
   pageError("");
-  for (const id of PAGE_BUSY) $(id).disabled = false; // a finished deploy may not have yet
-  $("page-name").value = "";
-  $("page-visibility").value = defaults.visibility;
+  for (const id of PAGE_BUSY) $<HTMLButtonElement | HTMLInputElement>(id).disabled = false; // a finished deploy may not have yet
+  $<HTMLInputElement>("page-name").value = "";
+  $<HTMLSelectElement>("page-visibility").value = defaults.visibility;
   setKeep($("page-retention"), defaults.retentionDays);
   showVisHint();
   dlg.showModal();
   pageSlug.suggest();
 }
 $("page-new").addEventListener("click", openPageDialog);
-for (const id of ["page-cancel", "page-close"]) $(id).addEventListener("click", () => !pageUploading && $("page-dialog").close());
+for (const id of ["page-cancel", "page-close"]) $(id).addEventListener("click", () => !pageUploading && $<HTMLDialogElement>("page-dialog").close());
 $("page-dialog").addEventListener("cancel", (e) => pageUploading && e.preventDefault());
 // A file dropped anywhere in the dialog but the drop zone would make the browser open it, leaving the studio.
 for (const type of ["dragover", "drop"]) {
-  $("page-dialog").addEventListener(type, (e) => e.dataTransfer?.types.includes("Files") && e.preventDefault());
+  $("page-dialog").addEventListener(type, (e) => (e as DragEvent).dataTransfer?.types.includes("Files") && e.preventDefault());
 }
 
 $("page-form").addEventListener("submit", async (e) => {
@@ -2319,11 +2355,11 @@ $("page-form").addEventListener("submit", async (e) => {
     return;
   }
   pageError("");
-  const dlg = $("page-dialog");
+  const dlg = $<HTMLDialogElement>("page-dialog");
   const mine = ++pageUploadGen;
   const pick = pagePick; // what was chosen when Deploy was pressed (the file inputs are disabled meanwhile)
   pageUploading = true;
-  for (const id of PAGE_BUSY) $(id).disabled = true;
+  for (const id of PAGE_BUSY) $<HTMLButtonElement | HTMLInputElement>(id).disabled = true;
   try {
     const name = await pageSlug.value();
     if (!name) {
@@ -2333,14 +2369,14 @@ $("page-form").addEventListener("submit", async (e) => {
     const content = pick.html
       ? { html: await pick.html.text() }
       : await folderBody(pick.files);
-    const { page } = await api("/v1/pages", {
+    const { page } = await api<{ page: API.Page }>("/v1/pages", {
       method: "POST",
       body: JSON.stringify({
         ...content,
         name,
         title: pick.title,
-        visibility: $("page-visibility").value,
-        retentionDays: keepParse($("page-retention").value),
+        visibility: $<HTMLSelectElement>("page-visibility").value,
+        retentionDays: keepParse($<HTMLSelectElement>("page-retention").value),
         source: "studio",
       }),
     });
@@ -2352,50 +2388,50 @@ $("page-form").addEventListener("submit", async (e) => {
     await renderPages();
     refocus($("page-new")); // from the empty state's button, which the list replaced
   } catch (err) {
-    if (dlg.open) pageError(`Could not deploy: ${err.message}`);
-    else toast(`Could not deploy: ${err.message}`); // closed by leaving the page meanwhile
+    if (dlg.open) pageError(`Could not deploy: ${errorMessage(err)}`);
+    else toast(`Could not deploy: ${errorMessage(err)}`); // closed by leaving the page meanwhile
   } finally {
     if (mine === pageUploadGen) {
       pageUploading = false;
-      for (const id of PAGE_BUSY) $(id).disabled = false;
+      for (const id of PAGE_BUSY) $<HTMLButtonElement | HTMLInputElement>(id).disabled = false;
       if (dlg.open && !dlg.contains(document.activeElement)) $("page-upload").focus(); // disabling Deploy dropped focus
     }
   }
 });
 
 // Settings: the account's defaults for new pages.
-function pageDefaultsError(text) {
+function pageDefaultsError(text: string) {
   $("page-defaults-error").textContent = text;
   $("page-defaults-error").hidden = !text;
 }
-function showPageDefaults({ pages, defaults }) {
-  $("def-visibility").value = pages.visibility;
+function showPageDefaults({ pages, defaults }: API.Settings) {
+  $<HTMLSelectElement>("def-visibility").value = pages.visibility;
   setKeep($("def-retention"), pages.retentionDays);
   $("def-server").textContent = `${VIS_LABEL[defaults.pages.visibility].toLowerCase()}, kept ${defaults.pages.retentionDays === null ? "forever" : `for ${keepText(defaults.pages.retentionDays).toLowerCase()}`}`;
 }
 function renderPageDefaults() {
   pageDefaultsError("");
-  api("/v1/me/settings").then(showPageDefaults, (e) => pageDefaultsError(`Could not load your artifact defaults: ${e.message}`));
+  api<API.Settings>("/v1/me/settings").then(showPageDefaults, (e) => pageDefaultsError(`Could not load your artifact defaults: ${e.message}`));
 }
-async function savePageDefaults(pages, done) {
+async function savePageDefaults(pages: { visibility: string; retentionDays: number | null } | null, done: string) {
   pageDefaultsError("");
-  $("page-defaults-save").disabled = $("page-defaults-reset").disabled = true;
+  $<HTMLButtonElement>("page-defaults-save").disabled = $<HTMLButtonElement>("page-defaults-reset").disabled = true;
   try {
-    showPageDefaults(await api("/v1/me/settings", { method: "PUT", body: JSON.stringify({ pages }) }));
+    showPageDefaults(await api<API.Settings>("/v1/me/settings", { method: "PUT", body: JSON.stringify({ pages }) }));
     toast(done);
   } catch (e) {
-    pageDefaultsError(`Could not save: ${e.message}`);
+    pageDefaultsError(`Could not save: ${errorMessage(e)}`);
   } finally {
-    $("page-defaults-save").disabled = $("page-defaults-reset").disabled = false;
+    $<HTMLButtonElement>("page-defaults-save").disabled = $<HTMLButtonElement>("page-defaults-reset").disabled = false;
   }
 }
 $("page-defaults-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  savePageDefaults({ visibility: $("def-visibility").value, retentionDays: keepParse($("def-retention").value) }, "Artifact defaults saved");
+  savePageDefaults({ visibility: $<HTMLSelectElement>("def-visibility").value, retentionDays: keepParse($<HTMLSelectElement>("def-retention").value) }, "Artifact defaults saved");
 });
 $("page-defaults-reset").addEventListener("click", () => savePageDefaults(null, "Using the server's artifact defaults"));
 
-let cliToken = null; // the token renderCli named the account of
+let cliToken: string | null = null; // the token renderCli named the account of
 /**
  * #/cli: where `cresslet auth login` sends the browser. The user types the code from their terminal (it isn't in
  * the link, so a link someone else sent can't log their CLI in to this account), and the CLI's poll then gets a
@@ -2404,8 +2440,8 @@ let cliToken = null; // the token renderCli named the account of
 function renderCli() {
   showOnly("cli-login");
   document.title = "Log in the CLI · Cresslet Studio";
-  const text = (t) => ($("cli-login-text").textContent = t);
-  const form = $("cli-login-form");
+  const text = (t: string) => ($("cli-login-text").textContent = t);
+  const form = $<HTMLFormElement>("cli-login-form");
   form.hidden = true;
   form.reset();
   cliError("");
@@ -2428,7 +2464,7 @@ function renderCli() {
   text("Checking your account…");
   // Session changed meanwhile (another tab): start over with the current one.
   const stale = () => location.hash !== "#/cli" || (auth.token !== token && (renderCli(), true));
-  api("/v1/me").then(({ account }) => {
+  api<{ account: API.Account }>("/v1/me").then(({ account }) => {
     if (stale()) return;
     text(`Enter the code that cresslet auth login shows in your terminal. The CLI gets full access to ${account.github ?? account.email}. Only enter a code from a terminal you're using.`);
     form.hidden = false;
@@ -2436,7 +2472,7 @@ function renderCli() {
     if (!stale()) text(`Could not load your account: ${e.message}`);
   });
 }
-function cliError(t) {
+function cliError(t: string) {
   $("cli-login-error").textContent = t;
   $("cli-login-error").hidden = !t;
 }
@@ -2444,18 +2480,18 @@ $("cli-login-code").addEventListener("input", () => cliError(""));
 $("cli-login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   if (auth.token !== cliToken) return renderCli();
-  $("cli-login-approve").disabled = true;
+  $<HTMLButtonElement>("cli-login-approve").disabled = true;
   try {
-    await api("/v1/auth/cli/approve", { method: "POST", body: JSON.stringify({ userCode: $("cli-login-code").value }) });
+    await api("/v1/auth/cli/approve", { method: "POST", body: JSON.stringify({ userCode: $<HTMLInputElement>("cli-login-code").value }) });
     $("cli-login-form").hidden = true;
     $("cli-login-text").textContent = "CLI logged in. You can close this tab and go back to your terminal.";
     focusView();
   } catch (err) {
     if (!auth.token) return renderCli(); // session expired: offer the login
-    cliError(`Could not authorize: ${err.message}`);
+    cliError(`Could not authorize: ${errorMessage(err)}`);
     $("cli-login-code").focus();
   } finally {
-    $("cli-login-approve").disabled = false;
+    $<HTMLButtonElement>("cli-login-approve").disabled = false;
   }
 });
 
@@ -2463,10 +2499,10 @@ $("cli-login-form").addEventListener("submit", async (e) => {
  * #/view/<page>?path=…: where a private page sends a visitor without a session. Asks the server for a
  * one-time sign-in link to the page (owner and collaborators only) and goes there.
  */
-async function renderView(name, path) {
+async function renderView(name: string, path: string) {
   showOnly("view");
   document.title = "Private artifact · Cresslet Studio";
-  const text = (t) => ($("view-text").textContent = t);
+  const text = (t: string) => ($("view-text").textContent = t);
   $("view-actions").replaceChildren();
   if (!auth.token) {
     text("This artifact is private. Log in to open it, if its owner shared it with you.");
@@ -2484,9 +2520,9 @@ async function renderView(name, path) {
   }
   // A browser that drops the page's cookie would bounce between here and the page forever.
   const key = `cresslet.view.${name}`;
-  let tries = [];
+  let tries: number[] = [];
   try {
-    tries = JSON.parse(sessionStorage.getItem(key) ?? "[]").filter((t) => Date.now() - t < 60_000);
+    tries = (JSON.parse(sessionStorage.getItem(key) ?? "[]") as number[]).filter((t) => Date.now() - t < 60_000); // what this page stored
     sessionStorage.setItem(key, JSON.stringify([...tries, Date.now()]));
   } catch { /* storage blocked */ }
   if (tries.length >= 3) {
@@ -2505,26 +2541,26 @@ async function renderView(name, path) {
   }
   text("Opening…");
   try {
-    const { url } = await api(`/v1/pages/${encodeURIComponent(name)}/view`, { method: "POST", body: JSON.stringify({ path }) });
+    const { url } = await api<{ url: string }>(`/v1/pages/${encodeURIComponent(name)}/view`, { method: "POST", body: JSON.stringify({ path }) });
     location.replace(url);
   } catch (e) {
-    text(e.status === 404 ? "This artifact doesn't exist, or it expired."
-      : e.status === 403 ? `You don't have access to this artifact (logged in as ${auth.email}). Ask its owner to share it with you.`
-      : `Could not open the artifact: ${e.message}`);
+    text((e as ApiError).status === 404 ? "This artifact doesn't exist, or it expired."
+      : (e as ApiError).status === 403 ? `You don't have access to this artifact (logged in as ${auth.email}). Ask its owner to share it with you.`
+      : `Could not open the artifact: ${errorMessage(e)}`);
     $("view-actions").replaceChildren(el("a", { className: "btn", href: "#/" }, "Go to Projects"));
   }
 }
 
 // ------------------------------------------------------------------ sharing (collaborators and invites)
-const ACCESS_LABEL = { owner: "Owner", admin: "Admin", viewer: "Viewer" };
-const personText = (p) => (p.github ? `${p.github} (${p.email})` : p.email);
+const ACCESS_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", viewer: "Viewer" };
+const personText = (p: API.Owner) => (p.github ? `${p.github} (${p.email})` : p.email);
 
 /** Invitations to apps other people shared with you (home). */
 async function renderInvites() {
   const gen = routeGen;
-  let invites;
+  let invites: API.MyInvite[];
   try {
-    ({ invites } = await api("/v1/me/invites"));
+    ({ invites } = await api<{ invites: API.MyInvite[] }>("/v1/me/invites"));
   } catch {
     invites = [];
   }
@@ -2539,30 +2575,30 @@ async function renderInvites() {
       el("button", { className: "btn sm", type: "button", id: `decline-${i.id}`, textContent: "Decline", ariaLabel: `Decline invite to ${i.app}`, onclick: () => answerInvite(i, false) }))));
 }
 
-async function answerInvite(i, accept) {
-  let r;
+async function answerInvite(i: API.MyInvite, accept: boolean) {
+  let r: { app: { access: string } } | undefined;
   try {
-    r = await api(`/v1/me/invites/${encodeURIComponent(i.id)}${accept ? "/accept" : ""}`, accept ? { method: "POST", body: "{}" } : { method: "DELETE" });
+    r = await api<{ app: { access: string } }>(`/v1/me/invites/${encodeURIComponent(i.id)}${accept ? "/accept" : ""}`, accept ? { method: "POST", body: "{}" } : { method: "DELETE" });
   } catch (e) {
     // e.g. 404: cancelled, or re-sent with another role (a new invite): show the current ones.
-    toast(`Could not ${accept ? "accept" : "decline"} the invite: ${e.message}`);
+    toast(`Could not ${accept ? "accept" : "decline"} the invite: ${errorMessage(e)}`);
     await renderInvites();
     refocus($("invites-section").hidden ? $("apps-title") : $("invites-title"));
     return;
   }
   // An invite can be to an app (Deployed apps) or an artifact (Artifacts).
-  toast(accept ? `Joined ${i.app} as ${ACCESS_LABEL[r.app.access]?.toLowerCase() ?? r.app.access}: it's in Deployed apps or Artifacts` : `Declined the invite to ${i.app}`);
+  toast(accept ? `Joined ${i.app} as ${ACCESS_LABEL[r!.app.access]?.toLowerCase() ?? r!.app.access}: it's in Deployed apps or Artifacts` : `Declined the invite to ${i.app}`);
   await Promise.all([renderInvites(), accept ? renderApps() : null]);
   refocus($("invites-section").hidden ? $("apps-title") : $("invites-title"));
 }
 
-async function leaveApp(a) {
+async function leaveApp(a: API.AppSummary) {
   if (!confirm(`Leave ${a.name}? You lose access to it until someone invites you again.`)) return;
   try {
-    const id = myAccountId ?? (await api("/v1/me")).account.id;
+    const id = myAccountId ?? (await api<{ account: API.Account }>("/v1/me")).account.id;
     await api(`/v1/apps/${encodeURIComponent(a.name)}/collaborators/${encodeURIComponent(id)}`, { method: "DELETE" });
   } catch (e) {
-    toast(`Could not leave ${a.name}: ${e.message}`);
+    toast(`Could not leave ${a.name}: ${errorMessage(e)}`);
     return;
   }
   toast(`You left ${a.name}`);
@@ -2571,8 +2607,8 @@ async function leaveApp(a) {
 }
 
 /** #/share/<app>: who has access to an app (owner and admins only). */
-let shareApp = null;
-async function renderShare(name) {
+let shareApp: string | null = null;
+async function renderShare(name: string) {
   if (!auth.token) {
     location.hash = "#/";
     return;
@@ -2582,43 +2618,44 @@ async function renderShare(name) {
   document.title = `Share ${name} · Cresslet Studio`;
   $("share-title").replaceChildren(el("a", { href: "#/", textContent: "Projects" }), " / ", `Share ${name}`);
   $("share-sub").textContent = "Invite accounts to this app. Viewers see it; admins can also change it.";
-  $("invite-role").options[0].textContent = INVITE_VIEWER_APP;
+  $<HTMLSelectElement>("invite-role").options[0].textContent = INVITE_VIEWER_APP;
   $("invite-role-admin").textContent = inviteAdminApp;
   // An artifact: its title, and what sharing means for it.
-  api(`/v1/pages/${encodeURIComponent(name)}`).then(({ page }) => {
+  api<{ page: API.Page }>(`/v1/pages/${encodeURIComponent(name)}`).then(({ page }) => {
     if (shareApp !== name) return;
     $("share-title").replaceChildren(el("a", { href: "#/artifacts", textContent: "Artifacts" }), " / ", `Share ${pageName(page)}`);
     $("share-sub").textContent = "Invite accounts to this artifact. Viewers can open it even when it's private; admins can also change it.";
-    $("invite-role").options[0].textContent = "Viewer: open it, even when it's private";
+    $<HTMLSelectElement>("invite-role").options[0].textContent = "Viewer: open it, even when it's private";
     $("invite-role-admin").textContent = "Admin: also replace its files, change who can open it and how long it's kept, and share it (not deleting it)";
   }, () => {});
-  $("invite-form").reset();
+  $<HTMLFormElement>("invite-form").reset();
   $("invite-form").hidden = true; // until the list loads: only the owner and admins may share
-  $("invite-send").disabled = false; // an invite still in flight from another app's page doesn't hold this one
+  $<HTMLButtonElement>("invite-send").disabled = false; // an invite still in flight from another app's page doesn't hold this one
   inviteError("");
   $("people").replaceChildren(el("li", { className: "list-row muted", textContent: "Loading…" }));
   const gen = routeGen;
-  if (!myAccountId) await api("/v1/me").then(setAccount, () => {});
+  if (!myAccountId) await api<{ account: API.Account }>("/v1/me").then(setAccount, () => {});
   $("org-block").hidden = true;
   await Promise.all([renderPeople(gen), renderOrgBlock(gen)]);
 }
 
 /** Moving the app into one of your organizations, or back out: for its owner (in an organization: an org admin). */
 async function renderOrgBlock(gen = routeGen) {
-  const name = shareApp;
+  const name = shareApp!; // on the Share page
   let app, orgs;
   try {
-    [{ app }, orgs] = await Promise.all([api(`/v1/apps/${encodeURIComponent(name)}`), loadMyOrgs()]);
+    [{ app }, orgs] = await Promise.all([api<API.AppDetail>(`/v1/apps/${encodeURIComponent(name)}`), loadMyOrgs()]);
   } catch {
     return;
   }
   if (gen !== routeGen || shareApp !== name) return;
   $("org-block").hidden = app.access !== "owner" || (!orgs.length && !app.org);
-  const sel = $("org-select");
-  const inMine = !app.org || orgs.some((o) => o.name === app.org.name);
+  const sel = $<HTMLSelectElement>("org-select");
+  const org = app.org;
+  const inMine = !org || orgs.some((o) => o.name === org.name);
   sel.replaceChildren(
-    el("option", { value: "", textContent: app.org ? "Nobody: make it my personal app" : "Nobody: my personal app" }),
-    ...(inMine ? [] : [el("option", { value: app.org.name, textContent: app.org.title ?? app.org.name })]),
+    el("option", { value: "", textContent: org ? "Nobody: make it my personal app" : "Nobody: my personal app" }),
+    ...(inMine ? [] : [el("option", { value: org.name, textContent: org.title ?? org.name })]),
     ...orgs.map((o) => el("option", { value: o.name, textContent: o.title ? `${o.title} (${o.name})` : o.name })));
   sel.value = app.org?.name ?? "";
   $("org-form-text").textContent = app.org
@@ -2628,34 +2665,34 @@ async function renderOrgBlock(gen = routeGen) {
 }
 $("org-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const name = shareApp, to = $("org-select").value || null, gen = routeGen;
+  const name = shareApp!, to = $<HTMLSelectElement>("org-select").value || null, gen = routeGen; // on the Share page
   if ((to ?? "") === $("org-form").dataset.current) return void toast("It's already there.");
   if (!confirm(to ? `Move ${name} into ${to}? Its admins will own it.` : `Make ${name} your personal app? The organization's members lose access to it.`)) return;
-  $("org-move").disabled = true;
+  $<HTMLButtonElement>("org-move").disabled = true;
   try {
     await api(`/v1/apps/${encodeURIComponent(name)}/org`, { method: "PUT", body: JSON.stringify({ org: to }) });
     toast(to ? `Moved ${name} into ${to}` : `${name} is your personal app now`);
   } catch (x) {
-    toast(`Could not move it: ${x.message}`);
+    toast(`Could not move it: ${errorMessage(x)}`);
   } finally {
-    $("org-move").disabled = false;
+    $<HTMLButtonElement>("org-move").disabled = false;
   }
   if (gen !== routeGen) return;
   await Promise.all([renderPeople(gen), renderOrgBlock(gen)]);
 });
 
 async function renderPeople(gen = routeGen) {
-  const name = shareApp;
+  const name = shareApp!; // on the Share page
   let d;
   try {
-    d = await api(`/v1/apps/${encodeURIComponent(name)}/collaborators`);
+    d = await api<API.Collaborators>(`/v1/apps/${encodeURIComponent(name)}/collaborators`);
   } catch (e) {
-    if (gen === routeGen) $("people").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load who has access: ${e.message}` }));
+    if (gen === routeGen) $("people").replaceChildren(el("li", { className: "list-row error", textContent: `Could not load who has access: ${errorMessage(e)}` }));
     return;
   }
   if (gen !== routeGen) return;
   $("invite-form").hidden = false;
-  const who = (text, meta, badge) =>
+  const who = (text: string, meta: string, badge?: string | null) =>
     el("div", { className: "tok" },
       el("strong", { textContent: text }, badge ? el("span", { className: "badge", textContent: badge }) : null),
       el("span", { className: "meta", textContent: meta }));
@@ -2700,22 +2737,24 @@ async function renderPeople(gen = routeGen) {
 }
 
 /** One role update per row at a time, in order (a select can fire change per arrow key); shows what the server stored. */
-function setRole(p, select) {
+/** A collaborator's row: its role updates in flight (`version`, `saving`), and whether you just demoted yourself. */
+type CollaboratorRow = API.Collaborators["collaborators"][number] & { version?: number; saving?: Promise<void>; demoted?: boolean };
+function setRole(p: CollaboratorRow, select: HTMLSelectElement) {
   const role = select.value;
   // Demoting yourself ends your access to this page: only after a confirmation.
   if (p.id === myAccountId && role === "viewer" && !confirm(`Make yourself a viewer of ${shareApp}? You won't be able to change it or share it any more.`)) {
     select.value = p.role;
     return;
   }
-  const url = `/v1/apps/${encodeURIComponent(shareApp)}/collaborators/${encodeURIComponent(p.id)}`;
+  const url = `/v1/apps/${encodeURIComponent(shareApp!)}/collaborators/${encodeURIComponent(p.id)}`; // on the Share page
   const version = p.version = (p.version ?? 0) + 1; // only the latest change updates the row
   const gen = routeGen, app = shareApp;
   p.saving = (p.saving ?? Promise.resolve()).then(async () => {
     if (p.demoted) return; // you made yourself a viewer: later changes would only be refused
     try {
-      p.role = (await api(url, { method: "PUT", body: JSON.stringify({ role }) })).role;
+      p.role = (await api<{ role: API.Access }>(url, { method: "PUT", body: JSON.stringify({ role }) })).role;
     } catch (e) {
-      toast(`Could not change the role: ${e.message}`);
+      toast(`Could not change the role: ${errorMessage(e)}`);
       if (version === p.version) select.value = p.role;
       return;
     }
@@ -2731,13 +2770,13 @@ function setRole(p, select) {
   });
 }
 
-async function removePerson(p, me) {
-  const name = shareApp, gen = routeGen;
+async function removePerson(p: API.Person, me: boolean) {
+  const name = shareApp!, gen = routeGen; // on the Share page
   if (!confirm(me ? `Leave ${name}? You lose access to it until someone invites you again.` : `Remove ${personText(p)} from ${name}?`)) return;
   try {
     await api(`/v1/apps/${encodeURIComponent(name)}/collaborators/${encodeURIComponent(p.id)}`, { method: "DELETE" });
   } catch (e) {
-    toast(`Could not remove: ${e.message}`);
+    toast(`Could not remove: ${errorMessage(e)}`);
     return;
   }
   toast(me ? `You left ${name}` : `Removed ${personText(p)}`);
@@ -2750,12 +2789,12 @@ async function removePerson(p, me) {
   if (gen === routeGen) refocus($("people-title"));
 }
 
-async function cancelInvite(i) {
+async function cancelInvite(i: API.Collaborators["invites"][number]) {
   const gen = routeGen;
   try {
-    await api(`/v1/apps/${encodeURIComponent(shareApp)}/invites/${encodeURIComponent(i.id)}`, { method: "DELETE" });
+    await api(`/v1/apps/${encodeURIComponent(shareApp!)}/invites/${encodeURIComponent(i.id)}`, { method: "DELETE" }); // on the Share page
   } catch (e) {
-    toast(`Could not cancel the invite: ${e.message}`);
+    toast(`Could not cancel the invite: ${errorMessage(e)}`);
     return;
   }
   toast(`Cancelled the invite for ${i.email}`);
@@ -2764,7 +2803,7 @@ async function cancelInvite(i) {
   if (gen === routeGen) refocus($("people-title"));
 }
 
-function inviteError(text) {
+function inviteError(text: string) {
   $("invite-error").textContent = text;
   $("invite-error").hidden = !text;
 }
@@ -2772,40 +2811,41 @@ $("invite-form").addEventListener("input", () => inviteError(""));
 $("invite-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   inviteError("");
-  $("invite-send").disabled = true;
+  $<HTMLButtonElement>("invite-send").disabled = true;
   const gen = routeGen; // the form is shared by every app's Share page: don't touch it after navigating
   try {
-    const r = await api(`/v1/apps/${encodeURIComponent(shareApp)}/collaborators`, {
+    const r = await api<{ invite: { email: string; role: API.Access } }>(`/v1/apps/${encodeURIComponent(shareApp!)}/collaborators`, { // on the Share page
       method: "POST",
-      body: JSON.stringify({ email: $("invite-email").value, role: $("invite-role").value }),
+      body: JSON.stringify({ email: $<HTMLInputElement>("invite-email").value, role: $<HTMLSelectElement>("invite-role").value }),
     });
     toast(`Invited ${r.invite.email} as ${ACCESS_LABEL[r.invite.role].toLowerCase()}`);
     if (gen !== routeGen) return;
-    $("invite-form").reset();
+    $<HTMLFormElement>("invite-form").reset();
     await renderPeople(gen);
   } catch (err) {
-    if (gen === routeGen) inviteError(`Could not invite: ${err.message}`);
-    else toast(`Could not invite: ${err.message}`);
+    if (gen === routeGen) inviteError(`Could not invite: ${errorMessage(err)}`);
+    else toast(`Could not invite: ${errorMessage(err)}`);
   } finally {
     if (gen === routeGen) {
-      $("invite-send").disabled = false;
+      $<HTMLButtonElement>("invite-send").disabled = false;
       if (document.activeElement === document.body) $("invite-send").focus(); // disabling it dropped focus
     }
   }
 });
 
-async function copyCommand(cmd, fallback) {
+async function copyCommand(cmd: string, fallback: Node) {
   try {
     await navigator.clipboard.writeText(cmd);
     toast("Command copied");
   } catch {
-    getSelection().selectAllChildren(fallback);
+    getSelection()!.selectAllChildren(fallback); // the document's (never null in a window)
     toast("Copy failed: the command is selected, copy it manually.");
   }
 }
-$("cli-copy").addEventListener("click", () => copyCommand($("cli-cmd").lastChild.textContent.trim(), $("cli-cmd")));
-for (const b of document.querySelectorAll("[data-copy]")) {
-  b.addEventListener("click", () => copyCommand(b.dataset.copy, b.closest(".term").querySelector("code")));
+// (index.html: #cli-cmd ends in the command's text; each [data-copy] button is in a .term with a <code>)
+$("cli-copy").addEventListener("click", () => copyCommand($("cli-cmd").lastChild!.textContent!.trim(), $("cli-cmd")));
+for (const b of document.querySelectorAll<HTMLElement>("[data-copy]")) {
+  b.addEventListener("click", () => copyCommand(b.dataset.copy!, b.closest(".term")!.querySelector("code")!));
 }
 
 // ------------------------------------------------------------------ landing
@@ -2841,15 +2881,15 @@ for (const b of document.querySelectorAll("[data-start]")) {
 }
 
 /** New local project from the source uploaded with the app's current deploy (CLI or studio). */
-async function openDeployed({ name, url }) {
+async function openDeployed({ name, url }: { name: string; url: string }) {
   let src;
   try {
-    src = await api(`/v1/apps/${encodeURIComponent(name)}/source`);
+    src = await api<{ files: API.SourceFile[] }>(`/v1/apps/${encodeURIComponent(name)}/source`);
   } catch (e) {
-    alert(`Could not open ${name}: ${e.message}`);
+    alert(`Could not open ${name}: ${errorMessage(e)}`);
     return;
   }
-  const files = Object.create(null); // any file name, incl. "__proto__"
+  const files: Record<string, string | Uint8Array> = Object.create(null); // any file name, incl. "__proto__"
   for (const f of src.files) {
     files[f.path] = f.encoding === "base64" ? Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)) : f.data;
   }
@@ -2859,10 +2899,10 @@ async function openDeployed({ name, url }) {
   location.hash = `#/p/${id}`;
 }
 
-async function createProject(template) {
+async function createProject(template: string) {
   if (await mustLogIn()) return logIn();
-  const t = await api(`/v1/templates/${template}`);
-  const files = {};
+  const t = await api<{ files: API.SourceFile[] }>(`/v1/templates/${template}`);
+  const files: Record<string, string | Uint8Array> = {};
   for (const f of t.files) {
     files[f.path] = f.encoding === "base64" ? Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)) : f.data;
   }
@@ -2877,24 +2917,30 @@ let booted = false;
 // Chat first: the AI builder beside the app's preview, the code (files + editor) when asked for, and the terminal and
 // deploy log in a drawer under them. What was last shown is remembered in this browser.
 const LAYOUT = "cresslet.workspace";
-const layoutPrefs = () => {
+/** What the workspace last showed (`localStorage`, this page's own JSON). */
+interface LayoutPrefs {
+  view?: string;
+  drawer?: boolean;
+  chat?: boolean;
+}
+const layoutPrefs = (): LayoutPrefs => {
   try {
-    return JSON.parse(localStorage.getItem(LAYOUT)) ?? {};
+    return JSON.parse(localStorage.getItem(LAYOUT)!) ?? {}; // JSON.parse(null): null
   } catch {
     return {};
   }
 };
-const saveLayout = (p) => {
+const saveLayout = (p: LayoutPrefs) => {
   try {
     localStorage.setItem(LAYOUT, JSON.stringify({ ...layoutPrefs(), ...p }));
   } catch { /* storage blocked: not remembered */ }
 };
 
 /** The view switch (Preview | Code) and the drawer. `onCode`: the code was shown; `onDrawer`: the drawer was opened. */
-function mountLayout({ onCode, onDrawer }) {
+function mountLayout({ onCode, onDrawer }: { onCode: () => void; onDrawer: () => void }) {
   const ws = $("workspace");
   const switches = [...$("view-switch").querySelectorAll("button")];
-  function setView(v) {
+  function setView(v: string) {
     ws.dataset.view = v;
     $("files-pane").hidden = $("editor-pane").hidden = v !== "code";
     $("preview-pane").hidden = v !== "preview";
@@ -2902,7 +2948,7 @@ function mountLayout({ onCode, onDrawer }) {
     saveLayout({ view: v });
     if (v === "code") onCode();
   }
-  function setDrawer(open, { focus = false } = {}) {
+  function setDrawer(open: boolean, { focus = false } = {}) {
     const had = $("drawer").contains(document.activeElement);
     $("drawer").hidden = !open;
     ws.dataset.drawer = open ? "open" : "";
@@ -2911,8 +2957,8 @@ function mountLayout({ onCode, onDrawer }) {
     if (open) onDrawer();
     if (!open && (focus || had)) $("drawer-btn").focus();
   }
-  for (const b of switches) b.onclick = () => setView(b.dataset.view);
-  $("drawer-btn").onclick = () => setDrawer($("drawer").hidden);
+  for (const b of switches) b.onclick = () => setView(b.dataset.view!); // index.html: each has data-view
+  $("drawer-btn").onclick = () => setDrawer($("drawer").hidden as boolean); // never "until-found" here
   $("drawer-close").onclick = () => setDrawer(false, { focus: true });
   $("view-switch").hidden = false;
   $("drawer-btn").hidden = false;
@@ -2922,7 +2968,7 @@ function mountLayout({ onCode, onDrawer }) {
   return { setView, setDrawer };
 }
 
-async function openProject(id, gen) {
+async function openProject(id: string, gen: number) {
   if (await mustLogIn()) {
     if (gen === routeGen) toLanding(location.hash);
     return;
@@ -2943,14 +2989,15 @@ async function openProject(id, gen) {
   showOnly("workspace");
   $("project-title").hidden = false;
   $("deploy-btn").hidden = false;
-  $("deploy-btn").disabled = project.trusted === false; // locked from the start (gate() below takes over)
-  $("project-name").value = project.name;
+  $<HTMLButtonElement>("deploy-btn").disabled = project.trusted === false; // locked from the start (gate() below takes over)
+  $<HTMLInputElement>("project-name").value = project.name;
   document.title = `${project.name} · Cresslet Studio`;
   showDeployLink(project.deploy);
 
   $("project-name").onchange = async (e) => {
-    project.name = e.target.value.trim() || project.name;
-    e.target.value = project.name;
+    const name = e.target as HTMLInputElement; // #project-name
+    project.name = name.value.trim() || project.name;
+    name.value = project.name;
     document.title = `${project.name} · Cresslet Studio`;
     $("workspace-title").textContent = `${project.name}: AI builder, preview and code`;
     await projects.rename(project.id, project.name);
@@ -2970,7 +3017,7 @@ async function openProject(id, gen) {
     },
   };
   const termTheme = () => {
-    const v = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+    const v = (n: string) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
     return {
       ...ANSI[scheme.matches ? "dark" : "light"],
       background: v("--surface"), foreground: v("--text"), cursor: v("--accent-text"), cursorAccent: v("--surface"), selectionBackground: v("--accent-soft"),
@@ -3013,14 +3060,14 @@ async function openProject(id, gen) {
   const layout = mountLayout({ onCode: () => showCode(), onDrawer: openTerm });
 
   setStatus("Booting");
-  let c;
+  let c: Container;
   try {
     // Previews on their own origin: preview code can't read this page's storage (the API token).
     // Fail closed: never fall back to running previews on this origin.
     const { previewOrigin } = await meta;
     let po;
     try {
-      po = new URL(previewOrigin).origin;
+      po = new URL(String(previewOrigin)).origin; // (URL stringifies it too: a missing one throws)
     } catch {
       throw new Error("the server didn't say where previews run (GET /v1 → previewOrigin); refusing to run them on the studio's origin");
     }
@@ -3046,15 +3093,15 @@ async function openProject(id, gen) {
   } catch (e) {
     setStatus("Runtime failed", "error");
     $("preview-spinner").hidden = true;
-    $("preview-msg").textContent = `Could not start the runtime: ${e.message}`;
-    term.writeln(`\x1b[31m${e.stack ?? e.message}\x1b[0m`);
+    $("preview-msg").textContent = `Could not start the runtime: ${errorMessage(e)}`;
+    term.writeln(`\x1b[31m${(e as Error).stack ?? errorMessage(e)}\x1b[0m`);
     return;
   }
   const wd = c.workdir;
   await c.mount(toTree(project.files));
 
   // persistence: debounce export of source files into IndexedDB
-  let saveTimer;
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
   const save = () => {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(async () => {
@@ -3070,13 +3117,13 @@ async function openProject(id, gen) {
     auth: () => ({ token: auth.token }),
     project: () => project,
     onDeployed: async (r) => {
-      project.deploy = { name: r.app.name, deployKey: r.deployKey ?? project.deploy?.deployKey, url: r.app.url };
+      const deploy: LocalDeploy = project.deploy = { name: r.app.name, deployKey: r.deployKey ?? project.deploy?.deployKey, url: r.app.url };
       const saved = await projects.put(project).catch(() => false);
-      if (!saved && project.deploy.deployKey) {
+      if (!saved && deploy.deployKey) {
         // Site storage refused the key; it's not kept anywhere app code can read, so hand it over.
-        prompt("This browser blocked saving the app's deploy key. Copy it now (needed to redeploy without logging in):", project.deploy.deployKey);
+        prompt("This browser blocked saving the app's deploy key. Copy it now (needed to redeploy without logging in):", deploy.deployKey);
       }
-      showDeployLink(project.deploy);
+      showDeployLink(deploy);
     },
     // `cresslet deploy` in a command the AI builder started: the user says yes first.
     builderRunning: () => builder.running(),
@@ -3086,7 +3133,7 @@ async function openProject(id, gen) {
   // editor
   const lang = new Compartment();
   const theme = new Compartment();
-  let current = null;
+  let current: string | null = null; // the open file
   let suppress = false;
   const view = new EditorView({
     parent: $("editor"),
@@ -3107,7 +3154,7 @@ async function openProject(id, gen) {
     }),
   });
   showCode = () => view.requestMeasure();
-  const langFor = (p) =>
+  const langFor = (p: string) =>
     /\.(ts|tsx)$/.test(p) ? javascript({ typescript: true, jsx: p.endsWith("x") })
     : /\.(js|jsx|mjs)$/.test(p) ? javascript({ jsx: true })
     : p.endsWith(".html") ? html()
@@ -3115,7 +3162,7 @@ async function openProject(id, gen) {
     : p.endsWith(".json") ? json()
     : [];
 
-  async function openFile(path) {
+  async function openFile(path: string) {
     let text;
     try {
       text = await c.fs.readFile(`${wd}/${path}`, "utf8");
@@ -3148,9 +3195,9 @@ async function openProject(id, gen) {
     term.options.theme = termTheme();
   });
 
-  async function listFiles(dir = "", depth = 0, out = []) {
+  async function listFiles(dir = "", depth = 0, out: { path: string; name: string; depth: number; dir: boolean }[] = []) {
     const entries = await c.fs.readdir(`${wd}${dir ? "/" + dir : ""}`, { withFileTypes: true });
-    entries.sort((a, b) => (b.isDirectory() - a.isDirectory()) || a.name.localeCompare(b.name));
+    entries.sort((a, b) => (Number(b.isDirectory()) - Number(a.isDirectory())) || a.name.localeCompare(b.name));
     for (const e of entries) {
       const path = dir ? `${dir}/${e.name}` : e.name;
       if (ignored(path)) continue;
@@ -3165,17 +3212,17 @@ async function openProject(id, gen) {
   // Folders are labels, files are buttons named by their full path (the indent alone shows nesting).
   async function renderTree() {
     const items = await listFiles().catch(() => []);
-    const focused = document.activeElement?.closest?.("#tree") ? document.activeElement.dataset.path : null;
+    const focused = document.activeElement?.closest?.("#tree") ? (document.activeElement as HTMLElement).dataset.path : null;
     $("tree").replaceChildren(el("ul", {}, ...items.map((f) => {
       const item = f.dir
         ? el("span", { className: "dir" }, icon("folder"), el("span", { textContent: f.name }))
         : el("button", { type: "button", dataset: { path: f.path }, onclick: () => openFile(f.path) },
           icon("file"), el("span", { textContent: f.name }), f.depth ? srOnly(` in ${f.path.slice(0, -f.name.length - 1)}`) : null);
-      item.style.setProperty("--depth", f.depth);
+      item.style.setProperty("--depth", String(f.depth));
       if (!f.dir && f.path === current) item.setAttribute("aria-current", "true");
       return el("li", {}, item);
     })));
-    if (focused) $("tree").querySelector(`button[data-path="${CSS.escape(focused)}"]`)?.focus();
+    if (focused) $("tree").querySelector<HTMLElement>(`button[data-path="${CSS.escape(focused)}"]`)?.focus();
   }
 
   $("new-file").onclick = async () => {
@@ -3188,7 +3235,7 @@ async function openProject(id, gen) {
   };
 
   // keep tree in sync with terminal changes
-  let treeTimer;
+  let treeTimer: ReturnType<typeof setTimeout> | undefined;
   c.fs.watch(wd, { recursive: true }, (_e, filename) => {
     if (filename && ignored(filename.replace(`${wd}/`, ""))) return;
     clearTimeout(treeTimer);
@@ -3197,7 +3244,7 @@ async function openProject(id, gen) {
       save();
       // the open file removed (a command, the AI builder): openFile clears the editor
       const open = current;
-      if (open) c.fs.exists(`${wd}/${open}`).then((ok) => ok || openFile(open), () => {});
+      if (open) c.fs.exists(`${wd}/${open}`).then((ok): unknown => ok || openFile(open), () => {});
     }, 300);
   });
 
@@ -3205,12 +3252,12 @@ async function openProject(id, gen) {
   await openFile(["src/App.tsx", "src/main.ts", "src/routes/index.tsx"].find((f) => project.files[f] !== undefined) ?? "index.html");
 
   // preview
-  let previewBase = null;
+  let previewBase: string | null = null;
   const loadPreview = () => {
     if (!previewBase) return;
-    const path = $("preview-path").value.trim() || "/";
+    const path = $<HTMLInputElement>("preview-path").value.trim() || "/";
     const url = previewBase.replace(/\/$/, "") + (path.startsWith("/") ? path : "/" + path);
-    $("preview").src = url;
+    $<HTMLIFrameElement>("preview").src = url;
   };
   c.on("server-ready", (port, url) => {
     if (port !== 3000 && previewBase) return;
@@ -3256,9 +3303,9 @@ async function openProject(id, gen) {
     // A file the builder changed is the one in the editor: show the new contents.
     onChange: (path) => path === current && openFile(path),
   });
-  const gate = (on) => {
+  const gate = (on: boolean) => {
     locked = on;
-    $("deploy-btn").disabled = on;
+    $<HTMLButtonElement>("deploy-btn").disabled = on;
     $("deploy-btn").title = on ? "Run the project first" : "";
     builder.lock(on); // its commands would run the project's code too
   };
@@ -3283,10 +3330,10 @@ async function openProject(id, gen) {
 
   // deploy
   $("deploy-btn").onclick = async () => {
-    const btn = $("deploy-btn");
+    const btn = $<HTMLButtonElement>("deploy-btn");
     // A new app: the user keeps the generated address or picks their own first. (A cresslet.json that won't
     // parse skips this: the deploy below reports it.)
-    let cfg, newApp;
+    let cfg: CressletConfig | undefined, newApp: { app: string; create: boolean } | undefined;
     if (!project.deploy?.name) {
       cfg = await cresslet.config().catch(() => undefined);
       if (cfg && !cfg.name) {
@@ -3305,15 +3352,15 @@ async function openProject(id, gen) {
     try {
       // A shared app you only view: say so before building (the API would refuse the upload).
       const target = project.deploy?.name;
-      if (target && auth.token && !project.deploy.deployKey) {
-        const info = await api(`/v1/apps/${encodeURIComponent(target)}`).catch(() => null);
+      if (target && auth.token && !project.deploy!.deployKey) { // target: it has a deploy
+        const info = await api<API.AppDetail>(`/v1/apps/${encodeURIComponent(target)}`).catch(() => null);
         if (info?.app.access === "viewer") throw new Error(`you're a viewer of ${target}: only its owner and admins can deploy it`);
       }
       const r = await cresslet.deploy((line) => (log.textContent += line + "\n"), undefined, cfg, newApp);
       toast(el("span", {}, "Deployed: ", extLink(r.app.url, r.app.url)), 10000);
     } catch (e) {
-      log.textContent += `\nerror: ${e.message}\n`;
-      toast(`Deploy failed: ${e.message}`, 10000);
+      log.textContent += `\nerror: ${errorMessage(e)}\n`;
+      toast(`Deploy failed: ${errorMessage(e)}`, 10000);
     } finally {
       btn.disabled = false;
       $("deploy-btn-label").textContent = "Deploy";
@@ -3322,31 +3369,33 @@ async function openProject(id, gen) {
 }
 
 // ------------------------------------------------------------------ AI builder
-// The chat pane (studio/builder.js runs the conversation and the tools).
-const STEP_ICON = { run_command: "terminal", read_dev_log: "terminal" };
-const runningText = (name, input) => ({
-  list_files: "Listing files", read_file: `Reading ${input?.path ?? "a file"}`, write_file: `Writing ${input?.path ?? "a file"}`,
-  edit_file: `Editing ${input?.path ?? "a file"}`, delete_file: `Deleting ${input?.path ?? "a file"}`,
-  run_command: `Running ${input?.command ?? "a command"}`, read_dev_log: "Reading the dev server output",
-})[name] ?? name;
+// The chat pane (studio/builder.ts runs the conversation and the tools).
+const STEP_ICON: Record<string, string> = { run_command: "terminal", read_dev_log: "terminal" };
+/** A tool call's input as the model sent it (not validated yet). */
+type ToolInput = { path?: string; command?: string } | null | undefined;
+const runningText = (name: string, input: unknown) => ({
+  list_files: "Listing files", read_file: `Reading ${(input as ToolInput)?.path ?? "a file"}`, write_file: `Writing ${(input as ToolInput)?.path ?? "a file"}`,
+  edit_file: `Editing ${(input as ToolInput)?.path ?? "a file"}`, delete_file: `Deleting ${(input as ToolInput)?.path ?? "a file"}`,
+  run_command: `Running ${(input as ToolInput)?.command ?? "a command"}`, read_dev_log: "Reading the dev server output",
+} as Record<string, string>)[name] ?? name;
 
-function mountBuilder({ c, devLog, onChange }) {
-  const btn = $("builder-btn"), pane = $("builder"), log = $("builder-log"), input = $("builder-input");
-  const approvals = new Set(); // decline functions of the deploy approvals waiting for the user
+function mountBuilder({ c, devLog, onChange }: { c: Container; devLog: () => string; onChange: (path: string) => unknown }) {
+  const btn = $<HTMLButtonElement>("builder-btn"), pane = $("builder"), log = $("builder-log"), input = $<HTMLTextAreaElement>("builder-input");
+  const approvals = new Set<() => void>(); // decline functions of the deploy approvals waiting for the user
   const tools = createTools(c, { devLog, onChange, paused: () => approvals.size > 0 });
-  let agent = null, locked = false, busy = false;
+  let agent: ReturnType<typeof createAgent> | null = null, locked = false, busy = false;
   let approved = false, stopped = false; // this request: a deploy was approved; the user pressed Stop
-  let bubble = null, step = null; // the assistant text and the tool step being written
+  let bubble: HTMLElement | null = null, step: HTMLElement | null = null; // the assistant text and the tool step being written
   let replied = "", failed = ""; // this request's latest reply text (read out when it ends), and its error
   btn.hidden = false;
 
-  const announce = (text) => ($("builder-status").textContent = text);
-  const working = (text) => {
+  const announce = (text: string) => ($("builder-status").textContent = text);
+  const working = (text: string) => {
     $("builder-working").hidden = !text;
     if (text) $("builder-working-text").textContent = text;
   };
   const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 48;
-  function add(node) {
+  function add<N extends Node>(node: N) {
     const stick = nearBottom();
     log.append(node);
     if (stick) log.scrollTop = log.scrollHeight;
@@ -3369,7 +3418,7 @@ function mountBuilder({ c, devLog, onChange }) {
   const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
   async function refreshCredits() {
     if (source() !== "credits") return;
-    const r = await api("/v1/me/credits").catch(() => null);
+    const r = await api<API.MyCredits>("/v1/me/credits").catch(() => null);
     if (!r) return;
     if (!r.enabled) {
       creditsOn = false;
@@ -3391,7 +3440,7 @@ function mountBuilder({ c, devLog, onChange }) {
   // Where focus goes in the chat: the message field, or the heading while it's locked (a disabled field can't take it).
   const chatFocus = () => (locked ? $("builder-title") : input).focus();
   const setupFocus = () => ($("builder-credits-offer").hidden ? $("builder-key") : $("builder-login")).focus();
-  function setOpen(open, { focus = true, remember = true } = {}) {
+  function setOpen(open: boolean, { focus = true, remember = true } = {}) {
     pane.hidden = !open;
     btn.setAttribute("aria-expanded", String(open));
     $("workspace").dataset.builder = open ? "open" : "";
@@ -3402,14 +3451,14 @@ function mountBuilder({ c, devLog, onChange }) {
     else if (chat) chatFocus();
     else setupFocus();
   }
-  btn.onclick = () => setOpen(pane.hidden);
+  btn.onclick = () => setOpen(pane.hidden as boolean); // never "until-found" here
   $("builder-close").onclick = () => setOpen(false);
 
   function render() {
-    $("builder-send").disabled = busy || locked;
+    $<HTMLButtonElement>("builder-send").disabled = busy || locked;
     $("builder-stop").hidden = !busy;
-    $("builder-new").disabled = busy;
-    $("builder-forget").disabled = busy;
+    $<HTMLButtonElement>("builder-new").disabled = busy;
+    $<HTMLButtonElement>("builder-forget").disabled = busy;
     input.disabled = locked;
     $("builder-locked").hidden = !locked;
     input.setAttribute("aria-describedby", locked ? "builder-locked builder-hint" : "builder-hint");
@@ -3423,13 +3472,13 @@ function mountBuilder({ c, devLog, onChange }) {
   };
   $("builder-key-form").onsubmit = (e) => {
     e.preventDefault();
-    const v = $("builder-key").value.trim();
+    const v = $<HTMLInputElement>("builder-key").value.trim();
     if (!v) return;
     if (!apiKey.set(v)) {
       $("builder-key-error").textContent = "This browser blocked saving the key (site storage). Allow it and try again.";
       return;
     }
-    $("builder-key").value = "";
+    $<HTMLInputElement>("builder-key").value = "";
     $("builder-key-error").textContent = "";
     showView();
     chatFocus();
@@ -3462,7 +3511,7 @@ function mountBuilder({ c, devLog, onChange }) {
     input.focus(); // the Stop button hides
   };
 
-  function on(ev) {
+  function on(ev: AgentEvent) {
     switch (ev.type) {
       case "turn":
         bubble = null;
@@ -3513,7 +3562,8 @@ function mountBuilder({ c, devLog, onChange }) {
     if (!source()) return void showView();
     // Each request goes the way chosen when it's sent (the key can be forgotten or entered mid-chat).
     agent ??= createAgent({
-      client: () => (source() === "key" ? anthropicClient(apiKey.get()) : creditsClient(auth.token)),
+      // (each source has its secret: "key" a stored key, "credits" a session token)
+      client: () => (source() === "key" ? anthropicClient(apiKey.get()!) : creditsClient(auth.token!)),
       errorText: (e) => errorText(e, { credits: source() !== "key" }),
       tools,
       on,
@@ -3547,16 +3597,16 @@ function mountBuilder({ c, devLog, onChange }) {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
-      $("builder-form").requestSubmit();
+      $<HTMLFormElement>("builder-form").requestSubmit();
     }
   });
 
   /** Asks the user to approve a deploy the builder started. Resolves to true if approved; false if declined or stopped. */
-  function approve(text, signal) {
-    return new Promise((resolve) => {
+  function approve(text: string, signal?: AbortSignal) {
+    return new Promise<boolean>((resolve) => {
       if (signal?.aborted) return resolve(false);
       if (pane.hidden) setOpen(true, { focus: false });
-      const done = (ok) => {
+      const done = (ok: boolean) => {
         if (!approvals.delete(stop)) return; // already answered
         approved ||= ok;
         signal?.removeEventListener("abort", stop);
@@ -3588,7 +3638,7 @@ function mountBuilder({ c, devLog, onChange }) {
   return {
     approve,
     running: () => tools.running > 0,
-    lock(on) {
+    lock(on: boolean) {
       locked = on;
       render();
     },
@@ -3599,23 +3649,23 @@ const deploySlug = slugField($("deploy-name"), "app");
 /** Asks for a new app's address (a generated one to start with). Resolves to the name, or null if cancelled. */
 let appNameAsks = 0;
 function pickAppName() {
-  const dlg = $("deploy-dialog");
+  const dlg = $<HTMLDialogElement>("deploy-dialog");
   const ask = ++appNameAsks;
-  return new Promise((resolve) => {
-    let picked = null;
-    $("deploy-confirm").disabled = false; // a cancelled ask may have left it disabled mid-check
+  return new Promise<string | null>((resolve) => {
+    let picked: string | null = null;
+    $<HTMLButtonElement>("deploy-confirm").disabled = false; // a cancelled ask may have left it disabled mid-check
     $("deploy-form").onsubmit = async (e) => {
       e.preventDefault();
-      $("deploy-confirm").disabled = true;
+      $<HTMLButtonElement>("deploy-confirm").disabled = true;
       const name = await deploySlug.value().catch(() => null);
       if (ask !== appNameAsks || !dlg.open) return; // cancelled while checking (or asked again since)
-      $("deploy-confirm").disabled = false;
+      $<HTMLButtonElement>("deploy-confirm").disabled = false;
       if (!name) return $("deploy-name").focus();
       picked = name;
       dlg.close();
       resolve(name); // now, not on "close" (dispatched later): the deploy starts while focus is back on Deploy
     };
-    $("deploy-cancel").onclick = () => dlg.close();
+    $<HTMLButtonElement>("deploy-cancel").onclick = () => dlg.close();
     const onClose = () => {
       if (dlg.open) return; // an earlier close's event (it's dispatched later), delivered after this one opened
       dlg.removeEventListener("close", onClose);
@@ -3623,12 +3673,12 @@ function pickAppName() {
     };
     dlg.addEventListener("close", onClose);
     dlg.showModal();
-    deploySlug.suggest().then(() => dlg.open && $("deploy-name").select());
+    deploySlug.suggest().then(() => dlg.open && $<HTMLInputElement>("deploy-name").select());
   });
 }
 
-function showDeployLink(deploy) {
-  const a = $("deploy-link");
+function showDeployLink(deploy: LocalDeploy | null) {
+  const a = $<HTMLAnchorElement>("deploy-link");
   a.hidden = !deploy?.url;
   if (deploy?.url) {
     a.href = deploy.url;
@@ -3637,24 +3687,24 @@ function showDeployLink(deploy) {
 }
 
 // Tabs (ARIA tabs pattern): one tab stop, arrows/Home/End move between tabs and select them.
-const tabs = [...document.querySelectorAll(".tab")];
-function selectTab(name, focus = false) {
+const tabs = [...document.querySelectorAll<HTMLElement>(".tab")];
+function selectTab(name: string, focus = false) {
   for (const t of tabs) {
     const on = t.dataset.tab === name;
     t.setAttribute("aria-selected", String(on));
     t.tabIndex = on ? 0 : -1;
     if (on && focus) t.focus();
   }
-  for (const p of document.querySelectorAll("[data-panel]")) p.hidden = p.dataset.panel !== name;
+  for (const p of document.querySelectorAll<HTMLElement>("[data-panel]")) p.hidden = p.dataset.panel !== name;
 }
 for (const t of tabs) {
-  t.addEventListener("click", () => selectTab(t.dataset.tab));
+  t.addEventListener("click", () => selectTab(t.dataset.tab!)); // index.html: every .tab has data-tab
   t.addEventListener("keydown", (e) => {
     const i = tabs.indexOf(t);
-    const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    const j = ({ ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 } as Record<string, number>)[e.key];
     if (j === undefined) return;
     e.preventDefault();
-    selectTab(tabs[(j + tabs.length) % tabs.length].dataset.tab, true);
+    selectTab(tabs[(j + tabs.length) % tabs.length]!.dataset.tab!, true);
   });
 }
 
@@ -3663,8 +3713,8 @@ let routeGen = 0;
 function route() {
   const gen = ++routeGen;
   // A link inside the new-artifact dialog or a row's menu (Settings, Share) leaves the page: they don't come along.
-  if ($("page-dialog").open) $("page-dialog").close();
-  for (const m of document.querySelectorAll(".menu:popover-open")) m.hidePopover();
+  if ($<HTMLDialogElement>("page-dialog").open) $<HTMLDialogElement>("page-dialog").close();
+  for (const m of document.querySelectorAll<HTMLElement>(".menu:popover-open")) m.hidePopover();
   appDash.stop?.(); // a Logs tab's stream
   appDash.stop = null;
   const m = location.hash.match(/^#\/p\/([\w-]+)/);
@@ -3696,7 +3746,7 @@ addEventListener("hashchange", () => {
 });
 renderAccount();
 // Role can change server-side: refresh it (shows the Admin link to site admins).
-if (auth.token) api("/v1/me").then(setAccount, () => {});
+if (auth.token) api<{ account: API.Account }>("/v1/me").then(setAccount, () => {});
 // Leaving or switching a project reloads the page (one runtime per page): the next view still gets focus.
 function reloadForRoute() {
   try {

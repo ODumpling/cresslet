@@ -1,0 +1,12 @@
+{
+  // start-service.ts: a `node` process in cresslet-container (start-build.ts bundles it with esbuild, as CJS), so
+  // Node's types; the TanStack packages it imports come from the project's node_modules (types/tanstack.d.ts).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2024"],
+    "types": ["node"],
+    "typeRoots": ["../node_modules/@types"]
+  },
+  "include": ["start-service.ts", "types/tanstack.d.ts"],
+  "exclude": []
+}

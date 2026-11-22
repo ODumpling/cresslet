@@ -1,0 +1,305 @@
+// The control-plane API's JSON (docs/api.md), as the studio reads it: the fields it uses. Types only: nothing
+// imports this file at runtime. Timestamps are ISO strings unless noted.
+
+export type Access = "owner" | "admin" | "viewer";
+export type OrgRole = "admin" | "member";
+export type Visibility = "private" | "link" | "public";
+
+/** GET /v1 (the studio falls back to `{}` if it fails: everything may be missing). */
+export interface Meta {
+  appUrlTemplate?: string;
+  previewOrigin?: string;
+  customDomains?: boolean;
+  anonDeploys?: boolean;
+  auth?: { github?: boolean };
+  ai?: { credits?: boolean };
+  limits?: { anonTtlMs?: number };
+}
+
+export interface Account {
+  id: string;
+  email: string;
+  github: string | null;
+  role: "SiteAdmin" | null;
+}
+/** Someone named by email and GitHub login (owners, inviters). */
+export interface Owner {
+  email: string;
+  github: string | null;
+}
+export interface Person extends Owner {
+  id: string;
+}
+
+export interface Token {
+  id: string;
+  name: string;
+  role: string;
+  /** The apps it's limited to; null: every app. */
+  apps: string[] | null;
+  createdAt: string | null;
+  lastUsedAt: string | null;
+  current?: boolean;
+}
+
+export interface LedgerEntry {
+  kind: "usage" | "grant";
+  at: string;
+  credits: number;
+  model?: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estimated?: boolean;
+  usd?: number | null;
+  free?: number;
+  by?: string | null;
+  note?: string | null;
+  /** Admin listings across accounts. */
+  account: { id: string; email: string };
+}
+
+/** GET /v1/me/credits */
+export interface MyCredits {
+  enabled: boolean;
+  available: number;
+  balance: number;
+  monthly: { allowance: number; remaining: number; resetsAt: string };
+  history: LedgerEntry[];
+}
+
+export interface OrgRef {
+  name: string;
+  title: string | null;
+}
+
+/** GET /v1/apps */
+export interface AppSummary {
+  id: string;
+  name: string;
+  url: string;
+  access: Access;
+  org?: OrgRef | null;
+  updatedAt: string;
+}
+
+export interface Usage {
+  total: number;
+  deploys: number;
+  database: number;
+  files: number;
+}
+
+export interface DeployInfo {
+  id: string;
+  current?: boolean;
+  createdAt: string;
+  bytes: number;
+  files: number;
+  source: string;
+}
+
+/** GET /v1/apps/:name */
+export interface AppDetail {
+  app: AppSummary & {
+    config?: { server?: boolean; crons?: unknown[] } | null;
+    claimed: boolean;
+    expiresAt: string | null;
+    currentDeployId: string | null;
+    egress: string[] | null;
+    createdAt: string;
+  };
+  runtime: { running: boolean; pid?: number };
+  deploys: DeployInfo[];
+  secrets: string[];
+}
+
+export interface Domain {
+  domain: string;
+  verified: boolean;
+}
+
+/** GET /v1/apps/:name/metrics */
+export interface Metrics {
+  database: { tables: { name: string; rows: number }[]; error?: string };
+  totals: { requests: number; errors: number; clientErrors: number; avgMs: number | null; maxMs: number | null };
+  usage: Usage;
+  since: string;
+  series: { t: string; requests: number; errors: number }[];
+  bucketMs: number;
+  domains: Domain[];
+}
+
+/** GET /v1/apps/:name/db */
+export interface DbTables {
+  tables: Record<string, { count: number; schema?: string }>;
+  truncated?: boolean;
+}
+/** POST /v1/apps/:name/db/query (values as JSON; blobs `{ $bytes: base64 }`) */
+export interface DbRows {
+  rows: Record<string, unknown>[];
+  truncated?: boolean;
+}
+
+/** A log line (GET /v1/apps/:name/logs, JSON lines); `t`: epoch ms. */
+export interface LogLine {
+  t: number;
+  kind: string;
+  msg: string;
+}
+
+export type SiteStatus = "running" | "idle" | "empty" | "deleted";
+/** GET /v1/admin/sites (and one site's `site`) */
+export interface Site {
+  id: string;
+  name: string;
+  url: string;
+  status: SiteStatus;
+  owner: Owner | null;
+  domains: string[];
+  usage: Usage;
+  server?: boolean;
+  crons?: number;
+  currentDeploy?: DeployInfo | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string | null;
+  purgeAt?: string | null;
+  expiresAt?: string | null;
+}
+export interface AdminSites {
+  totals: { sites: number; live: number; anonymous: number; deleted: number; running: number; usage: Usage };
+  sites: Site[];
+  retentionDays: number;
+}
+/** GET /v1/admin/sites/:name; `database` null unless you own the site or are one of its admins. */
+export interface AdminSite {
+  site: Site;
+  runtime: { running: boolean; pid?: number };
+  deploys: DeployInfo[];
+  database: { error?: string; tables: { rows: number }[] } | null;
+  domains: Domain[];
+  secrets: number;
+}
+
+export type AccountStatus = "active" | "invited" | "disabled";
+/** GET /v1/admin/accounts */
+export interface AdminAccounts {
+  totals: { accounts: number; siteAdmins: number; active: number; invited: number; disabled: number };
+  accounts: {
+    id: string;
+    email: string;
+    github: string | null;
+    status: AccountStatus;
+    siteAdmin: boolean;
+    siteAdminFromConfig?: boolean;
+    orgs: { name: string; role: OrgRole }[];
+    apps: number;
+    lastActiveAt: string | null;
+    invitedBy?: Owner | null;
+  }[];
+  openSignup: boolean;
+}
+
+/** GET /v1/admin/orgs */
+export interface AdminOrg extends OrgRef {
+  members: number;
+  apps: number;
+  createdAt: string;
+}
+/** GET /v1/orgs */
+export interface MyOrg extends OrgRef {
+  role: OrgRole;
+}
+/** GET /v1/orgs/:name; `role` null: you manage it as a site admin. */
+export interface OrgDetail {
+  org: OrgRef;
+  role: OrgRole | null;
+  canManage: boolean;
+  members: (Person & { role: OrgRole; disabled?: boolean; createdAt: string })[];
+  apps: { name: string; kind: "app" | "page"; url: string; updatedAt: string }[];
+}
+
+export interface CreditAccount {
+  id: string;
+  email: string;
+  github: string | null;
+  siteAdmin?: boolean;
+  available: number;
+  balance: number;
+  monthlyUsed: number;
+  used: number;
+  requests: number;
+  lastUsedAt: string | null;
+}
+/** GET /v1/admin/credits */
+export interface AdminCredits {
+  enabled: boolean;
+  totals: {
+    used: number; usd: number; requests: number; free: number; granted: number; grants: number; balance: number;
+    overdrawn: number; active: number; accounts: number;
+  };
+  resetsAt: string;
+  monthlyCredits: number;
+  accounts: CreditAccount[];
+  days: { date: string; credits: number; requests: number }[];
+  models: { model: string; requests: number; inputTokens: number; outputTokens: number; usd: number; credits: number }[];
+  recent: LedgerEntry[];
+}
+/** GET /v1/admin/credits/accounts/:id */
+export interface AdminCreditsAccount {
+  enabled: boolean;
+  account: CreditAccount;
+  resetsAt: string;
+  monthlyCredits: number;
+  history: LedgerEntry[];
+}
+
+/** A file in a template or an app's uploaded source. */
+export interface SourceFile {
+  path: string;
+  data: string;
+  encoding?: "base64";
+}
+export interface Template {
+  name: string;
+  description?: string;
+  /** false: CLI only (its framework's build doesn't run in the browser runtime). */
+  studio?: boolean;
+}
+
+export interface Page {
+  id: string;
+  name: string;
+  title: string | null;
+  url: string;
+  visibility: Visibility;
+  retentionDays: number | null;
+  expiresAt: string | null;
+  access?: Access;
+}
+export interface PageDefaults {
+  visibility: Visibility;
+  retentionDays: number | null;
+}
+/** GET /v1/me/settings */
+export interface Settings {
+  pages: PageDefaults;
+  defaults: { pages: PageDefaults };
+}
+
+/** GET /v1/me/invites */
+export interface MyInvite {
+  id: string;
+  app: string;
+  role: Access;
+  invitedBy?: Owner | null;
+}
+/** GET /v1/apps/:name/collaborators (in an organization: `org`, and `owner` is who last held it) */
+export interface Collaborators {
+  org?: OrgRef | null;
+  owner: Person;
+  collaborators: (Person & { role: Access; createdAt: string })[];
+  invites: { id: string; email: string; role: Access; createdAt: string }[];
+}

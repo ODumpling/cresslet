@@ -107,8 +107,8 @@ top level throws a `CressletError` that says so.
 ### SDK runtime contract
 
 Each runtime publishes the env on `globalThis[Symbol.for("cresslet.runtime")]` as
-`{ contract, runtime, paramStyle, env }` (`env` null while the app's module evaluates): `runtime/cresslet-runtime.js` in
-the sandbox, `cresslet dev`, `studio/server-worker.js`. The SDK is bundled into the app while the platform is updated
+`{ contract, runtime, paramStyle, env }` (`env` null while the app's module evaluates): `runtime/cresslet-runtime.ts` in
+the sandbox, `cresslet dev`, `studio/server-worker.ts`. The SDK is bundled into the app while the platform is updated
 on its own, so `contract` is versioned: it grows by one with each addition the SDK relies on, and nothing a contract had
 is removed. The SDK knows which contract each feature needs and throws a `CressletError` naming what to update when a
 runtime is older (or publishes nothing: a platform, studio or `cresslet dev` from before the SDK). `paramStyle` (`?`

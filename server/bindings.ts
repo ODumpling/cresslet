@@ -1,6 +1,6 @@
 // Host side of the app `env` bindings (db, files). Runs in the control plane, one worker thread per
 // app (serveBindings, server/bindings-thread.ts) so app SQL never blocks the main thread; each sandbox
-// reaches its own instance over a per-app unix socket (see runtime/worker.js for the client side).
+// reaches its own instance over a per-app unix socket (see runtime/worker.ts for the client side).
 // Same shape is implemented by cresslet-cli (local dev) and the studio (in-browser preview).
 // Keep in sync with docs/app-format.md.
 import { constants, DatabaseSync, type SQLInputValue } from "node:sqlite";
@@ -117,7 +117,7 @@ export function createDb(path: string, maxBytes?: number) {
      * The statements in one transaction (a savepoint, so it also nests in one the app opened with exec), all run
      * before anything else on this thread: atomic, and no other request's statement in between. Each result: rows
      * (statements that return any), changes, lastInsertRowid. Same in cresslet-cli lib/bindings.js and
-     * studio/server-worker.js.
+     * studio/server-worker.ts.
      */
     batch(statements: { sql: string; params?: SQLInputValue[] }[]) {
       const total = db.prepare("SELECT total_changes() n");
@@ -220,7 +220,7 @@ export function createFiles(dir: string) {
   };
 }
 
-// SQL values cross the binding as JSON; bigints and blobs are tagged (mirrors runtime/worker.js).
+// SQL values cross the binding as JSON; bigints and blobs are tagged (mirrors runtime/worker.ts).
 const reviver = (_k: string, v: unknown) => {
   if (v && typeof v === "object") {
     const o = v as { $bytes?: unknown; $bigint?: unknown };

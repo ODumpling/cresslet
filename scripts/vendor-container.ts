@@ -1,7 +1,7 @@
 // Copies cresslet-container's dist/ into studio/vendor/cresslet-container.
 // Source: $CRESSLET_CONTAINER_DIR, ../cresslet-container, or a shallow clone of GitHub main (or $CRESSLET_CONTAINER_REF).
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,4 +18,6 @@ if (!existsSync(join(src, "dist"))) {
 }
 rmSync(dest, { recursive: true, force: true });
 cpSync(join(src, "dist"), dest, { recursive: true });
+// The studio imports the bundle by its file name (cresslet-container.js): its types, next to it (studio/tsconfig.json).
+writeFileSync(join(dest, "cresslet-container.d.ts"), '// Written by scripts/vendor-container.ts: the types of the bundle beside it (studio/tsconfig.json).\nexport * from "./index";\n');
 console.log(`vendored ${join(src, "dist")} → ${dest}`);

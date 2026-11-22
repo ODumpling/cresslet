@@ -1,11 +1,15 @@
 // Registers the `cresslet` command inside cresslet-container so `cresslet dev|build|deploy`
 // behave like the real CLI, entirely in the browser.
 import { createStartBuilder, isStartApp } from "./start-build.js";
+import type { CommandContext, Container, FileSystemTree, ProjectWorker } from "./vendor/cresslet-container/cresslet-container.js";
+import type { Plugin } from "./vendor/cresslet-container/types/vendor/esbuild-wasm.js";
+import type { FileItem, FileOp, FileResult, FromWorker, HeaderList, ResponseMessage, ToWorker } from "./server-worker-protocol.ts";
+import type { Project } from "./store.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-export function matchRoute(pattern, p) {
+export function matchRoute(pattern: string, p: string) {
   if (pattern === "*" || pattern === "/*") return true;
   if (pattern.endsWith("/*")) {
     const base = pattern.slice(0, -2);
@@ -15,7 +19,7 @@ export function matchRoute(pattern, p) {
 }
 
 /** Same as server/host.ts serverRoute: a `routes` match and no `!pattern` exclusion. */
-export function serverRoute(routes, p) {
+export function serverRoute(routes: string[] | null | undefined, p: string) {
   let hit = false;
   for (const r of routes ?? ["/api/*"]) {
     if (r.startsWith("!")) {
@@ -25,11 +29,11 @@ export function serverRoute(routes, p) {
   return hit;
 }
 
-export function parseDotenv(text) {
-  const out = {};
+export function parseDotenv(text: string) {
+  const out: Record<string, string> = {};
   for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (m) out[m[1]] = /^(['"]).*\1$/.test(m[2]) ? m[2].slice(1, -1) : m[2];
+    if (m) out[m[1]!] = /^(['"]).*\1$/.test(m[2]!) ? m[2]!.slice(1, -1) : m[2]!; // both groups always match
   }
   return out;
 }
@@ -45,15 +49,15 @@ const DOTENV = /(?:^|\/)\.env[^/]*$/i;
  * VITE_*) are kept verbatim, comments are dropped, and the first line not understood ends the file.
  */
 const SAFE_ENTRY = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][\w.-]*)[ \t]*=[ \t]*(?:[^\s"'\x60\\#][^"'\x60\\\r\n#]*|"[^"\\\r\n]*"|'[^'\\\r\n]*')[ \t]*(?:#[^"'\x60\\\r\n]*)?$/;
-export function publicDotenv(text) {
-  const out = [];
+export function publicDotenv(text: string) {
+  const out: string[] = [];
   for (const l of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
     if (/[\r\u2028\u2029]/.test(l)) break; // a line break to some parsers, not to others
     if (/^[ \t]*$/.test(l)) out.push(l);
     else if (!/^[ \t]*#/.test(l)) {
       const m = SAFE_ENTRY.exec(l);
       if (!m) break; // anything else may open a value that runs on: drop it and the rest
-      if (/^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[1])) out.push(l);
+      if (/^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[1]!)) out.push(l); // the name group always matches
     }
   }
   return out.join("\n");
@@ -64,8 +68,8 @@ export function publicDotenv(text) {
  * as a virtual module, not the project's node_modules/cresslet (the CLI package: esbuild & co., maybe not installed
  * yet, maybe another version than this studio's preview and platform).
  */
-let sdkSource;
-const sdkPlugin = {
+let sdkSource: Promise<string> | undefined;
+const sdkPlugin: Plugin = {
   name: "cresslet-sdk",
   setup(b) {
     b.onResolve({ filter: /^cresslet$/ }, () => ({ path: "cresslet", namespace: "cresslet-sdk" }));
@@ -84,33 +88,61 @@ const sdkPlugin = {
   },
 };
 
-const CONTENT_TYPES = {
+const CONTENT_TYPES: Record<string, string> = {
   html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8",
   css: "text/css; charset=utf-8", json: "application/json", map: "application/json", txt: "text/plain; charset=utf-8",
   svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
   avif: "image/avif", ico: "image/x-icon", woff: "font/woff", woff2: "font/woff2", wasm: "application/wasm",
 };
 
-function toBase64(bytes) {
-  if (bytes.toBase64) return bytes.toBase64();
+function toBase64(bytes: Uint8Array & { toBase64?: () => string }) {
+  if (bytes.toBase64) return bytes.toBase64(); // newer browsers
   let s = "";
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(s);
 }
 
-/**
- * @param {import("./vendor/cresslet-container/index").Container} c
- * @param {{ auth: () => { token?: string|null }, project: () => any, onDeployed?: (r: any) => void,
- *   builderRunning?: () => boolean, approveDeploy?: (target: string|null, signal: AbortSignal) => Promise<boolean> }} opts
- *   approveDeploy: asked before `cresslet deploy` runs while the AI builder runs a command (builderRunning), or in a
- *   process it started (CRESSLET_AI_BUILDER set); without it, such deploys are refused. target: the app it deploys
- *   to, null for a new one.
- */
-export function createCresslet(c, opts) {
-  const wd = c.workdir;
-  const p = (rel) => `${wd}/${rel}`;
+/** cresslet.json, as read here (JSON: any of it may be missing). */
+export interface CressletConfig {
+  name?: string;
+  routes?: string[];
+  crons?: unknown;
+}
 
-  async function readText(rel) {
+/** POST /v1/deploys's answer (docs/api.md), the parts read here. */
+export interface DeployResult {
+  app: { name: string; url: string; claimed?: boolean; expiresAt?: string | number };
+  deploy?: { warning?: string };
+  deployKey?: string;
+}
+
+/** Where a deploy goes. `create`: a new app only. */
+export interface Target {
+  app: string | undefined;
+  deployKey?: string;
+  create?: boolean;
+}
+
+export interface CressletOptions {
+  auth: () => { token?: string | null };
+  project: () => Pick<Project, "deploy"> | null | undefined;
+  onDeployed?: (r: DeployResult) => void;
+  builderRunning?: () => boolean;
+  /**
+   * Asked before `cresslet deploy` runs while the AI builder runs a command (builderRunning), or in a process it
+   * started (CRESSLET_AI_BUILDER set); without it, such deploys are refused. target: the app it deploys to, null for a
+   * new one.
+   */
+  approveDeploy?: (target: string | null, signal: AbortSignal) => Promise<boolean>;
+}
+
+type Log = (line: string) => void;
+
+export function createCresslet(c: Container, opts: CressletOptions) {
+  const wd = c.workdir;
+  const p = (rel: string) => `${wd}/${rel}`;
+
+  async function readText(rel: string) {
     try {
       return await c.fs.readFile(p(rel), "utf8");
     } catch {
@@ -118,16 +150,16 @@ export function createCresslet(c, opts) {
     }
   }
 
-  async function config() {
+  async function config(): Promise<CressletConfig> {
     const raw = await readText("cresslet.json");
     try {
       return raw ? JSON.parse(raw) : {};
     } catch (e) {
-      throw new Error(`invalid cresslet.json: ${e.message}`);
+      throw new Error(`invalid cresslet.json: ${(e as Error).message}`); // JSON.parse throws SyntaxErrors
     }
   }
 
-  /** A TanStack Start app (start-build.js): its own client and server build. */
+  /** A TanStack Start app (start-build.ts): its own client and server build. */
   async function startApp() {
     try {
       return isStartApp(JSON.parse((await readText("package.json")) ?? "{}"));
@@ -159,18 +191,18 @@ export function createCresslet(c, opts) {
       write: false,
       plugins: [sdkPlugin],
     });
-    const out = r.outputFiles.find((f) => f.path.endsWith(".js")) ?? r.outputFiles[0];
+    const out = r.outputFiles.find((f) => f.path.endsWith(".js")) ?? r.outputFiles[0]!; // write: false, one entry
     return out.text ?? dec.decode(out.contents);
   }
 
   /** → { files: absolute paths, outDir: where the static files are (relative), server: code|null } */
-  async function build(log = () => {}) {
+  async function build(log: Log = () => {}): Promise<{ files: string[]; outDir: string; server: string | null | undefined }> {
     const t = performance.now();
     if (await startApp()) {
       const builder = createStartBuilder(c, { sdkPlugin });
       try {
         const r = await builder.build();
-        await c.fs.writeFile(p(".cresslet/build/server.js"), r.server);
+        await c.fs.writeFile(p(".cresslet/build/server.js"), r.server!); // a Start server bundle is always written
         log(`built ${r.files.length} files + server (TanStack Start) in ${Math.round(performance.now() - t)}ms`);
         return { files: r.files, outDir: r.outDir, server: r.server };
       } finally {
@@ -185,18 +217,18 @@ export function createCresslet(c, opts) {
   }
 
   /** Where a deploy goes: the project's app (and its deploy key), else cresslet.json's name, else a new app. */
-  const targetOf = (cfg) => {
+  const targetOf = (cfg: CressletConfig): Target => {
     const d = opts.project()?.deploy;
     return { app: d?.name ?? (cfg.name || undefined), deployKey: d?.deployKey };
   };
 
   /** `cfg`, `target`: read before an approval, so the app it named is the one deployed to. */
-  async function deploy(log = () => {}, signal = undefined, cfg = undefined, target = undefined) {
+  async function deploy(log: Log = () => {}, signal: AbortSignal | undefined = undefined, cfg: CressletConfig | undefined = undefined, target: Target | undefined = undefined): Promise<DeployResult> {
     cfg ??= await config();
     target ??= targetOf(cfg);
     const { files: built, outDir, server } = await build(log);
     signal?.throwIfAborted();
-    const files = [];
+    const files: { path: string; data: string; encoding?: "base64" }[] = [];
     const out = p(`${outDir}/`);
     for (const f of built) {
       const abs = f.startsWith("/") ? f : out + f;
@@ -204,20 +236,20 @@ export function createCresslet(c, opts) {
       const bytes = await c.fs.readFile(abs);
       files.push({ path: rel, data: toBase64(typeof bytes === "string" ? enc.encode(bytes) : bytes), encoding: "base64" });
     }
-    const headers = { "content-type": "application/json" };
+    const headers: Record<string, string> = { "content-type": "application/json" };
     const token = opts.auth().token;
     if (token) headers.authorization = `Bearer ${token}`;
     if (target.deployKey) headers["x-cresslet-deploy-key"] = target.deployKey;
     // Project source too, so the CLI (`cresslet pull`) or another browser can open it. Never local secrets.
-    const sources = [];
-    const walk = (tree, prefix) => {
+    const sources: typeof files = [];
+    const walk = (tree: FileSystemTree, prefix: string) => {
       for (const [name, node] of Object.entries(tree)) {
         // Same path form as the server's check (it normalizes "\\" to "/").
         const rel = (prefix ? `${prefix}/${name}` : name).replace(/\\/g, "/");
-        if (node.directory) walk(node.directory, rel);
+        if ("directory" in node && node.directory) walk(node.directory, rel);
         // Regular files only (symlinks have no contents); same secret rules as the server, applied here
         // so local secrets never leave the browser.
-        else if (node.file && "contents" in node.file && !NOT_SOURCE.test(rel)) {
+        else if ("file" in node && node.file && "contents" in node.file && !NOT_SOURCE.test(rel)) {
           let v = node.file.contents;
           if (DOTENV.test(rel)) v = publicDotenv(typeof v === "string" ? v : dec.decode(v));
           sources.push(typeof v === "string" ? { path: rel, data: v } : { path: rel, data: toBase64(v), encoding: "base64" });
@@ -236,7 +268,7 @@ export function createCresslet(c, opts) {
       sources,
     };
     let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload), signal });
-    let body = await res.json();
+    let body: DeployResult & { error?: string; message?: string } = await res.json();
     if (res.status === 413 && body?.error === "body_too_large" && sources.length) {
       log("warning: project source omitted (request exceeded server upload limit)");
       res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }), signal });
@@ -249,21 +281,21 @@ export function createCresslet(c, opts) {
     if (!cfg.name && now && !now.name) await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...now, name: body.app.name }, null, 2) + "\n");
     log(`deployed ${body.app.name} → ${body.app.url}`);
     if (body.deploy?.warning) log(`warning: ${body.deploy.warning}`);
-    if (!body.app.claimed) log(`unclaimed: expires ${new Date(body.app.expiresAt).toLocaleString()}. Log in to keep it.`);
+    if (!body.app.claimed) log(`unclaimed: expires ${new Date(body.app.expiresAt!).toLocaleString()}. Log in to keep it.`); // unclaimed apps expire
     opts.onDeployed?.(body);
     return body;
   }
 
   // ---- dev: container dev server for the client, a project Worker (on the preview origin) for the server handler.
-  // TanStack Start apps: their production build (start-build.js), rebuilt on save (the preview then reloads itself).
-  async function dev(ctx, port) {
-    const out = (s) => ctx.stdout.write(s.replace(/\n/g, "\r\n") + "\r\n");
+  // TanStack Start apps: their production build (start-build.ts), rebuilt on save (the preview then reloads itself).
+  async function dev(ctx: CommandContext, port: number) {
+    const out = (s: string) => ctx.stdout.write(s.replace(/\n/g, "\r\n") + "\r\n");
     const cfg = await config();
     const routes = cfg.routes ?? ["/api/*"];
     const start = await startApp();
     const builder = start ? createStartBuilder(c, { sdkPlugin }) : null;
-    let building = Promise.resolve(); // one Start build at a time (each rewrites dist/)
-    const serverCode = start
+    let building: Promise<unknown> = Promise.resolve(); // one Start build at a time (each rewrites dist/)
+    const serverCode = builder
       ? () => {
         const t = performance.now();
         // the serving worker's pages load its build's bundles: they stay until another worker serves
@@ -272,30 +304,32 @@ export function createCresslet(c, opts) {
         return run.then((r) => (out(`\x1b[2mbuilt in ${Math.round(performance.now() - t)}ms\x1b[0m`), (lastBundles = r.bundles), r.server));
       }
       : bundleServer;
-    let activeBundles = new Set(); // Start: the bundles of the build the serving worker runs
-    let lastBundles = new Set();
+    let activeBundles = new Set<string>(); // Start: the bundles of the build the serving worker runs
+    let lastBundles = new Set<string>();
     const hasServer = start ? async () => true : serverEntry;
     // Start apps have no HMR: their pages reload when a rebuild is ready (keeping the page they're on)
     const reloadChannel = `cresslet:${c.instanceId}:${port}`;
     const reloads = start ? c.previewChannel(reloadChannel) : null;
     const RELOAD_SCRIPT = `<script>new BroadcastChannel(${JSON.stringify(reloadChannel)}).onmessage = (e) => e.data?.type === "cresslet-start-reload" && location.reload();</script>`;
-    const withReload = (html) => (html.includes("</head>") ? html.replace("</head>", `${RELOAD_SCRIPT}</head>`) : html + RELOAD_SCRIPT);
+    const withReload = (html: string) => (html.includes("</head>") ? html.replace("</head>", `${RELOAD_SCRIPT}</head>`) : html + RELOAD_SCRIPT);
     const dbPath = p(".cresslet/dev/db.sqlite");
     const filesDir = p(".cresslet/dev/files");
-    let worker = null;
-    const initializing = new Set(); // workers not ready yet (stopped with dev too)
+    let worker: ProjectWorker | null = null;
+    const initializing = new Set<ProjectWorker>(); // workers not ready yet (stopped with dev too)
     // (stopped while it started: the signal may have fired already)
-    const aborted = new Promise((resolve) => (ctx.signal.aborted ? resolve() : ctx.signal.addEventListener("abort", resolve, { once: true })));
-    let workerError = null;
+    const aborted = new Promise<Event | void>((resolve) => (ctx.signal.aborted ? resolve() : ctx.signal.addEventListener("abort", resolve, { once: true })));
+    let workerError: string | null = null;
     let reqId = 0;
     let starts = 0; // startWorker calls
     let readySeq = 0; // the start whose worker serves now
     let stopped = false; // `cresslet dev` ended
-    const waiting = new Map(); // request id → { w, done }
+    /** A worker's response, or the 503 `retire` makes; `body` may be swapped for one made here. */
+    type Res = Omit<ResponseMessage, "type" | "id" | "body"> & { body: ArrayBuffer | Uint8Array<ArrayBuffer> | null };
+    const waiting = new Map<number, { w: ProjectWorker; done: (m: Res) => void }>(); // request id → { w, done }
 
-    async function fileOp(m) {
+    async function fileOp(m: FileOp & { key?: unknown }): Promise<FileResult> {
       const indexPath = `${filesDir}/index.json`;
-      const index = JSON.parse((await readText(".cresslet/dev/files/index.json")) ?? "{}");
+      const index: Record<string, Omit<FileItem, "key">> = JSON.parse((await readText(".cresslet/dev/files/index.json")) ?? "{}");
       const key = String(m.key ?? "").replace(/^\/+/, "");
       if (m.op !== "list" && (!key || key.split("/").includes(".."))) throw new Error(`invalid file key: ${m.key}`);
       if (m.op === "put") {
@@ -306,7 +340,8 @@ export function createCresslet(c, opts) {
       }
       if (m.op === "get") {
         if (!index[key]) return { found: false };
-        const bytes = await c.fs.readFile(`${filesDir}/blobs/${key}`);
+        // VFS bytes: on an ArrayBuffer (structured-cloned to the worker)
+        const bytes = await c.fs.readFile(`${filesDir}/blobs/${key}`) as Uint8Array<ArrayBuffer>;
         return { found: true, bytes, contentType: index[key].contentType };
       }
       if (m.op === "delete") {
@@ -322,24 +357,25 @@ export function createCresslet(c, opts) {
             .map(([k, v]) => ({ key: k, ...v })),
         };
       }
-      throw new Error(`unknown op ${m.op}`);
+      throw new Error(`unknown op ${(m as { op: unknown }).op}`);
     }
 
     // Preview WebSockets stay here, bridged to the worker over a channel, so they can be closed even when their
     // worker can't do it (restarted, crashed, stuck in app code): clients then reconnect as after a redeploy.
     // Protocol (cresslet-container's upgradeWebSocket): whoever sends `close` is done with the port; whoever gets it closes it.
-    const sockets = new Map(); // worker → Set of functions that close one of its sockets
-    function bridge(w, socket) {
+    type End = (code?: number, reason?: string) => void;
+    const sockets = new Map<ProjectWorker, Set<End>>(); // worker → Set of functions that close one of its sockets
+    function bridge(w: ProjectWorker, socket: MessagePort) {
       const { port1, port2 } = new MessageChannel();
-      const own = sockets.get(w) ?? sockets.set(w, new Set()).get(w);
-      const end = (code, reason) => {
+      const own = sockets.get(w) ?? sockets.set(w, new Set()).get(w)!; // just set
+      const end: End = (code, reason) => {
         own.delete(end);
         port1.close();
         socket.postMessage({ type: "close", code, reason });
       };
       own.add(end);
       // Messages from the preview and the app are untrusted: pass on only well-formed ones.
-      const pipe = (from, to) => (from.onmessage = ({ data: d }) => {
+      const pipe = (from: MessagePort, to: MessagePort) => (from.onmessage = ({ data: d }) => {
         if (d?.type === "message" && (typeof d.data === "string" || d.data instanceof ArrayBuffer)) {
           to.postMessage({ type: "message", data: d.data }, typeof d.data === "string" ? [] : [d.data]);
         } else if (d?.type === "close") {
@@ -354,7 +390,7 @@ export function createCresslet(c, opts) {
     }
 
     // Terminates a worker: its WebSockets get `close` and its unanswered requests a 503.
-    function retire(w, code, reason, message) {
+    function retire(w: ProjectWorker | null, code: number, reason: string, message: string) {
       if (!w) return;
       for (const end of sockets.get(w) ?? []) end(code, reason);
       sockets.delete(w);
@@ -371,30 +407,30 @@ export function createCresslet(c, opts) {
       try {
         code = await serverCode();
       } catch (e) {
-        workerError = `server build failed:\n${e.message}`;
+        workerError = `server build failed:\n${(e as Error).message}`;
         out(`\x1b[31m${workerError}\x1b[0m`);
         return;
       }
       if (!code) return;
       const bundles = lastBundles;
-      let db = null;
+      let db: Uint8Array | null = null;
       try {
         db = await c.fs.readFile(dbPath);
       } catch { /* fresh db */ }
       const secrets = parseDotenv((await readText(".env.cresslet")) ?? "");
       // On the preview origin (cresslet-container runs project workers there), so server code can't open the
       // studio's IndexedDB (every local project's files).
-      let w;
+      let w: ProjectWorker;
       try {
         w = await c.projectWorker(new URL("./server-worker.js", import.meta.url), { name: "cresslet-server" });
         if (stopped) return w.terminate(); // dev ended meanwhile
       } catch (e) {
-        workerError = `server failed to start:\n${e.message}`;
+        workerError = `server failed to start:\n${(e as Error).message}`;
         out(`\x1b[31m${workerError}\x1b[0m`);
         return;
       }
-      const ready = new Promise((resolve, reject) => {
-        // The worker catches and logs its own errors (server-worker.js): one that gets here means it's gone (e.g.
+      const ready = new Promise<void>((resolve, reject) => {
+        // The worker catches and logs its own errors (server-worker.ts): one that gets here means it's gone (e.g.
         // the preview relay restarted). Fail its requests and the next ones until a server file is saved or
         // `cresslet dev` is rerun (both start a new worker).
         w.onerror = (e) => {
@@ -405,7 +441,7 @@ export function createCresslet(c, opts) {
           out(`\x1b[31m${workerError}\x1b[0m`);
           retire(w, 1011, "server stopped", workerError);
         };
-        w.onmessage = async ({ data: m }) => {
+        w.onmessage = async ({ data: m }: MessageEvent<FromWorker>) => {
           if (m.type === "ready") resolve();
           else if (m.type === "fatal") reject(new Error(m.message));
           else if (m.type === "log") out(`${m.level === "error" ? "\x1b[31m" : "\x1b[2m"}[server] ${m.msg}\x1b[0m`);
@@ -416,9 +452,9 @@ export function createCresslet(c, opts) {
           } else if (m.type === "files") {
             try {
               const r = await fileOp(m);
-              w.postMessage({ type: "files-result", id: m.id, ...r });
+              w.postMessage({ type: "files-result", id: m.id, ...r } satisfies ToWorker);
             } catch (e) {
-              w.postMessage({ type: "files-result", id: m.id, error: e.message });
+              w.postMessage({ type: "files-result", id: m.id, error: (e as Error).message } satisfies ToWorker);
             }
           }
         };
@@ -431,7 +467,7 @@ export function createCresslet(c, opts) {
         secrets,
         db,
         app: { id: "studio", name: cfg.name || "preview", url: location.origin, deployId: "dev" },
-      });
+      } satisfies ToWorker);
       try {
         await ready.finally(() => initializing.delete(w));
         if (stopped || seq < readySeq) return w.terminate(); // dev ended, or a later save's worker got ready first
@@ -445,7 +481,7 @@ export function createCresslet(c, opts) {
       } catch (e) {
         w.terminate();
         if (seq < readySeq) return; // a later save's worker serves already
-        workerError = `server failed to start:\n${e.message}`;
+        workerError = `server failed to start:\n${(e as Error).message}`;
         out(`\x1b[31m${workerError}\x1b[0m`);
       }
     }
@@ -454,8 +490,8 @@ export function createCresslet(c, opts) {
     // don't carry them, so they're kept here for this `cresslet dev` and sent with each request. One jar per preview:
     // name → { value, none: SameSite=None } (Path/Domain don't matter on one origin; Max-Age=0 or a past Expires
     // removes one).
-    const jar = new Map();
-    function keepCookies(headers) {
+    const jar = new Map<string, { value: string; none: boolean }>();
+    function keepCookies(headers: HeaderList) {
       for (const [k, v] of headers) {
         if (k.toLowerCase() !== "set-cookie") continue;
         const [pair, ...attrs] = v.split(";");
@@ -473,9 +509,9 @@ export function createCresslet(c, opts) {
     }
 
     // Preview URLs are prefixed (/__cresslet__/<id>/<port>/…); match on the app-relative path.
-    const appPath = (url) => url.pathname.replace(/^\/__cresslet__\/[^/]+\/\d+/, "") || "/";
+    const appPath = (url: URL) => url.pathname.replace(/^\/__cresslet__\/[^/]+\/\d+/, "") || "/";
 
-    async function middleware(req) {
+    async function middleware(req: Request): Promise<Response | undefined> {
       const url = new URL(req.url);
       const path = appPath(url);
       if (!serverRoute(routes, path) || !(await hasServer())) return undefined;
@@ -486,7 +522,7 @@ export function createCresslet(c, opts) {
       const unavailable = () => {
         const text = workerError ?? "server is starting";
         if (!start) return new Response(text, { status: 503, headers: { "content-type": "text/plain" } });
-        const esc = text.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[ch]);
+        const esc = text.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" } as Record<string, string>)[ch]);
         return new Response(withReload(`<!doctype html><pre>${esc}</pre>`), { status: 503, headers: { "content-type": "text/html; charset=utf-8" } });
       };
       if (!w) return unavailable();
@@ -495,7 +531,7 @@ export function createCresslet(c, opts) {
       // The preview page's own Origin reads as the app's, as it does deployed, so `Origin === new URL(req.url).origin`
       // checks (against cross-site WebSocket hijacking) pass here too.
       const page = c.previewOrigin ?? location.origin; // where preview pages run
-      const headers = [...req.headers].map(([k, v]) => (k.toLowerCase() === "origin" && v === page ? [k, appUrl.origin] : [k, v]));
+      const headers: HeaderList = [...req.headers].map(([k, v]) => (k.toLowerCase() === "origin" && v === page ? [k, appUrl.origin] : [k, v]));
       // Other requests reach this handler as a `Request` cresslet-container made on this page, which drops the
       // browser's Origin (and Sec-Fetch-Site, Referer). The preview's service worker takes fetches only from preview
       // pages, but also navigations: a page elsewhere (another app on this site, framing the preview's URL) can submit
@@ -508,10 +544,10 @@ export function createCresslet(c, opts) {
       if (unsafe && !navigation && !req.headers.has("origin")) headers.push(["origin", appUrl.origin]);
       const cookies = [...jar].filter(([, c]) => !navigation || c.none);
       if (cookies.length && !req.headers.has("cookie")) headers.push(["cookie", cookies.map(([k, c]) => `${k}=${c.value}`).join("; ")]);
-      const res = await new Promise((resolve) => {
+      const res = await new Promise<Res>((resolve) => {
         waiting.set(id, { w, done: resolve });
         w.postMessage(
-          { type: "request", id, url: appUrl.href, method: req.method, headers, body },
+          { type: "request", id, url: appUrl.href, method: req.method, headers, body } satisfies ToWorker,
           body ? [body] : [],
         );
       });
@@ -522,18 +558,18 @@ export function createCresslet(c, opts) {
         // The app accepted a WebSocket (WebSocketPair): connect the preview's socket to the worker that holds its end.
         if (w !== worker) {
           // replaced meanwhile: refuse, so the client reconnects to the new one
-          w.postMessage({ type: "socket", id });
+          w.postMessage({ type: "socket", id } satisfies ToWorker);
           return unavailable();
         }
         let upgrade;
         try {
           upgrade = c.upgradeWebSocket(req, { protocol: res.protocol });
         } catch (e) {
-          w.postMessage({ type: "socket", id }); // the preview gave up meanwhile: the app's end gets `close`
+          w.postMessage({ type: "socket", id } satisfies ToWorker); // the preview gave up meanwhile: the app's end gets `close`
           throw e;
         }
         const port = bridge(w, upgrade.socket);
-        w.postMessage({ type: "socket", id }, [port]);
+        w.postMessage({ type: "socket", id } satisfies ToWorker, [port]);
         return upgrade.response;
       }
       if (start && res.body && /^text\/html/i.test(new Headers(res.headers).get("content-type") ?? "")) {
@@ -544,7 +580,7 @@ export function createCresslet(c, opts) {
     }
 
     // Start apps: what isn't a server route is a file of the client build (or public/).
-    async function staticFile(req) {
+    async function staticFile(req: Request) {
       let rel;
       try {
         rel = decodeURIComponent(appPath(new URL(req.url)));
@@ -552,30 +588,30 @@ export function createCresslet(c, opts) {
         return new Response("Bad request", { status: 400 });
       }
       if (rel.split("/").includes("..")) return new Response("Not found", { status: 404 });
-      let bytes;
+      let bytes: Uint8Array<ArrayBuffer>; // VFS bytes: never on a SharedArrayBuffer
       try {
-        bytes = await c.fs.readFile(p(`.cresslet/start/preview${rel}`)); // start-build.js: the preview's build
+        bytes = await c.fs.readFile(p(`.cresslet/start/preview${rel}`)) as Uint8Array<ArrayBuffer>; // start-build.ts: the preview's build
       } catch {
         return new Response("Not found", { status: 404, headers: { "content-type": "text/plain" } });
       }
-      const type = CONTENT_TYPES[rel.split(".").pop().toLowerCase()] ?? "application/octet-stream";
+      const type = CONTENT_TYPES[rel.split(".").pop()!.toLowerCase()] ?? "application/octet-stream"; // split: ≥ 1 part
       return new Response(bytes, { headers: { "content-type": type, "cache-control": "no-cache" } });
     }
 
     await Promise.race([startWorker(), aborted]); // the first build and server (a stuck one doesn't hold up Ctrl+C)
-    let timer;
-    const rebuild = (_e, f) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const rebuild = (_e: unknown, f: string) => {
       if (f && /(?:^|\/)routeTree\.gen\.ts$/.test(f)) return; // the build writes it
       clearTimeout(timer);
       timer = setTimeout(() => startWorker(), start ? 300 : 150);
     };
-    const watchers = [];
+    const watchers: { close(): void }[] = [];
     for (const dir of start ? ["src", "public"] : ["server"]) {
       try {
         watchers.push(c.fs.watch(p(dir), { recursive: true }, rebuild));
       } catch { /* no such directory */ }
     }
-    let server = null;
+    let server: { close(): void } | null = null;
     if (!ctx.signal.aborted) {
       server = start
         ? c.servePort(port, async (req) => (await middleware(req)) ?? staticFile(req))
@@ -597,8 +633,8 @@ export function createCresslet(c, opts) {
 
   c.registerCommand("cresslet", async (ctx) => {
     const [sub, ...args] = ctx.args;
-    const out = (s) => ctx.stdout.write(s.replace(/\n/g, "\r\n") + "\r\n");
-    const err = (s) => ctx.stderr.write(`\x1b[31m${s.replace(/\n/g, "\r\n")}\x1b[0m\r\n`);
+    const out = (s: string) => ctx.stdout.write(s.replace(/\n/g, "\r\n") + "\r\n");
+    const err = (s: string) => ctx.stderr.write(`\x1b[31m${s.replace(/\n/g, "\r\n")}\x1b[0m\r\n`);
     try {
       if (sub === "dev") {
         const i = args.findIndex((a) => a === "--port" || a === "-p");
@@ -624,7 +660,7 @@ export function createCresslet(c, opts) {
       out("usage: cresslet dev [--port 3000] | build | deploy\r\n(other commands: use the real CLI: npx cresslet, or npm i -g cresslet)");
       return sub ? 1 : 0;
     } catch (e) {
-      err(e.message ?? String(e));
+      err((e as Error).message ?? String(e));
       return 1;
     }
   });

@@ -1,18 +1,28 @@
 // TanStack Start apps in the studio: their build without Vite (which can't run in cresslet-container). esbuild (c.bundle,
 // on this page) bundles the client and the server; TanStack's own compilers (route generation, server functions, the
-// client's route options) run in a `node` process in the container (start-service.js), since they come from the
+// client's route options) run in a `node` process in the container (start-service.ts), since they come from the
 // project's node_modules. Output as the CLI's `vite build` writes it: dist/client (static files, under /assets) and a
 // server bundle (`export default { fetch }`).
 // Covers Start apps like templates/tanstack-start: no Vite plugins beyond Start's and React's, one client bundle
 // (no route code splitting), stylesheets through `?url` imports or imported CSS. No HMR: a save rebuilds and reloads.
+import type { BundleResult, Container, ContainerProcess } from "./vendor/cresslet-container/cresslet-container.js";
+import type { BuildOptions, Loader, Message, Metafile, OnLoadResult, Plugin } from "./vendor/cresslet-container/types/vendor/esbuild-wasm.js";
+
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const MARK = "\u0001tss\u0001";
 const SERVER_FN_SPLIT = "tss-serverfn-split";
 
 /** A Start app: depends on @tanstack/react-start. */
-export function isStartApp(pkg) {
+export function isStartApp(pkg: PackageJson | null | undefined) {
   return !!(pkg?.dependencies?.["@tanstack/react-start"] || pkg?.devDependencies?.["@tanstack/react-start"]);
+}
+
+/** The package.json fields read here (from JSON: anything may be missing). */
+export interface PackageJson {
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  exports?: unknown;
 }
 
 /** Start's build-time constants (as @tanstack/start-plugin-core's createViteDefineConfig sets them for `vite build`). */
@@ -29,21 +39,28 @@ export function startDefines() {
     TSS_SHELL: "false",
   };
   const env = { MODE: "production", PROD: true, DEV: false, BASE_URL: "/" };
-  const d = { "process.env.NODE_ENV": '"production"', "import.meta.env": JSON.stringify({ ...env, ...tss }) };
+  const d: Record<string, string> = { "process.env.NODE_ENV": '"production"', "import.meta.env": JSON.stringify({ ...env, ...tss }) };
   for (const [k, v] of Object.entries(env)) d[`import.meta.env.${k}`] = JSON.stringify(v);
   for (const [k, v] of Object.entries(tss)) d[`process.env.${k}`] = d[`import.meta.env.${k}`] = JSON.stringify(v);
   return d;
 }
 
 /** The SSR manifest module (tanstack-start-manifest:v): the client entry and its stylesheet, on the root route. */
-export function manifestModule({ entry, css }) {
-  const root = { preloads: [entry], scripts: [{ attrs: { type: "module", async: true, src: entry } }] };
+export function manifestModule({ entry, css }: { entry: string; css: string[] }) {
+  const root: { preloads: string[]; scripts: { attrs: Record<string, unknown> }[]; css?: string[] } = { preloads: [entry], scripts: [{ attrs: { type: "module", async: true, src: entry } }] };
   if (css.length) root.css = css;
   return `export const tsrStartManifest = () => (${JSON.stringify({ routes: { __root__: root } })})`;
 }
 
 /** #tanstack-start-server-fn-resolver: every server function by id (generateServerFnResolverModule, static imports). */
-export function serverFnResolverModule(serverFns) {
+/** A server function as Start's compiler reports it (start-service.ts `serverFns`). */
+export interface ServerFn {
+  extractedFilename: string;
+  functionName: string;
+  isClientReferenced?: boolean;
+}
+
+export function serverFnResolverModule(serverFns: Record<string, ServerFn>) {
   const entries = Object.entries(serverFns).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const imports = entries.map(([, fn], i) => `import * as m${i} from ${JSON.stringify(fn.extractedFilename)};`);
   const rows = entries.map(([id, fn], i) =>
@@ -65,7 +82,7 @@ export async function getServerFnById(id, access) {
 
 /**
  * AsyncLocalStorage for the preview's server worker (a browser Worker has no node:async_hooks). One store at a time:
- * the worker handles one request at a time for Start apps (server-worker.js `serial`), and the outermost store stays
+ * the worker handles one request at a time for Start apps (server-worker.ts `serial`), and the outermost store stays
  * after its callback resolves (until the next request's), so a streamed response's rest still sees its request.
  */
 export const ASYNC_HOOKS_SHIM = `export class AsyncLocalStorage {
@@ -121,8 +138,8 @@ export const VERSION = "", CONTRACT = 0;`;
  * deno/node for servers), and Start's packages pick their server or client code by condition (router-core's isServer,
  * react-dom/server's Web-streams build): each Start bundle resolves packages with its own.
  */
-export function exportsTarget(exp, sub, conditions) {
-  const pick = (t, star) => {
+export function exportsTarget(exp: unknown, sub: string, conditions: readonly string[]): string | null {
+  const pick = (t: unknown, star?: string): string | null => {
     if (typeof t === "string") return star === undefined ? t : t.replaceAll("*", star);
     if (Array.isArray(t)) {
       for (const x of t) {
@@ -144,9 +161,10 @@ export function exportsTarget(exp, sub, conditions) {
   if (exp == null) return null;
   const isMap = typeof exp === "object" && !Array.isArray(exp) && Object.keys(exp).some((k) => k.startsWith("."));
   if (!isMap) return sub === "." ? pick(exp) : null;
-  if (sub in exp) return pick(exp[sub]);
-  let best = null;
-  for (const k of Object.keys(exp)) {
+  const map = exp as Record<string, unknown>; // an object whose keys start with "."
+  if (sub in map) return pick(map[sub]);
+  let best: { k: string; pre: string; star: string } | null = null;
+  for (const k of Object.keys(map)) {
     const i = k.indexOf("*");
     if (i < 0) continue;
     const [pre, post] = [k.slice(0, i), k.slice(i + 1)];
@@ -154,28 +172,62 @@ export function exportsTarget(exp, sub, conditions) {
       best = { k, pre, star: sub.slice(pre.length, sub.length - post.length) };
     }
   }
-  return best ? pick(exp[best.k], best.star) : null;
+  return best ? pick(map[best.k], best.star) : null;
 }
 
-export const CONDITIONS = {
+/** A bundle's environment. */
+export type Env = "client" | "server";
+
+export const CONDITIONS: Record<Env, string[]> = {
   client: ["browser", "import", "module"],
   server: ["workerd", "worker", "browser", "import", "module"],
 };
 
 /** 8 hex chars of SHA-256: asset names. */
-async function hash8(bytes) {
-  const d = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+async function hash8(bytes: Uint8Array) {
+  // VFS and esbuild bytes are never on a SharedArrayBuffer (digest would reject them).
+  const d = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>));
   return [...d.slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/**
- * @param {import("./vendor/cresslet-container/index").Container} c
- * @param {{ sdkPlugin: any, serviceUrl?: URL }} opts sdkPlugin: `cresslet` in server code (cresslet-plugin.js)
- */
-export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start-service.js", import.meta.url) }) {
+/** esbuild's messages (cresslet-container's BundleResult leaves them `unknown`). */
+const messages = (r: BundleResult) => r.errors as Message[];
+
+/** The running compiler service (start-service.ts). */
+interface Service {
+  proc: ContainerProcess;
+  pending: Map<number, { resolve: (m: Reply) => void; reject: (e: unknown) => void }>; // by request id
+  nextId: number;
+  input: WritableStreamDefaultWriter<string>;
+  log: string;
+  ready?: Promise<void>;
+}
+/** A JSON line from start-service.ts: `ok` with the fields of its op's reply (Replies), else `error`. */
+interface Reply {
+  id: number;
+  ok: boolean;
+  error?: string;
+}
+type Request = { op: "routes" } | { op: "compile"; env: Env; file: string; code: string };
+interface Replies {
+  routes: { clientRouteTree: string; routeFiles: string[] };
+  compile: { code: string | null; serverFns: Record<string, ServerFn> };
+}
+
+export interface StartBuild {
+  /** Absolute paths. */
+  files: string[];
+  outDir: string;
+  server: string | undefined;
+  entry: string;
+  bundles: Set<string>;
+}
+
+/** `sdkPlugin`: `cresslet` in server code (cresslet-plugin.ts). */
+export function createStartBuilder(c: Container, { sdkPlugin, serviceUrl = new URL("./start-service.js", import.meta.url) }: { sdkPlugin: Plugin; serviceUrl?: URL }) {
   const wd = c.workdir;
-  const p = (rel) => `${wd}/${rel}`;
-  let svc = null; // { proc, pending, nextId, ready }
+  const p = (rel: string) => `${wd}/${rel}`;
+  let svc: Service | null = null;
 
   async function startService() {
     const source = await fetch(serviceUrl).then((r) => {
@@ -186,7 +238,7 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
     const nm = p("node_modules");
     // TanStack's compilers by file (their packages don't export them); @babel/* default imports as Node gives them
     // (module.exports), since esbuild can't tell these files are ESM-in-Node here.
-    const deep = {
+    const deep: Plugin = {
       name: "tss-service",
       setup(b) {
         b.onResolve({ filter: /^@tanstack\/[^/]+\/dist\// }, (a) => ({ path: `${nm}/${a.path}`, namespace: "cresslet-vfs" }));
@@ -216,15 +268,15 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
       external: ["@babel/preset-typescript", "@babel/preset-typescript/*", "supports-color"],
       plugins: [deep],
     });
-    if (r.errors?.length) throw new Error(r.errors.map((e) => e.text).join("\n"));
-    const out = r.outputFiles.find((f) => f.path.endsWith(".cjs")) ?? r.outputFiles[0];
+    if (r.errors?.length) throw new Error(messages(r).map((e) => e.text).join("\n"));
+    const out = r.outputFiles.find((f) => f.path.endsWith(".cjs")) ?? r.outputFiles[0]!; // write: false, one entry
     await c.fs.writeFile(p(".cresslet/start/service.cjs"), out.text ?? dec.decode(out.contents));
     if (closed) throw new Error("TanStack Start build closed");
     const proc = await c.spawn("node", [p(".cresslet/start/service.cjs")], { cwd: wd });
     booting = proc; // close() kills it while it starts
-    const me = { proc, pending: new Map(), nextId: 0, input: proc.input.getWriter(), log: "" };
-    let resolveReady, rejectReady;
-    me.ready = new Promise((res, rej) => ((resolveReady = res), (rejectReady = rej)));
+    const me: Service = { proc, pending: new Map(), nextId: 0, input: proc.input.getWriter(), log: "" };
+    let resolveReady = () => {}, rejectReady: (e: unknown) => void = () => {};
+    me.ready = new Promise<void>((res, rej) => ((resolveReady = res), (rejectReady = rej)));
     let buf = "";
     proc.output.pipeTo(new WritableStream({
       write(s) {
@@ -238,7 +290,7 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
             me.log = (me.log + line + "\n").slice(-4000);
             continue;
           }
-          const m = JSON.parse(line.slice(k + MARK.length));
+          const m: Reply = JSON.parse(line.slice(k + MARK.length));
           if (m.id === 0) resolveReady();
           const job = me.pending.get(m.id);
           if (!job) continue;
@@ -267,10 +319,10 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
     return me;
   }
 
-  let starting = null;
-  let booting = null; // the service's process until it's ready
+  let starting: Promise<Service> | null = null;
+  let booting: ContainerProcess | null = null; // the service's process until it's ready
   let closed = false;
-  async function rpc(msg) {
+  async function rpc<R extends Request>(msg: R): Promise<Replies[R["op"]]> {
     if (!svc) {
       starting ??= startService().finally(() => (starting = null));
       svc = await starting;
@@ -278,20 +330,20 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
     const me = svc;
     const id = ++me.nextId;
     return new Promise((resolve, reject) => {
-      me.pending.set(id, { resolve, reject });
+      me.pending.set(id, { resolve: (m) => resolve(m as Reply & Replies[R["op"]]), reject });
       me.input.write(JSON.stringify({ id, ...msg }) + "\n").catch(reject);
     });
   }
 
-  const loaderFor = (file) => (/\.tsx$/.test(file) ? "tsx" : /\.ts$|\.mts$/.test(file) ? "ts" : /\.jsx$/.test(file) ? "jsx" : "js");
-  const isSource = (file) => file.startsWith(p("src/")) && /\.[cm]?[jt]sx?$/.test(file);
+  const loaderFor = (file: string): Loader => (/\.tsx$/.test(file) ? "tsx" : /\.ts$|\.mts$/.test(file) ? "ts" : /\.jsx$/.test(file) ? "jsx" : "js");
+  const isSource = (file: string) => file.startsWith(p("src/")) && /\.[cm]?[jt]sx?$/.test(file);
 
-  const readText = async (file) => {
+  const readText = async (file: string) => {
     const v = await c.fs.readFile(file);
     return typeof v === "string" ? v : dec.decode(v);
   };
 
-  async function firstFile(...rels) {
+  async function firstFile(...rels: string[]) {
     for (const r of rels) if (await c.fs.exists(p(r))) return p(r);
     return null;
   }
@@ -302,33 +354,37 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
    * directory (a deploy's build doesn't touch what the preview serves). `keep`: files of an earlier build to leave
    * (the bundles a preview's pages still load). → { files: absolute paths, outDir, server, entry, bundles }
    */
-  async function build({ preview = false, keep: alsoKeep = new Set() } = {}) {
+  async function build({ preview = false, keep: alsoKeep = new Set<string>() } = {}): Promise<StartBuild> {
     const outDir = preview ? ".cresslet/start/preview" : "dist/client";
     const { clientRouteTree } = await rpc({ op: "routes" }); // also writes src/routeTree.gen.ts if routes changed
     const routeTreeFile = p("src/routeTree.gen.ts");
-    const serverFns = {};
-    const assetUrls = new Map(); // absolute file → its /assets URL (`?url` imports, the same in both builds)
-    const outFiles = new Map(); // absolute path under outDir → bytes
+    const serverFns: Record<string, ServerFn> = {};
+    const assetUrls = new Map<string, string>(); // absolute file → its /assets URL (`?url` imports, the same in both builds)
+    const outFiles = new Map<string, Uint8Array>(); // absolute path under outDir → bytes
     const defines = startDefines();
     const startEntry = await firstFile("src/start.ts", "src/start.tsx", "src/start.js");
     const routerEntry = await firstFile("src/router.tsx", "src/router.ts", "src/router.js");
     if (!routerEntry) throw new Error("TanStack Start: no src/router.tsx (it exports getRouter)");
+    const routerFile: string = routerEntry;
 
-    async function assetUrl(file) {
-      if (assetUrls.has(file)) return assetUrls.get(file);
-      const name = file.split("/").pop().replace(/\.[^.]+$/, "");
+    async function assetUrl(file: string): Promise<string> {
+      const known = assetUrls.get(file);
+      if (known !== undefined) return known;
+      const name = file.split("/").pop()!.replace(/\.[^.]+$/, ""); // split: at least one part
       const ext = file.split(".").pop();
-      let bytes;
+      let bytes: Uint8Array | string | undefined;
       if (ext === "css") {
         // a stylesheet with its @imports, minified
         const r = await c.bundle({ entryPoints: [file], bundle: true, minify: true, write: false, outfile: p(".cresslet/start/css.css"), loader: { ".woff2": "file", ".woff": "file", ".png": "file", ".svg": "file", ".jpg": "file" }, assetNames: "[name]-[hash]", publicPath: "/assets" });
-        if (r.errors?.length) throw new Error(r.errors.map((e) => e.text).join("\n"));
+        if (r.errors?.length) throw new Error(messages(r).map((e) => e.text).join("\n"));
         for (const f of r.outputFiles) {
           if (f.path.endsWith(".css")) bytes = f.contents ?? enc.encode(f.text);
           else outFiles.set(p(`${outDir}/assets/${f.path.split("/").pop()}`), f.contents);
         }
       } else bytes = await c.fs.readFile(file);
       if (typeof bytes === "string") bytes = enc.encode(bytes);
+      // (digest threw a TypeError here before this check)
+      if (bytes === undefined) throw new TypeError(`${file}: the CSS build wrote no stylesheet`);
       const url = `/assets/${name}-${await hash8(bytes)}.${ext}`;
       outFiles.set(p(`${outDir}${url}`), bytes);
       assetUrls.set(file, url);
@@ -336,8 +392,8 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
     }
 
     /** Start's virtual modules, entries and compilers for one environment's bundle. */
-    function startPlugin(env, own) {
-      const virtuals = {
+    function startPlugin(env: Env, own: Record<string, string | (() => string)>): Plugin {
+      const virtuals: Record<string, string | (() => string)> = {
         "#tanstack-start-entry": "export const startInstance = undefined;", // no src/start.ts
         "#tanstack-start-plugin-adapters": "export const pluginSerializationAdapters = [];\nexport const hasPluginAdapters = false;",
         "#tanstack-start-server-fn-resolver": "export async function getServerFnById() {}",
@@ -348,7 +404,7 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
         setup(b) {
           // Start's `#` imports (package.json `imports` defaults, replaced by the app's files as its plugins do)
           b.onResolve({ filter: /^(?:#tanstack-start-entry|#tanstack-router-entry)$/ }, (a) => {
-            if (a.path === "#tanstack-router-entry") return { path: routerEntry, namespace: "cresslet-vfs" };
+            if (a.path === "#tanstack-router-entry") return { path: routerFile, namespace: "cresslet-vfs" };
             return startEntry ? { path: startEntry, namespace: "cresslet-vfs" } : { path: a.path, namespace: "tss-virtual" };
           });
           for (const id of Object.keys(virtuals)) {
@@ -356,11 +412,14 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
             const filter = new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
             b.onResolve({ filter }, () => ({ path: id, namespace: "tss-virtual" }));
           }
-          b.onLoad({ filter: /.*/, namespace: "tss-virtual" }, async (a) => ({
-            contents: typeof virtuals[a.path] === "function" ? await virtuals[a.path]() : virtuals[a.path],
+          b.onLoad({ filter: /.*/, namespace: "tss-virtual" }, async (a) => {
+            const v = virtuals[a.path];
+            return {
+            contents: typeof v === "function" ? await v() : v,
             loader: "tsx",
             resolveDir: p("src"),
-          }));
+          };
+          });
           b.onResolve({ filter: /\?url$/ }, async (a) => {
             const r = await b.resolve(a.path.slice(0, -4), { resolveDir: a.resolveDir, kind: a.kind, importer: a.importer });
             if (r.errors.length) return { errors: r.errors };
@@ -391,7 +450,7 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
               if (dir === "/" || !dir) return undefined;
             }
           });
-          const transform = async (file, id) => {
+          const transform = async (file: string, id: string): Promise<OnLoadResult> => {
             const code = file === routeTreeFile && env === "client" ? clientRouteTree : await readText(file);
             if (file === routeTreeFile) return { contents: code, loader: env === "client" ? "js" : "ts", resolveDir: p("src") };
             const r = await rpc({ op: "compile", env, file: id, code });
@@ -416,9 +475,9 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
       };
     }
 
-    const common = { bundle: true, format: "esm", target: "es2022", write: false, metafile: true, jsx: "automatic", define: defines, logLevel: "silent" };
-    const fail = (what, r) => {
-      if (r.errors?.length) throw new Error(`${what} build failed:\n${r.errors.map((e) => (e.location ? `${e.location.file}:${e.location.line}:${e.location.column}: ${e.text}` : e.text)).join("\n")}`);
+    const common: BuildOptions = { bundle: true, format: "esm", target: "es2022", write: false, metafile: true, jsx: "automatic", define: defines, logLevel: "silent" };
+    const fail = (what: string, r: BundleResult) => {
+      if (r.errors?.length) throw new Error(`${what} build failed:\n${messages(r).map((e) => (e.location ? `${e.location.file}:${e.location.line}:${e.location.column}: ${e.text}` : e.text)).join("\n")}`);
     };
 
     // ---- client
@@ -447,12 +506,13 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       })],
     });
     fail("client", client);
-    let entry = null;
-    const css = [];
+    let entry: string | null | undefined = null;
+    const css: string[] = [];
+    const metafile = client.metafile as Metafile | undefined; // esbuild's (cresslet-container types it unknown)
     for (const f of client.outputFiles) {
       outFiles.set(f.path, f.contents ?? enc.encode(f.text));
       const url = f.path.slice(p(outDir).length);
-      const meta = client.metafile?.outputs?.[Object.keys(client.metafile.outputs).find((k) => f.path.endsWith(k)) ?? ""];
+      const meta = metafile?.outputs?.[Object.keys(metafile.outputs).find((k) => f.path.endsWith(k)) ?? ""];
       if (meta?.entryPoint) entry = url;
       if (f.path.endsWith(".css")) css.push(url);
     }
@@ -460,7 +520,7 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
     if (!entry) throw new Error("client build: no entry chunk");
 
     // ---- server: its compile may find server functions only the server calls; then once more with those in the resolver
-    let server;
+    let server: string | undefined;
     const serverEntry = await firstFile("src/server.ts", "src/server.tsx", "src/server.js");
     for (let pass = 0; ; pass++) {
       if (pass === 5) throw new Error("server build: server functions still changing after 5 passes");
@@ -492,8 +552,8 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
     }
 
     // ---- outDir: public/ files, then the bundles; then earlier builds' files go
-    const files = [];
-    const copyPublic = async (dir) => {
+    const files: string[] = [];
+    const copyPublic = async (dir: string) => {
       let entries;
       try {
         entries = await c.fs.readdir(p(dir), { withFileTypes: true });
@@ -516,7 +576,7 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       files.push(f);
     }
     const keep = new Set([...files, ...alsoKeep]);
-    const prune = async (dir) => {
+    const prune = async (dir: string) => {
       let entries;
       try {
         entries = await c.fs.readdir(dir, { withFileTypes: true });

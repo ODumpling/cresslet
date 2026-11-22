@@ -1,0 +1,9 @@
+{
+  // server-worker.ts: a module Web Worker on the preview origin (cresslet-container's projectWorker), not the page.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2024", "webworker", "webworker.iterable", "webworker.asynciterable"]
+  },
+  "include": ["server-worker.ts", "server-worker-protocol.ts", "types/sql.js.d.ts"],
+  "exclude": []
+}

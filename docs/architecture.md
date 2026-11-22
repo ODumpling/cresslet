@@ -18,7 +18,7 @@
                      HTTP over unix sock                 HOST binding│ (per-app unix sock)
                           ┌───────────┴─────────────────────────────┴─────────┐
                           │ workerd serve run/config.capnp (per app)           │
-                          │  runtime/worker.js wraps server.js, builds env     │
+                          │  runtime/worker.ts wraps server.js, builds env     │
                           │  no fs, no env, no subprocess; heap cap            │
                           │  network: none (unclaimed) | public only (claimed) │
                           │  multi-tenant: under gVisor (per sandbox or whole  │
@@ -81,7 +81,7 @@ Project code in workers runs there too: the app's *server* code in `cresslet dev
 
 ### AI builder
 
-The workspace is chat first: the **AI builder** pane (a chat with Claude that changes the open project, [`studio/builder.js`](../studio/builder.js)) sits beside the app's preview, **Code** swaps the preview for the files and editor, and **Terminal** opens a drawer with the terminal and deploy log (Deploy opens it too). The chat, the view and the drawer are remembered per browser (`cresslet.workspace` in `localStorage`). Claude's tools act on what the user can already reach from the tab: the project's files in the container, a `jsh -c` shell in the project root (stopped after 120 s), the dev server's terminal output, and `cresslet deploy`, which goes through `POST /v1/deploys` with the user's session or the project's deploy key, as the CLI would.
+The workspace is chat first: the **AI builder** pane (a chat with Claude that changes the open project, [`studio/builder.ts`](../studio/builder.ts)) sits beside the app's preview, **Code** swaps the preview for the files and editor, and **Terminal** opens a drawer with the terminal and deploy log (Deploy opens it too). The chat, the view and the drawer are remembered per browser (`cresslet.workspace` in `localStorage`). Claude's tools act on what the user can already reach from the tab: the project's files in the container, a `jsh -c` shell in the project root (stopped after 120 s), the dev server's terminal output, and `cresslet deploy`, which goes through `POST /v1/deploys` with the user's session or the project's deploy key, as the CLI would.
 
 Claude is reached one of two ways:
 

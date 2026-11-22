@@ -1,6 +1,6 @@
-// TanStack Start's own compilers for the studio's Start build (start-build.js), as a long-lived `node` process in
+// TanStack Start's own compilers for the studio's Start build (start-build.ts), as a long-lived `node` process in
 // cresslet-container: they come from the project's node_modules, so they run where project code runs (the preview
-// origin), never on the studio's page. start-build.js bundles this file with esbuild (CJS, the `@tanstack/...dist`
+// origin), never on the studio's page. start-build.ts bundles this file with esbuild (CJS, the `@tanstack/...dist`
 // imports resolved to the project's packages) and talks to it in JSON lines over stdin/stdout:
 //   in:  {id, op: "routes"}                      → {id, ok, clientRouteTree, routeFiles}  (writes src/routeTree.gen.ts)
 //   in:  {id, op: "compile", env, file, code}     → {id, ok, code|null, serverFns}  (env: "client" | "server";
@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Generator, getConfig } from "@tanstack/router-generator";
 import { createStartCompiler } from "@tanstack/start-plugin-core/dist/esm/start-compiler/host.js";
+import type { ServerFnInfo, StartCompiler } from "@tanstack/start-plugin-core/dist/esm/start-compiler/host.js";
 import { detectKindsInCode } from "@tanstack/start-plugin-core/dist/esm/start-compiler/compiler.js";
 import { getTransformCodeFilterForEnv } from "@tanstack/start-plugin-core/dist/esm/start-compiler/config.js";
 import { pruneServerOnlySubtrees } from "@tanstack/start-plugin-core/dist/esm/start-router-plugin/pruneServerOnlySubtrees.js";
@@ -21,11 +22,13 @@ const src = path.join(root, "src");
 
 // The route generator names a temp file after an MD5 of its path; cresslet's `node` has no MD5 (any hash will do).
 // eslint-disable-next-line no-undef
-const nodeCrypto = require("node:crypto");
+const nodeCrypto: typeof import("node:crypto") = require("node:crypto");
 const createHash = nodeCrypto.createHash;
 nodeCrypto.createHash = (alg, ...rest) => createHash(alg === "md5" ? "sha256" : alg, ...rest);
 
-const exists = (f) => {
+type Env = "client" | "server";
+
+const exists = (f: string) => {
   try {
     return fs.statSync(f).isFile();
   } catch {
@@ -33,14 +36,14 @@ const exists = (f) => {
   }
 };
 const EXTS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", "/index.ts", "/index.tsx", "/index.js"];
-const resolveFile = (base) => EXTS.map((e) => base + e).find(exists) ?? null;
+const resolveFile = (base: string) => EXTS.map((e) => base + e).find(exists) ?? null;
 
 // ---- routes: the same generator config as @tanstack/start-plugin-core (start-router-plugin/generator-config.js)
 function routeTreeFooter() {
-  const rel = (f) => `./${path.relative(src, f)}`;
+  const rel = (f: string) => `./${path.relative(src, f)}`;
   const router = resolveFile(path.join(src, "router"));
   const start = resolveFile(path.join(src, "start"));
-  const lines = [];
+  const lines: string[] = [];
   if (router) lines.push(`import type { getRouter } from '${rel(router)}'`);
   lines.push(start ? `import type { startInstance } from '${rel(start)}'` : `import type { createStart } from '@tanstack/react-start'`);
   lines.push(`declare module '@tanstack/react-start' {
@@ -78,10 +81,10 @@ async function routes() {
 }
 
 // ---- compile: Start's compiler (server functions, middleware, isomorphic/server-only/client-only functions)
-let serverFns = {};
-let reported = new Set();
-const compilers = {};
-function compilerFor(env) {
+let serverFns: Record<string, ServerFnInfo> = {};
+let reported = new Set<string>();
+const compilers: Partial<Record<Env, StartCompiler>> = {};
+function compilerFor(env: Env): StartCompiler {
   return (compilers[env] ??= createStartCompiler({
     env,
     envName: env === "client" ? "client" : "ssr",
@@ -99,7 +102,7 @@ function compilerFor(env) {
     getKnownServerFns: () => serverFns,
     loadModule: async (id) => {
       const file = id.split("?")[0];
-      compilers[env].ingestModule({ id, code: fs.readFileSync(file, "utf8") });
+      compilers[env]!.ingestModule({ id, code: fs.readFileSync(file, "utf8") }); // (made just above, before any load)
     },
     resolveId: async (source, importer) => {
       if (!source.startsWith(".") && !source.startsWith("/")) return null; // packages: known by name
@@ -111,11 +114,11 @@ function compilerFor(env) {
 }
 const filters = { client: getTransformCodeFilterForEnv("client", {}), server: getTransformCodeFilterForEnv("server", {}) };
 const routeFactory = /\bcreate(?:File|Root|RootRouteWith\w*|LazyFile)Route\b|\bcreateRootRouteWithContext\b/;
-let routeFiles = new Set();
+let routeFiles = new Set<string>();
 
-async function compile({ env, file, code }) {
-  const clean = file.split("?")[0];
-  let out = null;
+async function compile({ env, file, code }: { env: Env; file: string; code: string }) {
+  const clean = file.split("?")[0]!; // split: at least one part
+  let out: string | null = null;
   // The client gets no route `server` / `ssr` / `headers` options (code that only runs on the server), as Start's
   // router plugin does. No code splitting: one client bundle.
   if (env === "client" && routeFiles.has(clean) && routeFactory.test(code)) {
@@ -135,7 +138,7 @@ async function compile({ env, file, code }) {
     const r = await compilerFor(env).compile({ id: file, code, detectedKinds: detectKindsInCode(code, env, {}) });
     if (r) out = r.code;
   }
-  const fresh = {};
+  const fresh: Record<string, ServerFnInfo> = {};
   for (const [id, fn] of Object.entries(serverFns)) {
     const key = `${id}:${fn.isClientReferenced}`;
     if (!reported.has(key)) (reported.add(key), (fresh[id] = fn));
@@ -143,10 +146,13 @@ async function compile({ env, file, code }) {
   return { code: out, serverFns: fresh };
 }
 
-async function handle(msg) {
+/** A request line (start-build.ts `rpc`). */
+type Message = { id: number; op: "routes" } | { id: number; op: "compile"; env: Env; file: string; code: string };
+
+async function handle(msg: Message) {
   if (msg.op === "routes") {
     // a new build: compilers and server functions start over (files changed)
-    for (const k of Object.keys(compilers)) delete compilers[k];
+    for (const k of Object.keys(compilers)) delete compilers[k as Env];
     serverFns = {};
     reported = new Set();
     const r = await routes();
@@ -154,12 +160,12 @@ async function handle(msg) {
     return r;
   }
   if (msg.op === "compile") return compile(msg);
-  throw new Error(`unknown op ${msg.op}`);
+  throw new Error(`unknown op ${(msg as { op: unknown }).op}`);
 }
 
 let buf = "";
-let queue = Promise.resolve();
-const reply = (m) => process.stdout.write(MARK + JSON.stringify(m) + "\n");
+let queue: Promise<unknown> = Promise.resolve();
+const reply = (m: Record<string, unknown>) => process.stdout.write(MARK + JSON.stringify(m) + "\n");
 process.stdin.on("data", (d) => {
   buf += String(d);
   let i;
@@ -167,11 +173,11 @@ process.stdin.on("data", (d) => {
     const line = buf.slice(0, i);
     buf = buf.slice(i + 1);
     if (!line.trim()) continue;
-    const msg = JSON.parse(line);
+    const msg: Message = JSON.parse(line);
     queue = queue.then(() =>
       handle(msg).then(
         (r) => reply({ id: msg.id, ok: true, ...r }),
-        (e) => reply({ id: msg.id, ok: false, error: e?.stack ?? String(e) }),
+        (e) => reply({ id: msg.id, ok: false, error: (e as { stack?: string } | null)?.stack ?? String(e) }),
       ),
     );
   }
