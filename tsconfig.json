@@ -6,6 +6,8 @@
     "lib": ["es2024", "dom", "dom.iterable", "dom.asynciterable"],
     "types": ["node"],
     "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true,

@@ -43,15 +43,18 @@ Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`
 - [Architecture, isolation, roadmap](docs/architecture.md)
 - [Self-hosting](docs/self-hosting.md)
 - [Metadata database: SQLite or Postgres, migrations](docs/database.md)
+- [TypeScript: how the code runs, tsconfigs, rules](docs/typescript.md)
 
 ## Develop
 
 ```sh
 npm run dev       # watch mode
 npm test          # integration tests (spawn real sandboxes)
-npm run check     # tsc
+npm run check     # tsc (every project) + the TypeScript-only check
 npm run vendor    # refresh studio/vendor/cresslet-container (../cresslet-container or GitHub)
-# browser e2e: see tests/e2e/studio.mjs
+# browser e2e: see tests/e2e/studio.ts
 ```
+
+Everything is TypeScript, run without a build step: [docs/typescript.md](docs/typescript.md).
 
 MIT

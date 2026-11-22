@@ -1,9 +1,10 @@
-// The studio's AI builder (studio/builder.js): its tools over a fake container, and the agent loop over a fake
-// Anthropic client. No network, no browser (tests/e2e/builder.mjs drives the real pane).
+// The studio's AI builder (studio/builder.ts): its tools over a fake container, and the agent loop over a fake
+// Anthropic client. No network, no browser (tests/e2e/builder.ts drives the real pane).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import "./studio-imports.ts"; // studio modules' ./x.js imports → x.ts
 
-const mod = "../studio/builder.js"; // untyped browser module
+const mod = "../studio/builder.ts"; // browser module: typed by studio/tsconfig.json, not this program
 const { createAgent, createTools, projectPath, validate, TOOLS, SYSTEM, MODEL } = await import(mod);
 
 type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -356,7 +357,7 @@ test("agent: API errors end the turn with a readable message; dropped connection
 });
 
 test("cresslet deploy from the builder: asks first, deploys to the app it named, keeps cresslet.json edits", async () => {
-  const plugin = "../studio/cresslet-plugin.js"; // untyped browser module
+  const plugin = "../studio/cresslet-plugin.ts"; // browser module: typed by studio/tsconfig.json, not this program
   const { createCresslet } = await import(plugin);
   const c = fakeContainer({ "cresslet.json": '{"routes":["/api/*"]}' });
   let command!: (ctx: Json) => Promise<number>;

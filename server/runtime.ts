@@ -4,7 +4,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, linkSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import { type IncomingMessage, request as httpRequest } from "node:http";
@@ -18,9 +18,19 @@ import { Metrics } from "./metrics.ts";
 import { serveBindings } from "./bindings.ts";
 import { createEgressProxy } from "./egress.ts";
 import { adoptListener, instanceId, jail, prepareHost, sweep } from "./sandbox.ts";
+import { stripTypes } from "./strip.ts";
 
-const WORKER = join(import.meta.dirname, "../runtime/worker.js");
-const WORKER_RUNTIME = join(import.meta.dirname, "../runtime/cresslet-runtime.js");
+/** The sandbox entry (runtime/*.ts) as the JavaScript workerd runs (worker.js, cresslet-runtime.js): stripped once per process. */
+const ENTRY = ["worker", "cresslet-runtime"];
+const entryCode = new Map<string, string>();
+async function entryJs(name: string): Promise<string> {
+  let code = entryCode.get(name);
+  if (code === undefined) {
+    code = stripTypes(await readFile(join(import.meta.dirname, `../runtime/${name}.ts`), "utf8"));
+    entryCode.set(name, code);
+  }
+  return code;
+}
 /** Pinned so a workerd upgrade doesn't silently change app semantics. */
 const COMPAT_DATE = "2026-11-01";
 
@@ -472,8 +482,7 @@ export class Runtime {
         const eg = egress = createEgressProxy(spec.egress, (l) => this.logs.push(spec.appId, "system", l));
         await new Promise<void>((res, rej) => eg.once("error", rej).listen(egressSock, res));
       }
-      await copyFile(WORKER, join(run, "worker.js"));
-      await copyFile(WORKER_RUNTIME, join(run, "cresslet-runtime.js"));
+      for (const name of ENTRY) await writeFile(join(run, `${name}.js`), await entryJs(name));
       await copyFile(join(p.deploy(spec.deployId), "server.js"), join(run, "app.js"));
       await writeFile(
         join(run, "app.json"),

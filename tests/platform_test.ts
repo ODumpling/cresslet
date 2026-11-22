@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { type Config, loadConfig } from "../server/config.ts";
+import { stripTypes } from "../server/strip.ts";
+import "./studio-imports.ts"; // studio modules' ./x.js imports → x.ts
 
 const SERVER = `
 export default {
@@ -243,7 +245,7 @@ test("templates are served", withServer(async (t) => {
     assert.ok(paths.includes(p), `missing ${p}`);
   }
   assert.equal((await t.json("/v1/templates/..%2Fserver")).status, 404);
-  // TanStack Start: a framework build (cresslet.json `build`; the studio builds it itself, studio/start-build.js);
+  // TanStack Start: a framework build (cresslet.json `build`; the studio builds it itself, studio/start-build.ts);
   // SSR everywhere but its built assets
   const tss = list.body.templates.find((x: { name: string }) => x.name === "tanstack-start");
   assert.ok(tss && tss.studio !== false, "tanstack-start is offered in the studio");
@@ -275,6 +277,15 @@ test("studio is cross-origin isolated", withServer(async (t) => {
   assert.equal(versioned.status, 200);
   assert.equal(await versioned.text(), await (await t.call("/app.js")).text());
   assert.equal((await t.call(src.replace("app.js", "vendor/editor.js"))).status, 200);
+  // The studio's modules are TypeScript, served as the JavaScript their URLs name: types stripped, lines kept.
+  const mod = await t.call(src.replace("app.js", "store.js"));
+  assert.equal(mod.headers.get("content-type"), "text/javascript; charset=utf-8");
+  assert.equal(await mod.text(), stripTypes(await readFile(join(import.meta.dirname, "../studio/store.ts"), "utf8")));
+  const etag = mod.headers.get("etag");
+  assert.ok(etag);
+  const again = await t.call("/store.js", { headers: { "if-none-match": etag } });
+  assert.equal(again.status, 304);
+  assert.equal((await t.call("/no-such-module.js")).status, 404);
   const copy = await t.call(src.replace("app.js", "index.html")); // the studio by another path: still unframeable
   await copy.body?.cancel();
   assert.equal(copy.headers.get("content-security-policy"), "frame-ancestors 'none'");
@@ -351,7 +362,7 @@ test("a configured preview host is normalized and its name reserved", withServer
 }, { previewHost: "Sandbox.Test.Local." } as never));
 
 test("the studio's dotenv filter matches the server's", async () => {
-  const studioPlugin = "../studio/cresslet-plugin.js"; // untyped browser module
+  const studioPlugin = "../studio/cresslet-plugin.ts"; // browser module: typed by studio/tsconfig.json, not this program
   const { publicDotenv } = await import(studioPlugin);
   const { publicDotenvText } = await import("../server/deploys.ts");
   const cases = [

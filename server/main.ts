@@ -173,7 +173,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
       });
     }
     const path = url.pathname.replace(VERSIONED, "");
-    const res = await serveDir(path === url.pathname ? req : new Request(new URL(path + url.search, url), req), STUDIO);
+    const res = await serveDir(path === url.pathname ? req : new Request(new URL(path + url.search, url), req), STUDIO, { stripTs: true });
     const h = new Headers(res.headers);
     for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
     // Studio files aren't content-hashed: always revalidate (ETag), or a CDN/browser can pair new HTML

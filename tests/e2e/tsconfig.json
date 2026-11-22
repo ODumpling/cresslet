@@ -1,0 +1,6 @@
+{
+  // The browser e2e scripts (Node runs them directly; Playwright from this directory's package.json).
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "typeRoots": ["../../node_modules/@types"] },
+  "include": ["*.ts"]
+}

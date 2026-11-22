@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
 import { createBindings } from "../server/bindings.ts";
+import "./studio-imports.ts"; // studio modules' ./x.js imports → x.ts
 
 const ROOT = join(import.meta.dirname, "..");
 const SDK = await readFile(join(ROOT, "studio/vendor/cresslet-sdk.js"), "utf8");
@@ -123,7 +124,7 @@ test("host /db/batch: atomic, nests in an app transaction, validates its input",
 });
 
 test("studio: `cresslet` in server code is the vendored SDK (virtual module), not node_modules", async () => {
-  const plugin = "../studio/cresslet-plugin.js"; // untyped browser module
+  const plugin = "../studio/cresslet-plugin.ts"; // browser module: typed by studio/tsconfig.json, not this program
   const { createCresslet } = await import(plugin);
   let options: { plugins: { name: string; setup(b: unknown): void }[] } | undefined;
   const c = {
