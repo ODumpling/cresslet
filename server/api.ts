@@ -33,6 +33,7 @@ import {
   type Store,
   type Token,
   AccountDisabledError,
+  accountLock,
   inviteLock,
 } from "./store.ts";
 import { orgRefs, orgRoutes } from "./orgs.ts";
@@ -355,6 +356,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   /** New apps and pages per account per hour: deleting doesn't give the allowance back, so create/delete loops stop. */
   const takeCreate = async (acct: Account) => {
     // Runs right before the insert: an account disabled while its upload was in flight gets nothing new online.
+    // Its lock (disabling takes it) keeps a disable from landing between this check and the insert.
+    await store.db.lock(accountLock(acct.id));
     if ((await store.accountById(acct.id))?.disabled_at) throw new HttpError(403, "this account is disabled", "account_disabled");
     if (isSiteAdmin(cfg, acct)) return;
     if (!await accountCreates.take(acct.id)) {
