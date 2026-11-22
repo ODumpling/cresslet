@@ -5,7 +5,7 @@
 import type { ProjectGitState, PullRequest, Stack, StackChange } from "../../../git.ts";
 import { ExtLink } from "../../ui/icons.tsx";
 
-export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside, onLand }: {
+export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside, onLand, onFold }: {
   stack: Stack;
   state: ProjectGitState;
   busy: boolean;
@@ -13,6 +13,8 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
   pulls?: Record<string, PullRequest>;
   /** Opens or updates a pull request per change. */
   onSubmit: () => void;
+  /** Folds a change into the one below it. */
+  onFold: (change: StackChange) => void;
   /** Lands a change and the ones below it into the default branch. */
   onLand: (change: StackChange) => void;
   /** A change pushed to on GitHub: pulled in as the stack's top, or carried on from as a branch of its own. */
@@ -43,6 +45,7 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
             {!aside && on ? (
               <span className="stack-actions">
                 {c !== top ? <button className="btn sm" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button> : null}
+                {c !== stack.changes[0] ? <button className="btn sm" type="button" disabled={busy} onClick={() => onFold(c)} aria-label={`Fold change ${c.position}, ${c.title}, into change ${c.position - 1}`}>Fold</button> : null}
                 {state.activeBranch === top.branch ? <button className="btn sm" type="button" disabled={busy} onClick={() => onLand(c)}
                   aria-label={c === stack.changes[0] ? `Land change ${c.position} in ${state.defaultBranch}` : `Land changes ${stack.changes[0].position} to ${c.position} in ${state.defaultBranch}`}>Land</button> : null}
               </span>

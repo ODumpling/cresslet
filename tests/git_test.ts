@@ -1059,3 +1059,24 @@ test("stack: land up to a change (each pull request merged with its own turn); d
   const merged = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: d1.branch, headSha: d1.sha });
   assert.deepEqual([merged.status, merged.body.fastForward, merged.body.landed], [200, false, { stack: "four", changes: 1 }]);
 }));
+
+test("stack: fold a change into the one below (its pull request on that one's base, that one's closed with a note)", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];
+  const add = async (from: string, baseSha: string, title: string, x: string) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: files(x), title, prompt: `${title}!` })).body;
+  const c1 = await add("main", linked.sha, "One", "1");
+  const c2 = await add(c1.branch, c1.sha, "Two", "2");
+  await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: c1.stack.id });
+  const repo = t.gh.repo("octo/shop"), pulls = repo.pulls;
+  const bottom = await t.send("POST", "/v1/apps/shop/git/stack/fold", tok, { change: c1.change.id });
+  assert.deepEqual([bottom.status, bottom.body.error], [409, "bottom"]);
+  const f = await t.send("POST", "/v1/apps/shop/git/stack/fold", tok, { change: c2.change.id });
+  assert.equal(f.status, 200, JSON.stringify(f.body));
+  assert.deepEqual([f.body.change.position, f.body.change.title, f.body.change.prompt], [1, "One", "One!\n\nTwo!"]);
+  assert.deepEqual(pulls.map((p) => [p.state, p.base, p.title]), [["closed", "main", "One"], ["open", "main", "One"]]);
+  assert.match(pulls[0].comments?.[0] ?? "", /^Folded into #2 /);
+  assert.equal(repo.refs.has(c1.branch), false);
+  const s = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
+  assert.deepEqual(s.changes.map((c: { branch: string; pull: number }) => [c.branch, c.pull]), [[c2.branch, 2]]);
+}));

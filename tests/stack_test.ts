@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Pull, Repo, SourceControlProvider } from "../server/git.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, followed, goBack, landed, landUpTo, MAX_STACK, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, goBack, landed, landUpTo, MAX_STACK, pullIn, readStacks, restore,
   setAsideBranches, slug, stackPulls, submitStack,
 } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
@@ -31,6 +31,7 @@ function fakeProvider() {
   const keep = new Set<string>(); // branches GitHub won't delete (a rule)
   const guarded = new Set<string>(); // protected branches
   const failUpdate = new Set<number>(); // pull requests GitHub won't change (once)
+  const comments: { n: number; body: string }[] = [];
   const contains = (sha: string, of: string) => { // `of` is `sha` or one of its ancestors
     for (let x: string | null = sha; x; x = commits.get(x)?.parent ?? null) if (x === of) return true;
     return false;
@@ -41,10 +42,10 @@ function fakeProvider() {
     return x;
   };
   const p: SourceControlProvider & {
-    refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; keep: Set<string>; guarded: Set<string>; failUpdate: Set<number>;
+    refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; keep: Set<string>; guarded: Set<string>; failUpdate: Set<number>; comments: { n: number; body: string }[];
     push(branch: string, files: Record<string, string>): string;
   } = {
-    refs, commits, pulls, refuse, keep, guarded, failUpdate,
+    refs, commits, pulls, refuse, keep, guarded, failUpdate, comments,
     async branchProtection(_r: Repo, branch: string) {
       return guarded.has(branch) ? `${branch} is protected on GitHub` : null;
     },
@@ -71,6 +72,9 @@ function fakeProvider() {
       if (failUpdate.delete(n)) throw new HttpError(502, "GitHub: Server Error", "github_error");
       Object.assign(pullOf(n), Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)));
       return { ...pullOf(n) };
+    },
+    async commentPull(_r: Repo, n: number, body: string) {
+      comments.push({ n, body });
     },
     async pullStatus(_r: Repo, n: number) {
       const x = pullOf(n);
@@ -789,6 +793,67 @@ test("stack: landing a stack never submitted (no pull requests), with GitHub hav
   };
   const l = await landUpTo(t.ctx, c2.change.id);
   assert.deepEqual([l.sha, t.provider.refs.get("main"), t.provider.pulls.length, l.deleted], [c2.sha, c2.sha, 0, [c2.branch]]);
+});
+
+test("stack: folding change 3 into 2 leaves a stack of two; its pull request takes 2's base, 2's is closed with a note", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Bluer", "3"));
+  await submitStack(t.ctx, c1.stack.id);
+  const pr = t.provider.pulls;
+  const f = await fold(t.ctx, c3.change.id);
+  assert.deepEqual([f.change.position, f.change.title, f.change.baseSha, f.change.branch, f.dropped], [2, "Two", c1.sha, c3.branch, c2.change.id]);
+  assert.equal(f.change.prompt, "Two, please\n\nBluer, please");
+  const [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((c) => [c.position, c.title, c.branch]), [[1, "One", c1.branch], [2, "Two", c3.branch]]);
+  // Its diff against change 1 holds both turns: change 3's commit sits on change 2's.
+  assert.equal(t.provider.commits.get(c3.sha)!.parent, c2.sha);
+  assert.deepEqual(pr.map((x) => [x.state, x.base, x.title]), [["open", "main", "One"], ["closed", c1.branch, "Two"], ["open", c1.branch, "Two"]]);
+  assert.deepEqual(t.provider.comments, [{ n: 2, body: `Folded into #3 (Cresslet): ${c3.branch} now holds this change and the one that was above it.` }]);
+  assert.equal(t.provider.refs.has(c2.branch), false);
+  assert.match(pr[0].body, /\| {2}\| 2 · Two \| #3 \|\n\| → \| 1 · One \| #1 \|/); // tables refreshed
+});
+
+test("stack: folding a change with no pull request onto one that has one: it gets one on that base", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  await submitStack(t.ctx, c1.stack.id);
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Bluer", "2"));
+  await fold(t.ctx, c2.change.id);
+  assert.deepEqual(t.provider.pulls.map((x) => [x.head, x.base, x.state, x.title]), [[c1.branch, "main", "closed", "One"], [c2.branch, "main", "open", "One"]]);
+  assert.deepEqual(t.provider.comments.map((x) => x.body.split(" (")[0]), ["Folded into #2"]);
+});
+
+test("stack: folding moves the changes above down; never the bottom, nor one set aside; never submitted works too; refused, nothing changes", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const code = (e: unknown) => (e as HttpError).code;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  const c4 = ok(await t.change(c3.branch, c3.sha, "Four", "4"));
+  await assert.rejects(fold(t.ctx, c1.change.id), (e) => code(e) === "bottom");
+  await goBack(t.ctx, c3.change.id); // 4 set aside
+  await assert.rejects(fold(t.ctx, c4.change.id), (e) => code(e) === "not_found");
+  await restore(t.ctx, c1.stack.id);
+  const f = await fold(t.ctx, c2.change.id); // never submitted
+  assert.deepEqual([f.pullErrors, t.provider.pulls.length], [undefined, 0]);
+  let [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((c) => [c.position, c.title, c.baseSha]), [[1, "One", main], [2, "Three", c2.sha], [3, "Four", c3.sha]]);
+  assert.equal(t.provider.refs.has(c1.branch), false);
+  // A next change goes on top at the next position.
+  const c5 = ok(await t.change(c4.branch, c4.sha, "Five", "5"));
+  assert.equal(c5.change.position, 4);
+  // Its pull request can't be moved onto the base: refused, nothing changes.
+  await submitStack(t.ctx, s.id);
+  t.provider.failUpdate.add(t.provider.pulls.find((x) => x.head === c4.branch)!.number);
+  await assert.rejects(fold(t.ctx, c4.change.id), (e) => code(e) === "github_error");
+  [s] = await readStacks(t.ctx);
+  assert.equal(s.changes.length, 4);
+  assert.equal(t.provider.refs.get(c3.branch), c3.sha);
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {

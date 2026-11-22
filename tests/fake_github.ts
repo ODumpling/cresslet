@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 export type GhUser = { id: number; login: string; email: string };
 type Entry = { mode: string; sha: string };
 type Commit = { tree: Map<string, Entry>; parents: string[]; message: string; author: { name: string; email: string } | null; by: string };
-type Pull = { number: number; head: string; base: string; title: string; body: string; state: "open" | "closed"; merged?: boolean; reviews: { user: { login: string }; state: string }[] };
+type Pull = { number: number; head: string; base: string; title: string; body: string; state: "open" | "closed"; merged?: boolean; comments?: string[]; reviews: { user: { login: string }; state: string }[] };
 type Repo = {
   id: number; owner: string; name: string; private: boolean; default_branch: string; push: Set<string>; refs: Map<string, string>;
   protected: Set<string>; rulesets?: boolean; pulls: Pull[];
@@ -308,6 +308,12 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       return json(201, pullJson(pr));
     }
     if ((x = /^\/pulls\/(\d+)\/reviews$/.exec(rest))) return json(200, r.pulls[Number(x[1]) - 1]?.reviews ?? []);
+    if ((x = /^\/issues\/(\d+)\/comments$/.exec(rest)) && req.method === "POST") {
+      const pr = r.pulls[Number(x[1]) - 1];
+      if (!pr) return json(404, { message: "Not Found" });
+      (pr.comments ??= []).push(body.body);
+      return json(201, { body: body.body });
+    }
     if ((x = /^\/pulls\/(\d+)$/.exec(rest))) {
       const pr = r.pulls[Number(x[1]) - 1];
       if (!pr) return json(404, { message: "Not Found" });
