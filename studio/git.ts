@@ -320,7 +320,9 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     openPullRequest: (title?: string) => serial(async () => {
       const s = o.state()!;
       if (s.dirty) await syncNow(`Update ${s.activeBranch}`);
-      return (await post<{ pull: PullRequest }>("/pulls", { branch: s.activeBranch, ...(title ? { title } : {}) })).pull;
+      const r = await post<{ pull: PullRequest; stackErrors?: Submitted[] }>("/pulls", { branch: s.activeBranch, ...(title ? { title } : {}) });
+      // A change of a stack: its stack was submitted; what GitHub refused for the rest of it comes along.
+      return { ...r.pull, stackErrors: r.stackErrors };
     }),
     /** The workspace's change count (studio/src/views/workspace/engine.ts bumps it). */
     get revision() {

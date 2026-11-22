@@ -442,6 +442,8 @@ test("stack: a pull request merged by hand is said, not opened again; a reused o
   const again = await submitStack(t.ctx, c1.stack.id);
   assert.deepEqual(again.pulls.map((x) => [x.number, !!x.merged, x.error]), [[2, true, undefined], [1, false, undefined]]);
   assert.equal(t.provider.pulls.length, 2);
+  // The change above one merged already is based where that one was (the default branch).
+  assert.equal(t.provider.pulls[0].base, "main");
 });
 
 test("stack: going back closes the set-aside changes' pull requests; restore reopens them", async () => {

@@ -960,6 +960,13 @@ test("stack: submitted as a chain of pull requests (as the user), their review a
   assert.equal((await t.send("GET", `/v1/apps/shop/git/pulls?branch=${encodeURIComponent(c2.branch)}`, tok)).body.pull.number, 2);
   assert.equal((await t.send("GET", `/v1/apps/shop/git/pulls?branch=${encodeURIComponent(c4.branch)}`, tok)).body.pull, null);
   const opened = await t.send("POST", "/v1/apps/shop/git/pulls", tok, { branch: c4.branch });
-  assert.deepEqual([opened.status, opened.body.pull.number], [200, 4]);
+  assert.deepEqual([opened.status, opened.body.pull.number], [201, 4]);
   assert.deepEqual([pulls.length, pulls[3].base], [4, c3.branch]);
+  // Closed on GitHub: none open (Source control offers to open it again); a change set aside gets none.
+  pulls[3].state = "closed";
+  assert.equal((await t.send("GET", `/v1/apps/shop/git/pulls?branch=${encodeURIComponent(c4.branch)}`, tok)).body.pull, null);
+  await t.send("POST", "/v1/apps/shop/git/stack/back", tok, { change: c3.change.id });
+  const aside = await t.send("POST", "/v1/apps/shop/git/pulls", tok, { branch: c4.branch });
+  assert.deepEqual([aside.status, aside.body.error], [409, "set_aside"]);
+  assert.equal(pulls.length, 4);
 }));

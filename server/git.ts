@@ -1231,7 +1231,7 @@ export function gitRoutes(
     if (branch === repo.default_branch) throw new HttpError(400, `a pull request needs a branch other than ${branch}`);
     // A change of a stack: its stack is submitted (one pull request per change), not a second one into the default branch.
     const stacked = await changePull({ provider: client, store, appId: a.id, repo, r }, branch, true);
-    if (stacked) return c.json({ pull: stacked.pull });
+    if (stacked) return c.json({ pull: stacked.pull, ...(stacked.errors ? { stackErrors: stacked.errors } : {}) }, stacked.created ? 201 : 200);
     const { pull, created } = await client.openPull(r, {
       head: branch, base: repo.default_branch,
       title: message(input.title, `Update ${a.name} (${branch})`).split("\n")[0].slice(0, 200),
