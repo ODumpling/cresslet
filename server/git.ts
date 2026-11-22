@@ -484,9 +484,11 @@ export class GitHub implements SourceControlProvider {
     const full = await Promise.all([input.change, input.top, input.parent].map((sha) => this.#entries(r, sha))) as [Entries, Entries, Entries];
     const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
     // (Taking those from the parent would need a commit the workspace can't make.)
-    const refused = [...outside.both, ...outside.take.map((x) => x.path)].sort();
+    // An executable the change deleted or made plain, still so at the top: the studio's commit can't make it one again.
+    const exec = [...full[2].values()].filter((e) => e.mode === "100755" && full[0].get(e.path)?.mode !== "100755" && full[1].get(e.path)?.mode !== "100755");
+    const refused = [...new Set([...outside.both, ...outside.take.map((x) => x.path), ...exec.map((e) => e.path)])].sort();
     if (refused.length) {
-      throw Object.assign(new HttpError(409, `${refused.join(", ")} can't be undone in the studio (outside what it holds, or binary): undo it on GitHub`, "merge_unresolvable"), { extra: { paths: refused } });
+      throw Object.assign(new HttpError(409, `${refused.join(", ")} can't be undone in the studio (outside what it holds, or an executable): undo it on GitHub`, "merge_unresolvable"), { extra: { paths: refused } });
     }
     return this.#mergeHeld(r, full, input.subdir, outside, ["now", `undo ${input.label}`]);
   }
@@ -542,14 +544,14 @@ export class GitHub implements SourceControlProvider {
       out.set(p, new TextEncoder().encode(`<<<<<<< ${input.head}\n${nl(ot)}=======\n${nl(tt)}>>>>>>> ${input.into}\n`));
     });
     if (binary.length) throw unresolvable(binary.map((p) => prefix + p));
-    // A file where the result has a folder (a file deleted, then one added under its name): can't be held.
-    const clash = [...out.keys()].filter((p) => [...out.keys()].some((q) => q.startsWith(p + "/"))).sort();
-    if (clash.length) throw unresolvable(clash.map((p) => prefix + p));
     // Dotenv files (merged outside the studio's part): the result's public entries, as the workspace holds them.
     for (const x of envs) {
       const d = await this.#blob(r, x.sha!);
       out.set(x.path.slice(prefix.length), DOTENV.test(x.path) ? publicDotenv(d) : d);
     }
+    // A file where the result has a folder (a file deleted, then one added under its name): can't be held.
+    const clash = [...out.keys()].filter((p) => [...out.keys()].some((q) => q.startsWith(p + "/"))).sort();
+    if (clash.length) throw unresolvable(clash.map((p) => prefix + p));
     const files: DeployFile[] = [...out].sort(([x], [y]) => (x < y ? -1 : 1)).map(([path, d]) => {
       const t = text(d);
       return t === null ? { path, data: Buffer.from(d).toString("base64"), encoding: "base64" } : { path, data: t, encoding: "utf8" };
@@ -1237,8 +1239,9 @@ export function gitRoutes(
     const { a, r, repo, client } = await linked(c, "deploy");
     const change = c.req.query("change");
     if (!change) throw new HttpError(400, "change must be a change's id");
+    const seen = c.req.query("sha") != null ? { sha: shaOf(c.req.query("sha"), "sha"), base: shaOf(c.req.query("base"), "base") } : undefined;
     c.header("cache-control", "no-store");
-    return c.json(await undoPlan({ provider: client, store, appId: a.id, repo, r }, change));
+    return c.json(await undoPlan({ provider: client, store, appId: a.id, repo, r }, change, seen));
   });
   // Folding a change into the one below it.
   app.post("/apps/:name/git/stack/fold", async (c) => {

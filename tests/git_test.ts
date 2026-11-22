@@ -1131,3 +1131,28 @@ test("stack: undo refuses a change with a merge in it, and a result holding a fi
   const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}`, tok);
   assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["dir"]]);
 }));
+
+test("stack: undo refuses bringing back an executable, and a folder's dotenv file where the result has a file", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const main = t.gh.write(t.gh.repo("octo/shop"), "main", { "run.sh": "#!/bin/sh\n" });
+  t.gh.commit(main).tree.get("run.sh")!.mode = "100755";
+  // Change 1 deleted the executable run.sh: undone, the studio's commit would bring it back as a plain file.
+  const c1 = await add("main", main, "Drop run.sh", {});
+  const c2 = await add(c1.branch, c1.sha, "Add b", { "b.txt": "b\n" });
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.deepEqual([u.status, u.body.error, u.body.paths], [409, "merge_unresolvable", ["run.sh"]]);
+
+  // Change 4 deleted the file `config`, change 5 added `config/.env`: undoing 4 would hold both.
+  const c3 = await add(c2.branch, c2.sha, "Add config", { "b.txt": "b\n", config: "c\n" });
+  const c4 = await add(c3.branch, c3.sha, "Drop config", { "b.txt": "b\n" });
+  const c5 = await add(c4.branch, c4.sha, "Add config/.env", { "b.txt": "b\n", "config/.env": "A=1\n" });
+  assert.ok(c5.branch, JSON.stringify(c5));
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}`, tok);
+  assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["config"]]);
+  // The change as the studio saw it: since folded into (another base), refused.
+  const w = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}&sha=${c4.sha}&base=${c2.sha}`, tok);
+  assert.deepEqual([w.status, w.body.error], [409, "conflict"]);
+}));

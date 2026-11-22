@@ -664,6 +664,9 @@ test("git: undoing a change loads the result; clean, it's committed at once as \
   assert.deepEqual(c.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/stack/undo"]); // nothing committed
   c.files.list = [{ path: "a.txt", data: "<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n" }];
   await assert.rejects(c.git.commitChange("Fix it", "resolve"), (e: Json) => e.code === "conflicts_left");
+  // As the workspace may export text: base64.
+  c.files.list = [{ path: "a.txt", data: Buffer.from("<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n").toString("base64"), encoding: "base64" }];
+  await assert.rejects(c.git.commitChange("Fix it", "resolve"), (e: Json) => e.code === "conflicts_left");
   // Pushing it (or opening a pull request, switching branch): a change of its own too, never a commit onto the top.
   await assert.rejects(c.git.sync("Update"), (e: Json) => e.code === "conflicts_left");
   c.files.list = [{ path: "a.txt", data: "x" }];

@@ -152,6 +152,20 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
 
   const revision = () => o.revision?.() ?? 0;
 
+  /** Conflicted `paths` still holding their markers (text the workspace exports as base64 too). */
+  const markersLeft = (paths: string[], files: GitFile[]) => paths.filter((p) => files.some((f) => {
+    if (f.path !== p) return false;
+    let t = f.data;
+    if (f.encoding === "base64") {
+      try {
+        t = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)));
+      } catch {
+        return false; // binary: never given markers
+      }
+    }
+    return /^(?:<<<<<<<|>>>>>>>) /m.test(t);
+  }));
+
   /** `snap`: files already read (and the revision before), to commit exactly those. */
   async function syncNow(message: string, snap?: { files: GitFile[]; rev: number }): Promise<{ sha: string; changed: boolean; files: GitFile[] }> {
     const s = o.state();
@@ -164,7 +178,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     const rev = snap?.rev ?? revision(); // before the snapshot: a change after it keeps the workspace dirty
     const files = snap?.files ?? await o.files();
     // A merge being resolved: not committed while a conflicted file still has its markers.
-    const left = (s.conflicts ?? []).filter((p) => files.some((f) => f.path === p && f.encoding !== "base64" && /^(?:<<<<<<<|>>>>>>>) /m.test(f.data)));
+    const left = markersLeft(s.conflicts ?? [], files);
     if (left.length) throw Object.assign(new Error(`resolve the merge conflicts first (markers left in ${left.join(", ")})`), { code: "conflicts_left" });
     let r: { sha: string; changed: boolean };
     try {
@@ -204,7 +218,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     const files = await o.files();
     // An undo being finished: its title, and not while its conflicts have markers left.
     if (s.undo) {
-      const left = s.undo.conflicts.filter((p) => files.some((f) => f.path === p && f.encoding !== "base64" && /^(?:<<<<<<<|>>>>>>>) /m.test(f.data)));
+      const left = markersLeft(s.undo.conflicts, files);
       if (left.length) throw Object.assign(new Error(`resolve the undo's conflicts first (markers left in ${left.join(", ")})`), { code: "conflicts_left" });
       title = s.undo.title;
     }
@@ -318,7 +332,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       if (s.dirty) await syncNow(`Work in progress on ${s.activeBranch}`);
       if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: try again"), { code: "changed" });
       const rev = revision();
-      const r = await o.api<{ intoSha: string; headSha: string; conflicts: string[]; files: GitFile[] }>(path(`/conflicts?branch=${encodeURIComponent(s.activeBranch)}`));
+      // (Read again: an undo pushed is a change of its own, on a branch of its own.)
+      const r = await o.api<{ intoSha: string; headSha: string; conflicts: string[]; files: GitFile[] }>(path(`/conflicts?branch=${encodeURIComponent(o.state()!.activeBranch)}`));
       unchangedSince(rev, "loading the merge"); // not over an edit made meanwhile
       const merging = () => set({ headSha: r.headSha, mergeParent: r.intoSha, conflicts: r.conflicts, dirty: true });
       try {
@@ -339,7 +354,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     openPullRequest: (title?: string) => serial(async () => {
       const s = o.state()!;
       if (s.dirty) await syncNow(`Update ${s.activeBranch}`);
-      const r = await post<{ pull: PullRequest; stackErrors?: Submitted[] }>("/pulls", { branch: s.activeBranch, ...(title ? { title } : {}) });
+      const r = await post<{ pull: PullRequest; stackErrors?: Submitted[] }>("/pulls", { branch: o.state()!.activeBranch, ...(title ? { title } : {}) });
       // A change of a stack: its stack was submitted; what GitHub refused for the rest of it comes along.
       return { ...r.pull, stackErrors: r.stackErrors };
     }),
@@ -448,7 +463,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: undo again"), { code: "changed" });
       const s = o.state()!;
       const rev = revision();
-      const r = await o.api<{ title: string; top: { branch: string; sha: string }; conflicts: string[]; files: GitFile[] }>(path(`/stack/undo?change=${encodeURIComponent(change.id)}`));
+      const r = await o.api<{ title: string; top: { branch: string; sha: string }; conflicts: string[]; files: GitFile[] }>(path(`/stack/undo?change=${encodeURIComponent(change.id)}&sha=${change.sha}&base=${change.baseSha}`));
       if (r.top.branch !== s.activeBranch || r.top.sha !== s.headSha) throw stackChanged();
       unchangedSince(rev, "loading the undo");
       const holding = () => set({ dirty: true, undo: { title: r.title, conflicts: r.conflicts } });

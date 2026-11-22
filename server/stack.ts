@@ -844,12 +844,14 @@ export function fold(ctx: Ctx, changeId: string, into: string): Promise<{ change
  * touched where it did comes back with conflict markers (`conflicts`), for the builder or the user to resolve first.
  * The top change itself is undone by going back (409 `top`).
  */
-export function undoPlan(ctx: Ctx, changeId: string): Promise<{ change: string; title: string; top: { branch: string; sha: string }; conflicts: string[]; files: DeployFile[] }> {
+export function undoPlan(ctx: Ctx, changeId: string, seen?: { sha: string; base: string }): Promise<{ change: string; title: string; top: { branch: string; sha: string }; conflicts: string[]; files: DeployFile[] }> {
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo, appId } = ctx;
     const open = await store.openStackChanges(appId);
     const c = open.find((x) => x.id === changeId);
     if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
+    // `seen`: the change as the caller saw it (folded into since: it holds more than that).
+    if (seen && (c.sha !== seen.sha || c.base_sha !== seen.base)) throw stackChanged();
     const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
     const top = s.at(-1)!;
     if (top.id === c.id) throw new HttpError(409, `${c.branch} is the stack's top: undo it by going back to the change below`, "top");
