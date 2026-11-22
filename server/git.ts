@@ -9,7 +9,7 @@ import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
-import { type DeployFile, DOTENV, HttpError, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
+import { type DeployFile, deploySource, DOTENV, HttpError, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -889,23 +889,32 @@ export function gitRoutes(
       throw new HttpError(400, "owner and repo required (the GitHub repository's owner and name)");
     }
     const initialSync = input.initialSync ?? "none";
-    if (initialSync !== "push" && initialSync !== "pull" && initialSync !== "none") throw new HttpError(400, "initialSync must be push, pull or none");
+    if (initialSync !== "push" && initialSync !== "pull" && initialSync !== "deploy" && initialSync !== "none") {
+      throw new HttpError(400, "initialSync must be push, pull, deploy or none");
+    }
     let subdir = "";
     if (input.subdir != null && input.subdir !== "") {
       if (typeof input.subdir !== "string") throw new HttpError(400, "subdir must be a path");
       subdir = safePath(input.subdir.replace(/\/+$/, ""));
     }
-    const files = initialSync === "push" ? sourceFiles(cfg, input.files as DeployFile[]) : null;
+    let files = initialSync === "push" ? sourceFiles(cfg, input.files as DeployFile[]) : null;
+    if (initialSync === "deploy") {
+      // The live deploy's own source (an app deployed before it had a repository, from the CLI or another studio).
+      const live = (await store.appById(a.id))?.current_deploy_id; // as of now: a deploy may have landed meanwhile
+      const source = live ? await deploySource(cfg, a.id, live) : null;
+      if (!source?.length) throw new HttpError(409, `${a.name}'s live deploy has no source to push (deployed without it)`, "no_source");
+      files = sourceFiles(cfg, source.map(([path, b]) => ({ path, data: Buffer.from(b).toString("base64"), encoding: "base64" })));
+    }
     const { client, author } = await as(c.get("account")!);
     const r = { owner: input.owner, name: input.repo };
     const info = await client.repo(r);
     if (!info.push) throw new HttpError(403, `you can't push to ${info.fullName} on GitHub`, "git_forbidden");
     let sha = await client.branchHead(r, info.defaultBranch);
     let out: DeployFile[] | undefined;
-    if (initialSync === "push") {
+    if (files) {
       sha ??= await client.initialize(r, info.defaultBranch, author);
       sha = (await client.commitTree(r, {
-        branch: info.defaultBranch, baseSha: sha, subdir, files: files!, author,
+        branch: info.defaultBranch, baseSha: sha, subdir, files, author,
         message: message(input.message, `Sync ${a.name} from Cresslet`),
       })).sha;
     } else if (initialSync === "pull") {

@@ -1,5 +1,6 @@
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, posix } from "node:path";
+import { existsSync } from "node:fs";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join, posix, relative } from "node:path";
 import { type Config, paths, previewAppName } from "./config.ts";
 import { type App, type Deploy, id, type Store } from "./store.ts";
 import { normalizeCrons } from "./cron.ts";
@@ -120,6 +121,18 @@ export function sourceFiles(cfg: Config, files: DeployFile[]): [string, Uint8Arr
   if (files.length > cfg.limits.deployFiles) throw new HttpError(413, `too many files (max ${cfg.limits.deployFiles})`, "too_large");
   const wanted = files.filter((f) => !NOT_SOURCE.test(safePath(String(f?.path))));
   return decodeFiles(cfg, wanted, { bytes: 0, files: 0 }).decoded.map(([p, d]) => [p, DOTENV.test(p) ? publicDotenv(d) : d]);
+}
+
+/** The project source stored with a deploy (its `sources`), sorted by path; null when it was deployed without it. */
+export async function deploySource(cfg: Config, appId: string, deployId: string): Promise<[string, Uint8Array][] | null> {
+  const root = join(paths(cfg, appId).deploy(deployId), "source");
+  if (!existsSync(root)) return null;
+  const out: [string, Uint8Array][] = [];
+  for (const e of (await readdir(root, { recursive: true, withFileTypes: true })).filter((e) => e.isFile())) {
+    const abs = join(e.parentPath, e.name);
+    out.push([relative(root, abs).split("\\").join("/"), await readFile(abs)]);
+  }
+  return out.sort(([x], [y]) => x.localeCompare(y));
 }
 
 const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
