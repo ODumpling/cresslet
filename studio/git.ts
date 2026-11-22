@@ -342,8 +342,10 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       let synced: { sha: string; files: GitFile[] } | undefined;
       if (was.dirty && !was.mergeParent && (turn || was.activeBranch === was.defaultBranch)) {
         log(`committing the changes here as a change…`);
-        const c = await changeNow(turn?.title ?? "Edits made in the studio", turn?.prompt ?? "");
-        if (!o.state()!.dirty) synced = c; // nothing more since: that commit is what's built
+        const rev0 = revision();
+        synced = await changeNow(turn?.title ?? "Edits made in the studio", turn?.prompt ?? "");
+        // An edit made meanwhile isn't in that change: it stays here, unpushed (not synced on its own, onto main).
+        unchangedSince(rev0, "deploying");
         signal?.throwIfAborted();
       }
       const s = o.state()!;

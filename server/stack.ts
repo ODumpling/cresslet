@@ -38,7 +38,7 @@ export interface ChangeView {
 export interface StackView {
   id: string;
   name: string;
-  /** The default branch's commit the bottom change was cut from. */
+  /** The commit the bottom change was cut from (the default branch's, or a branch of its own's). */
   baseSha: string;
   /** Bottom first: the top change (the last) holds them all. */
   changes: ChangeView[];
@@ -169,10 +169,11 @@ export async function readStacks(ctx: Ctx): Promise<StackView[]> {
 }
 
 /**
- * Before `branch` is merged into the default branch: a change below its stack's top can't be (its stack would be
- * left open on a branch that's gone). Landing part of a stack is a later step; until then the top lands them all.
+ * Before `branch` is merged into the default branch, or committed to: a change below its stack's top can't be (merged,
+ * its stack would be left open on a branch that's gone; committed to, the changes above wouldn't hold it). Landing
+ * part of a stack is a later step; until then the top lands them all.
  */
-export async function assertMergeable(ctx: Ctx, branch: string) {
+export async function assertNotBelowTop(ctx: Ctx, branch: string) {
   for (const s of byStack(await ctx.store.openStackChanges(ctx.appId))) {
     const c = s.find((x) => x.branch === branch), top = s.at(-1)!;
     if (c && c !== top) throw notOnTop(c, top);
@@ -180,15 +181,18 @@ export async function assertMergeable(ctx: Ctx, branch: string) {
 }
 
 /**
- * `branch` at `headSha` was merged into the default branch at `mergedSha`. If that's an open stack's top change, the
- * whole stack is in: it's landed (that change and the ones below it: one added meanwhile isn't), and with
- * `deleteBelow` the branches below the top go (the merge route deletes the top's) when the app's delete-branch
- * setting is on and they still point at their change.
+ * `branch` at `headSha` was merged into the default branch at `mergedSha`. If that's an open change (its stack's top
+ * when the merge was allowed; another may have been added on it since), it and the ones below it are in: they're
+ * landed, and with `deleteBelow` the branches below it go (the merge route deletes its own) when the app's
+ * delete-branch setting is on and they still point at their change. A change added on top stays open.
  */
 export async function landed(ctx: Ctx, input: { branch: string; headSha: string; mergedSha: string; deleteBelow: boolean }): Promise<{ stack: string; changes: number } | null> {
-  const s = byStack(await ctx.store.openStackChanges(ctx.appId)).find((x) => x.at(-1)!.branch === input.branch);
-  const top = s?.at(-1);
-  if (!s || !top || top.sha !== input.headSha) return null;
+  let s: StackChange[] = [], top: StackChange | undefined;
+  for (const x of byStack(await ctx.store.openStackChanges(ctx.appId))) {
+    const i = x.findIndex((c) => c.branch === input.branch && c.sha === input.headSha);
+    if (i >= 0) [s, top] = [x.slice(0, i + 1), x[i]];
+  }
+  if (!top) return null;
   const n = await ctx.store.landStack(ctx.appId, top.stack_id, top.position, input.mergedSha);
   if (ctx.repo.delete_branch && input.deleteBelow) {
     await pool(s.slice(0, -1), 4, async (c) => {

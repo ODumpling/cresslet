@@ -433,7 +433,7 @@ const gitMod = "../studio/git.ts"; // browser module: typed by studio/tsconfig.j
 const { createGitWorkspace, branchSlug, commitMessage } = await import(gitMod);
 
 /** A linked project over a scripted /v1/apps/:name/git API: the calls it made, its state, what was loaded. */
-function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true, hydrate = null as null | ((f: Json) => Promise<void>), duringSync = () => {}, stackError = null as string | null } = {}) {
+function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true, hydrate = null as null | ((f: Json) => Promise<void>), duringSync = () => {}, duringStack = () => {}, stackError = null as string | null } = {}) {
   const opts = { stackError };
   const calls: { path: string; body?: Json }[] = [];
   const hydrated: Json[] = [];
@@ -451,6 +451,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     }
     if (path.endsWith("/git/stack") && init.method === "POST") {
       if (opts.stackError) throw Object.assign(new Error(opts.stackError), { status: 409, code: opts.stackError });
+      duringStack();
       if (body.from !== "main" && body.from !== "feat/s/1-one") throw Object.assign(new Error("not a change of a stack"), { status: 409, code: "not_on_stack" });
       if (body.files.some((f: Json) => f.data === "same")) return { changed: false, sha: body.baseSha };
       return { changed: true, sha: String(++n).padStart(40, "c"), branch: "feat/s/2-two", change: { position: 2 }, stack: { id: "stk_1", name: "s" } };
@@ -599,6 +600,16 @@ test("deploy on a linked app: commit the branch, merge it into main, build main 
   assert.deepEqual([turn.calls[0].body.title, turn.calls[0].body.prompt, turn.calls[1].body.branch], ["Dark mode", "Dark mode please", "feat/s/2-two"]);
   assert.equal(turn.calls[1].body.headSha, "1".padStart(40, "c"));
   assert.equal(p3.branch, "main");
+
+  // An edit made while that change was being committed: nothing merged, nothing synced on its own (onto main); it
+  // stays here.
+  let late: Json;
+  late = fakeGit({ duringStack: () => void late.rev.n++ });
+  late.state.dirty = true;
+  late.files.list = [{ path: "index.html", data: "same" }]; // the change itself is a no-op: still on main
+  await assert.rejects(late.git.prepareDeploy(), /changed while deploying/);
+  assert.deepEqual(late.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack"]);
+  assert.deepEqual([late.state.activeBranch, late.state.dirty], ["main", true]);
 
   // On main already: just the commit.
   const main = fakeGit();

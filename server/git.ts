@@ -10,7 +10,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
-import { assertMergeable, commitChange, landed, readStacks } from "./stack.ts";
+import { assertNotBelowTop, commitChange, landed, readStacks } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -192,11 +192,16 @@ export class GitHub implements SourceControlProvider {
     if (res.status !== 201) throw ghError(res.status, res.body?.message);
   }
 
-  /** A branch of that name, or of a folder of it (`feat/x` for `feat/x/1-y`), exists: what a refused create meant. */
+  /**
+   * A branch of that name, of a folder of it (`feat/x` for `feat/x/1-y`), or under it (`feat/x/y` for `feat/x`)
+   * exists: what a refused create meant.
+   */
   async #inTheWay(r: Repo, branch: string) {
     const parts = branch.split("/");
-    const names = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
-    return (await Promise.all(names.map((n) => this.branchHead(r, n).catch(() => null)))).some(Boolean);
+    const folders = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
+    // The name itself: GitHub answers a branch, or the refs under it (an array).
+    const self = this.req<unknown>("GET", this.#path(r, `/git/ref/heads/${this.#ref(branch)}`)).then((x) => x.status === 200 && (!Array.isArray(x.body) || x.body.length > 0), () => false);
+    return (await Promise.all([self, ...folders.map((n) => this.branchHead(r, n).then(Boolean, () => false))])).some(Boolean);
   }
 
   /** True if it was deleted (false: it wasn't there). */
@@ -1016,6 +1021,7 @@ export function gitRoutes(
     const branch = branchName(input.branch);
     const baseSha = shaOf(input.baseSha, "baseSha");
     const files = sourceFiles(cfg, input.files as DeployFile[]);
+    await assertNotBelowTop({ provider: client, store, appId: a.id, repo, r }, branch);
     const head = await client.branchHead(r, branch);
     if (!head) throw new HttpError(404, `no branch ${branch} on GitHub`, "branch_not_found");
     if (head !== baseSha) {
@@ -1061,7 +1067,7 @@ export function gitRoutes(
     const into = input.into != null ? branchName(input.into, "into") : repo.default_branch;
     const expect = input.headSha != null ? shaOf(input.headSha, "headSha") : undefined;
     const ctx = { provider: client, store, appId: a.id, repo, r };
-    if (into === repo.default_branch) await assertMergeable(ctx, branch);
+    if (into === repo.default_branch) await assertNotBelowTop(ctx, branch);
     const m = await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
     if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha, upstream: m.mergedSha }).catch((e) => console.error(e));
     // The merge happened: from here on it's reported, whatever else fails. Its files (when they differ from the

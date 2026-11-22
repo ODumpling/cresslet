@@ -819,6 +819,10 @@ test("stack: each change on its own branch, read by a collaborator too; a push o
   const low = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: c1.body.branch });
   assert.deepEqual([low.status, low.body.error], [409, "not_on_top"]);
   assert.equal(t.gh.repo("octo/shop").refs.get("main"), linked.sha);
+  // …or committed to (the changes above wouldn't hold it).
+  const onto = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c1.body.branch, baseSha: c1.body.sha, files: files("x") });
+  assert.deepEqual([onto.status, onto.body.error], [409, "not_on_top"]);
+  assert.equal(t.gh.repo("octo/shop").refs.get(c1.body.branch), c1.body.sha);
 
   // A collaborator (their own GitHub) sees the same stack.
   const bob = await t.account("bob@b.co");
@@ -858,6 +862,10 @@ test("stack: an older branch named like the stack (feat/<name>) moves it to the 
   const c = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: "main", baseSha: linked.sha, files: [...linked.files, { path: "a", data: "1" }], title: "Dark mode" });
   assert.equal(c.status, 201, JSON.stringify(c.body));
   assert.equal(c.body.branch, "feat/dark-mode-2/1-dark-mode");
+  // …and one under the name (feat/x/… when making feat/x): taken too, not an error.
+  t.gh.repo("octo/shop").refs.set("keep/x/old", linked.sha);
+  const taken = await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "keep/x" });
+  assert.deepEqual([taken.status, taken.body.error], [409, "branch_exists"]);
   // From a branch of its own: a stack starts there.
   const own = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: "feat/dark-mode", baseSha: linked.sha, files: [...linked.files, { path: "b", data: "1" }], title: "Go on" });
   assert.deepEqual([own.status, own.body.branch, own.body.change.baseSha], [201, "feat/go-on/1-go-on", linked.sha]);

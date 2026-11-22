@@ -30,7 +30,10 @@ export interface Callbacks {
   deployed(d: Deploy): void;
   /** The AI builder: whether one of its commands runs, and asking the user to approve a deploy. */
   builderRunning(): boolean;
-  /** The request it's working on (a deploy it starts commits that turn as a change first). */
+  /**
+   * The request it's working on: a deploy while one of its commands runs commits that turn as a change first (one
+   * started by hand meanwhile too: the turn's edits are in it).
+   */
   builderTurn(): { title: string; prompt: string } | null;
   approveDeploy(text: string, signal?: AbortSignal): Promise<boolean>;
   /** Source control: the project's repository and branch changed (or it was linked or unlinked). */

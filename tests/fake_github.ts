@@ -177,8 +177,11 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
     let x: RegExpExecArray | null;
     if ((x = /^\/git\/ref\/heads\/(.+)$/.exec(rest))) {
       if (!r.refs.size) return json(409, { message: "Git Repository is empty." });
-      const sha = r.refs.get(decodeURIComponent(x[1]));
-      return sha ? json(200, { ref: `refs/heads/${x[1]}`, object: { sha, type: "commit" } }) : json(404, { message: "Not Found" });
+      const name = decodeURIComponent(x[1]), sha = r.refs.get(name);
+      if (sha) return json(200, { ref: `refs/heads/${name}`, object: { sha, type: "commit" } });
+      // No such branch, but ones under that name: GitHub lists them.
+      const under = [...r.refs].filter(([b]) => b.startsWith(name + "/")).map(([b, s2]) => ({ ref: `refs/heads/${b}`, object: { sha: s2, type: "commit" } }));
+      return under.length ? json(200, under) : json(404, { message: "Not Found" });
     }
     if (rest.startsWith("/branches")) {
       return json(200, [...r.refs].map(([name, sha]) => ({ name, commit: { sha }, protected: r.protected.has(name) })));

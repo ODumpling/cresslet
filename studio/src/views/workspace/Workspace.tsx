@@ -334,6 +334,9 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   async function onDeploy() {
     const btn = deployBtn.current!, e = engine.current;
     if (!e?.cresslet) return;
+    // Linked: what the AI builder is changing becomes its request's change when the request ends; deployed now, it'd
+    // go into the change before.
+    if (e.git.connected && builder.current?.busy()) return void toast("Wait for the AI builder to finish this request, then deploy.", 6000);
     // A new app: the user keeps the generated address or picks their own first. (A cresslet.json that won't parse
     // skips this: the deploy below reports it.)
     let cfg: CressletConfig | undefined, newApp: { app: string; create: boolean } | undefined;

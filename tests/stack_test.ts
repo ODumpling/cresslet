@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Repo, SourceControlProvider } from "../server/git.ts";
-import { assertMergeable, commitChange, type Ctx, landed, readStacks, slug } from "../server/stack.ts";
+import { assertNotBelowTop, commitChange, type Ctx, landed, readStacks, slug } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
 /** Branches and commits in memory: a commit is its files and its parent. */
@@ -200,8 +200,7 @@ test("stack: merging the top change lands the stack, and the branches below go w
   const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
   const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
   const moved = t.provider.push(c2.branch, { "y.txt": "a push from outside" });
-  // Not the top: nothing lands.
-  assert.equal(await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: c1.sha, deleteBelow: true }), null);
+  // Not at its recorded commit: nothing lands.
   assert.equal(await landed(t.ctx, { branch: c3.branch, headSha: "e".repeat(40), mergedSha: c3.sha, deleteBelow: true }), null);
   assert.deepEqual(await landed(t.ctx, { branch: c3.branch, headSha: c3.sha, mergedSha: c3.sha, deleteBelow: true }), { stack: "one", changes: 3 });
   assert.deepEqual(await readStacks(t.ctx), []);
@@ -211,13 +210,15 @@ test("stack: merging the top change lands the stack, and the branches below go w
   const rows = await t.store.db.all<{ state: string; landed_sha: string }>("SELECT state, landed_sha FROM stack_changes ORDER BY position");
   assert.deepEqual(rows.map((r) => [r.state, r.landed_sha]), [["landed", c3.sha], ["landed", c3.sha], ["landed", c3.sha]]);
 
-  // A change added on top after the merge read the stack isn't landed with it; without deleteBelow (the merged files
-  // didn't load), the branches below stay.
+  // A change added on top while the merge ran (the merged one was the top when it was allowed): the merged one and
+  // those below it land, the new one stays open; without deleteBelow (the merged files didn't load), the branches
+  // below stay.
   const e1 = ok(await t.change("main", main, "Six", "6"));
   const e2 = ok(await t.change(e1.branch, e1.sha, "Seven", "7"));
   const e3 = ok(await t.change(e2.branch, e2.sha, "Eight", "8"));
-  await t.store.landStack(t.app.id, e3.stack.id, 2, e2.sha);
+  assert.deepEqual(await landed(t.ctx, { branch: e2.branch, headSha: e2.sha, mergedSha: e2.sha, deleteBelow: true }), { stack: "six", changes: 2 });
   assert.deepEqual((await readStacks(t.ctx)).find((x) => x.id === e3.stack.id)!.changes.map((c) => c.title), ["Eight"]);
+  assert.equal(t.provider.refs.has(e1.branch), false);
   const f1 = ok(await t.change("main", main, "Nine", "9"));
   const f2 = ok(await t.change(f1.branch, f1.sha, "Ten", "10"));
   await landed(t.ctx, { branch: f2.branch, headSha: f2.sha, mergedSha: f2.sha, deleteBelow: false });
@@ -235,9 +236,9 @@ test("stack: a change below its stack's top can't be merged on its own", async (
   const main = t.provider.refs.get("main")!;
   const c1 = ok(await t.change("main", main, "One", "1"));
   const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
-  await assert.rejects(assertMergeable(t.ctx, c1.branch), (e) => (e as HttpError).code === "not_on_top");
-  await assertMergeable(t.ctx, c2.branch);
-  await assertMergeable(t.ctx, "feat/anything");
+  await assert.rejects(assertNotBelowTop(t.ctx, c1.branch), (e) => (e as HttpError).code === "not_on_top");
+  await assertNotBelowTop(t.ctx, c2.branch);
+  await assertNotBelowTop(t.ctx, "feat/anything");
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {
