@@ -1656,10 +1656,14 @@ $("pages-login-btn").addEventListener("click", () => {
 });
 
 let pageUploading = false; // the dialog stays open (Escape, Cancel, × do nothing) while a deploy is in flight
+const PAGE_BUSY = ["page-upload", "page-cancel", "page-close", "page-file", "page-dir"]; // disabled while deploying
 let pageUploadGen = 0; // the latest deploy: an earlier one finishing later doesn't unlock the dialog it no longer owns
 const pageSlug = slugField($("page-name"), "page");
+let pagesReq = 0; // only the latest list request is shown (an older, slower one would hide a newer artifact)
 function renderPages() {
+  const mine = ++pagesReq;
   return api("/v1/pages").then(({ pages }) => {
+    if (mine !== pagesReq) return;
     // Closed before their rows go, so their scroll/resize listeners go with them.
     for (const m of $("page-list").querySelectorAll(".menu:popover-open")) m.hidePopover();
     $("page-list").replaceChildren(pages.length
@@ -1668,7 +1672,7 @@ function renderPages() {
         el("strong", { textContent: "No artifacts yet" }),
         el("span", {}, "Deploy an HTML file or a folder, or run ", el("code", { textContent: "npx cresslet@latest deploy report.html" }), "."),
         el("button", { className: "btn primary sm", type: "button", ariaHasPopup: "dialog", onclick: openPageDialog }, icon("plus"), "New artifact")));
-  }).catch((e) => $("page-list").replaceChildren(el("p", { className: "error", textContent: `Could not load artifacts: ${e.message}` })));
+  }).catch((e) => mine === pagesReq && $("page-list").replaceChildren(el("p", { className: "error", textContent: `Could not load artifacts: ${e.message}` })));
 }
 
 /** A popover menu under its button (native popover: Escape and a click outside close it, focus returns to the button). */
@@ -1858,6 +1862,7 @@ drop.addEventListener("dragleave", (e) => !drop.contains(e.relatedTarget) && del
 drop.addEventListener("drop", (e) => {
   e.preventDefault();
   delete drop.dataset.over;
+  if (pageUploading) return;
   const item = e.dataTransfer.items?.[0];
   const f = e.dataTransfer.files[0];
   if (item?.webkitGetAsEntry?.()?.isDirectory) return pageError("To deploy a folder, choose it with the Folder button.");
@@ -1888,7 +1893,7 @@ async function openPageDialog() {
   pagePick = null;
   showPick(...NO_PICK);
   pageError("");
-  for (const id of ["page-upload", "page-cancel", "page-close"]) $(id).disabled = false; // a finished deploy may not have yet
+  for (const id of PAGE_BUSY) $(id).disabled = false; // a finished deploy may not have yet
   $("page-name").value = "";
   $("page-visibility").value = defaults.visibility;
   setKeep($("page-retention"), defaults.retentionDays);
@@ -1914,23 +1919,24 @@ $("page-form").addEventListener("submit", async (e) => {
   pageError("");
   const dlg = $("page-dialog");
   const mine = ++pageUploadGen;
+  const pick = pagePick; // what was chosen when Deploy was pressed (the file inputs are disabled meanwhile)
   pageUploading = true;
-  for (const id of ["page-upload", "page-cancel", "page-close"]) $(id).disabled = true;
+  for (const id of PAGE_BUSY) $(id).disabled = true;
   try {
     const name = await pageSlug.value();
     if (!name) {
       $("page-name").focus();
       return;
     }
-    const content = pagePick.html
-      ? { html: await pagePick.html.text() }
-      : await folderBody(pagePick.files);
+    const content = pick.html
+      ? { html: await pick.html.text() }
+      : await folderBody(pick.files);
     const { page } = await api("/v1/pages", {
       method: "POST",
       body: JSON.stringify({
         ...content,
         name,
-        title: pagePick.title,
+        title: pick.title,
         visibility: $("page-visibility").value,
         retentionDays: keepParse($("page-retention").value),
         source: "studio",
@@ -1939,17 +1945,17 @@ $("page-form").addEventListener("submit", async (e) => {
     pagePick = null;
     pageUploading = false;
     dlg.close();
-    await renderPages();
-    refocus($("page-new")); // from the empty state's button, which the list replaced
     toast(el("span", {}, `Deployed ${pageName(page)}: `, extLink(page.url, page.url.replace(/^https?:\/\//, "")), " ",
       el("button", { className: "btn sm", type: "button", onclick: () => copyLink(page.url) }, icon("copy"), "Copy link")));
+    await renderPages();
+    refocus($("page-new")); // from the empty state's button, which the list replaced
   } catch (err) {
     if (dlg.open) pageError(`Could not deploy: ${err.message}`);
     else toast(`Could not deploy: ${err.message}`); // closed by leaving the page meanwhile
   } finally {
     if (mine === pageUploadGen) {
       pageUploading = false;
-      for (const id of ["page-upload", "page-cancel", "page-close"]) $(id).disabled = false;
+      for (const id of PAGE_BUSY) $(id).disabled = false;
       if (dlg.open && !dlg.contains(document.activeElement)) $("page-upload").focus(); // disabling Deploy dropped focus
     }
   }
