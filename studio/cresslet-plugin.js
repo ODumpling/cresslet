@@ -280,6 +280,9 @@ export function createCresslet(c, opts) {
     const dbPath = p(".cresslet/dev/db.sqlite");
     const filesDir = p(".cresslet/dev/files");
     let worker = null;
+    const initializing = new Set(); // workers not ready yet (stopped with dev too)
+    // (stopped while it started: the signal may have fired already)
+    const aborted = new Promise((resolve) => (ctx.signal.aborted ? resolve() : ctx.signal.addEventListener("abort", resolve, { once: true })));
     let workerError = null;
     let reqId = 0;
     let starts = 0; // startWorker calls
@@ -415,6 +418,7 @@ export function createCresslet(c, opts) {
           }
         };
       });
+      initializing.add(w);
       w.postMessage({
         type: "init",
         code,
@@ -424,7 +428,7 @@ export function createCresslet(c, opts) {
         app: { id: "studio", name: cfg.name || "preview", url: location.origin, deployId: "dev" },
       });
       try {
-        await ready;
+        await ready.finally(() => initializing.delete(w));
         if (stopped || seq < readySeq) return w.terminate(); // dev ended, or a later save's worker got ready first
         readySeq = seq;
         retire(worker, 1012, "server restarting", "server restarted");
@@ -496,6 +500,7 @@ export function createCresslet(c, opts) {
       const unsafe = req.method !== "GET" && req.method !== "HEAD";
       const navigation = unsafe && /^\s*text\/html/i.test(req.headers.get("accept") ?? "");
       if (unsafe && !navigation && !req.headers.has("origin")) headers.push(["origin", appUrl.origin]);
+      if (navigation) out(`\x1b[33m${req.method} ${path}: a form submission; in this preview it has no Origin and only SameSite=None cookies (CSRF checks refuse it). Send it with fetch, as server functions do.\x1b[0m`);
       const cookies = [...jar].filter(([, c]) => !navigation || c.none);
       if (cookies.length && !req.headers.has("cookie")) headers.push(["cookie", cookies.map(([k, c]) => `${k}=${c.value}`).join("; ")]);
       const res = await new Promise((resolve) => {
@@ -551,7 +556,7 @@ export function createCresslet(c, opts) {
       return new Response(bytes, { headers: { "content-type": type, "cache-control": "no-cache" } });
     }
 
-    await startWorker();
+    await Promise.race([startWorker(), aborted]); // the first build and server (a stuck one doesn't hold up Ctrl+C)
     let timer;
     const rebuild = (_e, f) => {
       if (f && /(?:^|\/)routeTree\.gen\.ts$/.test(f)) return; // the build writes it
@@ -564,16 +569,19 @@ export function createCresslet(c, opts) {
         watchers.push(c.fs.watch(p(dir), { recursive: true }, rebuild));
       } catch { /* no such directory */ }
     }
-    const server = start
-      ? c.servePort(port, async (req) => (await middleware(req)) ?? staticFile(req))
-      : await c.createDevServer({ root: wd, port, middleware });
-    out(`\x1b[32m✔\x1b[0m dev server on port ${port}`);
-    // (stopped while it started: the signal has fired already)
-    await new Promise((resolve) => (ctx.signal.aborted ? resolve() : ctx.signal.addEventListener("abort", resolve, { once: true })));
+    let server = null;
+    if (!ctx.signal.aborted) {
+      server = start
+        ? c.servePort(port, async (req) => (await middleware(req)) ?? staticFile(req))
+        : await c.createDevServer({ root: wd, port, middleware });
+      out(`\x1b[32m✔\x1b[0m dev server on port ${port}`);
+    }
+    await aborted;
     stopped = true;
     clearTimeout(timer);
     for (const w of watchers) w.close();
-    server.close();
+    for (const w of initializing) w.terminate();
+    server?.close();
     builder?.close();
     reloads?.close();
     retire(worker, 1001, "server stopped", "server stopped");

@@ -270,6 +270,7 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
   let starting = null;
   let booting = null; // the service's process until it's ready
   let closed = false;
+  let lastBundles = new Set(); // the last preview build's bundles and assets (its pages may still be served)
   async function rpc(msg) {
     if (!svc) {
       starting ??= startService().finally(() => (starting = null));
@@ -514,9 +515,8 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       await c.fs.writeFile(f, bytes);
       files.push(f);
     }
-    const keep = new Set(files);
-    const prune = async (dir, except) => {
-      if (dir === except) return;
+    const keep = new Set([...files, ...(preview ? lastBundles : [])]);
+    const prune = async (dir) => {
       let entries;
       try {
         entries = await c.fs.readdir(dir, { withFileTypes: true });
@@ -525,12 +525,13 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       }
       for (const e of entries) {
         const f = `${dir}/${e.name}`;
-        if (e.isDirectory()) await prune(f, except);
+        if (e.isDirectory()) await prune(f);
         else if (!keep.has(f)) await c.fs.rm(f, { force: true });
       }
     };
-    // (the preview keeps earlier hashed assets: its worker serves the last build's pages until a new one is ready)
-    await prune(p(outDir), preview ? p(`${outDir}/assets`) : null);
+    // (the preview keeps the last build's bundles: its worker serves that build's pages until a new one is ready)
+    await prune(p(outDir));
+    if (preview) lastBundles = new Set(outFiles.keys());
     return { files, outDir, server, entry };
   }
 
