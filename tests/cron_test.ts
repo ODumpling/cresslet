@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
-import { cronMatches, nextRuns, normalizeCrons, parseCron, Scheduler } from "../server/cron.ts";
+import { cronMatches, CronRuns, nextRuns, normalizeCrons, parseCron, Scheduler } from "../server/cron.ts";
 
 const at = (iso: string) => new Date(iso);
 const matches = (expr: string, iso: string) => cronMatches(parseCron(expr), at(iso));
@@ -44,6 +44,7 @@ test("next runs", () => {
   assert.deepEqual(next("0 0 1 JAN *", "2026-11-19T00:00:00Z", 1), ["2027-01-01T00:00"]);
   assert.deepEqual(next("0 0 29 2 *", "2026-03-01T00:00:00Z", 1), ["2028-02-29T00:00"]);
   assert.deepEqual(next("0 0 30 2 *", "2026-03-01T00:00:00Z"), []); // never
+  assert.deepEqual(next("0 0 29 2 */7", "2088-03-01T00:00:00Z", 1), ["2128-02-29T00:00"]); // past 2100's missing leap day
   assert.deepEqual(next("0 0 1 * 1", "2026-11-19T00:00:00Z", 2), ["2026-11-23T00:00", "2026-11-30T00:00"]); // either day field
   // Matches cronMatches minute by minute over a stretch.
   for (const expr of ["7,37 */3 * * *", "0 0 */2 * 1", "15 10 1-7 * SUN", "*/13 * * * *"]) {
@@ -52,6 +53,20 @@ test("next runs", () => {
     for (let t = from + 60_000; brute.length < 5; t += 60_000) if (cronMatches(c, new Date(t))) brute.push(t);
     assert.deepEqual(nextRuns(c, from, 5), brute, expr);
   }
+});
+
+test("each cron's last run outlives the recent runs; old crons' are let go", () => {
+  const r = new CronRuns();
+  const run = (cron: string) => r.record("app_1", { cron, at: 0, startedAt: 0, ms: 1, status: 200, manual: false });
+  run("0 3 * * *");
+  for (let i = 0; i < 60; i++) run("* * * * *");
+  assert.equal(r.list("app_1").length, CronRuns.KEEP);
+  assert.ok(!r.list("app_1").some((x) => x.cron === "0 3 * * *"));
+  assert.equal(r.last("app_1", "0 3 * * *")?.cron, "0 3 * * *");
+  for (let i = 0; i < CronRuns.KEEP_LAST; i++) run(`${i} 1 * * *`);
+  assert.equal(r.last("app_1", "0 3 * * *"), undefined);
+  assert.equal(r.last("app_1", "* * * * *"), undefined);
+  assert.ok(r.last("app_1", `${CronRuns.KEEP_LAST - 1} 1 * * *`));
 });
 
 test("a paused cron doesn't fire on schedule; Run now runs it once, queued behind the app's other runs", async () => {
@@ -179,6 +194,10 @@ test("crons run the scheduled() export of claimed apps", async () => {
     const forged = await call("/api/runs", { host, headers: { "x-cresslet-scheduled": '{"cron":"forged","scheduledTime":1}' } });
     assert.equal(forged.status, 200);
     assert.ok(!(await forged.json()).some((r: { cron: string }) => r.cron === "forged"));
+
+    // Delete only the app the caller looked at.
+    assert.equal((await call(`/v1/apps/${d.app.name}?id=app_other`, { method: "DELETE", headers: auth })).status, 409);
+    assert.equal((await call(`/v1/apps/${d.app.name}?id=${d.app.id}`, { method: "DELETE", headers: auth })).status, 200);
   } finally {
     await srv.close();
     await rm(dataDir, { recursive: true, force: true });

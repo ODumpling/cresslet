@@ -49,9 +49,17 @@ function Body({ v: loaded, onChange }: { v: API.Crons; onChange: () => Promise<b
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [status, setStatus] = useState("");
   const busy = v.crons.some((x) => x.state);
+  // The next look once the last one is in (a slow answer isn't dropped for a newer request).
   useEffect(() => {
-    const t = setInterval(() => document.hidden || void onChange(), busy ? BUSY_POLL_MS : IDLE_POLL_MS);
-    return () => clearInterval(t);
+    let t: ReturnType<typeof setTimeout>, live = true;
+    const next = () => {
+      t = setTimeout(() => void (document.hidden ? Promise.resolve(true) : onChange()).finally(() => live && next()), busy ? BUSY_POLL_MS : IDLE_POLL_MS);
+    };
+    next();
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
   }, [busy, onChange]);
 
   /** `i`: the cron's row (its buttons' ids). */
@@ -73,6 +81,7 @@ function Body({ v: loaded, onChange }: { v: API.Crons; onChange: () => Promise<b
         setV(r);
         setStatus(msg);
       });
+      void onChange(); // and a load newer than any poll already in flight (its older answer is dropped)
     } catch (e) {
       toast(`Could not ${what === "run" ? "run" : what} ${cron}: ${errorMessage(e)}`);
       if (!alive.current) return;

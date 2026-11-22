@@ -85,14 +85,16 @@ function Domains() {
       toast(`${domain} verified`);
       if (!alive.current) return;
       flushSync(() => {
+        mark(domain, false);
         put(r.domain);
         setStatus(`${domain} verified`);
       });
       refocusId(`domain-remove-${domain}`); // Verify is gone
     } catch (e) {
       toast(`Could not verify ${domain}: ${errorMessage(e)}`);
-    } finally {
-      if (alive.current) mark(domain, false);
+      if (!alive.current) return;
+      flushSync(() => mark(domain, false));
+      refocusId(`domain-verify-${domain}`);
     }
   }
 
@@ -104,6 +106,7 @@ function Domains() {
       toast(`${domain} removed`);
       if (!alive.current) return;
       flushSync(() => {
+        mark(domain, false);
         // Only this row: the answer's list could be older than another row's Verify that finished meanwhile.
         setDomains((ds) => ds?.filter((x) => x.domain !== domain));
         setStatus(`${domain} removed`);
@@ -111,8 +114,9 @@ function Domains() {
       refocusId("domains-title");
     } catch (e) {
       toast(`Could not remove ${domain}: ${errorMessage(e)}`);
-    } finally {
-      if (alive.current) mark(domain, false);
+      if (!alive.current) return;
+      flushSync(() => mark(domain, false));
+      refocusId(`domain-remove-${domain}`);
     }
   }
 
@@ -188,9 +192,10 @@ function Egress() {
       if (alive.current) await refresh();
     } catch (e2) {
       if (alive.current) setErr(`Could not save: ${errorMessage(e2)}`);
-    } finally {
-      if (alive.current) setSaving(false);
     }
+    if (!alive.current) return;
+    flushSync(() => setSaving(false));
+    refocusId("egress-save"); // it was disabled while saving
   }
 
   return (
@@ -215,7 +220,7 @@ function Egress() {
       <FormError text={err} />
       {manage ? (
         <div className="row start">
-          <button className="btn primary" type="submit" disabled={saving}>Save</button>
+          <button className="btn primary" type="submit" id="egress-save" disabled={saving}>Save</button>
           <span className="muted small">Saving restarts the app.</span>
         </div>
       ) : null}
@@ -236,10 +241,8 @@ function Delete() {
     if (typed.trim() !== name) return;
     setBusy(true);
     try {
-      // The app this page shows, not one made with its name since (deleted and recreated elsewhere).
-      const now = await api<API.AppDetail>(appPath(name));
-      if (now.app.id !== d.app.id) throw new Error(`${name} is a different app now: reload the page`);
-      await api(appPath(name), { method: "DELETE" });
+      // The app this page shows, not one made with its name since (deleted and recreated elsewhere): 409 then.
+      await api(appPath(name, `?id=${encodeURIComponent(d.app.id)}`), { method: "DELETE" });
     } catch (e2) {
       if (alive.current) {
         setErr(`Could not delete: ${errorMessage(e2)}`);
@@ -248,7 +251,7 @@ function Delete() {
       return;
     }
     toast(`${name} deleted`);
-    void navigate({ to: "/" });
+    if (alive.current) void navigate({ to: "/" });
   }
 
   return (

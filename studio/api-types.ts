@@ -147,7 +147,7 @@ export interface Crons {
     paused: boolean;
     /** On the node that runs it: running now, or waiting behind another run of the app. */
     state: "running" | "queued" | null;
-    /** The next (up to 3) times it fires, none while paused. */
+    /** The next (up to 3) times it fires, none while paused or unclaimed. */
     next: string[];
     last: CronRun | null;
   }[];

@@ -780,6 +780,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.delete("/apps/:name", async (c) => {
     const a = await getApp(c.req.param("name"));
     await authorize(c, a, "admin", { owner: true });
+    // `?id=`: only that app (not one made with its name since the caller looked).
+    const only = c.req.query("id");
+    if (only !== undefined && only !== a.id) throw new HttpError(409, `${a.name} is a different app now (${a.id})`, "conflict");
     await purgeApp(cfg, store, runtime, a);
     return c.json({ deleted: a.name });
   });

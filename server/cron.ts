@@ -56,10 +56,10 @@ function dayMatches({ fields: [, , dom, , dow], domStar, dowStar }: Cron, d: Dat
 
 /**
  * The next `n` minutes (ms, UTC) after `from` the cron fires at, within `horizonMs` (an expression like
- * `0 0 30 2 *` never fires: fewer or none). 28 years: the calendar's weekdays repeat, so a date and weekday
- * that can meet do within it. Skips whole months, days and hours that can't match.
+ * `0 0 30 2 *` never fires: fewer or none). 400 years: the Gregorian calendar repeats, so a date and weekday
+ * that can ever meet do within it. Skips whole months, days and hours that can't match (a few thousand steps).
  */
-export function nextRuns(cron: Cron, from: number, n: number, horizonMs = 28 * 366 * 86_400_000): number[] {
+export function nextRuns(cron: Cron, from: number, n: number, horizonMs = 400 * 366 * 86_400_000): number[] {
   const [min, hour, , mon] = cron.fields;
   const out: number[] = [];
   const end = from + horizonMs;
@@ -94,6 +94,8 @@ export interface CronRun {
  */
 export class CronRuns {
   static readonly KEEP = 50;
+  /** Crons whose last run is kept (most recently run first): an app has at most MAX_CRONS at a time. */
+  static readonly KEEP_LAST = 2 * MAX_CRONS;
   #apps = new Map<string, { runs: CronRun[]; last: Map<string, CronRun> }>();
   readonly since = Date.now();
 
@@ -102,7 +104,12 @@ export class CronRuns {
     if (!a) this.#apps.set(appId, a = { runs: [], last: new Map() });
     a.runs.unshift(run);
     if (a.runs.length > CronRuns.KEEP) a.runs.length = CronRuns.KEEP;
+    a.last.delete(run.cron); // to the end: the most recent
     a.last.set(run.cron, run);
+    for (const k of a.last.keys()) {
+      if (a.last.size <= CronRuns.KEEP_LAST) break;
+      a.last.delete(k);
+    }
   }
   list(appId: string): readonly CronRun[] {
     return this.#apps.get(appId)?.runs ?? [];
