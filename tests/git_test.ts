@@ -970,3 +970,31 @@ test("stack: submitted as a chain of pull requests (as the user), their review a
   assert.deepEqual([aside.status, aside.body.error], [409, "set_aside"]);
   assert.equal(pulls.length, 4);
 }));
+
+test("stack: a change pushed to on GitHub is pulled in or carried on from; changes set aside are listed and deleted", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];
+  const add = async (from: string, baseSha: string, title: string, x: string) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: files(x), title })).body;
+  const c1 = await add("main", linked.sha, "One", "1");
+  const c2 = await add(c1.branch, c1.sha, "Two", "2");
+  const pushed = t.gh.write(t.gh.repo("octo/shop"), c1.branch, { "x.txt": "outside" });
+  const moved = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0].changes[0];
+  assert.deepEqual([moved.github, moved.headSha], ["moved", pushed]);
+  const pull = await t.send("POST", "/v1/apps/shop/git/stack/pull-in", tok, { change: c1.change.id, sha: pushed });
+  assert.deepEqual([pull.status, pull.body.change.sha, pull.body.dropped], [200, pushed, 1]);
+  let s = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
+  assert.deepEqual([s.changes.length, s.changes[0].github, s.setAside], [1, "ok", []]);
+  // The change dropped from it is listed with the ones set aside (not restorable), and deleted.
+  const aside = (await t.send("GET", "/v1/apps/shop/git/stack/aside", tok)).body.changes;
+  assert.deepEqual(aside.map((c: { branch: string; restorable: boolean }) => [c.branch, c.restorable]), [[c2.branch, false]]);
+  const del = await t.send("POST", "/v1/apps/shop/git/stack/aside/delete", tok, { change: c2.change.id });
+  assert.deepEqual([del.status, del.body.dropped], [200, [c2.change.id]]);
+  assert.equal(t.gh.repo("octo/shop").refs.has(c2.branch), false);
+  // Carried on from: it leaves the stack, and the workspace commits to it as one branch.
+  const again = t.gh.write(t.gh.repo("octo/shop"), c1.branch, { "y.txt": "outside again" });
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/stack/carry-on", tok, { change: c1.change.id, sha: again })).body.left, 1);
+  assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks, []);
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c1.branch, baseSha: again, files: files("3"), title: "Three" })).body.error, "not_on_stack");
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c1.branch, baseSha: again, files: files("3") })).status, 200);
+}));

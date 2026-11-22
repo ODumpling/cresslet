@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Pull, Repo, SourceControlProvider } from "../server/git.ts";
-import { assertNotBelowTop, changePull, commitChange, type Ctx, followed, goBack, landed, readStacks, restore, slug, stackPulls, submitStack } from "../server/stack.ts";
+import {
+  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, followed, goBack, landed, MAX_STACK, pullIn, readStacks, restore,
+  setAsideBranches, slug, stackPulls, submitStack,
+} from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
 /** Branches and commits in memory: a commit is its files and its parent. */
@@ -476,6 +479,77 @@ test("stack: going back closes the set-aside changes' pull requests; restore reo
   assert.equal(t.provider.pulls[3].state, "closed");
   await restore(t.ctx, c1.stack.id);
   assert.equal(t.provider.pulls[3].state, "open");
+});
+
+test("stack: a change pushed to on GitHub is pulled in as the top (the ones above set aside for good), or carried on from as a branch", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const code = (e: unknown) => (e as HttpError).code;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await submitStack(t.ctx, c1.stack.id);
+  const pushed = t.provider.push(c2.branch, { "x.txt": "from outside" });
+  let [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((c) => c.github), ["ok", "moved", "ok"]);
+  await assert.rejects(pullIn(t.ctx, c2.change.id, "e".repeat(40)), (e) => code(e) === "conflict"); // not what GitHub has
+  const r = await pullIn(t.ctx, c2.change.id, pushed);
+  assert.deepEqual([r.change.sha, r.dropped], [pushed, 1]);
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes.map((c) => [c.title, c.github]), s.setAside], [[["One", "ok"], ["Two", "ok"]], []]);
+  assert.equal(t.provider.pulls[2].state, "closed");
+  assert.equal(t.provider.refs.get(c3.branch), c3.sha); // kept
+  const n3 = ok(await t.change(c2.branch, pushed, "Three again", "3b"));
+  assert.equal(t.provider.commits.get(n3.sha)!.parent, pushed);
+
+  // Carried on from: it and the ones above leave the stack; it's committed to as one branch (as before stacks).
+  const other = t.provider.push(c1.branch, { "y.txt": "more from outside" });
+  const left = await carryOn(t.ctx, c1.change.id, other);
+  assert.equal(left.left, 3);
+  assert.deepEqual(await readStacks(t.ctx), []);
+  await assert.rejects(t.change(c1.branch, other, "Four", "4"), (e) => code(e) === "not_on_stack");
+});
+
+test("stack: changes set aside are listed and deleted (with the ones above them); a landed stack's go with it", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  const c4 = ok(await t.change(c3.branch, c3.sha, "Four", "4"));
+  await goBack(t.ctx, c1.change.id);
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => [c.title, c.restorable]).sort(), [["Four", true], ["Three", true], ["Two", true]]);
+  // Deleting 3 takes 4 with it; 2 stays restorable.
+  const moved = t.provider.push(c4.branch, { "z.txt": "pushed" });
+  let d = await deleteSetAside(t.ctx, c3.change.id);
+  assert.deepEqual([d.dropped, d.kept.map((k) => k.position)], [[c3.change.id], [4]]); // 4 was pushed to: kept, said
+  assert.equal(t.provider.refs.has(c3.branch), false);
+  t.provider.refs.set(c4.branch, c4.sha);
+  d = await deleteSetAside(t.ctx, c4.change.id);
+  assert.deepEqual(d.dropped, [c4.change.id]);
+  void moved;
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => c.title), ["Two"]);
+  assert.equal((await restore(t.ctx, c1.stack.id)).change.id, c2.change.id);
+
+  // Going back to 1 and landing it: the ones set aside go (the app deletes merged branches).
+  await goBack(t.ctx, c1.change.id);
+  await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: c1.sha, deleteBelow: true });
+  assert.equal(t.provider.refs.has(c2.branch), false);
+  assert.deepEqual(await setAsideBranches(t.ctx), []);
+});
+
+test("stack: at its most changes, a turn joins the top change and says so", async () => {
+  await using t = await setup();
+  let from = "main", sha = t.provider.refs.get("main")!, id = "";
+  for (let i = 1; i <= MAX_STACK; i++) {
+    const c = ok(await t.change(from, sha, `Change ${i}`, String(i)));
+    [from, sha, id] = [c.branch, c.sha, c.stack.id];
+  }
+  const j = ok(await t.change(from, sha, "One more", "more"));
+  assert.deepEqual([j.joined, j.branch, j.change.position], [true, from, MAX_STACK]);
+  assert.equal(t.provider.refs.get(from), j.sha);
+  const [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.id, s.changes.length, s.changes.at(-1)!.sha], [id, MAX_STACK, j.sha]);
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {

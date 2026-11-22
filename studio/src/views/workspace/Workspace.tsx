@@ -472,6 +472,21 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 void g.submitStack(stack.id).then((r) => said(r.pulls), (e) => toast(`Couldn't submit the stack: ${errorMessage(e)}`, 10000))
                   .finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
+              onOutside={(how, change) => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                const above = stack.changes.filter((c) => c.position > change.position).length;
+                const text = how === "pull-in"
+                  ? `Pull in ${change.branch} as GitHub has it, as the top of the stack?${above ? ` The ${above} ${above === 1 ? "change" : "changes"} above it are set aside for good (they don't hold that push; their branches stay).` : ""}`
+                  : `Carry on from ${change.branch} as a branch of its own? It${above ? ` and the ${above} above it` : ""} leave the stack (branches kept), and new requests commit to it as one branch.`;
+                if (!confirm(`${text}${gitState.dirty ? "\n\nThis workspace's changes not pushed yet are dropped." : ""}`)) return;
+                setStackBusy(true);
+                void g.takeOutside(how, change, gitState.dirty).then(
+                  () => toast(how === "pull-in" ? `Pulled in ${change.branch}: the next request goes on it` : `On ${change.branch}, as a branch of its own`, 8000),
+                  (e) => toast(`Couldn't load ${change.branch}: ${errorMessage(e)}`, 10000),
+                ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+              }}
               onContinue={(branch) => {
                 const g = engine.current?.git;
                 if (!g) return;

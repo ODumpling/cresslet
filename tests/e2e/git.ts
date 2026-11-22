@@ -186,6 +186,31 @@ try {
   if (gh.repo(full).pulls[1].state !== "closed") fail("the pull request of the change set aside isn't closed");
   console.log("built a new change 2 on change 1");
 
+  // Source control lists the change dropped from the stack; deleting it deletes its branch.
+  await page.locator("#git-btn").click();
+  const asideRow = page.locator("#git-aside li", { hasText: DARK });
+  await asideRow.waitFor({ timeout: 60000 });
+  await page.locator("#git-dialog").screenshot({ path: `${out}/git-aside.png` });
+  await asideRow.getByRole("button", { name: `Delete ${DARK}` }).click();
+  await toast(/Deleted 1 branch/, 30000);
+  if (gh.repo(full).refs.has(DARK)) fail("the set-aside branch wasn't deleted");
+  await page.locator("#git-dialog").evaluate((d: HTMLDialogElement) => d.close());
+  console.log("deleted the set-aside branch");
+
+  // Someone pushes to the top change on GitHub: the stack says so (read again with Update pull requests), and Pull it
+  // in loads it as the top.
+  const outside = gh.write(gh.repo(full), DARKER, { "OUTSIDE.md": "pushed on GitHub\n" }, "Outside", "teammate");
+  await page.locator("#stack-submit").click();
+  const movedRow = page.locator("#stack-panel .stack-row", { hasText: "2 · Dark mode, darker" });
+  await movedRow.getByRole("button", { name: /Pull in change 2/ }).waitFor({ timeout: 60000 });
+  await page.locator("#stack-panel").screenshot({ path: `${out}/git-stack-moved.png` });
+  await movedRow.getByRole("button", { name: /Pull in change 2/ }).click();
+  await toast(/Pulled in/, 60000);
+  await page.locator('#tree button[data-path="OUTSIDE.md"]').waitFor({ state: "attached", timeout: 30000 });
+  if (await movedRow.getByRole("button", { name: /Pull in change 2/ }).count()) fail("still shown as changed on GitHub");
+  void outside;
+  console.log("pulled in the push from outside");
+
   // A hand edit after them: it goes into the top change (pushed with the deploy).
   await page.locator("#view-code").click();
   await page.locator('#tree button[data-path="src/App.tsx"]').click();
@@ -204,7 +229,7 @@ try {
     if (!log.includes(want)) fail(`deploy log lacks "${want}":\n${log}`);
   }
   if ([`${STACK}/1-add-due-dates-to-tasks`, DARKER].some((b) => gh.repo(full).refs.has(b))) fail(`landed stack's branches not deleted: ${[...gh.repo(full).refs.keys()]}`);
-  if (!gh.files(full)["src/due.ts"] || gh.files(full)["src/dark.css"] !== "body { background: #000; }\n") fail("the stack's changes aren't on main");
+  if (!gh.files(full)["src/due.ts"] || gh.files(full)["src/dark.css"] !== "body { background: #000; }\n" || !gh.files(full)["OUTSIDE.md"]) fail("the stack's changes aren't on main");
   await page.locator("#stack-panel").waitFor({ state: "detached", timeout: 30000 });
   const mainSha = gh.repo(full).refs.get("main")!;
   const after = await call(`/v1/apps/${app}`, token);

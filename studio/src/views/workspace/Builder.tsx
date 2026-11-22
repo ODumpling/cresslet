@@ -272,7 +272,12 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
       const out = await g.commitChange(commitMessage(text), text);
       if (out.changed) {
         const s = g.state!;
-        on({ type: "notice", text: out.change ? `Committed as change ${out.change.position} of the stack, on ${s.activeBranch}. ${s.defaultBranch} stays as deployed until you deploy.` : `Committed to ${s.activeBranch}.` });
+        on({
+          type: "notice",
+          text: out.joined ? `The stack has ${out.change?.position} changes, its most: this request joined the top one, on ${s.activeBranch}. Deploy to land the stack, then new requests are changes of their own again.`
+            : out.change ? `Committed as change ${out.change.position} of the stack, on ${s.activeBranch}. ${s.defaultBranch} stays as deployed until you deploy.`
+            : `Committed to ${s.activeBranch}.`,
+        });
         // The app submits its stack after each change: what GitHub refused is said.
         const failed = out.submitted ? [...(out.submitted.error ? [out.submitted.error] : []), ...out.submitted.pulls.filter((p) => p.error).map((p) => `change ${p.position}: ${p.error}`)] : [];
         if (failed.length) on({ type: "notice", text: `The stack's pull requests weren't all updated (${failed.join("; ")}). Submit it again from the stack.`, error: true });

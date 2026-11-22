@@ -80,6 +80,9 @@ export interface Ctx {
 }
 
 const notOnStack = (message: string) => new HttpError(409, message, "not_on_stack");
+
+/** A stack's most changes: at it, a turn joins the top change instead (land the stack to start new ones). */
+export const MAX_STACK = 30;
 const setAside = (c: StackChange) => new HttpError(
   409, `${c.branch} (change ${c.position} of ${c.stack_name}) was set aside: going back left it out of the stack. Restore it, or load the stack's top`, "set_aside",
 );
@@ -97,19 +100,35 @@ const notOnTop = (c: StackChange, top: StackChange) => new HttpError(
  */
 export function commitChange(ctx: Ctx, input: {
   from: string; baseSha: string; files: [string, Uint8Array][]; title: string; prompt: string; author: Author; by: string | null;
-}): Promise<{ changed: false; sha: string } | { changed: true; sha: string; branch: string; change: ChangeView; stack: { id: string; name: string } }> {
+}): Promise<{ changed: false; sha: string } | { changed: true; sha: string; branch: string; change: ChangeView; stack: { id: string; name: string }; joined?: boolean }> {
   const { provider, store, appId, repo, r } = ctx;
   return locked(appId, async () => {
     const stacks = byStack(await store.openStackChanges(appId));
     let below: StackChange | undefined;
     const aside = input.from === repo.default_branch ? undefined : (await store.setAsideStackChanges(appId)).find((c) => c.branch === input.from);
     if (aside) throw setAside(aside);
+    // Carried on from as a branch of its own (pushed to on GitHub): committed to as one branch, as before stacks.
+    if (input.from !== repo.default_branch && (await store.stackChangesInState(appId, "outside")).some((c) => c.branch === input.from)) {
+      throw notOnStack(`${input.from} left its stack (changed on GitHub): it's committed to as a branch of its own`);
+    }
     const on = input.from === repo.default_branch ? undefined : stacks.find((s) => s.some((c) => c.branch === input.from));
     if (on) {
       const top = on.at(-1)!; // a stack listed has a change
       if (top.branch !== input.from) throw notOnTop(on.find((c) => c.branch === input.from)!, top);
       if (top.sha !== input.baseSha) throw notOnStack(`${input.from} is recorded at another commit than the workspace's`);
       below = top;
+    }
+    // At the limit: this turn joins the top change (its branch gets the commit), and the user is told.
+    if (below && below.position >= MAX_STACK) {
+      const out = await provider.commitTree(r, {
+        branch: below.branch, baseSha: input.baseSha, subdir: repo.subdir, files: input.files, message: input.title, author: input.author,
+      });
+      if (!out.changed) return { changed: false, sha: input.baseSha };
+      await followed(ctx, below.branch, input.baseSha, out.sha);
+      return {
+        changed: true, sha: out.sha, branch: below.branch, joined: true,
+        change: { ...view({ ...below, sha: out.sha }), github: "ok" }, stack: { id: below.stack_id, name: below.stack_name },
+      };
     }
     const position = below ? below.position + 1 : 1;
     const part = `${position}-${slug(input.title)}`;
@@ -295,6 +314,11 @@ export async function landed(ctx: Ctx, input: { branch: string; headSha: string;
     await pool(s.slice(0, -1), 4, async (c) => {
       if (await ctx.provider.branchHead(ctx.r, c.branch).catch(() => null) === c.sha) await ctx.provider.deleteBranch(ctx.r, c.branch).catch(() => false);
     });
+    // Its changes set aside go too (also ones a build on a change gone back to dropped from it: same name), unless the
+    // stack is still open above what landed.
+    const open = (await ctx.store.openStackChanges(ctx.appId)).some((c) => c.stack_id === top.stack_id);
+    const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).filter((c) => (c.stack_id === top.stack_id && !open) || (c.stack_id !== top.stack_id && c.stack_name === top.stack_name));
+    await dropBranches(ctx, aside);
   }
   return { stack: top.stack_name, changes: n };
 }
@@ -442,4 +466,96 @@ export async function stackPulls(ctx: Ctx, stackId: string): Promise<Record<stri
   const s = (await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId && c.pr_number);
   const info = await pool(s, 4, (c) => ctx.provider.pullStatus(ctx.r, c.pr_number!).catch(() => null));
   return Object.fromEntries(s.flatMap((c, i) => (info[i] ? [[c.id, info[i]!]] : [])));
+}
+
+// ---- branches changed outside the studio, and changes set aside
+
+/**
+ * Deletes changes' branches (set aside ones), each only while it still points at its change (or is gone already):
+ * those are `dropped`. One pushed to since is kept, and said.
+ */
+async function dropBranches(ctx: Ctx, changes: StackChange[]): Promise<{ dropped: string[]; kept: PullError[] }> {
+  const dropped: string[] = [], kept: PullError[] = [];
+  await pool(changes, 4, async (c) => {
+    try {
+      const head = await ctx.provider.branchHead(ctx.r, c.branch);
+      if (head && head !== c.sha) {
+        kept.push({ change: c.id, position: c.position, error: `${c.branch} was pushed to on GitHub since: delete it there` });
+        return;
+      }
+      if (head) await ctx.provider.deleteBranch(ctx.r, c.branch);
+      dropped.push(c.id);
+    } catch (e) {
+      kept.push({ change: c.id, position: c.position, error: why(e) });
+    }
+  });
+  await ctx.store.setStackChangeStates(ctx.appId, dropped, "dropped");
+  return { dropped, kept };
+}
+
+/** Every change set aside (restorable or not), newest first, checked against GitHub: Source control lists them. */
+export async function setAsideBranches(ctx: Ctx): Promise<(ChangeView & { stackName: string; restorable: boolean })[]> {
+  const open = new Set((await ctx.store.openStackChanges(ctx.appId)).map((c) => c.stack_id));
+  const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).sort((x, y) => y.created_at - x.created_at);
+  const heads = await pool(aside, 8, (c) => ctx.provider.branchHead(ctx.r, c.branch).catch(() => null));
+  return aside.map((c, i) => ({
+    ...view(c), stackName: c.stack_name, restorable: open.has(c.stack_id),
+    ...(heads[i] === c.sha ? { github: "ok" as const } : heads[i] ? { github: "moved" as const, headSha: heads[i]! } : { github: "gone" as const }),
+  }));
+}
+
+/**
+ * Deletes a change set aside: its branch, and those of the ones set aside above it in its stack (cut from it). The
+ * ones below stay restorable.
+ */
+export function deleteSetAside(ctx: Ctx, changeId: string): Promise<{ dropped: string[]; kept: PullError[] }> {
+  return locked(ctx.appId, async () => {
+    const aside = await ctx.store.setAsideStackChanges(ctx.appId);
+    const c = aside.find((x) => x.id === changeId);
+    if (!c) throw new HttpError(404, "no such change set aside", "not_found");
+    return dropBranches(ctx, aside.filter((x) => x.stack_id === c.stack_id && x.position >= c.position));
+  });
+}
+
+/** An open change whose branch is at `sha` on GitHub, another commit than its own (pushed to from outside). */
+async function movedChange(ctx: Ctx, changeId: string, sha: string) {
+  const open = await ctx.store.openStackChanges(ctx.appId);
+  const c = open.find((x) => x.id === changeId);
+  if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
+  const head = await ctx.provider.branchHead(ctx.r, c.branch);
+  if (!head) throw new HttpError(404, `${c.branch} is gone on GitHub`, "branch_not_found");
+  if (head !== sha) throw new HttpError(409, `${c.branch} moved on GitHub again: look at the stack again`, "conflict");
+  return { c, open, head };
+}
+
+/**
+ * A change's branch was pushed to on GitHub: pull that in as the top of the stack. The change takes the branch's
+ * commit; the changes above it are set aside for good (they don't hold that commit; their branches kept, their pull
+ * requests closed). The next change goes on it.
+ */
+export function pullIn(ctx: Ctx, changeId: string, sha: string): Promise<{ change: ChangeView; dropped: number; pullErrors?: PullError[] }> {
+  return locked(ctx.appId, async () => {
+    const { c, open, head } = await movedChange(ctx, changeId, sha);
+    const above = open.filter((x) => x.stack_id === c.stack_id && x.position > c.position);
+    await ctx.store.db.tx(async () => {
+      await ctx.store.setAsideAbove(ctx.appId, c.stack_id, c.position);
+      await ctx.store.detachSetAside(ctx.appId, c.stack_id, id("stk"));
+      await ctx.store.setStackChangeSha(c.id, head);
+    });
+    const pullErrors = await setPulls(ctx, above, "closed");
+    return { change: { ...view({ ...c, sha: head }), github: "ok" }, dropped: above.length, ...(pullErrors.length ? { pullErrors } : {}) };
+  });
+}
+
+/**
+ * A change's branch was pushed to on GitHub: carry on from it as a branch of its own. It and the changes above it
+ * leave the stack (their branches kept); the workspace then commits to that branch as before stacks.
+ */
+export function carryOn(ctx: Ctx, changeId: string, sha: string): Promise<{ change: ChangeView; left: number }> {
+  return locked(ctx.appId, async () => {
+    const { c, open, head } = await movedChange(ctx, changeId, sha);
+    const leaving = open.filter((x) => x.stack_id === c.stack_id && x.position >= c.position);
+    await ctx.store.setStackChangeStates(ctx.appId, leaving.map((x) => x.id), "outside");
+    return { change: { ...view({ ...c, sha: head }), github: "ok" }, left: leaving.length };
+  });
 }

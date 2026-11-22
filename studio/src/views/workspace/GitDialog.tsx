@@ -3,7 +3,7 @@
 // this server, as the signed-in user.
 import { type Ref, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type * as API from "../../../api-types.ts";
-import { gitCode, type GitFile, type GitWorkspace, type ProjectGitState, type PullRequest } from "../../../git.ts";
+import { gitCode, type GitFile, type GitWorkspace, type ProjectGitState, type PullRequest, type StackChange } from "../../../git.ts";
 import { api, errorMessage, json } from "../../lib/api.ts";
 import { toast } from "../../lib/toast.tsx";
 import { ExtLink, Icon } from "../../ui/icons.tsx";
@@ -18,7 +18,8 @@ export async function connectGithub(returnTo = location.pathname) {
   location.assign(url);
 }
 
-type Load = { me: API.MeGit; status: API.GitStatus | null; repos: API.GitRepo[] | null; linked: API.AppRepo | null; pull?: PullRequest | null; error?: string };
+type Aside = StackChange & { stackName: string; restorable: boolean };
+type Load = { me: API.MeGit; status: API.GitStatus | null; repos: API.GitRepo[] | null; linked: API.AppRepo | null; pull?: PullRequest | null; aside?: Aside[]; error?: string };
 
 export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () => {} }: {
   ref: Ref<GitDialogHandle>;
@@ -56,7 +57,7 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
     const me = await api<API.MeGit>("/v1/me/git").catch(() => null);
     if (!me) return setLoad({ me: { provider: "github", available: false, kind: null, connected: false, login: null, status: null, installUrl: null }, status: null, repos: null, linked: null });
     let status: API.GitStatus | null = null, repos: API.GitRepo[] | null = null, linked: API.AppRepo | null = null, err: string | undefined;
-    let pull: PullRequest | null | undefined;
+    let pull: PullRequest | null | undefined, aside: Aside[] | undefined;
     try {
       if (me.connected && me.status === "active" && git?.state && app) {
         try {
@@ -64,6 +65,7 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
           const st = git.state;
           setBranch(status.branches.some((b) => b.name === st.activeBranch) ? st.activeBranch : status.defaultBranch);
           if (st.activeBranch !== st.defaultBranch) pull = await git.pullRequest().catch(() => undefined);
+          aside = await git.setAside().catch(() => undefined);
         } catch (e) {
           // Unlinked elsewhere (another browser, the CLI): so is this workspace.
           if (gitCode(e) !== "git_not_linked") throw e;
@@ -83,7 +85,7 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
       err = errorMessage(e);
       if (gitCode(e) === "git_reauth_required") me.status = "expired";
     }
-    setLoad({ me, status, repos, linked, pull, error: err });
+    setLoad({ me, status, repos, linked, pull, aside, error: err });
   }
 
   useImperativeHandle(ref, () => ({
@@ -253,6 +255,29 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
                     <span className="muted small">For a {s.defaultBranch} that needs reviews or checks: merge it on GitHub, then pull {s.defaultBranch} and deploy.</span>
                   </div>
                 )}
+              </div>
+            ) : null}
+            {load.aside?.length ? (
+              <div className="field" id="git-aside">
+                <strong className="small">Changes set aside</strong>
+                <p className="muted small">Gone back from: their branches are kept on GitHub. Deleting one deletes the ones set aside above it too.</p>
+                <ul className="git-aside">
+                  {load.aside.map((c) => (
+                    <li key={c.id} className="row start">
+                      <span className="small">{`${c.stackName} · ${c.position} · ${c.title}`}<span className="muted mono">{` ${c.branch}`}</span>
+                        {c.restorable ? <span className="muted">{" (restorable)"}</span> : null}
+                        {c.github === "gone" ? <span className="muted">{" (gone on GitHub)"}</span> : null}</span>
+                      <button className="btn sm" type="button" disabled={!!busy} aria-label={`Delete ${c.branch}`} onClick={() => {
+                        if (!confirm(`Delete ${c.branch}${c.restorable ? ", which can't be restored after" : ""}, and any set aside above it, on GitHub?`)) return;
+                        void run("Deleting…", async () => {
+                          const r = await git!.deleteSetAside(c.id);
+                          if (r.kept.length) throw new Error(`Not deleted: ${r.kept.map((x) => `change ${x.position} (${x.error})`).join(", ")}`);
+                          return `Deleted ${r.dropped.length} ${r.dropped.length === 1 ? "branch" : "branches"}`;
+                        });
+                      }}>Delete</button>
+                    </li>
+                  ))}
+                </ul>
               </div>
             ) : null}
             {s.conflicts?.length ? <p className="muted small" id="git-conflicts">{`Merging ${s.defaultBranch} in: resolve ${s.conflicts.join(", ")} (remove the conflict markers), then push or deploy.`}</p> : null}

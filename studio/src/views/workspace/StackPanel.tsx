@@ -5,7 +5,7 @@
 import type { ProjectGitState, PullRequest, Stack, StackChange } from "../../../git.ts";
 import { ExtLink } from "../../ui/icons.tsx";
 
-export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit }: {
+export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside }: {
   stack: Stack;
   state: ProjectGitState;
   busy: boolean;
@@ -13,6 +13,8 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
   pulls?: Record<string, PullRequest>;
   /** Opens or updates a pull request per change. */
   onSubmit: () => void;
+  /** A change pushed to on GitHub: pulled in as the stack's top, or carried on from as a branch of its own. */
+  onOutside: (how: "pull-in" | "carry-on", change: StackChange) => void;
   /** Loads the stack's top change into the workspace (it's on another branch). */
   onContinue: (branch: string) => void;
   /** Goes back to a change (the ones above it set aside). */
@@ -41,6 +43,13 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
             ) : null}
           </span>
           <ExtLink className="ext stack-branch mono" href={tree(c.branch)}>{c.branch}</ExtLink>
+          {!aside && c.github === "moved" ? (
+            <span className="stack-outside small">
+              <span className="muted">Changed on GitHub since.</span>
+              <button className="btn sm" type="button" disabled={busy} onClick={() => onOutside("pull-in", c)} aria-label={`Pull in change ${c.position} as GitHub has it, as the top of the stack`}>Pull it in</button>
+              <button className="btn sm" type="button" disabled={busy} onClick={() => onOutside("carry-on", c)} aria-label={`Carry on from change ${c.position} as a branch of its own`}>Carry on from it</button>
+            </span>
+          ) : null}
           {!aside && c.pull ? (
             <span className="stack-pull small">
               <ExtLink href={`${state.url}/pull/${c.pull}`}>{`Pull request #${c.pull}`}</ExtLink>

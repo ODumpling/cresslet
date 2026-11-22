@@ -184,14 +184,14 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
   /** `submit: false`: a change made on the way somewhere (going back, deploying): the app's auto-submit skips it. */
   async function changeNow(title: string, prompt: string, submit = true): Promise<{
     sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string };
-    submitted?: { pulls: Submitted[]; error?: string };
+    submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean;
   }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
     if (s.mergeParent) return syncNow(title);
     const rev = revision();
     const files = await o.files();
-    let r: { changed: boolean; sha: string; branch?: string; change?: StackChange; stack?: { id: string; name: string }; submitted?: { pulls: Submitted[]; error?: string } };
+    let r: { changed: boolean; sha: string; branch?: string; change?: StackChange; stack?: { id: string; name: string }; submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean };
     try {
       r = await post("/stack", { from: s.activeBranch, baseSha: s.headSha, files, title, prompt, ...(submit ? {} : { submit: false }) });
     } catch (e) {
@@ -207,7 +207,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       ...(s.activeBranch === s.defaultBranch ? { baseSha: s.headSha } : {}),
     });
     o.log?.(`committed change ${r.change?.position ?? "?"} of ${r.stack?.name ?? "the stack"}: ${r.branch} @ ${r.sha.slice(0, 7)}`);
-    return { sha: r.sha, changed: true, files, change: r.change, stack: r.stack, submitted: r.submitted };
+    return { sha: r.sha, changed: true, files, change: r.change, stack: r.stack, submitted: r.submitted, joined: r.joined };
   }
 
   /** Changes made since `rev` would be overwritten: stop instead. */
@@ -383,6 +383,20 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     submitStack: (stack: string) => post<{ pulls: Submitted[] }>("/stack/submit", { stack }),
     /** The review and checks of a stack's pull requests, by change id. */
     stackPulls: (stack: string) => o.api<{ pulls: Record<string, PullRequest> }>(path(`/stack/pulls?stack=${encodeURIComponent(stack)}`)).then((r) => r.pulls),
+    /**
+     * A change whose branch was pushed to on GitHub (`change.headSha`): pulled in as the top of its stack (`pull-in`), or
+     * carried on from as a branch of its own (`carry-on`); either way its branch is loaded as GitHub has it. Changes
+     * here would be lost: refused (`dirty`) unless `discard`.
+     */
+    takeOutside: (how: "pull-in" | "carry-on", change: StackChange, discard = false) => serial(async () => {
+      if (!change.headSha) throw new Error(`${change.branch} wasn't pushed to on GitHub`);
+      if (o.state()!.dirty && !discard) throw Object.assign(new Error("this workspace has changes not pushed yet: loading the branch would replace them"), { code: "dirty" });
+      const rev = revision();
+      await pullNow(change.branch, change.headSha, { rev, before: async () => void (await post(`/stack/${how}`, { change: change.id, sha: change.headSha })) });
+    }),
+    /** Every change set aside (Source control lists them), and deleting one (with the ones set aside above it). */
+    setAside: () => o.api<{ changes: (StackChange & { stackName: string; restorable: boolean })[] }>(path("/stack/aside")).then((r) => r.changes),
+    deleteSetAside: (change: string) => post<{ dropped: string[]; kept: PullError[] }>("/stack/aside/delete", { change }),
     /** Resolves once the steps queued so far have run (the AI builder sends a request on the workspace they leave). */
     idle: () => serial(async () => {}),
     /** Commits the workspace as a new change of the app's stack (see changeNow). */

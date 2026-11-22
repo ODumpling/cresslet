@@ -453,6 +453,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       duringBack();
       return { change: { id: body.change, position: 1, branch: "feat/s/1-one", sha: "1".repeat(40), title: "One" }, stack: { id: "stk_1" }, now: ["chg_2"], setAside: [{ title: "Two" }, { title: "Three" }] };
     }
+    if (/\/git\/stack\/(pull-in|carry-on)$/.test(path)) return { change: { id: body.change, sha: body.sha } };
     if (path.endsWith("/git/stack/restore")) {
       duringRestore();
       return { change: { id: "chg_3", position: 3, branch: "feat/s/3-three", sha: "3".repeat(40) }, below: { id: "chg_1", sha: "1".repeat(40) }, restored: 2 };
@@ -624,6 +625,20 @@ test("git: going back to a change commits changes here first, then loads its com
   assert.deepEqual([re.state.activeBranch, re.hydrated], ["feat/s/1-one", []]);
   // The workspace is waited on by a request sent meanwhile.
   await r.git.idle();
+});
+
+test("git: a change pushed to on GitHub is loaded as GitHub has it once the server took it (pulled in, or carried on from)", async () => {
+  const g = fakeGit({ onDefault: false });
+  const change = { id: "chg_2", branch: "feat/s/2-two", sha: "2".repeat(40), headSha: "e".repeat(40) };
+  await g.git.takeOutside("pull-in", change);
+  assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), [`/tree?ref=${"e".repeat(40)}`, "/stack/pull-in"]);
+  assert.deepEqual(g.calls[1].body, { change: "chg_2", sha: "e".repeat(40) });
+  assert.equal(g.state.activeBranch, "feat/s/2-two");
+  const d = fakeGit({ onDefault: false });
+  d.state.dirty = true;
+  await assert.rejects(d.git.takeOutside("carry-on", change), (e: Json) => e.code === "dirty");
+  await d.git.takeOutside("carry-on", change, true);
+  assert.equal(d.calls[1].path.split("/git")[1], "/stack/carry-on");
 });
 
 test("git: switching away from the default branch with edits puts them on a branch of their own first", async () => {

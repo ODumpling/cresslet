@@ -113,7 +113,9 @@ export interface StackChange {
   base_sha: string;
   title: string;
   prompt: string;
-  state: "open" | "landed" | "set_aside";
+  /** `outside`: its branch was pushed to on GitHub and the user carried on from it as a branch of its own (no
+   * longer a change of a stack); `dropped`: set aside, its branch deleted. */
+  state: "open" | "landed" | "set_aside" | "outside" | "dropped";
   /** The default branch's commit that took it in (landed). */
   landed_sha: string | null;
   pr_number: number | null;
@@ -1185,6 +1187,21 @@ export class Store implements RateHits {
     return this.db.get<StackChange>(
       "SELECT * FROM stack_changes WHERE app_id = ? AND branch = ? AND state IN ('open', 'set_aside') ORDER BY created_at DESC LIMIT 1", appId, branch,
     );
+  }
+  /** The app's changes in `state`, oldest first. */
+  stackChangesInState(appId: string, state: StackChange["state"]): Promise<StackChange[]> {
+    return this.db.all<StackChange>("SELECT * FROM stack_changes WHERE app_id = ? AND state = ? ORDER BY created_at, stack_id, position", appId, state);
+  }
+  async setStackChangeStates(appId: string, ids: string[], state: StackChange["state"]): Promise<number> {
+    if (!ids.length) return 0;
+    return (await this.db.run(
+      `UPDATE stack_changes SET state = ?, updated_at = ? WHERE app_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
+      state, Date.now(), appId, ...ids,
+    )).changes;
+  }
+  /** A change's commit, taken as it is on GitHub (pulled in after a push from outside). */
+  async setStackChangeSha(id: string, sha: string) {
+    await this.db.run("UPDATE stack_changes SET sha = ?, updated_at = ? WHERE id = ?", sha, Date.now(), id);
   }
   /** A change's pull request. */
   async setStackChangePull(id: string, number: number | null) {
