@@ -1,6 +1,8 @@
 // Runs an app's server bundle in the browser with the Cresslet Env API.
 // Protocol (postMessage):
-//   in:  {type:"init", code, app, secrets, db: Uint8Array|null}  → out: {type:"ready"} | {type:"fatal", message}
+//   in:  {type:"init", code, app, secrets, db: Uint8Array|null, serial?}  → out: {type:"ready"} | {type:"fatal", message}
+//        serial: one request at a time (each to its whole response body): the app's AsyncLocalStorage is a one-store
+//        shim here (TanStack Start, start-build.js)
 //   in:  {type:"request", id, url, method, headers, body}        → out: {type:"response", id, status, headers, body}
 //   out: {type:"log", level, msg}  {type:"db", bytes}  {type:"files", id, op, ...} ← in: {type:"files-result", id, ...}
 //   WebSockets: a 101 response is {type:"response", id, status: 101, headers, body: null, protocol}; then
@@ -10,6 +12,7 @@ import initSqlJs from "https://esm.sh/sql.js@1.13.0";
 const SQL_WASM = "https://cdn.jsdelivr.net/npm/sql.js@1.13.0/dist/sql-wasm.wasm";
 let handler;
 let env;
+let serial = null; // with init's `serial`: the request being handled (a promise), the next one waits for it
 // Where the `cresslet` SDK (`import { db } from "cresslet"`, cresslet-cli sdk/index.js) finds the env: published once
 // the app's module has loaded (bindings exist only once a handler runs). Contract: runtime/cresslet-runtime.js.
 const runtime = { contract: 1, runtime: "studio preview", paramStyle: "?", env: null };
@@ -109,14 +112,35 @@ globalThis.WebSocketPair = class WebSocketPair {
   }
 };
 const NativeResponse = Response;
+const ownHeaders = (res, headers) => Object.defineProperty(res, "headers", { value: new Headers(headers), configurable: true });
 globalThis.Response = class Response extends NativeResponse {
   // fetch(), Response.json(), clone()… return native ones: still `instanceof Response` (Hono checks). Apps' own
   // subclasses keep the usual check.
   static [Symbol.hasInstance](v) {
     return this === globalThis.Response ? v instanceof NativeResponse : Function.prototype[Symbol.hasInstance].call(this, v);
   }
+  // Browsers drop Set-Cookie from a Response's headers (a forbidden response header): an app's cookies (sessions)
+  // would never reach the studio. Responses made here keep all their headers, Set-Cookie included, on a Headers of
+  // their own (later appends too), which the studio reads.
+  static json(data, init) {
+    const body = JSON.stringify(data);
+    if (body === undefined) throw new TypeError("Value is not JSON serializable");
+    const headers = new Headers(init?.headers);
+    if (!headers.has("content-type")) headers.set("content-type", "application/json");
+    return new this(body, { ...init, headers });
+  }
+  clone() {
+    return ownHeaders(super.clone(), this.headers);
+  }
   constructor(body, init) {
-    if (init?.status !== 101) return super(body, init);
+    if (init?.status !== 101) {
+      super(body, init);
+      const headers = new Headers(super.headers); // with the defaults the body gave (content-type)
+      headers.delete("set-cookie"); // where Response keeps them (not browsers), they're added once below
+      for (const v of new Headers(init?.headers).getSetCookie()) headers.append("set-cookie", v);
+      ownHeaders(this, headers);
+      return;
+    }
     // `init` may be a 101 Response being re-wrapped (`new Response(res.body, res)`, as Hono middleware does).
     super(null, { status: 200, statusText: init.statusText, headers: init.headers });
     // as in workerd: not ok, and not clonable (a clone couldn't carry the socket)
@@ -383,6 +407,7 @@ onmessage = async ({ data: m, ports }) => {
       handler = typeof exp === "function" ? exp : exp?.fetch?.bind(exp);
       if (!handler) throw new Error("server/index must `export default { fetch(req, env) {} }`");
       runtime.env = env; // after the module's top level and reading its exports, as on the platform
+      if (m.serial) serial = Promise.resolve();
       postMessage({ type: "ready" });
     } catch (e) {
       postMessage({ type: "fatal", message: e?.stack ?? String(e) });
@@ -398,39 +423,49 @@ onmessage = async ({ data: m, ports }) => {
     return;
   }
   if (m.type === "request") {
-    try {
-      const req = new Request(m.url, {
-        method: m.method,
-        headers: m.headers,
-        body: m.body && m.method !== "GET" && m.method !== "HEAD" ? m.body : undefined,
-      });
-      const upgrade = new Headers(m.headers).get("upgrade")?.toLowerCase() === "websocket";
-      // `Request` drops Upgrade, Connection, Sec-WebSocket-*, Origin.
-      const shadow = (r, headers) => {
-        const clone = r.clone.bind(r);
-        return Object.defineProperties(r, {
-          headers: { value: new Headers(headers) },
-          clone: { value: () => shadow(clone(), r.headers) }, // with any edits made since
-        });
-      };
-      if (upgrade) shadow(req, m.headers);
-      const res = await handler(req, env, { waitUntil() {} });
-      if (!(res instanceof NativeResponse)) throw new Error("fetch handler must return a Response");
-      if (res.status === 101) {
-        if (!upgrade || !(res.webSocket instanceof PairSocket)) {
-          throw new Error("a 101 response needs `webSocket` (a WebSocketPair end) and a WebSocket upgrade request");
-        }
-        accepted.set(m.id, res.webSocket);
-        const protocol = res.headers.get("sec-websocket-protocol") ?? undefined;
-        postMessage({ type: "response", id: m.id, status: 101, headers: [...res.headers], body: null, protocol });
-        return;
-      }
-      const body = await res.arrayBuffer();
-      postMessage({ type: "response", id: m.id, status: res.status, headers: [...res.headers], body }, [body]);
-    } catch (e) {
-      console.error(e);
-      const body = new TextEncoder().encode(`Internal Server Error\n\n${e?.stack ?? e}`).buffer;
-      postMessage({ type: "response", id: m.id, status: 500, headers: [["content-type", "text/plain"]], body }, [body]);
+    if (serial) {
+      const turn = serial.then(() => handle(m));
+      serial = turn.catch(() => {});
+      return turn;
     }
+    return handle(m);
   }
 };
+
+async function handle(m) {
+  try {
+    const req = new Request(m.url, {
+      method: m.method,
+      headers: m.headers,
+      body: m.body && m.method !== "GET" && m.method !== "HEAD" ? m.body : undefined,
+    });
+    const upgrade = new Headers(m.headers).get("upgrade")?.toLowerCase() === "websocket";
+    // `Request` drops Upgrade, Connection, Sec-WebSocket-*, Origin, Cookie (which apps' sessions, CSRF and WebSocket
+    // checks read).
+    const shadow = (r, headers) => {
+      const clone = r.clone.bind(r);
+      return Object.defineProperties(r, {
+        headers: { value: new Headers(headers) },
+        clone: { value: () => shadow(clone(), r.headers) }, // with any edits made since
+      });
+    };
+    if (m.headers.some(([k]) => !req.headers.has(k))) shadow(req, m.headers); // e.g. Origin, Cookie: dropped
+    const res = await handler(req, env, { waitUntil() {} });
+    if (!(res instanceof NativeResponse)) throw new Error("fetch handler must return a Response");
+    if (res.status === 101) {
+      if (!upgrade || !(res.webSocket instanceof PairSocket)) {
+        throw new Error("a 101 response needs `webSocket` (a WebSocketPair end) and a WebSocket upgrade request");
+      }
+      accepted.set(m.id, res.webSocket);
+      const protocol = res.headers.get("sec-websocket-protocol") ?? undefined;
+      postMessage({ type: "response", id: m.id, status: 101, headers: [...res.headers], body: null, protocol });
+      return;
+    }
+    const body = await res.arrayBuffer();
+    postMessage({ type: "response", id: m.id, status: res.status, headers: [...res.headers], body }, [body]);
+  } catch (e) {
+    console.error(e);
+    const body = new TextEncoder().encode(`Internal Server Error\n\n${e?.stack ?? e}`).buffer;
+    postMessage({ type: "response", id: m.id, status: 500, headers: [["content-type", "text/plain"]], body }, [body]);
+  }
+}
