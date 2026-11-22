@@ -268,11 +268,7 @@ export class Engine {
       // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
       beforeDeploy: async (log, signal, app) => {
         if (this.git.connected && (!app || app === project.deploy?.name)) {
-          // A request being worked on: a deploy from one of its commands commits it as its change; any other waits
-          // (deployed now, its edits would go into the change before).
-          const turn = cb.builderTurn();
-          if (turn && !cb.builderRunning()) throw new Error("the AI builder is working on a request: deploy once it's done");
-          const { files, ...p } = await this.git.prepareDeploy(log, signal, turn);
+          const { files, ...p } = await this.git.prepareDeploy(log, signal, { turn: () => cb.builderTurn(), running: () => cb.builderRunning() });
           return { ...p, source: sourceDigest(files) };
         }
         // Linked to a repository elsewhere (another browser, the CLI), not here: deploying this workspace would skip it.

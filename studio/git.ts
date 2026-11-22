@@ -344,8 +344,12 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * of its own, and resolves to the commit to build and record. Throws, before anything is built, on a conflict
      * or a protected branch.
      */
-    prepareDeploy: (log: (line: string) => void = () => {}, signal?: AbortSignal, turn?: { title: string; prompt: string } | null) => serial(async (): Promise<Provenance> => {
+    prepareDeploy: (log: (line: string) => void = () => {}, signal?: AbortSignal, builder?: { turn: () => { title: string; prompt: string } | null; running: () => boolean }) => serial(async (): Promise<Provenance> => {
       signal?.throwIfAborted();
+      // The AI builder's request, as of now (this step may have waited for others): a deploy from one of its commands
+      // commits it as its change; any other waits (deployed now, its edits would go into the change before).
+      const turn = builder?.turn() ?? null;
+      if (turn && !builder!.running()) throw new Error("the AI builder is working on a request: deploy once it's done");
       // Changes here that are a change of their own first, merged like any other: an AI builder turn's (it's deploying
       // mid-turn), or edits on the default branch (by hand).
       const was = o.state()!;

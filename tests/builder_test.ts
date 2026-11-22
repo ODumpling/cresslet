@@ -558,7 +558,10 @@ test("git: edits on a change below its stack's top (one added elsewhere) go on a
 
 test("git: a change's fallback commit (its top moved on GitHub) commits what was read, not an edit made meanwhile", async () => {
   let g: Json;
-  g = fakeGit({ onDefault: false, stackError: "not_on_stack", duringStack: () => void g.rev.n++ });
+  g = fakeGit({ onDefault: false, stackError: "not_on_stack", duringStack: () => {
+    g.rev.n++;
+    g.files.list = [{ path: "index.html", data: "late" }];
+  } });
   g.state.dirty = true;
   await g.git.commitChange("One");
   assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack", "/sync"]);
@@ -615,11 +618,22 @@ test("deploy on a linked app: commit the branch, merge it into main, build main 
   const turn = fakeGit({ onDefault: false });
   turn.state.activeBranch = "feat/s/1-one";
   turn.state.dirty = true;
-  const p3 = await turn.git.prepareDeploy(() => {}, undefined, { title: "Dark mode", prompt: "Dark mode please" });
+  const p3 = await turn.git.prepareDeploy(() => {}, undefined, { turn: () => ({ title: "Dark mode", prompt: "Dark mode please" }), running: () => true });
   assert.deepEqual(turn.calls.map((x) => x.path.split("/git")[1]), ["/stack", "/merge"]);
   assert.deepEqual([turn.calls[0].body.title, turn.calls[0].body.prompt, turn.calls[1].body.branch], ["Dark mode", "Dark mode please", "feat/s/2-two"]);
   assert.equal(turn.calls[1].body.headSha, "1".padStart(40, "c"));
   assert.equal(p3.branch, "main");
+  // Deployed by hand while the builder works on a request (checked when the step runs, after any queued before it):
+  // refused, nothing sent.
+  const busy = fakeGit({ onDefault: false });
+  busy.state.dirty = true;
+  let working = false;
+  const queued = busy.git.sync("before");
+  const refused = busy.git.prepareDeploy(() => {}, undefined, { turn: () => (working ? { title: "x", prompt: "x" } : null), running: () => false });
+  working = true; // the request starts while the deploy waits behind the sync
+  await queued;
+  await assert.rejects(refused, /AI builder is working on a request/);
+  assert.deepEqual(busy.calls.map((x: Json) => x.path.split("/git")[1]), ["/sync"]);
 
   // An edit made while that change was being committed: nothing merged, nothing synced on its own (onto main); it
   // stays here.
