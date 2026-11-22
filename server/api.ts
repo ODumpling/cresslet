@@ -34,6 +34,7 @@ import {
   type Token,
   AccountDisabledError,
   accountLock,
+  cronsLock,
   inviteLock,
 } from "./store.ts";
 import { orgRefs, orgRoutes } from "./orgs.ts";
@@ -845,18 +846,25 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       crons: appCrons(a).map((c) => {
         let next: string[] = [];
         try {
-          if (!paused.has(c)) next = nextRuns(parseCron(c), now, 3).map((t) => iso(t)!);
+          // Unclaimed apps' crons don't fire.
+          if (a.account_id && !paused.has(c)) next = nextRuns(parseCron(c), now, 3).map((t) => iso(t)!);
         } catch { /* stored before validation tightened: never fires */ }
-        const last = runs.find((r) => r.cron === c);
+        const last = runtime.cronRuns.last(a.id, c);
         return { cron: c, paused: paused.has(c), state: scheduler?.state(a.id, c) ?? null, next, last: last ? runView(last) : null };
       }),
       runs: runs.map(runView),
       since: iso(runtime.cronRuns.since),
     };
   };
-  /** A cron the app's current deploy declares (as in its config), from the body. */
+  /** The body's cron, and the app as it is now (a deploy may have changed its crons while the body arrived). */
   const cronParam = async (c: Context<Env>, a: App) => {
-    const { cron } = await body<{ cron?: unknown }>(c);
+    const cron = (await body<{ cron?: unknown } | null>(c))?.cron;
+    const now = await store.appById(a.id);
+    if (!now) throw new HttpError(404, `app not found: ${a.name}`, "not_found");
+    return { cron: hasCron(now, cron), app: now };
+  };
+  /** A cron the app's current deploy declares (as in its config). */
+  const hasCron = (a: App, cron: unknown) => {
     if (typeof cron !== "string" || !appCrons(a).includes(cron)) throw new HttpError(404, `no cron ${JSON.stringify(cron)} in ${a.name}'s current deploy`, "not_found");
     return cron;
   };
@@ -873,11 +881,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     notPage(a);
     await authorize(c, a, "deploy");
     if (!a.account_id) throw new HttpError(403, "crons run in claimed apps only (cresslet claim)", "unclaimed");
-    const cron = await cronParam(c, a);
+    const { cron, app: now } = await cronParam(c, a);
     await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
     if (!scheduler) throw new HttpError(503, "crons aren't running on this server", "unavailable");
     if (!scheduler.runNow(a.id, cron)) throw new HttpError(409, `cron "${cron}" is already running or queued`, "busy");
-    return c.json(cronsView(a), 202);
+    return c.json(cronsView(now), 202);
   });
 
   for (const [path, pause] of [["pause", true], ["resume", false]] as const) {
@@ -885,12 +893,13 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       const a = await getApp(c.req.param("name"));
       notPage(a);
       await authorize(c, a, "deploy");
-      const cron = await cronParam(c, a);
-      await authorize(c, a, "deploy");
+      const { cron } = await cronParam(c, a);
       // Under a per-app lock (two pauses can't drop each other's); only crons the current deploy still has are kept.
-      const now = await store.serialized(`cresslet:crons:${a.id}`, async () => {
+      const now = await store.serialized(cronsLock(a.id), async () => {
+        await authorize(c, a, "deploy"); // again, right before the change: access may have changed while waiting
         const cur = await store.appById(a.id);
         if (!cur) throw new HttpError(404, `app not found: ${a.name}`, "not_found");
+        hasCron(cur, cron);
         const set = pausedCrons(cur);
         if (pause) set.add(cron);
         else set.delete(cron);

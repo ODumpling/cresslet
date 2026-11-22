@@ -645,9 +645,15 @@ export class Store implements RateHits {
     await this.db.run("UPDATE apps SET account_id = ?, expires_at = NULL, anon_client = NULL, updated_at = ? WHERE id = ?",
       accountId, Date.now(), appId);
   }
+  /** Paused crons the new config doesn't have are forgotten (one brought back later isn't paused). */
   async setCurrentDeploy(appId: string, deployId: string, config: unknown) {
-    await this.db.run("UPDATE apps SET current_deploy_id = ?, config = ?, updated_at = ? WHERE id = ?",
-      deployId, JSON.stringify(config ?? {}), Date.now(), appId);
+    const crons = (config as { crons?: string[] } | null)?.crons ?? [];
+    await this.serialized(cronsLock(appId), async () => {
+      const row = await this.db.get<{ paused_crons: string | null }>("SELECT paused_crons FROM apps WHERE id = ?", appId);
+      const paused = row?.paused_crons ? (JSON.parse(row.paused_crons) as string[]).filter((c) => crons.includes(c)) : [];
+      await this.db.run("UPDATE apps SET current_deploy_id = ?, config = ?, paused_crons = ?, updated_at = ? WHERE id = ?",
+        deployId, JSON.stringify(config ?? {}), paused.length ? JSON.stringify(paused) : null, Date.now(), appId);
+    });
   }
   async setPausedCrons(appId: string, crons: string[]) {
     await this.db.run("UPDATE apps SET paused_crons = ?, updated_at = ? WHERE id = ?", crons.length ? JSON.stringify(crons) : null, Date.now(), appId);
@@ -1111,6 +1117,8 @@ export class Store implements RateHits {
 
 /** Held while an account's tokens are issued, and while it's disabled. */
 export const accountLock = (accountId: string) => `cresslet:account:${accountId}`;
+/** Changing an app's paused crons (pause, resume, and a deploy forgetting the ones it dropped). */
+export const cronsLock = (appId: string) => `cresslet:crons:${appId}`;
 /** Held while an organization's members change (the last admin can't leave). */
 export const orgLock = (orgId: string) => `cresslet:org:${orgId}`;
 

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import type * as API from "../../../api-types.ts";
 import { api, errorMessage, json } from "../../lib/api.ts";
+import { refocusId } from "../../lib/focus.ts";
 import { ago, canManage, plural } from "../../lib/format.ts";
 import { useAlive, useLoad } from "../../lib/hooks.ts";
 import { toast } from "../../lib/toast.tsx";
@@ -11,21 +12,16 @@ import { DataTable, EmptyState, StatusPill, TimeAgo } from "../../ui/bits.tsx";
 import { Icon } from "../../ui/icons.tsx";
 import { appPath, TabError, useApp, useTabReload } from "./AppLayout.tsx";
 
-/** While a run is queued or running: how often the tab looks again. */
-const POLL_MS = 2000;
+/** How often the tab looks again (while it's visible): a run queued or running, or else (scheduled runs, next times). */
+const BUSY_POLL_MS = 2000;
+const IDLE_POLL_MS = 30_000;
 
 export function AppCrons() {
   const { name, d } = useApp();
   const server = !!d.app.config?.server;
   const c = useLoad(() => (server ? api<API.Crons>(appPath(name, "/crons")) : Promise.resolve(null)), [name, server], { keep: true });
   useTabReload(c.reload);
-  const busy = !!c.data?.crons.some((x) => x.state);
   const reload = c.reload;
-  useEffect(() => {
-    if (!busy) return;
-    const t = setInterval(() => void reload(), POLL_MS);
-    return () => clearInterval(t);
-  }, [busy, reload]);
 
   if (!server) {
     return <EmptyState title="No crons">Crons call a server's <code>scheduled()</code> export. This app is a static site: add a server to use them.</EmptyState>;
@@ -52,8 +48,14 @@ function Body({ v: loaded, onChange }: { v: API.Crons; onChange: () => Promise<b
   }
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [status, setStatus] = useState("");
+  const busy = v.crons.some((x) => x.state);
+  useEffect(() => {
+    const t = setInterval(() => document.hidden || void onChange(), busy ? BUSY_POLL_MS : IDLE_POLL_MS);
+    return () => clearInterval(t);
+  }, [busy, onChange]);
 
-  async function act(cron: string, what: "run" | "pause" | "resume") {
+  /** `i`: the cron's row (its buttons' ids). */
+  async function act(cron: string, i: number, what: "run" | "pause" | "resume") {
     const key = `${what} ${cron}`;
     setPending((s) => new Set(s).add(key));
     const done = () => setPending((s) => {
@@ -74,16 +76,18 @@ function Body({ v: loaded, onChange }: { v: API.Crons; onChange: () => Promise<b
     } catch (e) {
       toast(`Could not ${what === "run" ? "run" : what} ${cron}: ${errorMessage(e)}`);
       if (!alive.current) return;
-      done();
+      flushSync(done);
       void onChange();
     }
+    // The button was disabled meanwhile (focus fell to the page): back to it, or (Run now, disabled while it runs) the heading.
+    refocusId(what === "run" ? "crons-title" : `cron-toggle-${i}`);
   }
 
   return (
     <>
       <p className="muted lead">Each cron calls your server's <code>scheduled(event, env, ctx)</code> export on its schedule, in UTC.
         {" Declare them in cresslet.json, as "}<code>{'"crons": ["*/15 * * * *"]'}</code>{" (at most 5): deploying changes them. "}
-        Pausing one skips its scheduled runs, across deploys, until you resume it; Run now still runs it.</p>
+        Pausing one skips its scheduled runs until you resume it (a deploy that drops it forgets the pause); Run now still runs it.</p>
       {!a.claimed ? <p className="muted small">Crons run in claimed apps only: run cresslet claim, or deploy it while logged in.</p>
         : !canManage(a.access) ? <p className="muted small">Only the owner and admins can pause or run crons.</p> : null}
       <div className="panel">
@@ -115,12 +119,12 @@ function Body({ v: loaded, onChange }: { v: API.Crons; onChange: () => Promise<b
                   {manage ? (
                     <>
                       <button className="btn sm" type="button" id={`cron-run-${i}`} aria-label={`Run ${x.cron} now`}
-                        disabled={!!x.state || pending.has(`run ${x.cron}`)} onClick={() => void act(x.cron, "run")}>
+                        disabled={!!x.state || pending.has(`run ${x.cron}`)} onClick={() => void act(x.cron, i, "run")}>
                         <Icon name="zap" />Run now
                       </button>
                       <button className="btn sm" type="button" id={`cron-toggle-${i}`} aria-label={`${x.paused ? "Resume" : "Pause"} ${x.cron}`}
                         disabled={pending.has(`pause ${x.cron}`) || pending.has(`resume ${x.cron}`)}
-                        onClick={() => void act(x.cron, x.paused ? "resume" : "pause")}>
+                        onClick={() => void act(x.cron, i, x.paused ? "resume" : "pause")}>
                         {x.paused ? "Resume" : "Pause"}
                       </button>
                     </>
@@ -139,8 +143,8 @@ function Body({ v: loaded, onChange }: { v: API.Crons; onChange: () => Promise<b
         </div>
         {v.runs.length ? (
           <DataTable label="Recent cron runs" labelledBy="cron-runs-title" heads={[["Cron"], ["Started"], ["Result"], ["Duration", "num"]]}>
-            {v.runs.map((r) => (
-              <tr key={`${r.startedAt} ${r.cron}`}>
+            {v.runs.map((r, i) => (
+              <tr key={`${i} ${r.startedAt} ${r.cron}`}>
                 <td><span className="mono">{r.cron}</span>{r.manual ? <span className="badge">run now</span> : null}</td>
                 <td><TimeAgo iso={r.startedAt} /></td>
                 <td><RunPill r={r} /></td>

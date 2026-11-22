@@ -167,6 +167,13 @@ test("crons run the scheduled() export of claimed apps", async () => {
     await call("/v1/deploys", { method: "POST", headers: auth, body: JSON.stringify({ app: d.app.name, files: [{ path: "index.html", data: "x" }], server: SERVER, config: { crons: ["0 3 * * *"] } }) });
     v = await crons();
     assert.deepEqual(v.crons.map((x: { cron: string; paused: boolean }) => [x.cron, x.paused]), [["0 3 * * *", true]]);
+    assert.equal(v.crons[0].last.manual, true); // its last run, though */5 runs were newer
+    // A deploy without it forgets the pause: brought back, it runs.
+    const redeploy = (crons: string[]) => call("/v1/deploys", { method: "POST", headers: auth, body: JSON.stringify({ app: d.app.name, files: [{ path: "index.html", data: "x" }], server: SERVER, config: { crons } }) });
+    await redeploy(["*/5 * * * *"]);
+    await redeploy(["0 3 * * *"]);
+    assert.equal((await crons()).crons[0].paused, false);
+    assert.equal((await call(`/v1/apps/${d.app.name}/crons/pause`, { method: "POST", headers: auth, body: "null" })).status, 404);
 
     // Clients can't trigger scheduled() by forging the internal header.
     const forged = await call("/api/runs", { host, headers: { "x-cresslet-scheduled": '{"cron":"forged","scheduledTime":1}' } });

@@ -56,9 +56,10 @@ function dayMatches({ fields: [, , dom, , dow], domStar, dowStar }: Cron, d: Dat
 
 /**
  * The next `n` minutes (ms, UTC) after `from` the cron fires at, within `horizonMs` (an expression like
- * `0 0 30 2 *` never fires: fewer or none). Skips whole months, days and hours that can't match.
+ * `0 0 30 2 *` never fires: fewer or none). 28 years: the calendar's weekdays repeat, so a date and weekday
+ * that can meet do within it. Skips whole months, days and hours that can't match.
  */
-export function nextRuns(cron: Cron, from: number, n: number, horizonMs = 5 * 366 * 86_400_000): number[] {
+export function nextRuns(cron: Cron, from: number, n: number, horizonMs = 28 * 366 * 86_400_000): number[] {
   const [min, hour, , mon] = cron.fields;
   const out: number[] = [];
   const end = from + horizonMs;
@@ -87,20 +88,27 @@ export interface CronRun {
   manual: boolean;
 }
 
-/** Recent runs per app, newest first, in memory on the node that runs them (a restart starts over: see `since`). */
+/**
+ * Recent runs per app, newest first, and each cron's last one (kept also once its run left the recent ones), in
+ * memory on the node that runs them (a restart starts over: see `since`).
+ */
 export class CronRuns {
   static readonly KEEP = 50;
-  #apps = new Map<string, CronRun[]>();
+  #apps = new Map<string, { runs: CronRun[]; last: Map<string, CronRun> }>();
   readonly since = Date.now();
 
   record(appId: string, run: CronRun) {
-    let list = this.#apps.get(appId);
-    if (!list) this.#apps.set(appId, list = []);
-    list.unshift(run);
-    if (list.length > CronRuns.KEEP) list.length = CronRuns.KEEP;
+    let a = this.#apps.get(appId);
+    if (!a) this.#apps.set(appId, a = { runs: [], last: new Map() });
+    a.runs.unshift(run);
+    if (a.runs.length > CronRuns.KEEP) a.runs.length = CronRuns.KEEP;
+    a.last.set(run.cron, run);
   }
   list(appId: string): readonly CronRun[] {
-    return this.#apps.get(appId) ?? [];
+    return this.#apps.get(appId)?.runs ?? [];
+  }
+  last(appId: string, cron: string): CronRun | undefined {
+    return this.#apps.get(appId)?.last.get(cron);
   }
   drop(appId: string) {
     this.#apps.delete(appId);

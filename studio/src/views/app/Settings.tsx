@@ -84,8 +84,11 @@ function Domains() {
       const r = await api<{ domain: API.DomainDetail }>(appPath(name, `/domains/${encodeURIComponent(domain)}/verify`), json("POST", {}));
       toast(`${domain} verified`);
       if (!alive.current) return;
-      put(r.domain);
-      setStatus(`${domain} verified`);
+      flushSync(() => {
+        put(r.domain);
+        setStatus(`${domain} verified`);
+      });
+      refocusId(`domain-remove-${domain}`); // Verify is gone
     } catch (e) {
       toast(`Could not verify ${domain}: ${errorMessage(e)}`);
     } finally {
@@ -97,11 +100,12 @@ function Domains() {
     if (!confirm(`Remove ${domain} from ${name}? It stops serving the app at once.`)) return;
     mark(domain, true);
     try {
-      const r = await api<{ domains: API.DomainDetail[] }>(appPath(name, `/domains/${encodeURIComponent(domain)}`), { method: "DELETE" });
+      await api(appPath(name, `/domains/${encodeURIComponent(domain)}`), { method: "DELETE" });
       toast(`${domain} removed`);
       if (!alive.current) return;
       flushSync(() => {
-        setDomains(r.domains);
+        // Only this row: the answer's list could be older than another row's Verify that finished meanwhile.
+        setDomains((ds) => ds?.filter((x) => x.domain !== domain));
         setStatus(`${domain} removed`);
       });
       refocusId("domains-title");
@@ -119,7 +123,7 @@ function Domains() {
       {domains ? (
         domains.length ? (
           <DataTable label="Custom domains" labelledBy="domains-title" heads={[["Domain"], ["DNS records"], ["Actions", "actions", true]]}>
-            {domains.map((x, i) => (
+            {domains.map((x) => (
               <tr key={x.domain}>
                 <td><span className="mono">{x.domain}</span><span className="badge">{x.verified ? "verified" : "pending"}</span></td>
                 <td className="wrap">
@@ -130,8 +134,8 @@ function Domains() {
                 <td className="actions">
                   {manage ? (
                     <>
-                      {!x.verified && !off ? <button className="btn sm" type="button" id={`domain-verify-${i}`} aria-label={`Verify ${x.domain}`} disabled={busy.has(x.domain)} onClick={() => void verify(x.domain)}>Verify</button> : null}
-                      <button className="btn sm danger" type="button" id={`domain-remove-${i}`} aria-label={`Remove ${x.domain}`} disabled={busy.has(x.domain)} onClick={() => void remove(x.domain)}>
+                      {!x.verified && !off ? <button className="btn sm" type="button" id={`domain-verify-${x.domain}`} aria-label={`Verify ${x.domain}`} disabled={busy.has(x.domain)} onClick={() => void verify(x.domain)}>Verify</button> : null}
+                      <button className="btn sm danger" type="button" id={`domain-remove-${x.domain}`} aria-label={`Remove ${x.domain}`} disabled={busy.has(x.domain)} onClick={() => void remove(x.domain)}>
                         <Icon name="trash" />Remove
                       </button>
                     </>
@@ -194,13 +198,13 @@ function Egress() {
       <h2 id="egress-title">Outbound network</h2>
       <fieldset className="field">
         <legend>Hosts your server may <code>fetch</code></legend>
-        <label className="check"><input type="radio" name="egress" value="any" disabled={!manage} checked={mode === "any"} onChange={() => setMode("any")} /><span>Any public host</span></label>
-        <label className="check"><input type="radio" name="egress" value="list" disabled={!manage} checked={mode === "list"} onChange={() => setMode("list")} /><span>Only these hosts</span></label>
+        <label className="check"><input type="radio" name="egress" value="any" disabled={!manage || saving} checked={mode === "any"} onChange={() => setMode("any")} /><span>Any public host</span></label>
+        <label className="check"><input type="radio" name="egress" value="list" disabled={!manage || saving} checked={mode === "list"} onChange={() => setMode("list")} /><span>Only these hosts</span></label>
       </fieldset>
       {mode === "list" ? (
         <div className="field">
           <label htmlFor="egress-hosts">Allowed hosts, one per line</label>
-          <textarea className="input mono" id="egress-hosts" rows={4} aria-describedby="egress-hint" spellCheck={false} disabled={!manage}
+          <textarea className="input mono" id="egress-hosts" rows={4} aria-describedby="egress-hint" spellCheck={false} disabled={!manage || saving}
             placeholder={"api.stripe.com\n*.openai.com"} value={hosts} onChange={(e) => {
               setErr("");
               setHosts(e.target.value);
@@ -220,7 +224,7 @@ function Egress() {
 }
 
 function Delete() {
-  const { name } = useApp();
+  const { name, d } = useApp();
   const navigate = useNavigate();
   const alive = useAlive();
   const [typed, setTyped] = useState("");
@@ -232,6 +236,9 @@ function Delete() {
     if (typed.trim() !== name) return;
     setBusy(true);
     try {
+      // The app this page shows, not one made with its name since (deleted and recreated elsewhere).
+      const now = await api<API.AppDetail>(appPath(name));
+      if (now.app.id !== d.app.id) throw new Error(`${name} is a different app now: reload the page`);
       await api(appPath(name), { method: "DELETE" });
     } catch (e2) {
       if (alive.current) {
