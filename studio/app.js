@@ -2000,7 +2000,7 @@ function renderApps() {
               icon("download"), "Open source"),
             a.access === "viewer" ? null
               : el("a", { className: "btn sm", href: `#/share/${encodeURIComponent(a.name)}` }, icon("users"), "Share", srOnly(` ${a.name}`)),
-            a.access === "owner" ? null
+            a.access === "owner" || a.org ? null // org apps: leave the organization instead
               : el("button", { className: "btn sm danger", type: "button", id: `leave-${a.id}`, ariaLabel: `Leave ${a.name}`, onclick: () => leaveApp(a) }, "Leave")))))
       : emptyState("Nothing deployed yet", "Open a project and press Deploy, or run cresslet deploy."));
   }).catch((e) => $("apps").replaceChildren(el("p", { className: "error", textContent: `Could not load apps: ${e.message}` })));

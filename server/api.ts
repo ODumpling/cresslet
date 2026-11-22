@@ -277,6 +277,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   ): Promise<AppAccess | undefined> {
     const acct = c.get("account"), t = c.get("token");
     let scopeError: string | undefined;
+    // The app as it is now: callers check again after reading a body, and it may have moved organizations since.
+    a = (await store.appById(a.id, true)) ?? a;
     const access = acct && t ? await store.access(a, acct.id) : undefined;
     if (access) {
       const apps = tokenApps(t!);

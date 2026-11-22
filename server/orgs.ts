@@ -169,7 +169,9 @@ export function orgRoutes(
       : { ...await manager(c, o), self: false };
     await store.serialized(orgLock(o.id), async () => {
       if (!m.self) await stillManages(c, o, m);
-      if (!await store.orgRole(o.id, target)) throw new HttpError(404, "member not found", "not_found");
+      if (!await store.orgRole(o.id, target)) {
+        throw new HttpError(404, m.self ? `organization not found: ${o.name}` : "member not found", "not_found");
+      }
       await keepAdmin(o, target);
       await store.removeOrgMember(o.id, target);
       await store.reassignOrgApps(o.id, target);

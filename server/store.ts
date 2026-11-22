@@ -319,6 +319,10 @@ export class Store implements RateHits {
    */
   disableAccount(accountId: string): Promise<boolean> {
     return this.serialized(accountLock(accountId), async () => {
+      // Each organization's lock (in a fixed order), as member changes take, before this account's row is
+      // locked by the update: two disables handing apps to each other wait here rather than deadlock.
+      const orgs = (await this.orgsFor(accountId)).map((o) => o.id).sort();
+      for (const o of orgs) await this.db.lock(orgLock(o));
       const r = await this.db.run(
         `UPDATE accounts SET disabled_at = ?, disabled_email = email, disabled_github_id = github_id,
            email = 'disabled+' || id || '@invalid', github_id = NULL
@@ -327,9 +331,6 @@ export class Store implements RateHits {
       );
       await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
       await this.db.run("DELETE FROM page_sessions WHERE account_id = ?", accountId);
-      // Each organization's lock (in a fixed order), as member changes take: they can't interleave with this.
-      const orgs = (await this.orgsFor(accountId)).map((o) => o.id).sort();
-      for (const o of orgs) await this.db.lock(orgLock(o));
       for (const o of orgs) await this.reassignOrgApps(o, accountId);
       return r.changes > 0;
     });
