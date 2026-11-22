@@ -31,8 +31,7 @@ export function SettingsTokens() {
   const [scope, setScope] = useState<"all" | "some">("all");
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [created, setCreated] = useCreatedToken();
+  const { secret: created, keep: setCreated, creating: busy, setCreating: setBusy } = useCreatedToken();
   const title = useRef<HTMLHeadingElement>(null);
   const appsBox = useRef<HTMLDivElement>(null);
   const newValue = useRef<HTMLInputElement>(null);
@@ -65,6 +64,7 @@ export function SettingsTokens() {
 
   async function create(e: FormEvent) {
     e.preventDefault();
+    if (busy) return; // one create at a time
     const some = scope === "some";
     const list = some ? (apps.data ?? []).map((a) => a.name).filter((n) => picked.has(n)) : null;
     if (list && !list.length) {
@@ -94,10 +94,8 @@ export function SettingsTokens() {
     } catch (err) {
       if (alive.current) setError(`Could not create token: ${errorMessage(err)}`);
     } finally {
-      if (alive.current) {
-        flushSync(() => setBusy(false));
-        if (document.activeElement === document.body) createBtn.current?.focus(); // disabling it dropped focus
-      }
+      flushSync(() => setBusy(false));
+      if (alive.current && document.activeElement === document.body) createBtn.current?.focus(); // disabling it dropped focus
     }
   }
 
