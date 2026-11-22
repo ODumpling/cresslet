@@ -45,6 +45,8 @@ async function tx<T = undefined>(mode: IDBTransactionMode, fn: (s: IDBObjectStor
     const r = fn(t.objectStore("projects"));
     t.oncomplete = () => resolve(r?.result);
     t.onerror = () => reject(t.error);
+    // A commit can fail with only `abort` (e.g. QuotaExceededError): without this the promise never settles.
+    t.onabort = () => reject(t.error ?? new DOMException("transaction aborted", "AbortError"));
   });
 }
 
@@ -101,6 +103,8 @@ export async function migrateDeployKeys(): Promise<number> {
     };
     t.oncomplete = () => resolve(left);
     t.onerror = () => reject(t.error);
+    // A commit can fail with only `abort` (e.g. QuotaExceededError): without this the promise never settles.
+    t.onabort = () => reject(t.error ?? new DOMException("transaction aborted", "AbortError"));
   });
 }
 

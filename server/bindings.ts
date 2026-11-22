@@ -153,7 +153,8 @@ export function createDb(path: string, maxBytes?: number) {
 
 export function safeKey(key: string): string {
   const k = normalize(key).replace(/^\/+/, "");
-  if (!k || k.startsWith("..") || k.includes("\0") || k.length > 512) {
+  // A trailing slash would name the same blob as the key without it (two index rows, one file).
+  if (!k || k.startsWith("..") || k.endsWith("/") || k.includes("\0") || k.length > 512) {
     throw new Error(`invalid file key: ${key}`);
   }
   return k;
@@ -202,8 +203,9 @@ export function createFiles(dir: string) {
     },
     list(prefix = "") {
       const rows = meta.prepare(
-        "SELECT key, size, content_type, updated_at FROM files WHERE key LIKE ? ESCAPE '\\' ORDER BY key LIMIT 1000",
-      ).all(prefix.replace(/[\\%_]/g, (c) => "\\" + c) + "%") as {
+        // Not LIKE: it ignores ASCII case, so "Bob/" would list "bob/…" too.
+        "SELECT key, size, content_type, updated_at FROM files WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key LIMIT 1000",
+      ).all(prefix) as {
         key: string;
         size: number;
         content_type: string;
@@ -362,7 +364,10 @@ export function createBindings(
       if (req.method === "GET" && url.pathname === "/secrets") return Response.json(secrets);
       if (req.method === "POST" && url.pathname.startsWith("/db/")) {
         const op = url.pathname.slice(4);
-        const body = JSON.parse(await req.text(), reviver) as {
+        // Capped (a blob param travels as base64): unbounded, an app could buffer any size in the control plane.
+        const raw = await readCapped(req, 2 * maxFileBytes);
+        if (!raw) return text(`request exceeds ${2 * maxFileBytes} bytes`, 413);
+        const body = JSON.parse(new TextDecoder().decode(raw), reviver) as {
           sql: string;
           params?: SQLInputValue[];
           statements?: { sql: string; params?: SQLInputValue[] }[];

@@ -53,6 +53,39 @@ export function publicDotenvText(text: string): string {
   return out.join("\n");
 }
 
+/** Same as studio/cresslet-plugin.ts privateDotenvLines: the lines `publicDotenvText` doesn't keep, as written. */
+function privateDotenvLines(text: string): string[] {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/), own: string[] = [];
+  for (const [i, l] of lines.entries()) {
+    const m = /[\r\u2028\u2029]/.test(l) ? null : /^[ \t]*$/.test(l) ? "blank" : /^[ \t]*#/.test(l) ? "comment" : SAFE_ENTRY.exec(l);
+    if (m === null) return [...own, ...lines.slice(i)]; // publicDotenvText stops here: the rest is all private
+    if (m === "blank") continue;
+    if (m === "comment" || !/^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[2])) own.push(l);
+  }
+  return own;
+}
+
+/**
+ * Same as studio/cresslet-plugin.ts mergeDotenv: `local` (a repository's dotenv file) with its public entries replaced
+ * by `incoming` (the studio's copy, public entries only), keeping its own private lines; null when no layout keeps both.
+ */
+export function mergeDotenvText(local: string, incoming: string): string | null {
+  const keys = new Set([...incoming.matchAll(/^[ \t]*(?:export[ \t]+)?([A-Za-z_][\w.-]*)[ \t]*=/gm)].map((m) => m[1]));
+  const own = privateDotenvLines(local).filter((l) => {
+    const m = SAFE_ENTRY.exec(l);
+    return !(m && /^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[2]) && keys.has(m[2]));
+  });
+  if (!own.length) return incoming;
+  const head = incoming.replace(/\n*$/, "\n");
+  for (const sep of ["", "\n"]) {
+    for (const tail of ["", "\n"]) {
+      const out = head + sep + own.join("\n") + tail;
+      if (publicDotenvText(out) === incoming) return out;
+    }
+  }
+  return null;
+}
+
 export class HttpError extends Error {
   status: number;
   code: string;

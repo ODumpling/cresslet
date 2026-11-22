@@ -218,8 +218,8 @@ export function adminRoutes(
       return c.json({ purged: a.name });
     }
     if (!a.deleted_at) {
+      await store.setDeleted(a.id, Date.now()); // first: no request starts it again after the stop
       runtime.stop(a.id);
-      await store.setDeleted(a.id, Date.now());
       runtime.logs.push(a.id, "system", `site deleted by site admin ${who}`);
     }
     return c.json({ site: await siteView((await store.appById(a.id, true))!) });
@@ -378,13 +378,14 @@ export function adminRoutes(
   app.post("/admin/accounts/credits", async (c) => {
     const who = requireSiteAdmin(c);
     if (!cfg.ai) throw new HttpError(409, "AI credits aren't enabled on this server (CRESSLET_ANTHROPIC_API_KEY)", "ai_disabled");
-    const { email, credits, note } = await body<{ email?: string; credits?: number; note?: string }>(c);
+    const { email, credits, note } = await body<{ email?: unknown; credits?: unknown; note?: unknown } | null>(c) ?? {};
     if (typeof credits !== "number" || !Number.isFinite(credits) || Math.round(credits * 1000) === 0 || Math.abs(credits) > 10_000_000) {
       throw new HttpError(400, "credits must be a non-zero number, to a thousandth (at most 10,000,000 either way)");
     }
     if (note !== undefined && (typeof note !== "string" || note.length > 200)) throw new HttpError(400, "note must be a string of at most 200 characters");
-    const acct = email ? await store.accountByEmail(email) : undefined;
+    const acct = typeof email === "string" && email ? await store.accountByEmail(email) : undefined;
     if (!acct) throw new HttpError(404, "account not found", "not_found");
+    await stillSiteAdmin(cfg, store, c); // again: access may have changed while the body arrived
     const balance = await store.grantAi(acct.id, Math.round(credits * 1000), { note: note ?? null, by: who });
     console.log(`cresslet: ${credits} AI credits to ${acct.email} by ${who}`);
     return c.json({ account: { id: acct.id, email: acct.email, github: acct.github_login }, balance: balance / 1000 });

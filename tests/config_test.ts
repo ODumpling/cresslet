@@ -52,3 +52,20 @@ test("CRESSLET_CUSTOM_DOMAINS: on unless set to something other than true", () =
     else process.env.CRESSLET_CUSTOM_DOMAINS = prev;
   }
 });
+
+test("number settings: blank means the default; anything that isn't a number, 0 or more, stops the server", () => {
+  const prev = process.env.CRESSLET_APP_DB_MB;
+  try {
+    process.env.CRESSLET_APP_DB_MB = "";
+    assert.equal(loadConfig().limits.appDbBytes, 512 * 1024 * 1024);
+    process.env.CRESSLET_APP_DB_MB = " 64 ";
+    assert.equal(loadConfig().limits.appDbBytes, 64 * 1024 * 1024);
+    for (const v of ["512MB", "-1", "abc"]) {
+      process.env.CRESSLET_APP_DB_MB = v;
+      assert.throws(() => loadConfig(), /CRESSLET_APP_DB_MB must be a number/, v);
+    }
+  } finally {
+    if (prev === undefined) delete process.env.CRESSLET_APP_DB_MB;
+    else process.env.CRESSLET_APP_DB_MB = prev;
+  }
+});

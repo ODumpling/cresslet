@@ -323,8 +323,15 @@ test("sync: one commit for the workspace, refused when the branch moved; repo-on
   assert.equal(remote["other/x.txt"], "x"); // outside subdir
   assert.equal(t.gh.commit(sync.body.sha).message, "Add about");
 
+  // Its public entry edited: the repository's copy keeps the secret line the studio never saw.
+  const env = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "main", baseSha: sync.body.sha, files: [{ path: ".env", data: "VITE_A=2\n" }, { path: "index.html", data: "v1" }, { path: "about.html", data: "about" }],
+  });
+  assert.equal(env.status, 200, JSON.stringify(env.body));
+  assert.equal(t.gh.files("octo/shop")["app/.env"], "VITE_A=2\nSECRET=s\n");
+
   // Deleting a file the workspace had.
-  const del = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "main", baseSha: sync.body.sha, files: [{ path: "index.html", data: "v1" }] });
+  const del = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "main", baseSha: env.body.sha, files: [{ path: "index.html", data: "v1" }] });
   assert.equal(del.body.changed, true);
   assert.deepEqual(Object.keys(t.gh.files("octo/shop")).sort(), ["README.md", "app/.env.local", "app/index.html", "other/x.txt"]);
 

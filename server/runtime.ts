@@ -11,7 +11,8 @@ import { type IncomingMessage, request as httpRequest } from "node:http";
 import type { Duplex } from "node:stream";
 import { join } from "node:path";
 import { finished, Readable } from "node:stream";
-import { Client } from "undici";
+import { Pool } from "undici";
+import { MAX_LINE } from "./logs.ts";
 import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
 import { Metrics } from "./metrics.ts";
@@ -53,7 +54,9 @@ interface Proc {
   spec: AppSpec;
   sockPath: string;
   child: ChildProcess;
-  client: Client;
+  client: Pool;
+  /** Stopped while it was starting (e.g. its secrets changed): replaced on the next request. */
+  stale?: boolean;
   bindings: { egress: Server | null; close(): void };
   /** Kills whatever is left in the sandbox's cgroup and removes it (synchronous kill). */
   release(): void;
@@ -146,7 +149,7 @@ export class Runtime {
   metrics = new Metrics();
   cronRuns = new CronRuns();
   #cfg: Config;
-  #starting = new Map<string, { spec: AppSpec; p: Promise<Proc> }>();
+  #starting = new Map<string, { spec: AppSpec; p: Promise<Proc>; stale: boolean }>();
   #timer: ReturnType<typeof setInterval>;
   #instance: string;
   /** After close(): no new sandboxes (a cold start in flight must not spawn during shutdown). */
@@ -387,7 +390,7 @@ export class Runtime {
     const cur = this.procs.get(spec.appId);
     // Network policy is part of the identity: a sandbox started under an old policy (e.g. a cold
     // start racing a PUT /egress) is replaced on the next request.
-    if (cur && !cur.exited && cur.spec.deployId === spec.deployId && samePolicy(cur.spec, spec)) {
+    if (cur && !cur.exited && !cur.stale && cur.spec.deployId === spec.deployId && samePolicy(cur.spec, spec)) {
       await cur.ready;
       // It may have been evicted (#makeRoom) or stopped while we waited: then start over.
       if (cur.exited || this.procs.get(spec.appId) !== cur) return this.#get(spec);
@@ -407,9 +410,13 @@ export class Runtime {
       return this.#get(spec);
     }
     this.#makeRoom();
-    const p = this.#spawn(spec).finally(() => this.#starting.delete(spec.appId));
-    this.#starting.set(spec.appId, { spec, p });
-    return p;
+    const entry: { spec: AppSpec; p: Promise<Proc>; stale: boolean } = { spec, p: null!, stale: false };
+    entry.p = this.#spawn(spec).then((proc) => {
+      if (entry.stale) proc.stale = true;
+      return proc;
+    }).finally(() => this.#starting.delete(spec.appId));
+    this.#starting.set(spec.appId, entry);
+    return entry.p;
   }
 
   /**
@@ -524,7 +531,9 @@ export class Runtime {
       sockPath: sock,
       release: () => jl.release(),
       child,
-      client: new Client("http://app", { socketPath: sock }),
+      // A pool, not one Client: a single connection serves one request at a time, so a slow handler or a
+      // streaming response would queue every other request behind it (and time them out).
+      client: new Pool("http://app", { socketPath: sock, connections: 64 }),
       bindings: {
         egress: egressServer,
         close() {
@@ -553,6 +562,11 @@ export class Runtime {
       stream.setEncoding("utf8");
       stream.on("data", (chunk: string) => {
         buf += chunk;
+        // No newline for a long while: flush it as a line (Logs truncates it), not an ever-growing buffer.
+        if (buf.length > MAX_LINE && !buf.includes("\n")) {
+          this.logs.push(spec.appId, kind, buf);
+          buf = "";
+        }
         let i;
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i);
@@ -610,6 +624,9 @@ export class Runtime {
   }
 
   stop(appId: string) {
+    // A start in flight read its secrets (and the rest of its spec) already: don't let it serve once up.
+    const starting = this.#starting.get(appId);
+    if (starting) starting.stale = true;
     const proc = this.procs.get(appId);
     if (!proc) return;
     this.procs.delete(appId);

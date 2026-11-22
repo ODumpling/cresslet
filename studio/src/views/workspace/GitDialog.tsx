@@ -75,7 +75,8 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
         linked = (await api<API.AppDetail>(`/v1/apps/${encodeURIComponent(app)}`)).repo ?? null;
         if (!linked) {
           repos = (await api<{ repos: API.GitRepo[] }>("/v1/git/github/repos")).repos;
-          setPicked((p) => p || repos![0]?.fullName || "");
+          // Kept only while still listed (access revoked, or renamed, since): else the select shows one and Link sends another.
+          setPicked((p) => (repos!.some((r) => r.fullName === p) ? p : repos![0]?.fullName || ""));
         }
       }
     } catch (e) {
@@ -120,14 +121,18 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
     }
     const sync = mode === "create" ? "push" : initial;
     if (!sync) throw new Error("choose whether this workspace or the repository's files come first");
+    const rev = git!.revision; // before the snapshot: a change after it is one the repository doesn't have
     const r = await api<{ repo: API.AppRepo; sha: string; files?: GitFile[] }>(`/v1/apps/${encodeURIComponent(app!)}/git/connect`, json("POST", {
       owner, repo, initialSync: sync, ...(sync === "push" ? { files: await files(), message: `Add ${app} from Cresslet` } : {}),
     }));
     const st: ProjectGitState = {
       provider: "github", owner: r.repo.owner, repo: r.repo.name, url: r.repo.url, defaultBranch: r.repo.defaultBranch,
-      activeBranch: r.repo.defaultBranch, baseSha: r.sha, headSha: r.sha, dirty: false,
+      activeBranch: r.repo.defaultBranch, baseSha: r.sha, headSha: r.sha, dirty: git!.revision !== rev,
     };
     if (r.files) {
+      // Edited while it linked (the AI builder, say): loading the repository's files would overwrite that. Linked
+      // on the server, so the next refresh offers Load.
+      if (git!.revision !== rev) throw new Error("the workspace changed while linking: nothing was overwritten, load the repository's files to continue");
       try {
         await hydrate(r.files);
       } catch (e) {
