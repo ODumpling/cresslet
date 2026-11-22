@@ -497,9 +497,13 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                   builder.current?.prefill(`Resolve the conflict markers in ${r.conflicts.join(", ")}: this undoes "${change.title}" while keeping the later changes.`);
                 }, (e) => {
                   // Loaded, but npm install failed (not because of a conflicted package.json): resolve, then fix the install.
-                  const u = (e as { filesWritten?: boolean }).filesWritten ? g.state?.undo : undefined;
+                  // Or loaded, but its commit failed: held here, committed with the next request or Push.
+                  const { filesWritten, held } = e as { filesWritten?: boolean; held?: boolean };
+                  const u = filesWritten || held ? g.state?.undo : undefined;
                   if (u?.conflicts.length) builder.current?.prefill(`Resolve the conflict markers in ${u.conflicts.join(", ")}: this undoes "${change.title}" while keeping the later changes. npm install also failed: check the terminal.`);
-                  toast(u ? `"${u.title}" is loaded, but: ${errorMessage(e)}` : `Not undone: ${errorMessage(e)}`, 12000);
+                  toast(!u ? `Not undone: ${errorMessage(e)}`
+                    : held ? `"${u.title}" is loaded but not committed (${errorMessage(e)}): it's committed with the next request or Push; Pull drops it.`
+                    : `"${u.title}" is loaded, but: ${errorMessage(e)}`, 15000);
                 }).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
               onFold={(change) => {

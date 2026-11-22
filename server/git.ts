@@ -464,7 +464,7 @@ export class GitHub implements SourceControlProvider {
     // What the studio doesn't hold must merge by itself (else: a pull request).
     const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
     if (outside.both.length) throw unresolvable(outside.both);
-    return { intoSha, headSha, ...await this.#mergeHeld(r, full, input.subdir, outside, [input.head, input.into]) };
+    return { intoSha, headSha, ...await this.#mergeHeld(r, full, input.subdir, outside, [input.head, input.into], unresolvable) };
   }
 
   /**
@@ -487,14 +487,16 @@ export class GitHub implements SourceControlProvider {
     // An executable the change deleted or made plain, still so at the top: the studio's commit can't make it one again.
     const exec = [...full[2].values()].filter((e) => e.mode === "100755" && full[0].get(e.path)?.mode !== "100755" && full[1].get(e.path)?.mode !== "100755");
     const refused = [...new Set([...outside.both, ...outside.take.map((x) => x.path), ...exec.map((e) => e.path)])].sort();
-    if (refused.length) {
-      throw Object.assign(new HttpError(409, `${refused.join(", ")} can't be undone in the studio (outside what it holds, or an executable): undo it on GitHub`, "merge_unresolvable"), { extra: { paths: refused } });
-    }
-    return this.#mergeHeld(r, full, input.subdir, outside, ["now", `undo ${input.label}`]);
+    const refuse = (paths: string[]) => Object.assign(
+      new HttpError(409, `${paths.join(", ")} can't be undone in the studio (outside what it holds, binary, an executable, or a file where a folder is now): undo it on GitHub`, "merge_unresolvable"),
+      { extra: { paths } },
+    );
+    if (refused.length) throw refuse(refused);
+    return this.#mergeHeld(r, full, input.subdir, outside, ["now", `undo ${input.label}`], refuse);
   }
 
-  /** The three-way merge of what the studio holds (base, ours, theirs), conflicts marked with `labels`. */
-  async #mergeHeld(r: Repo, full: [Entries, Entries, Entries], subdir: string, outside: Outside, labels: [string, string]) {
+  /** The three-way merge of what the studio holds (base, ours, theirs), conflicts marked with `labels`; `refuse`: what can't be held. */
+  async #mergeHeld(r: Repo, full: [Entries, Entries, Entries], subdir: string, outside: Outside, labels: [string, string], refuse: (paths: string[]) => Error) {
     const input = { subdir, head: labels[0], into: labels[1] };
     const prefix = input.subdir ? input.subdir + "/" : "";
     const [base, ours, theirs] = full.map((m) => new Map([...m.values()].filter((e) => !outside.outside.has(e.path) && studioHolds(e.path, e, input.subdir)).map((e) => [e.path.slice(prefix.length), { ...e, rel: e.path.slice(prefix.length) }])));
@@ -543,7 +545,7 @@ export class GitHub implements SourceControlProvider {
       const nl = (x: string) => (x && !x.endsWith("\n") ? x + "\n" : x);
       out.set(p, new TextEncoder().encode(`<<<<<<< ${input.head}\n${nl(ot)}=======\n${nl(tt)}>>>>>>> ${input.into}\n`));
     });
-    if (binary.length) throw unresolvable(binary.map((p) => prefix + p));
+    if (binary.length) throw refuse(binary.map((p) => prefix + p));
     // Dotenv files (merged outside the studio's part): the result's public entries, as the workspace holds them.
     for (const x of envs) {
       const d = await this.#blob(r, x.sha!);
@@ -551,7 +553,7 @@ export class GitHub implements SourceControlProvider {
     }
     // A file where the result has a folder (a file deleted, then one added under its name): can't be held.
     const clash = [...out.keys()].filter((p) => [...out.keys()].some((q) => q.startsWith(p + "/"))).sort();
-    if (clash.length) throw unresolvable(clash.map((p) => prefix + p));
+    if (clash.length) throw refuse(clash.map((p) => prefix + p));
     const files: DeployFile[] = [...out].sort(([x], [y]) => (x < y ? -1 : 1)).map(([path, d]) => {
       const t = text(d);
       return t === null ? { path, data: Buffer.from(d).toString("base64"), encoding: "base64" } : { path, data: t, encoding: "utf8" };

@@ -172,7 +172,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     if (!s) throw new Error("not connected to a repository");
     // An undo being finished is a change of its own (its title, its markers checked), never a commit onto the top.
     if (s.undo && !s.mergeParent) {
-      if (snap) throw Object.assign(new Error("the stack changed meanwhile: undo again from it"), { code: "changed" });
+      // (Landed or carried on from in another browser: no stack to put it on.)
+      if (snap) throw Object.assign(new Error(`${s.activeBranch} isn't a stack's top any more, so the undo held here can't be committed: pull the branch to drop it`), { code: "changed" });
       return changeNow(message, "", false);
     }
     const rev = snap?.rev ?? revision(); // before the snapshot: a change after it keeps the workspace dirty
@@ -477,7 +478,13 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       }
       await holding();
       // No conflicts: committed now (nothing to commit: later changes had undone it already).
-      if (!r.conflicts.length) return { conflicts: [], title: r.title, committed: (await changeNow(r.title, "")).changed };
+      if (!r.conflicts.length) {
+        try {
+          return { conflicts: [], title: r.title, committed: (await changeNow(r.title, "")).changed };
+        } catch (e) {
+          throw Object.assign(e as object, { held: true }); // loaded, not committed: the next commit is it
+        }
+      }
       return { conflicts: r.conflicts, title: r.title, committed: false };
     }),
     /** Folds a change into the one below it (server/stack.ts fold). The workspace on it stays on it: same commit. */

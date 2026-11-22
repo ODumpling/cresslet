@@ -681,6 +681,11 @@ test("git: undoing a change loads the result; clean, it's committed at once as \
   const u = await d.git.undo({ id: "chg_1" }, top);
   assert.deepEqual(d.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/stack", "/stack/undo", "/stack"]);
   assert.deepEqual([d.calls[0].body.title, d.calls[2].body.title, u.committed], ["Edits made in the studio", "Undo: Add a", true]);
+  // Loaded, but its commit refused (the top moved meanwhile): held, and said so.
+  const h = fakeGit({ onDefault: false, stackError: "moved" });
+  h.state.activeBranch = "feat/s/1-one";
+  await assert.rejects(h.git.undo({ id: "chg_1" }, top), (x: Json) => x.held === true && x.code === "moved");
+  assert.deepEqual([h.state.undo, h.state.dirty], [{ title: "Undo: Add a", conflicts: [] }, true]);
   // The stack not as the caller saw it: nothing done.
   const e = fakeGit({ onDefault: false });
   e.state.activeBranch = "feat/s/1-one";
