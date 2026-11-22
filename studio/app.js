@@ -1590,7 +1590,7 @@ function drawOrg(d) {
         try {
           m.role = (await api(memberUrl(m.id), { method: "PUT", body: JSON.stringify({ role: role.value }) })).role;
           toast(`${personText(m)} is now ${ORG_ROLE_LABEL[m.role].toLowerCase()}`);
-          if (me && gen === routeGen) again();
+          if (gen === routeGen) again(); // its subtitle, and (yourself) what you can still do
         } catch (e) {
           toast(`Could not change the role: ${e.message}`);
           role.value = m.role;

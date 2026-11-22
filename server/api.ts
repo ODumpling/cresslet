@@ -860,7 +860,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const owner = a.account_id ? await store.accountById(a.account_id) : undefined;
     return c.json({
       // An app in an organization: its admins own it (`owner` is who last held it, for older clients).
-      owner: owner ? person(owner) : null,
+      owner: owner ? person({ ...owner, email: owner.disabled_email ?? owner.email }) : null,
       org: (await orgRefs(store, [a]))(a),
       collaborators: (await store.collaborators(a.id)).map((x) =>
         ({ ...person({ id: x.account_id, email: x.email, github_login: x.github_login }), role: x.role, createdAt: iso(x.created_at) })),

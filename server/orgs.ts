@@ -203,16 +203,18 @@ export function orgRoutes(
     if (title && title.length > 100) throw new HttpError(400, "title must be at most 100 characters");
     const email = typeof input.admin === "string" ? input.admin.trim().toLowerCase() : "";
     if (!email) throw new HttpError(400, "admin required: the email of the organization's first admin");
-    const admin = await store.accountByEmail(email);
-    if (!admin) throw new HttpError(404, `no account has the email ${email}: invite them first`, "no_account");
+    const found = await store.accountByEmail(email);
+    if (!found || found.disabled_at) throw new HttpError(404, `no account has the email ${email}: invite them first`, "no_account");
     const o = await store.serialized("cresslet:create-org", async () => {
       await stillSiteAdmin(cfg, store, c);
       if (await store.orgByName(name)) throw new HttpError(409, `an organization is already called ${name}`, "conflict");
+      const admin = await store.accountById(found.id);
+      if (!admin || admin.disabled_at) throw new HttpError(404, `no account has the email ${email}: invite them first`, "no_account");
       const o = await store.createOrg(name, title, sa.id);
       await store.setOrgMember(o.id, admin.id, "admin");
       return o;
     });
-    console.log(`cresslet: org ${o.name} created by ${sa.who}, admin ${admin.email}`);
+    console.log(`cresslet: org ${o.name} created by ${sa.who}, admin ${found.email}`);
     return c.json({ org: orgView(o) }, 201);
   });
 

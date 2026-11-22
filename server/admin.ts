@@ -117,7 +117,7 @@ export function adminRoutes(
     if (!id) return null;
     if (!owners.has(id)) owners.set(id, await store.accountById(id));
     const o = owners.get(id);
-    return o ? { id: o.id, email: o.email, github: o.github_login } : null;
+    return o ? { id: o.id, email: o.disabled_email ?? o.email, github: o.github_login } : null;
   };
 
   const iso = (t: number | null) => (t ? new Date(t).toISOString() : null);
