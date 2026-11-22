@@ -53,7 +53,13 @@ export interface StackChange {
   /** Where its branch is on GitHub: at `sha`, somewhere else (`headSha`), or gone. */
   github: "ok" | "moved" | "gone";
   headSha?: string;
+  /** Its pull request's number, once the stack was submitted. */
+  pull: number | null;
 }
+/** A change's pull request GitHub wouldn't close (going back) or reopen (restoring). */
+export interface PullError { change: string; position: number; error: string }
+/** A change's pull request, as submitting the stack left it (`error`: GitHub refused it, or its description). */
+export interface Submitted { change: string; position: number; number?: number; url?: string; created?: boolean; merged?: boolean; error?: string }
 export interface Stack {
   id: string;
   name: string;
@@ -175,15 +181,19 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
    * Finishing a merge, or on a top change GitHub moved, it's committed to the active branch as before. Below a
    * stack's top: 409 `not_on_top`, nothing committed.
    */
-  async function changeNow(title: string, prompt: string): Promise<{ sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string } }> {
+  /** `submit: false`: a change made on the way somewhere (going back, deploying): the app's auto-submit skips it. */
+  async function changeNow(title: string, prompt: string, submit = true): Promise<{
+    sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string };
+    submitted?: { pulls: Submitted[]; error?: string };
+  }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
     if (s.mergeParent) return syncNow(title);
     const rev = revision();
     const files = await o.files();
-    let r: { changed: boolean; sha: string; branch?: string; change?: StackChange; stack?: { id: string; name: string } };
+    let r: { changed: boolean; sha: string; branch?: string; change?: StackChange; stack?: { id: string; name: string }; submitted?: { pulls: Submitted[]; error?: string } };
     try {
-      r = await post("/stack", { from: s.activeBranch, baseSha: s.headSha, files, title, prompt });
+      r = await post("/stack", { from: s.activeBranch, baseSha: s.headSha, files, title, prompt, ...(submit ? {} : { submit: false }) });
     } catch (e) {
       if (gitCode(e) !== "not_on_stack") throw e; // not_on_top: kept here (the stack has changes above this one)
       return syncNow(title, { files, rev }); // what was read: an edit since stays here
@@ -197,7 +207,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       ...(s.activeBranch === s.defaultBranch ? { baseSha: s.headSha } : {}),
     });
     o.log?.(`committed change ${r.change?.position ?? "?"} of ${r.stack?.name ?? "the stack"}: ${r.branch} @ ${r.sha.slice(0, 7)}`);
-    return { sha: r.sha, changed: true, files, change: r.change, stack: r.stack };
+    return { sha: r.sha, changed: true, files, change: r.change, stack: r.stack, submitted: r.submitted };
   }
 
   /** Changes made since `rev` would be overwritten: stop instead. */
@@ -310,7 +320,9 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     openPullRequest: (title?: string) => serial(async () => {
       const s = o.state()!;
       if (s.dirty) await syncNow(`Update ${s.activeBranch}`);
-      return (await post<{ pull: PullRequest }>("/pulls", { branch: s.activeBranch, ...(title ? { title } : {}) })).pull;
+      const r = await post<{ pull: PullRequest; stackErrors?: Submitted[] }>("/pulls", { branch: s.activeBranch, ...(title ? { title } : {}) });
+      // A change of a stack: its stack was submitted; what GitHub refused for the rest of it comes along.
+      return { ...r.pull, stackErrors: r.stackErrors };
     }),
     /** The workspace's change count (studio/src/views/workspace/engine.ts bumps it). */
     get revision() {
@@ -325,10 +337,10 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * ones), the changes above it are set aside (server/stack.ts), and its files are loaded. The next change goes on it.
      */
     goBack: (change: StackChange) => serial(async () => {
-      if (o.state()!.dirty) await changeNow("Edits made in the studio", "");
+      if (o.state()!.dirty) await changeNow("Edits made in the studio", "", false);
       if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: go back again"), { code: "changed" });
       // Its files first: the server sets the later changes aside only once they're in hand and nothing changed here.
-      let r!: { change: StackChange; stack: { id: string }; now: string[]; setAside: StackChange[] };
+      let r!: { change: StackChange; stack: { id: string }; now: string[]; setAside: StackChange[]; pullErrors?: PullError[] };
       const rev = revision();
       await pullNow(change.branch, change.sha, {
         rev,
@@ -351,7 +363,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      */
     restore: (stack: string, top: StackChange, discard = false) => serial(async () => {
       if (o.state()!.dirty && !discard) throw Object.assign(new Error("this workspace has changes not pushed yet: restoring would replace them"), { code: "dirty" });
-      let r!: { change: StackChange; below: StackChange; restored: number };
+      let r!: { change: StackChange; below: StackChange; restored: number; pullErrors?: PullError[] };
       const rev = revision();
       await pullNow(top.branch, top.sha, {
         rev,
@@ -367,6 +379,10 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       });
       return r;
     }),
+    /** Opens or updates a pull request per change of a stack, each on the branch below (server/stack.ts). */
+    submitStack: (stack: string) => post<{ pulls: Submitted[] }>("/stack/submit", { stack }),
+    /** The review and checks of a stack's pull requests, by change id. */
+    stackPulls: (stack: string) => o.api<{ pulls: Record<string, PullRequest> }>(path(`/stack/pulls?stack=${encodeURIComponent(stack)}`)).then((r) => r.pulls),
     /** Resolves once the steps queued so far have run (the AI builder sends a request on the workspace they leave). */
     idle: () => serial(async () => {}),
     /** Commits the workspace as a new change of the app's stack (see changeNow). */
@@ -419,7 +435,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       if (was.dirty && !was.mergeParent && (turn || was.activeBranch === was.defaultBranch)) {
         log(`committing the changes here as a change…`);
         const rev0 = revision();
-        synced = await changeNow(turn?.title ?? "Edits made in the studio", turn?.prompt ?? "");
+        synced = await changeNow(turn?.title ?? "Edits made in the studio", turn?.prompt ?? "", false);
         // An edit made meanwhile isn't in that change: it stays here, unpushed (not synced on its own, onto main).
         unchangedSince(rev0, "deploying");
         signal?.throwIfAborted();

@@ -162,6 +162,8 @@ export interface AppRepo {
   last_synced_sha: string | null;
   /** The default branch's head a webhook last reported (migration 5; undefined before it). */
   upstream_sha?: string | null;
+  /** Submit the stack (its pull requests) after each change (1/0; migration 7). */
+  stack_auto_submit?: number;
   connected_at: number;
   updated_at: number;
 }
@@ -1177,6 +1179,19 @@ export class Store implements RateHits {
       c.created_by, now, now,
     );
     return { ...c, state: "open", landed_sha: null, pr_number: null, created_at: now, updated_at: now };
+  }
+  /** The open or set-aside change on `branch` (one read: its state with it). */
+  stackChangeByBranch(appId: string, branch: string): Promise<StackChange | undefined> {
+    return this.db.get<StackChange>(
+      "SELECT * FROM stack_changes WHERE app_id = ? AND branch = ? AND state IN ('open', 'set_aside') ORDER BY created_at DESC LIMIT 1", appId, branch,
+    );
+  }
+  /** A change's pull request. */
+  async setStackChangePull(id: string, number: number | null) {
+    await this.db.run("UPDATE stack_changes SET pr_number = ?, updated_at = ? WHERE id = ?", number, Date.now(), id);
+  }
+  async setStackAutoSubmit(appId: string, on: boolean) {
+    await this.db.run("UPDATE app_repos SET stack_auto_submit = ?, updated_at = ? WHERE app_id = ?", on ? 1 : 0, Date.now(), appId);
   }
   /** The app's changes set aside (gone back from), by stack, bottom first. */
   setAsideStackChanges(appId: string): Promise<StackChange[]> {

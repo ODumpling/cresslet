@@ -118,6 +118,8 @@ export interface AppRepo {
   defaultBranch: string;
   subdir: string;
   deleteBranch: boolean;
+  /** Submit the stack (its pull requests) after each change. */
+  stackAutoSubmit: boolean;
   lastSyncedSha: string | null;
   /** The default branch's head a GitHub webhook last reported. */
   upstreamSha?: string | null;

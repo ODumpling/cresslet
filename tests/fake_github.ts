@@ -198,7 +198,12 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
     }
     if ((x = /^\/git\/refs\/heads\/(.+)$/.exec(rest))) {
       const name = x[1].split("/").map(decodeURIComponent).join("/");
-      if (req.method === "DELETE") return r.refs.delete(name) ? json(204) : json(422, { message: "Reference does not exist" });
+      if (req.method === "DELETE") {
+        if (!r.refs.delete(name)) return json(422, { message: "Reference does not exist" });
+        // An API delete closes the pull requests from or into it (GitHub: #117's spike).
+        for (const pr of r.pulls) if (pr.state === "open" && (pr.head === name || pr.base === name)) pr.state = "closed";
+        return json(204);
+      }
       if (!canPush) return json(403, { message: "Resource not accessible" });
       if (r.protected.has(name)) return json(422, { message: "Protected branch update failed for refs/heads/" + name });
       if (r.rulesets && name === r.default_branch) return json(422, { message: "Repository rule violations found\n\nChanges must be made through a pull request." });
@@ -273,7 +278,10 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       r.refs.set(body.base, sha);
       return json(201, { sha, commit: { tree: { sha: treeId(out) } } });
     }
-    const pullJson = (pr: Pull) => ({ number: pr.number, html_url: `https://github.example/${r.owner}/${r.name}/pull/${pr.number}`, title: pr.title, draft: false, head: { sha: r.refs.get(pr.head) ?? "" } });
+    const pullJson = (pr: Pull) => ({
+      number: pr.number, html_url: `https://github.example/${r.owner}/${r.name}/pull/${pr.number}`, title: pr.title, body: pr.body, draft: false,
+      state: pr.state, merged: false, head: { sha: r.refs.get(pr.head) ?? "", ref: pr.head }, base: { ref: pr.base },
+    });
     if (rest === "/pulls" && req.method === "GET") {
       const head = url.searchParams.get("head")?.split(":")[1], base = url.searchParams.get("base");
       return json(200, r.pulls.filter((x) => x.state === "open" && (!head || x.head === head) && (!base || x.base === base)).map(pullJson));
@@ -285,6 +293,19 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       return json(201, pullJson(pr));
     }
     if ((x = /^\/pulls\/(\d+)\/reviews$/.exec(rest))) return json(200, r.pulls[Number(x[1]) - 1]?.reviews ?? []);
+    if ((x = /^\/pulls\/(\d+)$/.exec(rest))) {
+      const pr = r.pulls[Number(x[1]) - 1];
+      if (!pr) return json(404, { message: "Not Found" });
+      if (req.method === "PATCH") {
+        if (body.base !== undefined) {
+          if (!r.refs.has(body.base)) return json(422, { message: "Validation Failed", errors: [{ message: `Proposed base branch '${body.base}' was not found` }] });
+          pr.base = body.base;
+        }
+        if (body.state === "open" && (!r.refs.has(pr.base) || !r.refs.has(pr.head))) return json(422, { message: "state cannot be changed. The branch has been deleted." });
+        for (const k of ["title", "body", "state"] as const) if (body[k] !== undefined) pr[k] = body[k];
+      }
+      return json(200, pullJson(pr));
+    }
     if ((x = /^\/commits\/([0-9a-f]+)\/check-runs$/.exec(rest))) return json(200, { check_runs: checks.get(x[1]) ?? [] });
     if (rest.startsWith("/contents/") && req.method === "PUT") {
       const path = decodeURIComponent(rest.slice("/contents/".length));

@@ -8,7 +8,7 @@ import { projects, type Deploy, type StoredProject } from "../../../store.ts";
 import type { CressletConfig } from "../../../cresslet-plugin.ts";
 import type * as API from "../../../api-types.ts";
 import { api, errorMessage, meta, mustLogIn } from "../../lib/api.ts";
-import type { ProjectGitState, PullRequest, Stack } from "../../../git.ts";
+import type { ProjectGitState, PullError, PullRequest, Stack, Submitted } from "../../../git.ts";
 import { viewShown } from "../../lib/focus.ts";
 import { useView } from "../../lib/hooks.ts";
 import { projectsChanged } from "../../lib/projects.ts";
@@ -194,6 +194,24 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   // workspace moves (a turn committed a change) and with the checks above.
   const [stack, setStack] = useState<Stack | null>(null);
   const [stackBusy, setStackBusy] = useState(false);
+  /** Pull requests GitHub wouldn't close or reopen, said (going back again tries the closing again). */
+  const pullsSaid = (errors: PullError[] | undefined, what: string) =>
+    errors?.length ? ` Pull requests not ${what}: ${errors.map((x) => `change ${x.position} (${x.error})`).join(", ")}.` : "";
+  // Its pull requests' review and checks (read when it has some).
+  const [stackPulls, setStackPulls] = useState<Record<string, PullRequest>>({});
+  const pulled = stack?.changes.filter((c) => c.pull).map((c) => `${c.id}:${c.pull}`).join(",") ?? "";
+  useEffect(() => {
+    const g = engine.current?.git;
+    if (!stack || !pulled || !g) return setStackPulls({});
+    let live = true;
+    const read = () => void g.stackPulls(stack.id).then((p) => live && setStackPulls(p), () => {});
+    read();
+    const t = setInterval(read, 60_000); // reviews and checks finish on GitHub meanwhile
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [stack?.id, pulled, gitTick, gitState?.headSha]);
   useEffect(() => {
     const g = engine.current?.git;
     if (!gitState || !token || !deploy?.name || !g) return setStack(null);
@@ -314,7 +332,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     try {
       const pr = await g.openPullRequest();
       setGitTick((n) => n + 1);
-      toast(<span>{`Pull request #${pr.number}: `}<ExtLink href={pr.url}>{pr.title}</ExtLink></span>, 15000);
+      toast(<span>{`Pull request #${pr.number}: `}<ExtLink href={pr.url}>{pr.title}</ExtLink>
+        {pr.stackErrors?.length ? ` (problems in its stack: ${pr.stackErrors.map((x) => `change ${x.position}: ${x.error}`).join("; ")})` : null}</span>, 15000);
     } catch (e) {
       toast(`Couldn't open a pull request: ${errorMessage(e)}`, 10000);
     }
@@ -439,7 +458,21 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         {container ? (
           <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
             stack={stack && gitState && gitOn && token && !locked ? (
-              <StackPanel stack={stack} state={gitState} busy={stackBusy || deploying} onContinue={(branch) => {
+              <StackPanel stack={stack} state={gitState} busy={stackBusy || deploying} pulls={stackPulls}
+              onSubmit={() => {
+                const g = engine.current?.git;
+                if (!g) return;
+                setStackBusy(true);
+                const said = (p: Submitted[]) => {
+                  const failed = p.filter((x) => x.error);
+                  const made = p.filter((x) => x.created).length, merged = p.filter((x) => x.merged);
+                  if (failed.length) toast(`Pull requests: ${failed.map((x) => `change ${x.position}: ${x.error}`).join("; ")}`, 15000);
+                  else toast(`Submitted: ${p.length} ${p.length === 1 ? "pull request" : "pull requests"}${made ? ` (${made} new)` : ""}${merged.length ? `; already merged: ${merged.map((x) => `#${x.number}`).join(", ")}` : ""}`, 8000);
+                };
+                void g.submitStack(stack.id).then((r) => said(r.pulls), (e) => toast(`Couldn't submit the stack: ${errorMessage(e)}`, 10000))
+                  .finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+              }}
+              onContinue={(branch) => {
                 const g = engine.current?.git;
                 if (!g) return;
                 if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
@@ -462,7 +495,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                   "The preview's database isn't taken back: tables and rows from later changes stay.")) return;
                 setStackBusy(true);
                 void g.goBack(change).then(
-                  () => toast(`Back on change ${change.position}. The next request starts a new change from here.`, 8000),
+                  (r) => toast(`Back on change ${change.position}. The next request starts a new change from here.${pullsSaid(r.pullErrors, "closed")}`, r.pullErrors?.length ? 15000 : 8000),
                   (e) => toast(`Couldn't go back: ${errorMessage(e)}`, 10000),
                 ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
@@ -474,7 +507,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 if (discard && !confirm("This workspace has changes not pushed yet. Restoring loads the top change and drops them. Restore anyway?")) return;
                 setStackBusy(true);
                 void g.restore(stack.id, stack.setAside.at(-1)!, discard).then(
-                  (r) => toast(`Restored ${r.restored} ${r.restored === 1 ? "change" : "changes"}: on change ${r.change.position}`, 8000),
+                  (r) => toast(`Restored ${r.restored} ${r.restored === 1 ? "change" : "changes"}: on change ${r.change.position}.${pullsSaid(r.pullErrors, "reopened")}`, r.pullErrors?.length ? 15000 : 8000),
                   (e) => toast(`Couldn't restore: ${errorMessage(e)}`, 10000),
                 ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }} />

@@ -10,7 +10,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
-import { assertNotBelowTop, commitChange, followed, goBack, landed, locked, readStacks, restore } from "./stack.ts";
+import { assertNotBelowTop, changePull, commitChange, followed, goBack, landed, locked, readStacks, restore, stackPulls, submitStack } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -76,6 +76,21 @@ export interface SourceControlProvider {
   commitTree(r: Repo, input: CommitInput): Promise<{ sha: string; changed: boolean }>;
   /** `expect`: the head commit the caller built from; if the branch moved past it, 409 and nothing merged. */
   merge(r: Repo, input: { into: string; head: string; message: string; expect?: string }): Promise<MergeResult>;
+  /** Pull requests (stacked changes, server/stack.ts): by number, the open one from a branch, new, changed. */
+  getPull(r: Repo, number: number): Promise<Pull>;
+  findPull(r: Repo, head: string): Promise<Pull | null>;
+  createPull(r: Repo, input: { head: string; base: string; title: string; body: string }): Promise<Pull>;
+  updatePull(r: Repo, number: number, input: { base?: string; title?: string; body?: string; state?: "open" | "closed" }): Promise<Pull>;
+  /** Its review decision and its head's checks. */
+  pullStatus(r: Repo, number: number): Promise<PullInfo>;
+}
+export interface Pull {
+  number: number;
+  url: string;
+  state: "open" | "closed";
+  merged: boolean;
+  base: string;
+  head: string;
 }
 
 /** GitHub's REST API with one user's token. `unauthorized`: GitHub rejected the token (revoked meanwhile). */
@@ -499,6 +514,41 @@ export class GitHub implements SourceControlProvider {
     return { intoSha, headSha, conflicts: conflicts.sort(), files };
   }
 
+  #pull = (p: GhPull): Pull => ({
+    number: p.number, url: p.html_url, state: p.state === "closed" ? "closed" : "open", merged: !!p.merged_at || !!p.merged,
+    base: p.base?.ref ?? "", head: p.head.ref ?? "",
+  });
+  /** A refused pull request call: GitHub's own reason (422), else as any other call. */
+  #pullError(res: { status: number; body: { message?: string; errors?: { message?: string }[] } | null }) {
+    if (res.status === 422) return new HttpError(422, res.body?.errors?.[0]?.message ?? res.body?.message ?? "GitHub refused that pull request", "pull_invalid");
+    return ghError(res.status, res.body?.message);
+  }
+
+  async getPull(r: Repo, number: number) {
+    return this.#pull(await this.ok<GhPull>("GET", this.#path(r, `/pulls/${number}`)));
+  }
+
+  async findPull(r: Repo, head: string) {
+    const list = await this.ok<GhPull[]>("GET", this.#path(r, `/pulls?state=open&head=${encodeURIComponent(`${r.owner}:${head}`)}`));
+    return list[0] ? this.#pull(list[0]) : null;
+  }
+
+  async createPull(r: Repo, input: { head: string; base: string; title: string; body: string }) {
+    const res = await this.req<GhPull & { message?: string; errors?: { message?: string }[] }>("POST", this.#path(r, "/pulls"), input);
+    if (res.status !== 201) throw this.#pullError(res);
+    return this.#pull(res.body);
+  }
+
+  async updatePull(r: Repo, number: number, input: { base?: string; title?: string; body?: string; state?: "open" | "closed" }) {
+    const res = await this.req<GhPull & { message?: string; errors?: { message?: string }[] }>("PATCH", this.#path(r, `/pulls/${number}`), input);
+    if (res.status !== 200) throw this.#pullError(res);
+    return this.#pull(res.body);
+  }
+
+  async pullStatus(r: Repo, number: number) {
+    return this.#pullInfo(r, await this.ok<GhPull>("GET", this.#path(r, `/pulls/${number}`)));
+  }
+
   /** The open pull request from `head` into `base`, if any. */
   async pull(r: Repo, head: string, base: string): Promise<PullInfo | null> {
     const list = await this.ok<GhPull[]>("GET", this.#path(r, `/pulls?state=open&head=${encodeURIComponent(`${r.owner}:${head}`)}&base=${encodeURIComponent(base)}`));
@@ -548,7 +598,10 @@ type GhRepo = {
   owner: { login: string }; permissions?: { push?: boolean };
 };
 type GhEntry = { path: string; mode: string; type: string; sha: string; size?: number };
-type GhPull = { number: number; html_url: string; title: string; draft?: boolean; head: { sha: string } };
+type GhPull = {
+  number: number; html_url: string; title: string; draft?: boolean; head: { sha: string; ref?: string }; base?: { ref: string };
+  state?: string; merged?: boolean; merged_at?: string | null;
+};
 export interface PullInfo {
   number: number;
   url: string;
@@ -764,6 +817,8 @@ export function gitRoutes(
     defaultBranch: r.default_branch,
     subdir: r.subdir,
     deleteBranch: !!r.delete_branch,
+    /** Submit the stack (its pull requests) after each change. */
+    stackAutoSubmit: !!r.stack_auto_submit,
     lastSyncedSha: r.last_synced_sha,
     /** The default branch's latest commit a webhook reported (null: none, or webhooks off). */
     upstreamSha: r.upstream_sha ?? null,
@@ -1045,6 +1100,33 @@ export function gitRoutes(
     c.header("cache-control", "no-store");
     return c.json({ defaultBranch: repo.default_branch, stacks });
   });
+  // Pull requests for a stack's changes (opened or updated as the user), and their review and checks.
+  app.post("/apps/:name/git/stack/submit", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ stack?: unknown } | null>(c) ?? {};
+    if (typeof input.stack !== "string") throw new HttpError(400, "stack must be a stack's id");
+    return c.json(await submitStack({ provider: client, store, appId: a.id, repo, r }, input.stack));
+  });
+  app.get("/apps/:name/git/stack/pulls", async (c) => {
+    const { a, r, repo, client } = await linked(c, "read");
+    const stack = c.req.query("stack");
+    if (!stack) throw new HttpError(400, "stack must be a stack's id");
+    c.header("cache-control", "no-store");
+    return c.json({ pulls: await stackPulls({ provider: client, store, appId: a.id, repo, r }, stack) });
+  });
+  // The app's source control settings.
+  app.patch("/apps/:name/git", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    await authorize(c, a, "admin", { account: true });
+    const repo = await store.getAppRepo(a.id);
+    if (!repo) throw new HttpError(404, `${a.name} isn't connected to a repository`, "git_not_linked");
+    const input = await body<{ stackAutoSubmit?: unknown } | null>(c) ?? {};
+    if (input.stackAutoSubmit !== undefined) {
+      if (typeof input.stackAutoSubmit !== "boolean") throw new HttpError(400, "stackAutoSubmit must be true or false");
+      await store.setStackAutoSubmit(a.id, input.stackAutoSubmit);
+    }
+    return c.json({ repo: repoView((await store.getAppRepo(a.id))!) });
+  });
   // Going back to a change (the ones above it set aside), and putting them back.
   app.post("/apps/:name/git/stack/back", async (c) => {
     const { a, r, repo, client } = await linked(c, "deploy");
@@ -1066,17 +1148,23 @@ export function gitRoutes(
   // The workspace committed as a new change: on the default branch a new stack, on a stack's top change the next one.
   app.post("/apps/:name/git/stack", async (c) => {
     await linked(c, "deploy"); // before reading what may be a large body
-    const input = await body<{ from?: unknown; baseSha?: unknown; files?: unknown; title?: unknown; prompt?: unknown } | null>(c, deployBodyLimit) ?? {};
+    const input = await body<{ from?: unknown; baseSha?: unknown; files?: unknown; title?: unknown; prompt?: unknown; submit?: unknown } | null>(c, deployBodyLimit) ?? {};
     const { a, r, repo, client, author } = await linked(c, "deploy");
     const from = branchName(input.from, "from");
     const baseSha = shaOf(input.baseSha, "baseSha");
     const files = sourceFiles(cfg, input.files as DeployFile[]);
-    const out = await commitChange({ provider: client, store, appId: a.id, repo, r }, {
+    const ctx = { provider: client, store, appId: a.id, repo, r };
+    const out = await commitChange(ctx, {
       from, baseSha, files, author, by: c.get("account")!.id,
       title: message(input.title, `Update ${a.name}`).split("\n")[0].slice(0, 200),
       prompt: typeof input.prompt === "string" ? input.prompt.slice(0, 5000) : "",
     });
-    return c.json(out, out.changed ? 201 : 200);
+    // The app submits its stacks after each change (not one the studio makes on its way somewhere, `submit: false`):
+    // the change is made whatever happens to its pull requests.
+    const submitted = out.changed && repo.stack_auto_submit && input.submit !== false
+      ? await submitStack(ctx, out.stack.id).catch((e) => ({ pulls: [], error: e instanceof HttpError ? e.message : "couldn't submit the stack" }))
+      : undefined;
+    return c.json({ ...out, ...(submitted ? { submitted } : {}) }, out.changed ? 201 : 200);
   });
 
   // Merge `branch` into the default branch (or `into`), as the user: a fast-forward when it can, else a merge
@@ -1130,15 +1218,20 @@ export function gitRoutes(
 
   // Pull requests, when the default branch takes no direct merges (protection, required reviews or checks).
   app.get("/apps/:name/git/pulls", async (c) => {
-    const { r, repo, client } = await linked(c, "read");
+    const { a, r, repo, client } = await linked(c, "read");
     const branch = branchName(c.req.query("branch"));
-    return c.json({ pull: await client.pull(r, branch, repo.default_branch) });
+    // A change of a stack: its pull request is the stack's (into the change below).
+    const stacked = await changePull({ provider: client, store, appId: a.id, repo, r }, branch, false);
+    return c.json({ pull: stacked ? stacked.pull : await client.pull(r, branch, repo.default_branch) });
   });
   app.post("/apps/:name/git/pulls", async (c) => {
     const { a, r, repo, client } = await linked(c, "deploy");
     const input = await body<{ branch?: unknown; title?: unknown; body?: unknown } | null>(c) ?? {};
     const branch = branchName(input.branch);
     if (branch === repo.default_branch) throw new HttpError(400, `a pull request needs a branch other than ${branch}`);
+    // A change of a stack: its stack is submitted (one pull request per change), not a second one into the default branch.
+    const stacked = await changePull({ provider: client, store, appId: a.id, repo, r }, branch, true);
+    if (stacked) return c.json({ pull: stacked.pull, ...(stacked.errors ? { stackErrors: stacked.errors } : {}) }, stacked.created ? 201 : 200);
     const { pull, created } = await client.openPull(r, {
       head: branch, base: repo.default_branch,
       title: message(input.title, `Update ${a.name} (${branch})`).split("\n")[0].slice(0, 200),
