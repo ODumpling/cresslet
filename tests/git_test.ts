@@ -637,3 +637,42 @@ test("conflicts: main merged into the branch with markers; resolved and committe
   assert.equal(t.gh.files("octo/shop")["app.txt"], "hello from both\n");
   assert.equal(t.gh.files("octo/shop")["upstream.txt"], "u\n");
 }));
+
+test("conflicts in a subfolder app: the resolved merge keeps the default branch's changes elsewhere; ones the studio can't resolve are refused", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const repo = t.gh.repo("octo/shop");
+  t.gh.write(repo, "main", { "app/app.txt": "hello\n", "app/.env": "VITE_A=1\n", "other/x.txt": "x\n" });
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", subdir: "app", initialSync: "pull" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/c" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/c", baseSha: linked.body.sha, files: linked.body.files.map((f: { path: string }) => (f.path === "app.txt" ? { ...f, data: "mine\n" } : f)),
+  });
+  // main: the same file (a conflict to resolve), plus a file outside the app and its .env (merged by themselves).
+  const theirs = t.gh.write(repo, "main", { "app/app.txt": "theirs\n", "other/x.txt": "x2\n", "app/.env": "VITE_A=2\nSECRET=s\n" });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/c", tok);
+  assert.equal(cf.status, 200, JSON.stringify(cf.body));
+  assert.deepEqual(cf.body.conflicts, ["app.txt"]);
+  assert.equal(cf.body.files.find((f: { path: string }) => f.path === ".env").data, "VITE_A=2\n"); // main's, sanitized
+  const resolved = cf.body.files.map((f: { path: string }) => (f.path === "app.txt" ? { ...f, data: "both\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/c", baseSha: mine.body.sha, files: resolved, mergeParent: theirs });
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  const m = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: "feat/c" });
+  assert.equal(m.body.fastForward, true);
+  const files = t.gh.files("octo/shop");
+  assert.equal(files["app/app.txt"], "both\n");
+  assert.equal(files["other/x.txt"], "x2\n"); // main's change outside the app kept
+  assert.equal(files["app/.env"], "VITE_A=2\nSECRET=s\n"); // main's own .env, secret line and all
+
+  // Both sides change a file outside the app: not resolvable here.
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/d" });
+  await t.gh.write(repo, "feat/d", { "other/x.txt": "branch\n" });
+  t.gh.write(repo, "main", { "other/x.txt": "main\n" });
+  const un = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/d", tok);
+  assert.equal(un.status, 409);
+  assert.equal(un.body.error, "merge_unresolvable");
+  assert.deepEqual(un.body.paths, ["other/x.txt"]);
+  assert.equal((await t.send("GET", "/v1/apps/shop/git/conflicts?branch=main", tok)).status, 400);
+}));

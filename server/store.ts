@@ -1128,7 +1128,7 @@ export class Store implements RateHits {
        ON CONFLICT (app_id) DO UPDATE SET provider = excluded.provider, repo_id = excluded.repo_id, owner = excluded.owner,
          name = excluded.name, default_branch = excluded.default_branch, subdir = excluded.subdir,
          delete_branch = excluded.delete_branch, connected_by = excluded.connected_by,
-         last_synced_sha = excluded.last_synced_sha, connected_at = excluded.connected_at, updated_at = excluded.updated_at`,
+         last_synced_sha = excluded.last_synced_sha, upstream_sha = NULL, connected_at = excluded.connected_at, updated_at = excluded.updated_at`,
       r.app_id, r.provider, r.repo_id, r.owner, r.name, r.default_branch, r.subdir, r.delete_branch, r.connected_by,
       r.last_synced_sha, now, now,
     );
@@ -1147,13 +1147,17 @@ export class Store implements RateHits {
    * The last commit Cresslet wrote or read, and what the provider says about the repository now (renamed,
    * transferred, a new default branch). Only onto the link `was` (one relinked meanwhile is left alone).
    */
-  async updateAppRepoSync(was: AppRepo, p: { sha?: string | null; owner?: string; name?: string; defaultBranch?: string }) {
+  async updateAppRepoSync(was: AppRepo, p: { sha?: string | null; owner?: string; name?: string; defaultBranch?: string; upstream?: string }) {
     await this.db.run(
       `UPDATE app_repos SET last_synced_sha = COALESCE(?, last_synced_sha), owner = COALESCE(?, owner), name = COALESCE(?, name),
          default_branch = COALESCE(?, default_branch), updated_at = ?
        WHERE app_id = ? AND repo_id = ? AND connected_at = ?`,
       p.sha ?? null, p.owner ?? null, p.name ?? null, p.defaultBranch ?? null, Date.now(), was.app_id, was.repo_id, was.connected_at,
     );
+    // Cresslet moved the default branch itself: that's where it is now (a webhook's older report doesn't count).
+    if (p.upstream) {
+      await this.db.run("UPDATE app_repos SET upstream_sha = ? WHERE app_id = ? AND repo_id = ? AND connected_at = ?", p.upstream, was.app_id, was.repo_id, was.connected_at);
+    }
   }
 
   // ---- AI credits (millicredits; server/credits.ts)

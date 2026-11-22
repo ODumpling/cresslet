@@ -733,3 +733,9 @@ test("pull requests from the active branch: pushed first, then opened", async ()
   assert.equal(g.calls[1].body.branch, "feat/x");
   assert.equal(await g.git.pullRequest(), null);
 });
+
+test("merge conflicts: a conflicted package.json whose npm install fails still leaves the merge loaded to resolve", async () => {
+  const g = fakeGit({ onDefault: false, hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  assert.deepEqual(await g.git.resolveConflicts(), ["app.txt"]);
+  assert.equal(g.state.mergeParent, "f".repeat(40));
+});

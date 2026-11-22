@@ -34,7 +34,7 @@ export interface PullRequest {
   url: string;
   title: string;
   review: "approved" | "changes_requested" | "pending";
-  checks: "success" | "failure" | "pending" | "none";
+  checks: "success" | "failure" | "pending" | "none" | "unknown";
 }
 
 /** A file as the API takes and returns them (POST /v1/deploys's shape). */
@@ -135,7 +135,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     }
     await set({
       headSha: r.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined,
-      ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : {}),
+      // A merge of the default branch committed: the branch is on top of that now.
+      ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : s.mergeParent ? { baseSha: s.mergeParent } : {}),
     });
     return { ...r, files };
   }
@@ -232,9 +233,18 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     resolveConflicts: () => serial(async () => {
       const s = o.state()!;
       if (s.dirty) await syncNow(`Work in progress on ${s.activeBranch}`);
+      if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: try again"), { code: "changed" });
+      const rev = revision();
       const r = await o.api<{ intoSha: string; headSha: string; conflicts: string[]; files: GitFile[] }>(path(`/conflicts?branch=${encodeURIComponent(s.activeBranch)}`));
-      await o.hydrate(r.files);
-      await set({ headSha: r.headSha, mergeParent: r.intoSha, conflicts: r.conflicts, dirty: true });
+      unchangedSince(rev, "loading the merge"); // not over an edit made meanwhile
+      const merging = () => set({ headSha: r.headSha, mergeParent: r.intoSha, conflicts: r.conflicts, dirty: true });
+      try {
+        await o.hydrate(r.files);
+      } catch (e) {
+        // A conflicted package.json fails npm install: the merge is still loaded, to resolve.
+        if (!(e as { filesWritten?: boolean }).filesWritten) throw e;
+      }
+      await merging();
       return r.conflicts;
     }),
     /** The active branch's open pull request, if any. */

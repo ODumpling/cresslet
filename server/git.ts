@@ -204,6 +204,28 @@ export class GitHub implements SourceControlProvider {
     return new Uint8Array(Buffer.from(b.content, b.encoding === "base64" ? "base64" : "utf8"));
   }
 
+  /** Every entry of a commit's tree that isn't a folder (files, symlinks, submodules), by path. */
+  async #entries(r: Repo, sha: string) {
+    return new Map((await this.#tree(r, sha)).entries.filter((e) => e.type !== "tree").map((e) => [e.path, e]));
+  }
+
+  /**
+   * Merging `theirs` into `ours` (their merge base `base`), for what the studio doesn't hold (outside `subdir`,
+   * never-source files, symlinks, dotenv files: see `studioHolds`): the tree entries to take from `theirs`, and the
+   * paths both sides changed (which the studio can't resolve).
+   */
+  #mergeOutside(subdir: string, base: Map<string, GhEntry>, ours: Map<string, GhEntry>, theirs: Map<string, GhEntry>) {
+    const same = (x?: GhEntry, y?: GhEntry) => x?.sha === y?.sha && x?.mode === y?.mode;
+    const take: { path: string; mode: string; type: string; sha: string | null }[] = [], both: string[] = [];
+    for (const path of new Set([...base.keys(), ...ours.keys(), ...theirs.keys()])) {
+      const [b, o, t] = [base.get(path), ours.get(path), theirs.get(path)];
+      if (studioHolds(path, o ?? t ?? b!, subdir) || same(o, t) || same(t, b)) continue;
+      if (same(o, b)) take.push(t ? { path, mode: t.mode, type: t.type, sha: t.sha } : { path, mode: o!.mode, type: o!.type, sha: null });
+      else both.push(path);
+    }
+    return { take, both: both.sort() };
+  }
+
   async readTree(r: Repo, sha: string, subdir: string): Promise<DeployFile[]> {
     const { entries } = await this.#tree(r, sha);
     const files = sourceEntries(entries, subdir).filter((e) => !NOT_SOURCE.test(e.rel));
@@ -227,7 +249,18 @@ export class GitHub implements SourceControlProvider {
     const { treeSha, entries } = await this.#tree(r, input.baseSha);
     const prefix = input.subdir ? input.subdir + "/" : "";
     const base = new Map(entries.filter((e) => e.type === "blob").map((e) => [e.path, e]));
-    const want = new Map(input.files.map(([p, d]) => [prefix + p, d]));
+    // A merge (`mergeParent`): the studio's files are the resolution of what it holds; everything else (outside
+    // subdir, dotenv files…) is merged here, and both sides changing one of those stops it.
+    let outside: { path: string; mode: string; type: string; sha: string | null }[] = [];
+    if (input.mergeParent) {
+      const cmp = await this.ok<{ merge_base_commit: { sha: string } }>("GET", this.#path(r, `/compare/${input.mergeParent}...${input.baseSha}`));
+      const [b, t] = await Promise.all([this.#entries(r, cmp.merge_base_commit.sha), this.#entries(r, input.mergeParent)]);
+      const m = this.#mergeOutside(input.subdir, b, new Map(entries.filter((e) => e.type !== "tree").map((e) => [e.path, e])), t);
+      if (m.both.length) throw unresolvable(m.both);
+      outside = m.take;
+    }
+    const held = (path: string) => !input.mergeParent || !DOTENV.test(path);
+    const want = new Map(input.files.map(([p, d]) => [prefix + p, d] as const).filter(([p]) => held(p)));
     const changes: { path: string; mode: string; data: Uint8Array }[] = [];
     for (const [path, data] of want) {
       const b = base.get(path);
@@ -240,15 +273,16 @@ export class GitHub implements SourceControlProvider {
     }
     // Under subdir, files the studio was never sent stay: never-source ones, symlinks, names it can't hold.
     const gone = [...base.values()].filter((e) => e.path.startsWith(prefix) && !want.has(e.path) && sourceEntries([e], input.subdir).length &&
-      !NOT_SOURCE.test(e.path.slice(prefix.length))).map((e) => e.path);
+      !NOT_SOURCE.test(e.path.slice(prefix.length)) && held(e.path)).map((e) => e.path);
     if (!changes.length && !gone.length && !input.mergeParent) return { sha: input.baseSha, changed: false };
     const blobs = await pool(changes, 8, (ch) =>
       this.ok<{ sha: string }>("POST", this.#path(r, "/git/blobs"), { content: Buffer.from(ch.data).toString("base64"), encoding: "base64" }));
-    const tree = !changes.length && !gone.length ? { sha: treeSha } : await this.ok<{ sha: string }>("POST", this.#path(r, "/git/trees"), {
+    const tree = !changes.length && !gone.length && !outside.length ? { sha: treeSha } : await this.ok<{ sha: string }>("POST", this.#path(r, "/git/trees"), {
       base_tree: treeSha,
       tree: [
         ...changes.map((ch, i) => ({ path: ch.path, mode: ch.mode, type: "blob", sha: blobs[i].sha })),
         ...gone.map((path) => ({ path, mode: "100644", type: "blob", sha: null })),
+        ...outside,
       ],
     });
     const who = { name: input.author.name, email: input.author.email };
@@ -332,8 +366,12 @@ export class GitHub implements SourceControlProvider {
     const [intoSha, headSha] = await Promise.all([this.branchHead(r, input.into), this.branchHead(r, input.head)]);
     if (!intoSha || !headSha) throw new HttpError(404, `no branch ${!intoSha ? input.into : input.head} on GitHub`, "branch_not_found");
     const cmp = await this.ok<{ merge_base_commit: { sha: string } }>("GET", this.#path(r, `/compare/${intoSha}...${headSha}`));
-    const [base, ours, theirs] = await Promise.all([cmp.merge_base_commit.sha, headSha, intoSha].map(async (sha) =>
-      new Map(sourceEntries((await this.#tree(r, sha)).entries, input.subdir).filter((e) => !NOT_SOURCE.test(e.rel)).map((e) => [e.rel, e]))));
+    const full = await Promise.all([cmp.merge_base_commit.sha, headSha, intoSha].map((sha) => this.#entries(r, sha)));
+    // What the studio doesn't hold must merge by itself (else: a pull request).
+    const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
+    if (outside.both.length) throw unresolvable(outside.both);
+    const prefix = input.subdir ? input.subdir + "/" : "";
+    const [base, ours, theirs] = full.map((m) => new Map([...m.values()].filter((e) => studioHolds(e.path, e, input.subdir)).map((e) => [e.path.slice(prefix.length), { ...e, rel: e.path.slice(prefix.length) }])));
     const out = new Map<string, Uint8Array>(), conflicts: string[] = [];
     const read = (e: GhEntry) => this.#blob(r, e.sha).then((d) => (DOTENV.test(e.path) ? publicDotenv(d) : d));
     const text = (d: Uint8Array) => {
@@ -345,6 +383,10 @@ export class GitHub implements SourceControlProvider {
     };
     const paths = [...new Set([...base.keys(), ...ours.keys(), ...theirs.keys()])];
     if (paths.length > this.limits.files) throw new HttpError(413, `the repository has more than ${this.limits.files} files`, "too_large");
+    const size = paths.reduce((n, p) => n + (ours.get(p)?.size ?? 0) + (theirs.get(p)?.size ?? 0), 0);
+    if (size > this.limits.bytes) throw new HttpError(413, `the merge's files exceed ${this.limits.bytes} bytes`, "too_large");
+    // Binary files both sides changed: no markers to resolve them with.
+    const binary: string[] = [];
     await pool(paths, 8, async (p) => {
       const [b, o, t] = [base.get(p)?.sha, ours.get(p)?.sha, theirs.get(p)?.sha];
       const pick = o === t || t === b ? ours.get(p) : o === b ? theirs.get(p) : undefined;
@@ -356,12 +398,23 @@ export class GitHub implements SourceControlProvider {
       const [od, td] = await Promise.all([ours.get(p) ? read(ours.get(p)!) : null, theirs.get(p) ? read(theirs.get(p)!) : null]);
       const [ot, tt] = [od ? text(od) : "", td ? text(td) : ""];
       if (ot === null || tt === null) {
-        if (od ?? td) out.set(p, (od ?? td)!);
+        binary.push(p);
         return;
       }
       const nl = (x: string) => (x && !x.endsWith("\n") ? x + "\n" : x);
       out.set(p, new TextEncoder().encode(`<<<<<<< ${input.head}\n${nl(ot)}=======\n${nl(tt)}>>>>>>> ${input.into}\n`));
     });
+    if (binary.length) throw unresolvable(binary.map((p) => prefix + p));
+    // Dotenv files (merged above, outside the studio's part): the result's public entries, as the workspace holds them.
+    const taken = new Map(outside.take.map((x) => [x.path, x]));
+    for (const [path, e] of full[1]) if (!taken.has(path) && path.startsWith(prefix) && DOTENV.test(path) && e.mode !== "120000") taken.set(path, { path, mode: e.mode, type: e.type, sha: e.sha });
+    for (const x of taken.values()) {
+      const rel = x.path.slice(prefix.length);
+      if (!x.sha || !x.path.startsWith(prefix) || !DOTENV.test(x.path) || NOT_SOURCE.test(rel) || x.type !== "blob") continue;
+      try {
+        if (safePath(rel) === rel) out.set(rel, publicDotenv(await this.#blob(r, x.sha)));
+      } catch { /* not a path the workspace can hold */ }
+    }
     const files: DeployFile[] = [...out].sort(([x], [y]) => (x < y ? -1 : 1)).map(([path, d]) => {
       const t = text(d);
       return t === null ? { path, data: Buffer.from(d).toString("base64"), encoding: "base64" } : { path, data: t, encoding: "utf8" };
@@ -388,16 +441,17 @@ export class GitHub implements SourceControlProvider {
   async #pullInfo(r: Repo, p: GhPull): Promise<PullInfo> {
     const [reviews, checks] = await Promise.all([
       this.ok<{ user: { login: string } | null; state: string }[]>("GET", this.#path(r, `/pulls/${p.number}/reviews?per_page=100`)).catch(() => []),
-      this.ok<{ check_runs: { status: string; conclusion: string | null }[] }>("GET", this.#path(r, `/commits/${p.head.sha}/check-runs?per_page=100`)).catch(() => ({ check_runs: [] })),
+      // Needs the GitHub App's Checks: read permission; without it, unknown rather than "none".
+      this.ok<{ check_runs: { status: string; conclusion: string | null }[] }>("GET", this.#path(r, `/commits/${p.head.sha}/check-runs?per_page=100`)).catch(() => null),
     ]);
     const latest = new Map<string, string>();
     for (const x of reviews) if (x.user && x.state !== "COMMENTED") latest.set(x.user.login, x.state);
     const states = [...latest.values()];
-    const runs = checks.check_runs;
+    const runs = checks?.check_runs ?? [];
     return {
       number: p.number, url: p.html_url, title: p.title, draft: !!p.draft, headSha: p.head.sha,
       review: states.includes("CHANGES_REQUESTED") ? "changes_requested" : states.includes("APPROVED") ? "approved" : "pending",
-      checks: !runs.length ? "none" : runs.some((x) => x.status !== "completed") ? "pending"
+      checks: !checks ? "unknown" : !runs.length ? "none" : runs.some((x) => x.status !== "completed") ? "pending"
         : runs.every((x) => ["success", "neutral", "skipped"].includes(x.conclusion ?? "")) ? "success" : "failure",
     };
   }
@@ -425,7 +479,7 @@ export interface PullInfo {
   draft: boolean;
   headSha: string;
   review: "approved" | "changes_requested" | "pending";
-  checks: "success" | "failure" | "pending" | "none";
+  checks: "success" | "failure" | "pending" | "none" | "unknown";
 }
 
 /** The tree's regular files under `subdir`, with their paths relative to it (names a deploy can't hold left out). */
@@ -458,6 +512,19 @@ async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Prom
   return out;
 }
 
+/**
+ * A path the studio holds and resolves itself in a merge: a regular file under subdir it can hold, not never-source,
+ * not a dotenv file (it only ever has their public entries).
+ */
+function studioHolds(path: string, e: GhEntry, subdir: string) {
+  const prefix = subdir ? subdir + "/" : "";
+  if (!path.startsWith(prefix) || DOTENV.test(path)) return false;
+  return sourceEntries([{ ...e, path }], subdir).length > 0 && !NOT_SOURCE.test(path.slice(prefix.length));
+}
+const unresolvable = (paths: string[]) => Object.assign(
+  new HttpError(409, `both sides changed ${paths.join(", ")}, which can't be resolved in the studio: merge it on GitHub (a pull request)`, "merge_unresolvable"),
+  { extra: { paths } },
+);
 const reauth = () => new HttpError(401, "GitHub access expired or was revoked: connect GitHub again", "git_reauth_required");
 const conflict = (message: string) => new HttpError(409, message, "conflict");
 const notFastForward = (status: number, m?: string) => status === 422 && /fast.?forward/i.test(m ?? "");
@@ -502,10 +569,12 @@ export function githubSync(cfg: Config) {
 
 export function gitRoutes(
   app: Hono<Env>,
-  { cfg, store, body, accountWide, authorize, getApp, deployBodyLimit }: {
+  { cfg, store, body, readBody, accountWide, authorize, getApp, deployBodyLimit }: {
     cfg: Config;
     store: Store;
     body: <T>(c: Context<Env>, maxBytes?: number) => Promise<T>;
+    /** A request's raw body, refused (413) past `maxBytes` while it's read. */
+    readBody: (req: Request, maxBytes: number) => Promise<Uint8Array>;
     accountWide: (c: Context<Env>, role: Role) => Account;
     authorize: (c: Context<Env>, a: App, role: Role, opts?: { owner?: boolean; account?: boolean }) => Promise<unknown>;
     getApp: (name: string) => Promise<App>;
@@ -851,6 +920,7 @@ export function gitRoutes(
     const input = await body<{ branch?: unknown; baseSha?: unknown; files?: unknown; message?: unknown; mergeParent?: unknown } | null>(c, deployBodyLimit) ?? {};
     const { a, r, repo, client, author } = await linked(c, "deploy");
     const mergeParent = input.mergeParent != null ? shaOf(input.mergeParent, "mergeParent") : undefined;
+    if (mergeParent && mergeParent === input.baseSha) throw new HttpError(400, "mergeParent must be another commit than baseSha");
     const branch = branchName(input.branch);
     const baseSha = shaOf(input.baseSha, "baseSha");
     const files = sourceFiles(cfg, input.files as DeployFile[]);
@@ -860,7 +930,7 @@ export function gitRoutes(
       throw Object.assign(conflict(`${branch} moved on GitHub since this workspace loaded it: pull first`), { extra: { headSha: head } });
     }
     const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
-    if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha });
+    if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
     return c.json({ branch, ...out });
   });
 
@@ -874,7 +944,7 @@ export function gitRoutes(
     const into = input.into != null ? branchName(input.into, "into") : repo.default_branch;
     const expect = input.headSha != null ? shaOf(input.headSha, "headSha") : undefined;
     const m = await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
-    if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha }).catch((e) => console.error(e));
+    if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha, upstream: m.mergedSha }).catch((e) => console.error(e));
     // The merge happened: from here on it's reported, whatever else fails. Its files (when they differ from the
     // branch's) before the branch goes, so a failure to load them leaves the branch to retry from.
     let files: DeployFile[] | undefined, filesError: string | undefined;
@@ -900,6 +970,7 @@ export function gitRoutes(
   app.get("/apps/:name/git/conflicts", async (c) => {
     const { r, repo, client } = await linked(c, "deploy");
     const branch = branchName(c.req.query("branch"));
+    if (branch === repo.default_branch) throw new HttpError(400, `${branch} is the default branch: there's nothing to merge into it`);
     const out = await client.conflicts(r, { into: repo.default_branch, head: branch, subdir: repo.subdir });
     c.header("cache-control", "no-store");
     return c.json({ branch, into: repo.default_branch, ...out });
@@ -929,12 +1000,10 @@ export function gitRoutes(
   app.post("/webhooks/github", async (c) => {
     const secret = cfg.git.webhookSecret;
     if (!secret) throw new HttpError(404, "webhooks aren't set up on this server", "not_found");
-    if (Number(c.req.header("content-length") ?? 0) > 5 * 1024 * 1024) throw new HttpError(413, "payload too large", "too_large");
-    const raw = new Uint8Array(await c.req.arrayBuffer());
-    if (raw.byteLength > 5 * 1024 * 1024) throw new HttpError(413, "payload too large", "too_large");
-    const sig = c.req.header("x-hub-signature-256") ?? "";
-    const want = "sha256=" + createHmac("sha256", secret).update(raw).digest("hex");
-    if (sig.length !== want.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(want))) throw new HttpError(401, "bad signature", "unauthorized");
+    const raw = await readBody(c.req.raw, 5 * 1024 * 1024); // capped while it's read: anyone can send this
+    const sig = Buffer.from(c.req.header("x-hub-signature-256") ?? "");
+    const want = Buffer.from("sha256=" + createHmac("sha256", secret).update(raw).digest("hex"));
+    if (sig.byteLength !== want.byteLength || !timingSafeEqual(sig, want)) throw new HttpError(401, "bad signature", "unauthorized");
     const event = c.req.header("x-github-event");
     if (event !== "push") return c.json({ ok: true, ignored: event ?? null });
     let p: { ref?: string; after?: string; deleted?: boolean; repository?: { id?: number } };
