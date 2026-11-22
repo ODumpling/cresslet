@@ -20,8 +20,9 @@ const JS = /\.(?:js|mjs|cjs|jsx)$/;
 const TS = /\.(?:ts|tsx|mts|cts)$/;
 // Built from parts, so this file doesn't trip its own check.
 const OPT_OUT = new RegExp(`@ts-${"(?:ignore|nocheck)"}\\b`);
-/** `@ts-expect-error` with nothing after it (but a comment's end): after //, ///, /*, /** or a block comment's `*`. */
-const BARE_EXPECT_ERROR = new RegExp(`(?:///?|/\\*+|^\\s*\\*+)\\s*@ts-${"expect-error"}\\s*(?:\\*+/\\s*)?$`);
+/** `@ts-expect-error` with no reason after it (only the comment's end, maybe then code): after //, ///, /*, /**, or
+ * starting a block comment's line. */
+const BARE_EXPECT_ERROR = new RegExp(`(?:///?|/\\*+|^\\s*\\**)\\s*@ts-${"expect-error"}\\s*(?:\\*+/.*)?$`);
 
 /** Every problem with these repo-relative paths (`read`: a file's text). */
 export function check(files: string[], read: (path: string) => string): string[] {
