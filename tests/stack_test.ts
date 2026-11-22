@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Pull, Repo, SourceControlProvider } from "../server/git.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, goBack, landed, landUpTo, MAX_STACK, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, pullBody, goBack, landed, landUpTo, MAX_STACK, pullIn, readStacks, restore,
   setAsideBranches, slug, stackPulls, submitStack,
 } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
@@ -803,7 +803,7 @@ test("stack: folding change 3 into 2 leaves a stack of two; its pull request tak
   const c3 = ok(await t.change(c2.branch, c2.sha, "Bluer", "3"));
   await submitStack(t.ctx, c1.stack.id);
   const pr = t.provider.pulls;
-  const f = await fold(t.ctx, c3.change.id);
+  const f = await fold(t.ctx, c3.change.id, c2.change.id);
   assert.deepEqual([f.change.position, f.change.title, f.change.baseSha, f.change.branch, f.dropped], [2, "Two", c1.sha, c3.branch, c2.change.id]);
   assert.equal(f.change.prompt, "Two, please\n\nBluer, please");
   const [s] = await readStacks(t.ctx);
@@ -839,7 +839,7 @@ test("stack: a pull request opened by hand from the upper branch is the one kept
   const c1 = ok(await t.change("main", main, "One", "1"));
   const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
   await t.provider.createPull(t.ctx.r, { head: c2.branch, base: c1.branch, title: "by hand", body: "" });
-  const f = await fold(t.ctx, c2.change.id);
+  const f = await fold(t.ctx, c2.change.id, c1.change.id);
   assert.deepEqual([f.change.pull, t.provider.pulls[0].base, t.provider.pulls[0].title], [1, "main", "One"]);
   assert.equal(t.provider.refs.has(c1.branch), false);
 
@@ -848,9 +848,25 @@ test("stack: a pull request opened by hand from the upper branch is the one kept
   const d2 = ok(await t.change(d1.branch, d1.sha, "Four", "4"));
   await t.provider.createPull(t.ctx.r, { head: d1.branch, base: f.change.branch, title: "Three", body: "" });
   t.provider.refuse.add(d2.branch);
-  const g = await fold(t.ctx, d2.change.id);
+  const g = await fold(t.ctx, d2.change.id, d1.change.id);
   assert.ok(g.pullErrors?.some((x) => /is kept open/.test(x.error)));
   assert.deepEqual([t.provider.pulls.find((x) => x.head === d1.branch)?.state, t.provider.refs.has(d1.branch)], ["open", true]);
+});
+
+test("stack: folding publishes nothing else: only the remaining change's pull request is opened or refreshed; long prompts keep the newest", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await t.provider.createPull(t.ctx.r, { head: c3.branch, base: c2.branch, title: "by hand", body: "" });
+  await fold(t.ctx, c3.change.id, c2.change.id);
+  assert.deepEqual(t.provider.pulls.map((x) => [x.head, x.base, x.title]), [[c3.branch, c1.branch, "Two"]]); // change 1 not published
+  const [s] = await readStacks(t.ctx);
+  const row = (await t.store.openStackChanges(t.app.id)).find((x) => x.id === c3.change.id)!;
+  const body = pullBody({ ...row, prompt: `${"a".repeat(25000)}\n\nthe newest request` }, [row], new Map(), "main");
+  assert.ok(body.includes("the newest request") && body.length < 25000);
+  void s;
 });
 
 test("stack: folding a change with no pull request onto one that has one: it gets one on that base", async () => {
@@ -859,7 +875,7 @@ test("stack: folding a change with no pull request onto one that has one: it get
   const c1 = ok(await t.change("main", main, "One", "1"));
   await submitStack(t.ctx, c1.stack.id);
   const c2 = ok(await t.change(c1.branch, c1.sha, "Bluer", "2"));
-  await fold(t.ctx, c2.change.id);
+  await fold(t.ctx, c2.change.id, c1.change.id);
   assert.deepEqual(t.provider.pulls.map((x) => [x.head, x.base, x.state, x.title]), [[c1.branch, "main", "closed", "One"], [c2.branch, "main", "open", "One"]]);
   assert.deepEqual(t.provider.comments.map((x) => x.body.split(" (")[0]), ["Folded into #2"]);
 });
@@ -872,11 +888,11 @@ test("stack: folding moves the changes above down; never the bottom, nor one set
   const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
   const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
   const c4 = ok(await t.change(c3.branch, c3.sha, "Four", "4"));
-  await assert.rejects(fold(t.ctx, c1.change.id), (e) => code(e) === "bottom");
+  await assert.rejects(fold(t.ctx, c1.change.id, ""), (e) => code(e) === "bottom");
   await goBack(t.ctx, c3.change.id); // 4 set aside
-  await assert.rejects(fold(t.ctx, c4.change.id), (e) => code(e) === "not_found");
+  await assert.rejects(fold(t.ctx, c4.change.id, c3.change.id), (e) => code(e) === "not_found");
   await restore(t.ctx, c1.stack.id);
-  const f = await fold(t.ctx, c2.change.id); // never submitted
+  const f = await fold(t.ctx, c2.change.id, c1.change.id); // never submitted
   assert.deepEqual([f.pullErrors, t.provider.pulls.length], [undefined, 0]);
   let [s] = await readStacks(t.ctx);
   assert.deepEqual(s.changes.map((c) => [c.position, c.title, c.baseSha]), [[1, "One", main], [2, "Three", c2.sha], [3, "Four", c3.sha]]);
@@ -887,7 +903,7 @@ test("stack: folding moves the changes above down; never the bottom, nor one set
   // Its pull request can't be moved onto the base: refused, nothing changes.
   await submitStack(t.ctx, s.id);
   t.provider.failUpdate.add(t.provider.pulls.find((x) => x.head === c4.branch)!.number);
-  await assert.rejects(fold(t.ctx, c4.change.id), (e) => code(e) === "github_error");
+  await assert.rejects(fold(t.ctx, c4.change.id, c3.change.id), (e) => code(e) === "github_error");
   [s] = await readStacks(t.ctx);
   assert.equal(s.changes.length, 4);
   assert.equal(t.provider.refs.get(c3.branch), c3.sha);

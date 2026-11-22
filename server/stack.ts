@@ -374,7 +374,9 @@ const quiet = (s: string) => s.replace(/@(?=[\w-])/g, "@\u200b");
 
 /** A change's pull request description: its prompt, and the whole stack (newest on top), this change marked. */
 export function pullBody(c: StackChange, stack: StackChange[], numbers: Map<string, number>, defaultBranch: string) {
-  const prompt = quiet(c.prompt.trim() ? c.prompt.trim().slice(0, 20000).split(/\r?\n/).map((l) => `> ${l}`).join("\n") : `> ${c.title}`);
+  // Long (folded ones add up): its start and its end, so the newest request always shows.
+  const text = c.prompt.trim().length > 20000 ? `${c.prompt.trim().slice(0, 9900)}\n…\n${c.prompt.trim().slice(-9900)}` : c.prompt.trim();
+  const prompt = quiet(text ? text.split(/\r?\n/).map((l) => `> ${l}`).join("\n") : `> ${c.title}`);
   const rows = [...stack].reverse().map((x) => {
     const n = numbers.get(x.id);
     return `| ${x.id === c.id ? "→" : ""} | ${x.position} · ${quiet(cell(x.title))} | ${n ? `#${n}` : ""} |`;
@@ -404,7 +406,8 @@ export function submitStack(ctx: Ctx, stackId: string): Promise<{ pulls: Submitt
 }
 
 /** submitStack, for a caller holding the app's lock already. */
-async function submitNow(ctx: Ctx, stackId: string): Promise<{ pulls: Submitted[] }> {
+/** `only`: open or reopen a pull request for these changes only; the others' open ones are refreshed, none opened. */
+async function submitNow(ctx: Ctx, stackId: string, only?: Set<string>): Promise<{ pulls: Submitted[] }> {
   {
     const s = byStack((await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId))[0];
     if (!s) throw new HttpError(404, "no such stack open", "not_found");
@@ -423,6 +426,8 @@ async function submitNow(ctx: Ctx, stackId: string): Promise<{ pulls: Submitted[
         }
         if (p && p.head !== c.branch) p = null;
         p ??= await provider.findPull(r, c.branch);
+        // (Not one of the ones to open: only an open pull request of its own is refreshed.)
+        if (only && !only.has(c.id) && p?.state !== "open") continue;
         let created = false;
         if (p && p.state === "closed") p = await provider.updatePull(r, p.number, { state: "open" });
         // Above one merged by hand, its base is left as it is (landing part of a stack is #122's).
@@ -611,8 +616,7 @@ async function dropLandedAside(ctx: Ctx, stackId: string) {
 
 /** A change's open pull request (recorded, or open from its branch), pointed at `base` if it isn't. */
 async function retarget(ctx: Ctx, c: StackChange, base: string) {
-  let p = c.pr_number ? await ctx.provider.getPull(ctx.r, c.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e))) : null;
-  if (!p || p.head !== c.branch || p.state !== "open") p = await ctx.provider.findPull(ctx.r, c.branch);
+  const p = await pullOf(ctx, c);
   if (p && p.state === "open" && p.base !== base) await ctx.provider.updatePull(ctx.r, p.number, { base });
 }
 
@@ -761,7 +765,7 @@ async function pullOf(ctx: Ctx, c: StackChange): Promise<Pull | null> {
  * goes. Either is kept (and said) while nothing points at the remaining change yet, or a pull request is still on the
  * lower branch, or GitHub won't delete it. Not the bottom change (nothing below it), nor one set aside or landed.
  */
-export function fold(ctx: Ctx, changeId: string, into?: string): Promise<{ change: ChangeView; dropped: string; pullErrors?: PullError[] }> {
+export function fold(ctx: Ctx, changeId: string, into: string): Promise<{ change: ChangeView; dropped: string; pullErrors?: PullError[] }> {
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo, appId } = ctx;
     const open = await store.openStackChanges(appId);
@@ -769,9 +773,13 @@ export function fold(ctx: Ctx, changeId: string, into?: string): Promise<{ chang
     if (!upper) throw new HttpError(404, "no such change open on a stack (one set aside or landed can't be folded)", "not_found");
     const s = byStack(open.filter((x) => x.stack_id === upper.stack_id))[0];
     const i = s.indexOf(upper);
-    if (i === 0) throw new HttpError(409, `${upper.branch} is the stack's bottom change: there's nothing below it to fold it into`, "bottom");
+    // The change below the caller confirmed (a retry, or a stale tab, isn't folded one further down).
+    if (s[i - 1]?.id !== into) {
+      throw i === 0 && !into
+        ? new HttpError(409, `${upper.branch} is the stack's bottom change: there's nothing below it to fold it into`, "bottom")
+        : new HttpError(409, "the stack changed meanwhile (in another tab?): look at it again", "conflict");
+    }
     const lower = s[i - 1];
-    if (into && lower.id !== into) throw new HttpError(409, "the stack changed meanwhile (in another tab?): look at it again", "conflict");
     const heads = await Promise.all([lower, upper].map((x) => provider.branchHead(r, x.branch)));
     const off = [lower, upper].find((x, j) => heads[j] !== x.sha);
     if (off) throw new HttpError(409, `${off.branch} ${heads[[lower, upper].indexOf(off)] ? "was pushed to" : "is gone"} on GitHub: nothing was folded`, "moved");
@@ -785,14 +793,19 @@ export function fold(ctx: Ctx, changeId: string, into?: string): Promise<{ chang
     // The stack's pull requests say what it is now (the remaining change gets one if the stack has any): once.
     const after = (await store.openStackChanges(appId)).filter((x) => x.stack_id === upper.stack_id);
     if ((lowerPull?.state === "open") || upperPull || after.some((x) => x.pr_number)) {
-      const sub = await submitNow(ctx, upper.stack_id).catch((e) => ({ pulls: [{ change: upper.id, position: lower.position, error: why(e) }] as Submitted[] }));
+      // Opened or reopened for the remaining change only (auto-submit off means no other change is published here).
+      const sub = await submitNow(ctx, upper.stack_id, new Set([upper.id])).catch((e) => ({ pulls: [{ change: upper.id, position: lower.position, error: why(e) }] as Submitted[] }));
       for (const x of sub.pulls) if (x.error) pullErrors.push({ change: x.change, position: x.position, error: x.error });
     }
     const now = (await store.openStackChanges(appId)).find((x) => x.id === upper.id)!;
     // Where the remaining change's pull request is now (a base still on the lower branch keeps that branch).
-    const nowPull = now.pr_number ? await provider.getPull(r, now.pr_number).catch(() => null) : null;
-    const replaced = nowPull?.state === "open";
-    let keep = !!nowPull && nowPull.state === "open" && nowPull.base === lower.branch;
+    let unread = false;
+    const nowPull = now.pr_number
+      ? await provider.getPull(r, now.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : (unread = true, null)))
+      : null;
+    // A replacement: open, from the remaining branch, on the base it should have.
+    const replaced = nowPull?.state === "open" && nowPull.head === upper.branch && nowPull.base === base;
+    let keep = unread || (!!nowPull && nowPull.state === "open" && nowPull.base === lower.branch);
     if (lowerPull?.state === "open") {
       if (!replaced) {
         keep = true;

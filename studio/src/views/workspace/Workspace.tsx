@@ -480,7 +480,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 const below = stack.changes[stack.changes.indexOf(change) - 1];
                 if (!below) return;
                 if (!confirm(`Fold change ${change.position}, "${change.title}", into change ${below.position}, "${below.title}"?\n\n` +
-                  `They're one change after it, titled "${below.title}" (both requests in its description). ${below.branch} and its pull request go; ${change.branch} takes its place. No commit changes.`)) return;
+                  `They're one change after it, titled "${below.title}" (both requests in its description). ${change.branch} takes its place; ${below.branch} and its pull request go (kept if something still needs them: you'll be told). No commit changes.`)) return;
                 setStackBusy(true);
                 void g.fold(change, below).then(
                   (r) => toast(`Folded into one change: ${r.change.position} · ${r.change.title}.${pullsSaid(r.pullErrors, "updated")}`, r.pullErrors?.length ? 15000 : 8000),

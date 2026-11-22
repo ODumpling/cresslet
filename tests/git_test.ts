@@ -1069,9 +1069,8 @@ test("stack: fold a change into the one below (its pull request on that one's ba
   const c2 = await add(c1.branch, c1.sha, "Two", "2");
   await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: c1.stack.id });
   const repo = t.gh.repo("octo/shop"), pulls = repo.pulls;
-  const bottom = await t.send("POST", "/v1/apps/shop/git/stack/fold", tok, { change: c1.change.id });
-  assert.deepEqual([bottom.status, bottom.body.error], [409, "bottom"]);
-  const f = await t.send("POST", "/v1/apps/shop/git/stack/fold", tok, { change: c2.change.id });
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/stack/fold", tok, { change: c2.change.id })).status, 400); // which one below: required
+  const f = await t.send("POST", "/v1/apps/shop/git/stack/fold", tok, { change: c2.change.id, into: c1.change.id });
   assert.equal(f.status, 200, JSON.stringify(f.body));
   assert.deepEqual([f.body.change.position, f.body.change.title, f.body.change.prompt], [1, "One", "One!\n\nTwo!"]);
   assert.deepEqual(pulls.map((p) => [p.state, p.base, p.title]), [["closed", "main", "One"], ["open", "main", "One"]]);

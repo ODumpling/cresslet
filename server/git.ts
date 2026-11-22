@@ -1199,8 +1199,8 @@ export function gitRoutes(
     const { a, r, repo, client } = await linked(c, "deploy");
     const input = await body<{ change?: unknown; into?: unknown } | null>(c) ?? {};
     if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
-    if (input.into != null && typeof input.into !== "string") throw new HttpError(400, "into must be a change's id");
-    return c.json(await fold({ provider: client, store, appId: a.id, repo, r }, input.change, input.into as string | undefined));
+    if (typeof input.into !== "string" || !input.into) throw new HttpError(400, "into must be the id of the change below it");
+    return c.json(await fold({ provider: client, store, appId: a.id, repo, r }, input.change, input.into));
   });
   // Landing a stack up to a change (the default branch moved to it, change by change).
   app.post("/apps/:name/git/stack/land", async (c) => {
