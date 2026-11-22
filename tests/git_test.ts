@@ -1010,10 +1010,12 @@ test("stack: land up to a change (each pull request merged with its own turn); d
   await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: c1.stack.id });
   const repo = t.gh.repo("octo/shop"), pulls = repo.pulls;
 
-  // Protected: refused, nothing moved.
+  // Protected: refused, nothing moved (Land, and Deploy's merge of the top too).
   repo.protected.add("main");
   const refused = await t.send("POST", "/v1/apps/shop/git/stack/land", tok, { change: c2.change.id });
   assert.deepEqual([refused.status, refused.body.error], [422, "branch_protected"]);
+  const deploy = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: c3.branch, headSha: c3.sha });
+  assert.deepEqual([deploy.status, deploy.body.error], [422, "branch_protected"]);
   assert.equal(repo.refs.get("main"), linked.sha);
   repo.protected.delete("main");
 
@@ -1027,7 +1029,7 @@ test("stack: land up to a change (each pull request merged with its own turn); d
   // Deploy's merge of the top: landed the same way, its pull request merged too.
   const m = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: c3.branch, headSha: c3.sha });
   assert.equal(m.status, 200, JSON.stringify(m.body));
-  assert.deepEqual([m.body.mergedSha, m.body.fastForward, m.body.landed], [c3.sha, true, { stack: "one", changes: 1 }]);
+  assert.deepEqual([m.body.mergedSha, m.body.fastForward, m.body.landed, m.body.deletedBranch], [c3.sha, true, { stack: "one", changes: 1 }, true]);
   assert.equal(pulls[2].merged, true);
   assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks, []);
 

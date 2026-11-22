@@ -608,32 +608,41 @@ async function retarget(ctx: Ctx, c: StackChange, base: string) {
  * while at their change). Refused, before anything moves: a protected default branch (`branch_protected`), one that
  * moved since the stack was cut (`default_moved`), a change pushed to on GitHub (`moved`).
  */
-export function landUpTo(ctx: Ctx, changeId: string): Promise<{ landed: ChangeView[]; sha: string; stack: string; pullErrors?: PullError[] }> {
+export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{ landed: ChangeView[]; sha: string; stack: string; deleted: string[]; pullErrors?: PullError[] }> {
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo, appId } = ctx;
     const open = await store.openStackChanges(appId);
     const c = open.find((x) => x.id === changeId);
     if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
+    // The commit the caller synced and will build (Deploy): the change must still be at it, checked under the lock.
+    if (expect && c.sha !== expect) throw new HttpError(409, `${c.branch} isn't at the commit that was synced`, "not_synced");
     const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
-    const k = s.findIndex((x) => x.id === c.id);
+    let k = s.findIndex((x) => x.id === c.id);
     const def = repo.default_branch;
     const guarded = await provider.branchProtection(r, def);
     if (guarded) throw new HttpError(422, `${guarded}: land the stack through its pull requests on GitHub`, "branch_protected");
-    const heads = await pool(s.slice(0, k + 1), 8, (x) => provider.branchHead(r, x.branch));
-    const moved = s.find((x, i) => i <= k && heads[i] && heads[i] !== x.sha);
-    if (moved) throw new HttpError(409, `${moved.branch} was pushed to on GitHub: pull it in, or carry on from it, first`, "moved");
     let at = await provider.branchHead(r, def);
     if (!at) throw new HttpError(404, `no branch ${def} on GitHub`, "branch_not_found");
-    // Where the default branch is: where the stack was cut, or at one of its changes (a landing that stopped half way).
+    // Where the default branch is: where the stack was cut, or at one of its changes (a landing that stopped half way,
+    // or went further: what's landed is all of it).
     let from = 0;
     if (at !== s[0].base_sha) {
       const j = s.findIndex((x) => x.sha === at);
       if (j < 0) {
-        throw new HttpError(409, `${def} moved on GitHub since the stack was cut: nothing was landed. Deploy merges it in (resolving any conflicts there)`, "default_moved");
+        throw new HttpError(409, `${def} has commits the stack doesn't (it moved on GitHub, or the stack wasn't cut from it): nothing was landed. Deploy merges it in (resolving any conflicts there)`, "default_moved");
       }
-      await store.landStack(appId, c.stack_id, s[j].position, s[j].sha);
       from = j + 1;
+      k = Math.max(k, j);
     }
+    // Each change still to move: on GitHub at its commit (pushed to: pull it in first; deleted: not landed unseen).
+    const heads = await pool(s.slice(from, k + 1), 8, (x) => provider.branchHead(r, x.branch));
+    const off = s.slice(from, k + 1).find((x, i) => heads[i] !== x.sha);
+    if (off) {
+      throw heads[s.indexOf(off) - from]
+        ? new HttpError(409, `${off.branch} was pushed to on GitHub: pull it in, or carry on from it, first`, "moved")
+        : new HttpError(404, `${off.branch} is gone on GitHub: nothing was landed`, "branch_not_found");
+    }
+    if (from) await store.landStack(appId, c.stack_id, s[from - 1].position, s[from - 1].sha);
     for (let i = from; i <= k; i++) {
       const x = s[i];
       // Its pull request on the default branch first (the bottom's too: a landing that stopped half way may have left
@@ -643,19 +652,28 @@ export function landUpTo(ctx: Ctx, changeId: string): Promise<{ landed: ChangeVi
       at = x.sha;
       await store.landStack(appId, c.stack_id, x.position, x.sha);
     }
-    // The change above is the bottom now: its pull request on the default branch (before any branch below goes: an
-    // API delete of a base branch closes the pull requests on it for good).
-    const pullErrors: PullError[] = [];
-    if (s[k + 1]) await retarget(ctx, s[k + 1], def).catch((e) => pullErrors.push({ change: s[k + 1].id, position: s[k + 1].position, error: why(e) }));
+    // The change above is the bottom now: its pull request on the default branch, before any branch below goes (an
+    // API delete of a base branch closes the pull requests on it for good). If that fails, its base branch stays.
+    const pullErrors: PullError[] = [], deleted: string[] = [];
+    let keep: string | undefined;
+    if (s[k + 1]) {
+      await retarget(ctx, s[k + 1], def).catch((e) => {
+        keep = s[k].branch;
+        pullErrors.push({ change: s[k + 1].id, position: s[k + 1].position, error: `${why(e)} (${keep} is kept until it's on ${def}: land again, or submit the stack)` });
+      });
+    }
     if (repo.delete_branch) {
-      // (GitHub's own "delete branch on merge" may have done it: gone is fine.)
-      await pool(s.slice(0, k + 1), 4, async (x) => {
-        if (await provider.branchHead(r, x.branch).catch(() => null) === x.sha) await provider.deleteBranch(r, x.branch).catch(() => false);
+      // This stack's landed branches (also ones landed by an earlier run), while at their change; GitHub's own "delete
+      // branch on merge" may have done it: gone is fine.
+      const landedRows = (await store.db.all<StackChange>("SELECT * FROM stack_changes WHERE app_id = ? AND stack_id = ? AND state = 'landed'", appId, c.stack_id))
+        .filter((x) => x.branch !== keep);
+      await pool(landedRows, 4, async (x) => {
+        if (await provider.branchHead(r, x.branch).catch(() => null) === x.sha && await provider.deleteBranch(r, x.branch).catch(() => false)) deleted.push(x.branch);
       });
       await dropLandedAside(ctx, c.stack_id);
     }
     return {
-      landed: s.slice(0, k + 1).map((x) => ({ ...view(x), github: "ok" as const })), sha: at, stack: c.stack_name,
+      landed: s.slice(0, k + 1).map((x) => ({ ...view(x), github: "ok" as const })), sha: at, stack: c.stack_name, deleted,
       ...(pullErrors.length ? { pullErrors } : {}),
     };
   });

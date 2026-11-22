@@ -405,6 +405,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       const r = await post<{ landed: StackChange[]; sha: string; pullErrors?: PullError[] }>("/stack/land", { change: change.id });
       const s = o.state();
       if (s && r.landed.some((c) => c.branch === s.activeBranch) && s.headSha === r.sha) await set({ activeBranch: s.defaultBranch, baseSha: r.sha, headSha: r.sha, back: undefined });
+      // On a change above: the default branch's commit its stack sits on is the landed one now (not "moved on GitHub").
+      else if (s && s.baseSha === r.landed[0]?.baseSha) await set({ baseSha: r.sha });
       return r;
     }),
     /** Every change set aside (Source control lists them), and deleting one (with the ones set aside above it). */

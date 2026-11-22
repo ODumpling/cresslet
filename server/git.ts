@@ -555,7 +555,12 @@ export class GitHub implements SourceControlProvider {
     const [b, rules] = await Promise.all([
       this.ok<{ protected?: boolean }>("GET", this.#path(r, `/branches/${this.#ref(branch)}`)),
       // Rulesets (repository or organization): those that stand between a push and the branch.
-      this.req<{ type: string }[]>("GET", this.#path(r, `/rules/branches/${this.#ref(branch)}`)).then((x) => (x.status === 200 && Array.isArray(x.body) ? x.body : [])),
+      // (Not readable with this token, or none: no rules. Anything else fails: never moved on a guess.)
+      this.req<{ type: string; message?: string }[]>("GET", this.#path(r, `/rules/branches/${this.#ref(branch)}`)).then((x) => {
+        if (x.status === 200 && Array.isArray(x.body)) return x.body;
+        if (x.status === 403 || x.status === 404) return [];
+        throw ghError(x.status, (x.body as unknown as { message?: string } | null)?.message);
+      }),
     ]);
     if (b.protected) return `${branch} is protected on GitHub`;
     const blocking = rules.map((x) => x.type).filter((t) => ["update", "pull_request", "required_status_checks", "required_deployments", "merge_queue", "required_signatures"].includes(t));
@@ -1239,14 +1244,18 @@ export function gitRoutes(
     // its own turn); when it can't (protected, the default branch moved, a change pushed to), merged as before.
     let m: MergeResult | undefined, stackLanded: { stack: string; changes: number } | undefined;
     const top = into === repo.default_branch ? (await store.openStackChanges(a.id)).find((x) => x.branch === branch) : undefined;
+    let deletedTop = false;
     if (top) {
-      if (expect && expect !== top.sha) throw Object.assign(conflict(`${branch} moved since it was synced: pull it first`), { extra: { headSha: top.sha } });
       try {
-        const l = await landUpTo(ctx, top.id);
+        const l = await landUpTo(ctx, top.id, expect);
         m = { mergedSha: l.sha, headSha: top.sha, fastForward: true, treeChanged: false };
         stackLanded = { stack: l.stack, changes: l.landed.length };
+        deletedTop = l.deleted.includes(branch);
       } catch (e) {
-        if (!(e instanceof HttpError) || !["branch_protected", "default_moved", "moved"].includes(e.code)) throw e;
+        // A protected default branch is refused (Cresslet checks it: GitHub lets an admin through when protection isn't
+        // enforced for admins). The rest merge as before: the default branch moved, a change pushed to or gone, a
+        // commit other than the one synced (the merge checks it against GitHub).
+        if (!(e instanceof HttpError) || !["default_moved", "moved", "branch_not_found", "not_synced"].includes(e.code)) throw e;
       }
     }
     m ??= await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
@@ -1266,7 +1275,7 @@ export function gitRoutes(
     const stack = stackLanded ?? (into === repo.default_branch
       ? await landed(ctx, { branch, headSha: m.headSha, mergedSha: m.mergedSha, deleteBelow: !filesError }).catch((e) => (console.error(e), null))
       : null);
-    let deletedBranch = false;
+    let deletedBranch = deletedTop;
     // Only while it's still the commit that was merged: a push since then keeps it. (GitHub can't delete a ref
     // conditionally, so a push in between this check and the delete isn't excluded, only unlikely.)
     if (!filesError && repo.delete_branch && branch !== into && branch !== repo.default_branch && await client.branchHead(r, branch).catch(() => null) === m.headSha) {
