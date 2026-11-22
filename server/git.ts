@@ -273,8 +273,8 @@ export class GitHub implements SourceControlProvider {
       const changed = (p: string) => Object.assign(new HttpError(409, `${p.slice(prefix.length)} was changed while merging: commit the merge first, then that change`, "merge_dotenv_changed"), { extra: { paths: [p.slice(prefix.length)] } });
       for (const [path, d] of sent) {
         const e = result(path);
-        // Gone upstream, kept here with only private lines (nothing public): fine, it's not committed.
-        if (!e?.sha) {
+        // Gone upstream (or not a file the workspace holds), kept here with only private lines: not committed.
+        if (!e?.sha || !workspaceEnv(e, path, prefix)) {
           if (new TextDecoder().decode(publicDotenv(d)).trim()) throw changed(path);
           continue;
         }
@@ -283,7 +283,7 @@ export class GitHub implements SourceControlProvider {
       // …and none deleted here meanwhile.
       for (const path of new Set([...taken.keys(), ...ours.keys()])) {
         const e = result(path);
-        if (e?.sha && e.type === "blob" && path.startsWith(prefix) && DOTENV.test(path) && !NOT_SOURCE.test(path.slice(prefix.length)) && !sent.has(path)) throw changed(path);
+        if (e?.sha && workspaceEnv(e, path, prefix) && !sent.has(path)) throw changed(path);
       }
     }
     const held = (path: string) => !input.mergeParent || (!DOTENV.test(path) && !notHeld.has(path));
@@ -415,16 +415,7 @@ export class GitHub implements SourceControlProvider {
     const taken = new Map(outside.take.map((x) => [x.path, x]));
     for (const [path, e] of full[1]) if (!taken.has(path) && path.startsWith(prefix) && DOTENV.test(path)) taken.set(path, { path, mode: e.mode, type: e.type, sha: e.sha });
     // …and files the merge takes from the default branch that the workspace holds (a symlink there turned into a file).
-    const envs = [...taken.values()].filter((x) => {
-      const rel = x.path.slice(prefix.length);
-      if (!x.sha || !x.path.startsWith(prefix) || NOT_SOURCE.test(rel) || x.type !== "blob" || x.mode === "120000") return false;
-      if (!DOTENV.test(x.path) && !outside.take.includes(x)) return false;
-      try {
-        return safePath(rel) === rel;
-      } catch {
-        return false;
-      }
-    });
+    const envs = [...taken.values()].filter((x) => !!x.sha && workspaceFile(x, x.path, prefix) && (DOTENV.test(x.path) || outside.take.includes(x)));
     if (paths.length + envs.length > this.limits.files) throw new HttpError(413, `the repository has more than ${this.limits.files} files`, "too_large");
     const sizeOf = (sha: string) => [...full[1].values(), ...full[2].values()].find((e) => e.sha === sha)?.size ?? 0;
     // What's read: one side of a file only one side changed, both of a conflict, and the dotenv files.
@@ -566,6 +557,17 @@ function studioHolds(path: string, e: GhEntry, subdir: string) {
   if (!path.startsWith(prefix) || DOTENV.test(path)) return false;
   return sourceEntries([{ ...e, path }], subdir).length > 0 && !NOT_SOURCE.test(path.slice(prefix.length));
 }
+/** A regular file under subdir the workspace can hold (not never-source, a valid path): what it's sent and sends back. */
+function workspaceFile(e: { type: string; mode: string }, path: string, prefix: string) {
+  const rel = path.slice(prefix.length);
+  if (!path.startsWith(prefix) || NOT_SOURCE.test(rel) || e.type !== "blob" || e.mode === "120000") return false;
+  try {
+    return safePath(rel) === rel;
+  } catch {
+    return false;
+  }
+}
+const workspaceEnv = (e: { type: string; mode: string }, path: string, prefix: string) => DOTENV.test(path) && workspaceFile(e, path, prefix);
 const unresolvable = (paths: string[]) => Object.assign(
   new HttpError(409, `both sides changed ${paths.join(", ")}, which can't be resolved in the studio: merge it on GitHub (a pull request)`, "merge_unresolvable"),
   { extra: { paths } },
