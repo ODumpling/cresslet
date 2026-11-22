@@ -34,6 +34,8 @@ export interface RepoInfo {
   url: string;
   /** The acting user can push to it. */
   push: boolean;
+  /** …and administer it (GitHub's own protection may not hold them back). */
+  admin: boolean;
 }
 export interface Branch {
   name: string;
@@ -165,6 +167,7 @@ export class GitHub implements SourceControlProvider {
     defaultBranch: x.default_branch,
     url: x.html_url ?? `${this.#web}/${x.full_name}`,
     push: !!x.permissions?.push,
+    admin: !!x.permissions?.admin,
   });
 
   async listRepos() {
@@ -640,7 +643,7 @@ export class GitHub implements SourceControlProvider {
 
 type GhRepo = {
   id: number; name: string; full_name: string; private: boolean; default_branch: string; html_url?: string;
-  owner: { login: string }; permissions?: { push?: boolean };
+  owner: { login: string }; permissions?: { push?: boolean; admin?: boolean };
 };
 type GhEntry = { path: string; mode: string; type: string; sha: string; size?: number };
 type GhPull = {
@@ -1246,7 +1249,7 @@ export function gitRoutes(
   // commit. `treeChanged`: the result isn't `branch`'s tree (the default branch had commits of its own), so its
   // files come back for the workspace to build from.
   app.post("/apps/:name/git/merge", async (c) => {
-    const { a, r, repo, client } = await linked(c, "deploy");
+    const { a, r, repo, client, info } = await linked(c, "deploy");
     const input = await body<{ branch?: unknown; into?: unknown; message?: unknown; headSha?: unknown } | null>(c) ?? {};
     const branch = branchName(input.branch);
     const into = input.into != null ? branchName(input.into, "into") : repo.default_branch;
@@ -1267,8 +1270,9 @@ export function gitRoutes(
         // isn't enforced for admins), unless it's protection this user can't read (GitHub enforces it on them). A
         // change gone on GitHub is refused too. The rest merge as before: the default branch moved, a change pushed
         // to, a commit other than the one synced (the merge checks it against GitHub).
+        // (Protection it can't read: GitHub enforces it on the merge, unless the user is an admin it may let through.)
         const asBefore = ["default_moved", "moved", "not_synced"].includes((e as HttpError).code) ||
-          ((e as HttpError).code === "branch_protected" && (e as HttpError & { known?: boolean }).known === false);
+          ((e as HttpError).code === "branch_protected" && (e as HttpError & { known?: boolean }).known === false && !info.admin);
         if (!(e instanceof HttpError) || !asBefore) throw e;
       }
     }

@@ -306,8 +306,9 @@ export async function assertNotBelowTop(ctx: Ctx, branch: string) {
 /**
  * `branch` at `headSha` was merged into the default branch at `mergedSha`. If that's an open change (its stack's top
  * when the merge was allowed; another may have been added on it since), it and the ones below it are in: they're
- * landed, and with `deleteBelow` the branches below it go (the merge route deletes its own) when the app's
- * delete-branch setting is on and they still point at their change. A change added on top stays open.
+ * landed, and with `deleteBelow` the stack's landed branches go, the merged one too (dropLanded: the app's
+ * delete-branch setting, at their change, not under a pull request still open). A change added on top stays open.
+ * One landed already (a merge run again): its stack's branches are looked at again, the same way.
  */
 export async function landed(ctx: Ctx, input: { branch: string; headSha: string; mergedSha: string; deleteBelow: boolean }): Promise<{ stack: string; changes: number; deleted: string[]; pullErrors?: PullError[] } | null> {
   let s: StackChange[] = [], top: StackChange | undefined;
@@ -315,7 +316,16 @@ export async function landed(ctx: Ctx, input: { branch: string; headSha: string;
     const i = x.findIndex((c) => c.branch === input.branch && c.sha === input.headSha);
     if (i >= 0) [s, top] = [x.slice(0, i + 1), x[i]];
   }
-  if (!top) return null;
+  if (!top) {
+    // Merged again (a Deploy run again after one that kept a branch under an open pull request): not deleted unseen.
+    const was = await ctx.store.db.get<StackChange>(
+      "SELECT * FROM stack_changes WHERE app_id = ? AND branch = ? AND sha = ? AND state = 'landed'", ctx.appId, input.branch, input.headSha,
+    );
+    if (!was) return null;
+    const pullErrors: PullError[] = [];
+    const deleted = ctx.repo.delete_branch && input.deleteBelow ? await dropLanded(ctx, was.stack_id, undefined, pullErrors) : [];
+    return { stack: was.stack_name, changes: 0, deleted, ...(pullErrors.length ? { pullErrors } : {}) };
+  }
   const n = await ctx.store.landStack(ctx.appId, top.stack_id, top.position, input.mergedSha);
   const pullErrors: PullError[] = [];
   let deleted: string[] = [];
@@ -686,22 +696,25 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
 async function dropLanded(ctx: Ctx, stackId: string, keep: string | undefined, errors: PullError[], moved: Set<string> = new Set()): Promise<string[]> {
   const rows = await ctx.store.db.all<StackChange>("SELECT * FROM stack_changes WHERE app_id = ? AND stack_id = ? AND state = 'landed'", ctx.appId, stackId);
   const held = new Set<string>(keep ? [keep] : []);
+  let unknown = false;
   // (Not the ones this run moved: their pull requests were on the default branch as it reached them, so merged.)
   await pool(rows.filter((x) => !moved.has(x.id)), 4, async (x) => {
     try {
       let p = x.pr_number ? await ctx.provider.getPull(ctx.r, x.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e))) : null;
-      if (!p || p.head !== x.branch) p = await ctx.provider.findPull(ctx.r, x.branch);
+      // (A recorded one closed: maybe another was opened from it since.)
+      if (!p || p.head !== x.branch || p.state !== "open") p = await ctx.provider.findPull(ctx.r, x.branch) ?? p;
       if (p?.state === "open") {
         held.add(p.head).add(p.base);
         errors.push({ change: x.id, position: x.position, error: `pull request #${p.number} is still open (its change is in ${ctx.repo.default_branch} already): its branches are kept, close it on GitHub` });
       }
     } catch (e) {
-      // Not known whether a pull request is on it: kept.
-      held.add(x.branch);
-      errors.push({ change: x.id, position: x.position, error: `${x.branch} is kept (its pull request couldn't be read: ${why(e)})` });
+      // Not known whether a pull request is on it, nor what its base is: none of the stack's branches go this time.
+      unknown = true;
+      errors.push({ change: x.id, position: x.position, error: `${x.branch}'s pull request couldn't be read (${why(e)}): the stack's branches are kept for now` });
     }
   });
   const deleted: string[] = [];
+  if (unknown) return deleted;
   await pool(rows.filter((x) => !held.has(x.branch)), 4, async (x) => {
     if (await ctx.provider.branchHead(ctx.r, x.branch).catch(() => null) === x.sha && await ctx.provider.deleteBranch(ctx.r, x.branch).catch(() => false)) deleted.push(x.branch);
   });

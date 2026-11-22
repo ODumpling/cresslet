@@ -722,6 +722,32 @@ test("stack: merged in one merge, a submitted stack's branches under pull reques
   assert.deepEqual([t.provider.refs.has(c1.branch), t.provider.refs.has(c2.branch)], [true, true]);
 });
 
+test("stack: landed branches: a newer pull request from a branch whose recorded one closed is seen; one unreadable keeps them all; a merge run again doesn't delete unseen", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  await submitStack(t.ctx, c1.stack.id);
+  t.provider.pulls[1].state = "closed"; // #2 closed by hand, then another opened from the same branch
+  await t.provider.createPull(t.ctx.r, { head: c2.branch, base: c1.branch, title: "again", body: "" });
+  let r = await landed(t.ctx, { branch: c2.branch, headSha: c2.sha, mergedSha: "e".repeat(40), deleteBelow: true });
+  assert.deepEqual([t.provider.refs.has(c1.branch), t.provider.refs.has(c2.branch)], [true, true]);
+  assert.ok(r?.pullErrors?.some((x) => /#3 is still open/.test(x.error)));
+  // Merged again (Deploy run again): still kept while #3 is open; gone once it's closed.
+  r = await landed(t.ctx, { branch: c2.branch, headSha: c2.sha, mergedSha: "e".repeat(40), deleteBelow: true });
+  assert.deepEqual([r?.changes, r?.deleted, t.provider.refs.has(c2.branch)], [0, [], true]);
+  t.provider.pulls[0].state = "closed";
+  t.provider.pulls[2].state = "closed";
+  // One pull request that can't be read: nothing of the stack is deleted this time.
+  const real = t.provider.getPull;
+  t.provider.getPull = async () => { throw new HttpError(502, "GitHub: Server Error", "github_error"); };
+  r = await landed(t.ctx, { branch: c2.branch, headSha: c2.sha, mergedSha: "e".repeat(40), deleteBelow: true });
+  assert.deepEqual([r?.deleted, t.provider.refs.has(c1.branch)], [[], true]);
+  t.provider.getPull = real;
+  r = await landed(t.ctx, { branch: c2.branch, headSha: c2.sha, mergedSha: "e".repeat(40), deleteBelow: true });
+  assert.deepEqual(r?.deleted.sort(), [c1.branch, c2.branch].sort());
+});
+
 test("stack: the default branch moved past changes outside Cresslet with their pull requests still open: their branches are kept, and said", async () => {
   await using t = await setup();
   const main = t.provider.refs.get("main")!;
