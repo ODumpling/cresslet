@@ -328,14 +328,18 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       if (o.state()!.dirty) await changeNow("Edits made in the studio", "");
       if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: go back again"), { code: "changed" });
       // Its files first: the server sets the later changes aside only once they're in hand and nothing changed here.
-      let r!: { change: StackChange; stack: { id: string }; setAside: StackChange[] };
+      let r!: { change: StackChange; stack: { id: string }; now: string[]; setAside: StackChange[] };
       const rev = revision();
       await pullNow(change.branch, change.sha, {
         rev,
         before: async () => {
-          r = await post("/stack/back", { change: change.id });
-          // Edited while the server set them aside: put them back (nothing was built there), and leave the edit.
-          if (revision() !== rev) await post("/stack/restore", { stack: r.stack.id }).catch(() => {});
+          r = await post("/stack/back", { change: change.id, sha: change.sha });
+          // Edited while the server set them aside: put back the ones it did (nothing was built there), keep the edit.
+          if (revision() !== rev && r.now.length) {
+            await post("/stack/restore", { stack: r.stack.id, only: r.now }).catch(() => {
+              throw Object.assign(new Error("the workspace changed while going back, and the changes set aside couldn't be put back: restore them from the stack"), { code: "changed" });
+            });
+          }
           return { back: { position: r.change.position, title: r.change.title, setAside: r.setAside.map((x) => x.title) } };
         },
       });
@@ -347,12 +351,18 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      */
     restore: (stack: string, top: StackChange, discard = false) => serial(async () => {
       if (o.state()!.dirty && !discard) throw Object.assign(new Error("this workspace has changes not pushed yet: restoring would replace them"), { code: "dirty" });
-      let r!: { change: StackChange; restored: number };
+      let r!: { change: StackChange; below: StackChange; restored: number };
+      const rev = revision();
       await pullNow(top.branch, top.sha, {
-        rev: discard ? undefined : revision(),
+        rev,
         before: async () => {
-          r = await post("/stack/restore", { stack });
-          if (r.change.id !== top.id) throw new Error(`the stack changed meanwhile (its top is ${r.change.branch}): load it from the stack`);
+          r = await post("/stack/restore", { stack, top: top.id, sha: top.sha });
+          // Edited while the server restored them: set them aside again (the workspace is still below them), keep the edit.
+          if (revision() !== rev) {
+            await post("/stack/back", { change: r.below.id, sha: r.below.sha }).catch(() => {
+              throw Object.assign(new Error("the workspace changed while restoring, and the stack couldn't be put back: load its top change"), { code: "changed" });
+            });
+          }
         },
       });
       return r;

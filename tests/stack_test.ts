@@ -307,6 +307,35 @@ test("stack: after going back, a commit onto the change (a pushed edit) builds o
   assert.notEqual(s?.id, stackId);
 });
 
+test("stack: go back and restore check the commit the caller saw; an undo restores only what its go back set aside", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  const code = (e: unknown) => (e as HttpError).code;
+  await assert.rejects(goBack(t.ctx, c1.change.id, "e".repeat(40)), (e) => code(e) === "conflict");
+  await goBack(t.ctx, c2.change.id); // 3 set aside
+  const back = await goBack(t.ctx, c1.change.id, c1.sha); // then 2
+  assert.deepEqual([back.now, back.setAside.map((c) => c.title)], [[c2.change.id], ["Two", "Three"]]);
+  // Undone: only 2 comes back; 3 stays set aside, restorable.
+  const undo = await restore(t.ctx, c3.stack.id, { only: back.now });
+  assert.deepEqual([undo.change.id, undo.below.id], [c2.change.id, c1.change.id]);
+  let [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes.map((c) => c.title), s.setAside.map((c) => c.title)], [["One", "Two"], ["Three"]]);
+  // Restore names the top it'll load: another one (or another commit) is refused.
+  await assert.rejects(restore(t.ctx, s.id, { top: { id: c2.change.id, sha: c2.sha } }), (e) => code(e) === "conflict");
+  await assert.rejects(restore(t.ctx, s.id, { top: { id: c3.change.id, sha: "e".repeat(40) } }), (e) => code(e) === "conflict");
+  assert.equal((await restore(t.ctx, s.id, { top: { id: c3.change.id, sha: c3.sha } })).restored, 1);
+
+  // A commit on the top that the record couldn't follow (its branch had moved): it's still built on, nothing restorable.
+  await goBack(t.ctx, c2.change.id);
+  await t.ctx.store.db.run("UPDATE stack_changes SET sha = ? WHERE id = ?", "e".repeat(40), c2.change.id);
+  await followed(t.ctx, c2.branch, c2.sha, "f".repeat(40));
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.setAside, []);
+});
+
 test("stack: unlinking or relinking the app forgets its stacks", async () => {
   await using t = await setup();
   const main = t.provider.refs.get("main")!;

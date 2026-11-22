@@ -241,6 +241,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
     r.cmdRev = commandRev();
     try {
       await r.git?.idle(); // a source control step under way (going back, say): on the workspace it leaves
+      if (r.stopped || r.gone) return; // stopped (or left) while it waited
       await r.agent.send(text);
       await commitTurn(text);
     } finally {

@@ -1189,11 +1189,12 @@ export class Store implements RateHits {
       Date.now(), appId, stackId, position,
     )).changes;
   }
-  /** A stack's changes set aside, back on it. */
-  async restoreSetAside(appId: string, stackId: string): Promise<number> {
+  /** A stack's changes set aside (these ones), back on it. */
+  async restoreSetAside(appId: string, stackId: string, ids: string[]): Promise<number> {
+    if (!ids.length) return 0;
     return (await this.db.run(
-      "UPDATE stack_changes SET state = 'open', updated_at = ? WHERE app_id = ? AND stack_id = ? AND state = 'set_aside'",
-      Date.now(), appId, stackId,
+      `UPDATE stack_changes SET state = 'open', updated_at = ? WHERE app_id = ? AND stack_id = ? AND state = 'set_aside' AND id IN (${ids.map(() => "?").join(", ")})`,
+      Date.now(), appId, stackId, ...ids,
     )).changes;
   }
   /** A new change was built where they were: a stack's changes set aside leave it (for good; their branches stay). */

@@ -151,9 +151,9 @@ export function commitChange(ctx: Ctx, input: {
       c = await store.db.tx(async () => {
         if (below) await store.detachSetAside(appId, below.stack_id, id("stk"));
         return store.addStackChange({
-        id: id("chg"), app_id: appId, stack_id: below?.stack_id ?? id("stk"), stack_name: name, position, branch,
-        sha: out.sha, base_sha: input.baseSha, title: input.title.slice(0, 200), prompt: input.prompt.slice(0, 5000),
-        author: input.author.name, created_by: input.by,
+          id: id("chg"), app_id: appId, stack_id: below?.stack_id ?? id("stk"), stack_name: name, position, branch,
+          sha: out.sha, base_sha: input.baseSha, title: input.title.slice(0, 200), prompt: input.prompt.slice(0, 5000),
+          author: input.author.name, created_by: input.by,
         });
       });
     } catch (e) {
@@ -189,41 +189,58 @@ export async function readStacks(ctx: Ctx): Promise<StackView[]> {
  * Goes back to a change: the open changes above it in its stack are set aside (their branches kept), so it's the top
  * and the next change goes on it. Resolves to the change, for the workspace to load its commit.
  */
-export function goBack(ctx: Ctx, changeId: string): Promise<{ change: ChangeView; stack: { id: string; name: string }; setAside: ChangeView[] }> {
+const stackChanged = () => new HttpError(409, "the stack changed meanwhile (in another browser?): look at it again", "conflict");
+
+/**
+ * Goes back to a change (at `sha`, the commit the caller will load): the open changes above it in its stack are set
+ * aside (their branches kept), so it's the top and the next change goes on it. `now`: the ones this set aside;
+ * `setAside`: all the stack's, earlier ones too.
+ */
+export function goBack(ctx: Ctx, changeId: string, sha?: string): Promise<{ change: ChangeView; stack: { id: string; name: string }; now: string[]; setAside: ChangeView[] }> {
   return locked(ctx.appId, async () => {
     const open = await ctx.store.openStackChanges(ctx.appId);
     const c = open.find((x) => x.id === changeId);
     if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
+    if (sha && c.sha !== sha) throw stackChanged();
+    const now = open.filter((x) => x.stack_id === c.stack_id && x.position > c.position).map((x) => x.id);
     await ctx.store.setAsideAbove(ctx.appId, c.stack_id, c.position);
-    // All the stack's changes set aside, from this time and earlier ones.
     const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).filter((x) => x.stack_id === c.stack_id);
-    return { change: { ...view(c), github: "ok" }, stack: { id: c.stack_id, name: c.stack_name }, setAside: aside.map((x) => ({ ...view(x), github: "ok" as const })) };
+    return { change: { ...view(c), github: "ok" }, stack: { id: c.stack_id, name: c.stack_name }, now, setAside: aside.map((x) => ({ ...view(x), github: "ok" as const })) };
   });
 }
 
-/** Puts a stack's changes set aside back on it (while nothing was built where they were). Resolves to its top change. */
-export function restore(ctx: Ctx, stackId: string): Promise<{ change: ChangeView; stack: { id: string; name: string }; restored: number }> {
+/**
+ * Puts a stack's changes set aside back on it (while nothing was built where they were): all of them, or only `only`
+ * (the ones a go back set aside, to undo it). `top`: the change the caller will load, which must be the new top.
+ * Resolves to it, and `below`: the top before (to go back to, to undo this).
+ */
+export function restore(ctx: Ctx, stackId: string, opts: { only?: string[]; top?: { id: string; sha: string } } = {}): Promise<{ change: ChangeView; below: ChangeView; stack: { id: string; name: string }; restored: number }> {
   return locked(ctx.appId, async () => {
     // A stack that landed (or was forgotten) meanwhile: its changes set aside have no stack to go back on.
-    if (!(await ctx.store.openStackChanges(ctx.appId)).some((c) => c.stack_id === stackId)) {
-      throw new HttpError(409, "nothing to restore: that stack isn't open any more", "nothing_set_aside");
-    }
-    const n = await ctx.store.restoreSetAside(ctx.appId, stackId);
-    if (!n) throw new HttpError(409, "nothing to restore: a change was built where they were, or they're back already", "nothing_set_aside");
-    const top = byStack((await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId))[0]!.at(-1)!;
-    return { change: { ...view(top), github: "ok" }, stack: { id: top.stack_id, name: top.stack_name }, restored: n };
+    const before = byStack((await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId))[0];
+    if (!before) throw new HttpError(409, "nothing to restore: that stack isn't open any more", "nothing_set_aside");
+    let aside = (await ctx.store.setAsideStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId);
+    if (opts.only) aside = aside.filter((c) => opts.only!.includes(c.id));
+    if (!aside.length) throw new HttpError(409, "nothing to restore: a change was built where they were, or they're back already", "nothing_set_aside");
+    const top = aside.at(-1)!;
+    if (opts.top && (top.id !== opts.top.id || top.sha !== opts.top.sha)) throw stackChanged();
+    const n = await ctx.store.restoreSetAside(ctx.appId, stackId, aside.map((c) => c.id));
+    return { change: { ...view(top), github: "ok" }, below: { ...view(before.at(-1)!), github: "ok" }, stack: { id: top.stack_id, name: top.stack_name }, restored: n };
   });
 }
 
 /**
  * A commit Cresslet made onto `branch` from `from` to `to` (a hand edit pushed, a merge resolved): if that's an open
- * stack's top change at `from`, the change follows it. That builds on it: changes set aside above it (it was gone back
- * to) can't come back, since they don't hold the new commit.
+ * stack's top change at `from`, the change follows it. Any commit on a stack's top builds on it: changes set aside above
+ * it (it was gone back to) can't come back, since they don't hold the new commit.
  */
 export async function followed(ctx: Ctx, branch: string, from: string, to: string) {
-  if (!await ctx.store.followStackTop(ctx.appId, branch, from, to)) return;
-  const c = (await ctx.store.openStackChanges(ctx.appId)).find((x) => x.branch === branch && x.sha === to);
-  if (c) await ctx.store.detachSetAside(ctx.appId, c.stack_id, id("stk"));
+  const top = byStack(await ctx.store.openStackChanges(ctx.appId)).map((s) => s.at(-1)!).find((c) => c.branch === branch);
+  if (!top) return;
+  await ctx.store.db.tx(async () => {
+    await ctx.store.followStackTop(ctx.appId, branch, from, to);
+    await ctx.store.detachSetAside(ctx.appId, top.stack_id, id("stk"));
+  });
 }
 
 /**

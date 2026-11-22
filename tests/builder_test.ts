@@ -433,7 +433,7 @@ const gitMod = "../studio/git.ts"; // browser module: typed by studio/tsconfig.j
 const { createGitWorkspace, branchSlug, commitMessage } = await import(gitMod);
 
 /** A linked project over a scripted /v1/apps/:name/git API: the calls it made, its state, what was loaded. */
-function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true, hydrate = null as null | ((f: Json) => Promise<void>), duringSync = () => {}, duringStack = () => {}, duringBack = () => {}, stackError = null as string | null } = {}) {
+function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true, hydrate = null as null | ((f: Json) => Promise<void>), duringSync = () => {}, duringStack = () => {}, duringBack = () => {}, duringRestore = () => {}, stackError = null as string | null } = {}) {
   const opts = { stackError };
   const calls: { path: string; body?: Json }[] = [];
   const hydrated: Json[] = [];
@@ -451,9 +451,12 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     }
     if (path.endsWith("/git/stack/back")) {
       duringBack();
-      return { change: { id: body.change, position: 1, branch: "feat/s/1-one", sha: "1".repeat(40), title: "One" }, stack: { id: "stk_1" }, setAside: [{ title: "Two" }, { title: "Three" }] };
+      return { change: { id: body.change, position: 1, branch: "feat/s/1-one", sha: "1".repeat(40), title: "One" }, stack: { id: "stk_1" }, now: ["chg_2"], setAside: [{ title: "Two" }, { title: "Three" }] };
     }
-    if (path.endsWith("/git/stack/restore")) return { change: { id: "chg_3", position: 3, branch: "feat/s/3-three", sha: "3".repeat(40) }, restored: 2 };
+    if (path.endsWith("/git/stack/restore")) {
+      duringRestore();
+      return { change: { id: "chg_3", position: 3, branch: "feat/s/3-three", sha: "3".repeat(40) }, below: { id: "chg_1", sha: "1".repeat(40) }, restored: 2 };
+    }
     if (path.endsWith("/git/stack") && init.method === "POST") {
       duringStack();
       if (opts.stackError) throw Object.assign(new Error(opts.stackError), { status: 409, code: opts.stackError });
@@ -582,7 +585,7 @@ test("git: going back to a change commits changes here first, then loads its com
   // Committed as a change first (never dropped); its files in hand before the server sets anything aside.
   assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack", `/tree?ref=${"1".repeat(40)}`, "/stack/back"]);
   assert.equal(g.calls[0].body.title, "Edits made in the studio");
-  assert.deepEqual(g.calls[2].body, { change: "chg_1" });
+  assert.deepEqual(g.calls[2].body, { change: "chg_1", sha: "1".repeat(40) });
   assert.deepEqual([g.state.activeBranch, g.state.headSha, g.state.dirty], ["feat/s/1-one", "d".repeat(40), false]);
   assert.deepEqual(g.state.back, { position: 1, title: "One", setAside: ["Two", "Three"] });
   assert.deepEqual(g.hydrated, [[{ path: "a.txt", data: "pulled" }]]);
@@ -598,6 +601,7 @@ test("git: going back to a change commits changes here first, then loads its com
   e.state.activeBranch = "feat/s/3-three";
   await assert.rejects(e.git.goBack({ id: "chg_1", branch: "feat/s/1-one", sha: "1".repeat(40) }), /changed while/);
   assert.deepEqual(e.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/tree", "/stack/back", "/stack/restore"]);
+  assert.deepEqual(e.calls[2].body, { stack: "stk_1", only: ["chg_2"] }); // only what this one set aside
   assert.deepEqual([e.state.activeBranch, e.hydrated], ["feat/s/3-three", []]);
 
   // Restore: refused over changes here unless they're to be dropped; the top's files first, then the server.
@@ -605,10 +609,19 @@ test("git: going back to a change commits changes here first, then loads its com
   const r = fakeGit({ onDefault: false });
   r.state.dirty = true;
   await assert.rejects(r.git.restore("stk_1", top), (e: Json) => e.code === "dirty");
-  assert.deepEqual(r.calls, []);
+  assert.equal(r.calls.length, 0);
   await r.git.restore("stk_1", top, true);
   assert.deepEqual(r.calls.map((x: Json) => x.path.split("/git")[1]), [`/tree?ref=${"3".repeat(40)}`, "/stack/restore"]);
+  assert.deepEqual(r.calls[1].body, { stack: "stk_1", top: "chg_3", sha: "3".repeat(40) });
   assert.equal(r.state.activeBranch, "feat/s/3-three");
+  // An edit made while the server restored them: set aside again (back to the top before), the edit kept.
+  let re: Json;
+  re = fakeGit({ onDefault: false, duringRestore: () => void re.rev.n++ });
+  re.state.activeBranch = "feat/s/1-one";
+  await assert.rejects(re.git.restore("stk_1", top), /changed while/);
+  assert.deepEqual(re.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/tree", "/stack/restore", "/stack/back"]);
+  assert.deepEqual(re.calls[2].body, { change: "chg_1", sha: "1".repeat(40) });
+  assert.deepEqual([re.state.activeBranch, re.hydrated], ["feat/s/1-one", []]);
   // The workspace is waited on by a request sent meanwhile.
   await r.git.idle();
 });
