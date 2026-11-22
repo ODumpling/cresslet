@@ -243,9 +243,10 @@ test("templates are served", withServer(async (t) => {
     assert.ok(paths.includes(p), `missing ${p}`);
   }
   assert.equal((await t.json("/v1/templates/..%2Fserver")).status, 404);
-  // TanStack Start: a framework build (cresslet.json `build`), CLI only; SSR everywhere but its built assets
+  // TanStack Start: a framework build (cresslet.json `build`; the studio builds it itself, studio/start-build.js);
+  // SSR everywhere but its built assets
   const tss = list.body.templates.find((x: { name: string }) => x.name === "tanstack-start");
-  assert.equal(tss?.studio, false);
+  assert.ok(tss && tss.studio !== false, "tanstack-start is offered in the studio");
   const files = (await t.json("/v1/templates/tanstack-start")).body.files as { path: string; data: string }[];
   const cfg = JSON.parse(files.find((f) => f.path === "cresslet.json")!.data);
   assert.deepEqual(cfg.build, { command: "vite build", static: "dist/client", server: "dist/server/server.js", dev: "vite dev" });

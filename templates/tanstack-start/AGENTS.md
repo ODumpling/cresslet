@@ -22,6 +22,9 @@ store, `files` and `secrets`; built assets are served statically. Ships with ema
 ## Commands
 - `npm run dev` — Vite dev server on http://localhost:3000. `cresslet()` in `vite.config.ts` provides db/kv/files/
   secrets locally (data in `.cresslet/dev/`, secrets in `.env.cresslet`).
+- In Cresslet Studio, `cresslet dev` builds without Vite (TanStack's compilers + esbuild, in the browser): a save
+  rebuilds and reloads the preview (no HMR), and Vite plugins added to `vite.config.ts` don't run there. TanStack
+  versions are pinned: Studio's build uses their internals, tested with these versions.
 - `npm run typecheck` — `tsc --noEmit`.
 - `npx cresslet build` — `vite build` + bundles the server into `.cresslet/build/server.js`.
 - `npx cresslet deploy` — build + deploy, prints the URL. First deploy creates the app and stores a deploy key in

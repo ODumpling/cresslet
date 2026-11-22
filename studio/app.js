@@ -1901,7 +1901,7 @@ async function renderAdminCreditsAccount(id) {
 }
 
 // ------------------------------------------------------------------ home
-const TEMPLATE_ICONS = { react: "atom", vanilla: "zap" };
+const TEMPLATE_ICONS = { react: "atom", vanilla: "zap", "tanstack-start": "server" };
 const emptyState = (title, text) => el("div", { className: "empty-state" }, el("strong", { textContent: title }), el("span", { textContent: text }));
 const timeAgo = (iso) => el("time", { dateTime: new Date(iso).toISOString(), title: new Date(iso).toLocaleString(), textContent: ago(iso) });
 function dataTable(labelledBy, heads, rows) {
@@ -3081,6 +3081,7 @@ async function openProject(id, gen) {
     // `cresslet deploy` in a command the AI builder started: the user says yes first.
     builderRunning: () => builder.running(),
     approveDeploy: (target, signal) => builder.approve(`Claude wants to deploy ${target ? `to ${target}` : "this project as a new app"}. It goes live at once.`, signal),
+    onReload: () => loadPreview(), // a TanStack Start app rebuilt (it has no HMR)
   });
 
   // editor
@@ -3202,8 +3203,7 @@ async function openProject(id, gen) {
   });
 
   await renderTree();
-  await openFile(project.files["src/App.tsx"] !== undefined ? "src/App.tsx"
-    : project.files["src/main.ts"] !== undefined ? "src/main.ts" : "index.html");
+  await openFile(["src/App.tsx", "src/main.ts", "src/routes/index.tsx"].find((f) => project.files[f] !== undefined) ?? "index.html");
 
   // preview
   let previewBase = null;

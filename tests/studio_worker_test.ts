@@ -42,7 +42,7 @@ function withSdk(app: string) {
 }
 
 /** Starts the worker with `code` as the app's server bundle; `get(path)` → { status, json }; `snapshot()` → last db save. */
-async function startWorker(code: string) {
+async function startWorker(code: string, { serial = false } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "cresslet-studio-worker-"));
   const file = join(dir, "server-worker.mjs");
   await writeFile(file, await workerSource());
@@ -94,6 +94,7 @@ async function startWorker(code: string) {
     app: { id: "studio", name: "preview", url: "https://app.preview", deployId: "dev" },
     secrets: { CONTRACT_SECRET: "s3cret" },
     db: null,
+    serial,
   });
   await started;
   const sqlJs = "sql.js"; // untyped package
@@ -246,5 +247,35 @@ export default { async fetch(req) {
     assert.deepEqual((await w.get("/first-big")).json, { v: 1 }); // first reads one row, as node:sqlite's get()
   } finally {
     await w.close();
+  }
+});
+
+// TanStack Start apps (studio/start-build.js): AsyncLocalStorage is a one-store shim in the preview, so the worker
+// handles one request at a time, each to the end of its response body.
+test("studio worker: `serial` handles one request at a time", async () => {
+  const app = `let current = null;
+export default {
+  async fetch(req) {
+    current = new URL(req.url).pathname;
+    await new Promise((r) => setTimeout(r, 30));
+    const body = new ReadableStream({
+      async pull(c) {
+        await new Promise((r) => setTimeout(r, 30));
+        c.enqueue(new TextEncoder().encode(JSON.stringify(current)));
+        c.close();
+      },
+    });
+    return new Response(body);
+  },
+};`;
+  for (const serial of [false, true]) {
+    const w = await startWorker(app, { serial });
+    try {
+      const got = await Promise.all(["/a", "/b", "/c"].map((p) => w.get(p)));
+      const own = got.every((r, i) => r.json === ["/a", "/b", "/c"][i]);
+      assert.equal(own, serial, serial ? "each request saw its own state" : "without serial, requests interleave");
+    } finally {
+      await w.close();
+    }
   }
 });
