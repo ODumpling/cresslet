@@ -559,7 +559,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       let w: ProjectWorker;
       try {
         w = await c.projectWorker(staticUrl("server-worker.js"), { name: "cresslet-server" });
-        if (stopped) return (loaded(), w.terminate()); // dev ended meanwhile
+        if (stopped) return (unmark(), loaded(), w.terminate()); // dev ended meanwhile
       } catch (e) {
         unmark();
         loaded();
