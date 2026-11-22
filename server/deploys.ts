@@ -19,23 +19,25 @@ export interface DeployInput {
   source?: string;
   /** Optional project source (not served), so another client can open it (GET /v1/apps/:name/source). */
   sources?: DeployFile[];
+  /** The commit this was built from (source control): shown with the deploy. */
+  git?: { sha?: unknown; branch?: unknown; repo?: unknown } | null;
 }
 
-/** Never stored as source: local secrets, build output, dependencies, VCS. */
-const NOT_SOURCE = /(?:^|\/)(?:node_modules|\.git|\.cresslet|\.env[^/]*)\/|^dist\/|(?:^|\/)\.env[^/]*(?:local|cresslet)[^/]*$|(?:^|\/)(?:\.envrc[^/]*|\.dev\.vars(?:[._-][^/]*)?)$/i;
+/** Never stored as source (or committed to a repository): local secrets, build output, dependencies, VCS. */
+export const NOT_SOURCE = /(?:^|\/)(?:node_modules|\.git|\.cresslet|\.env[^/]*)\/|^dist\/|(?:^|\/)\.env[^/]*(?:local|cresslet)[^/]*$|(?:^|\/)(?:\.envrc[^/]*|\.dev\.vars(?:[._-][^/]*)?)$/i;
 // Any .env-prefixed file (sanitized: only public entries kept).
-const DOTENV = /(?:^|\/)\.env[^/]*$/i;
+export const DOTENV = /(?:^|\/)\.env[^/]*$/i;
 /** Other dotenv files keep only what the build exposes to the client anyway (docs/app-format.md). */
-function publicDotenv(data: Uint8Array): Uint8Array {
+export function publicDotenv(data: Uint8Array): Uint8Array {
   return new TextEncoder().encode(publicDotenvText(new TextDecoder().decode(data)));
 }
 /**
  * Fail closed: dotenv parsers differ (multi-line quotes, escapes, values starting on the next line, `KEY: v`), so
  * only lines that every parser reads as one complete single-line entry are understood: `NAME=value`, a non-empty
  * unquoted value or a backslash-free single-line '…' / "…", optional `# comment`. Public ones (CRESSLET_PUBLIC_*,
- * VITE_*) are kept verbatim, comments are dropped, and the first line not understood ends the file.
+ * VITE_*) are kept (a trailing comment cut off: it could hold anything), comments are dropped, and the first line not understood ends the file.
  */
-const SAFE_ENTRY = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][\w.-]*)[ \t]*=[ \t]*(?:[^\s"'\x60\\#][^"'\x60\\\r\n#]*|"[^"\\\r\n]*"|'[^'\\\r\n]*')[ \t]*(?:#[^"'\x60\\\r\n]*)?$/;
+const SAFE_ENTRY = /^([ \t]*(?:export[ \t]+)?([A-Za-z_][\w.-]*)[ \t]*=[ \t]*(?:[^\s"'\x60\\#][^"'\x60\\\r\n#]*|"[^"\\\r\n]*"|'[^'\\\r\n]*'))[ \t]*(?:#[^"'\x60\\\r\n]*)?$/;
 export function publicDotenvText(text: string): string {
   const out: string[] = [];
   for (const l of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
@@ -44,7 +46,7 @@ export function publicDotenvText(text: string): string {
     else if (!/^[ \t]*#/.test(l)) {
       const m = SAFE_ENTRY.exec(l);
       if (!m) break; // anything else may open a value that runs on: drop it and the rest
-      if (/^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[1])) out.push(l);
+      if (/^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[2])) out.push(m[1].trimEnd()); // without its comment
     }
   }
   return out.join("\n");
@@ -53,6 +55,8 @@ export function publicDotenvText(text: string): string {
 export class HttpError extends Error {
   status: number;
   code: string;
+  /** More fields for the error body (e.g. a conflict's paths). */
+  extra?: Record<string, unknown>;
   constructor(status: number, message: string, code = "error") {
     super(message);
     this.status = status;
@@ -107,6 +111,32 @@ export function normalizeRoutes(routes: unknown): string[] {
   });
 }
 
+/**
+ * Project source as stored or committed (fail closed): paths checked, files that are never source dropped, dotenv
+ * files cut to their public entries. Within the deploy limits.
+ */
+export function sourceFiles(cfg: Config, files: DeployFile[]): [string, Uint8Array][] {
+  if (!Array.isArray(files)) throw new HttpError(400, "files must be an array");
+  if (files.length > cfg.limits.deployFiles) throw new HttpError(413, `too many files (max ${cfg.limits.deployFiles})`, "too_large");
+  const wanted = files.filter((f) => !NOT_SOURCE.test(safePath(String(f?.path))));
+  return decodeFiles(cfg, wanted, { bytes: 0, files: 0 }).decoded.map(([p, d]) => [p, DOTENV.test(p) ? publicDotenv(d) : d]);
+}
+
+const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** A deploy's `git` provenance, checked (null when none was sent). */
+export function gitProvenance(g: DeployInput["git"]): { sha: string; branch: string | null; repo: string | null } | null {
+  if (g == null) return null;
+  if (typeof g !== "object" || Array.isArray(g)) throw new HttpError(400, "git must be an object: { sha, branch, repo }");
+  if (typeof g.sha !== "string" || !SHA_RE.test(g.sha)) throw new HttpError(400, "git.sha must be a full commit SHA (40 hex characters)");
+  if (g.branch != null && (typeof g.branch !== "string" || !g.branch || g.branch.length > 255 || /[\x00-\x20~^:?*\[\\]/.test(g.branch))) {
+    throw new HttpError(400, "git.branch must be a branch name");
+  }
+  if (g.repo != null && (typeof g.repo !== "string" || !/^[\w.-]{1,100}\/[\w.-]{1,100}$/.test(g.repo))) {
+    throw new HttpError(400, "git.repo must be owner/name");
+  }
+  return { sha: g.sha, branch: (g.branch as string | null | undefined) ?? null, repo: (g.repo as string | null | undefined) ?? null };
+}
+
 /** Decodes files against a shared budget (built files + source count together). */
 function decodeFiles(cfg: Config, files: DeployFile[], budget: { bytes: number; files: number }) {
   const seen = new Set<string>();
@@ -153,6 +183,7 @@ export async function writeDeploy(cfg: Config, store: Store, app: App, input: De
     throw new HttpError(400, (e as Error).message);
   }
   if (input.sources !== undefined && !Array.isArray(input.sources)) throw new HttpError(400, "sources must be an array");
+  const git = gitProvenance(input.git);
   const budget = { bytes: 0, files: 0 };
   const { decoded, bytes } = decodeFiles(cfg, input.files, budget);
   // Source is optional: if it doesn't fit in what's left of the budget, deploy without it (and say so).
@@ -205,6 +236,9 @@ export async function writeDeploy(cfg: Config, store: Store, app: App, input: De
       file_count: decoded.length,
       has_server: server ? 1 : 0,
       source: String(input.source ?? "api").slice(0, 20),
+      git_sha: git?.sha ?? null,
+      git_branch: git?.branch ?? null,
+      git_repo: git?.repo ?? null,
     });
     await store.setCurrentDeploy(app.id, deployId, config);
   });

@@ -86,6 +86,55 @@ export interface Deploy {
   file_count: number;
   has_server: number;
   source: string;
+  /** The commit it was built from (source control), if the client said. */
+  git_sha?: string | null;
+  git_branch?: string | null;
+  /** `owner/name`. */
+  git_repo?: string | null;
+}
+
+/** Source control providers (server/git.ts). */
+export const GIT_PROVIDERS = ["github"] as const;
+export type GitProvider = (typeof GIT_PROVIDERS)[number];
+
+/** An account's own connection to a provider: Cresslet acts as this user there. Tokens are plaintext here, sealed at rest. */
+export interface GitConnection {
+  account_id: string;
+  provider: GitProvider;
+  /** The provider's user id. */
+  provider_uid: string;
+  login: string;
+  /** Commit author email: the verified primary email, or the provider's noreply address. */
+  email: string;
+  scopes: string | null;
+  access_token: string;
+  refresh_token: string | null;
+  /** When `access_token` expires (null: it doesn't). */
+  expires_at: number | null;
+  /** "active", or "expired": refreshing failed (revoked), the user has to connect again. */
+  status: "active" | "expired";
+  /** Which tokens these are: new on every connect and refresh, so a refresh or expiry meant for older ones doesn't apply. */
+  gen: string;
+  created_at: number;
+  updated_at: number;
+}
+
+/** The repository an app is linked to. */
+export interface AppRepo {
+  app_id: string;
+  provider: GitProvider;
+  repo_id: string;
+  owner: string;
+  name: string;
+  default_branch: string;
+  /** Directory in the repository holding the app ("" = the root). */
+  subdir: string;
+  /** Delete a branch once it's merged into the default branch (1/0). */
+  delete_branch: number;
+  connected_by: string | null;
+  last_synced_sha: string | null;
+  connected_at: number;
+  updated_at: number;
 }
 
 /** read < deploy < admin. Each role includes the ones before it. */
@@ -253,6 +302,23 @@ export class Store implements RateHits {
         } else {
           const { value, stale } = this.#box.open(r.app_id, r.key, Buffer.from(r.value).toString());
           if (stale) await update(r, value);
+        }
+      }
+      // Source control tokens: only re-sealed under the primary key (they're never stored plaintext).
+      const conns = await this.db.all<{ account_id: string; provider: string; access_token: Uint8Array; refresh_token: Uint8Array | null }>(
+        "SELECT account_id, provider, access_token, refresh_token FROM git_connections",
+      );
+      for (const r of conns) {
+        const scope = gitScope(r.account_id);
+        const a = this.#box.open(scope, gitKey(r.provider, "access"), Buffer.from(r.access_token).toString());
+        const f = r.refresh_token ? this.#box.open(scope, gitKey(r.provider, "refresh"), Buffer.from(r.refresh_token).toString()) : null;
+        if (a.stale || f?.stale) {
+          await this.db.run(
+            "UPDATE git_connections SET access_token = ?, refresh_token = ? WHERE account_id = ? AND provider = ?",
+            this.#seal(scope, gitKey(r.provider, "access"), a.value),
+            f ? this.#seal(scope, gitKey(r.provider, "refresh"), f.value) : null,
+            r.account_id, r.provider,
+          );
         }
       }
       // Cleanup pending until the rebuild below succeeds (retried next start if the checkpoint is busy).
@@ -944,9 +1010,10 @@ export class Store implements RateHits {
   // ---- deploys
   async addDeploy(d: Deploy) {
     await this.db.run(
-      `INSERT INTO deploys (id, app_id, created_at, bytes, file_count, has_server, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, app_id, created_at, bytes, file_count, has_server, source, git_sha, git_branch, git_repo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       d.id, d.app_id, d.created_at, d.bytes, d.file_count, d.has_server, d.source,
+      d.git_sha ?? null, d.git_branch ?? null, d.git_repo ?? null,
     );
   }
   deploys(appId: string, limit = 20): Promise<Deploy[]> {
@@ -984,6 +1051,100 @@ export class Store implements RateHits {
   }
   async deleteSecret(appId: string, key: string) {
     await this.db.run("DELETE FROM secrets WHERE app_id = ? AND key = ?", appId, key);
+  }
+
+  // ---- source control (server/git.ts). Tokens are sealed bound to the account and which token it is, so a
+  // ciphertext moved to another account's row (or swapped access ↔ refresh) doesn't decrypt.
+  async getGitConnection(accountId: string, provider: GitProvider): Promise<GitConnection | undefined> {
+    const r = await this.db.get<Omit<GitConnection, "access_token" | "refresh_token"> & { access_token: Uint8Array; refresh_token: Uint8Array | null }>(
+      "SELECT * FROM git_connections WHERE account_id = ? AND provider = ?", accountId, provider,
+    );
+    if (!r) return undefined;
+    const scope = gitScope(accountId);
+    return {
+      ...r,
+      access_token: this.#box.open(scope, gitKey(provider, "access"), Buffer.from(r.access_token).toString()).value,
+      refresh_token: r.refresh_token ? this.#box.open(scope, gitKey(provider, "refresh"), Buffer.from(r.refresh_token).toString()).value : null,
+    };
+  }
+  /** A new connection (the OAuth callback), replacing the account's earlier one for the provider. */
+  async upsertGitConnection(c: Omit<GitConnection, "created_at" | "updated_at" | "status" | "gen">) {
+    const scope = gitScope(c.account_id), now = Date.now();
+    const access = this.#seal(scope, gitKey(c.provider, "access"), c.access_token);
+    const refresh = c.refresh_token ? this.#seal(scope, gitKey(c.provider, "refresh"), c.refresh_token) : null;
+    await this.db.run(
+      `INSERT INTO git_connections (account_id, provider, provider_uid, login, email, scopes, access_token, refresh_token,
+         expires_at, status, gen, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+       ON CONFLICT (account_id, provider) DO UPDATE SET provider_uid = excluded.provider_uid, login = excluded.login,
+         email = excluded.email, scopes = excluded.scopes, access_token = excluded.access_token,
+         refresh_token = excluded.refresh_token, expires_at = excluded.expires_at, status = 'active', gen = excluded.gen,
+         updated_at = excluded.updated_at`,
+      c.account_id, c.provider, c.provider_uid, c.login, c.email, c.scopes, access, refresh, c.expires_at, id("cg", 12), now, now,
+    );
+  }
+  /**
+   * New tokens from a refresh, only onto the tokens they were refreshed from (`was`: their `gen`): a connection
+   * disconnected or replaced meanwhile isn't brought back or overwritten. False if it changed. Active again even if a
+   * stale 401 (another server's, with the old token GitHub revoked as it refreshed) marked these tokens expired.
+   */
+  async refreshGitConnection(
+    accountId: string, provider: GitProvider, was: string,
+    t: Pick<GitConnection, "access_token" | "refresh_token" | "expires_at" | "scopes">,
+  ): Promise<boolean> {
+    const scope = gitScope(accountId);
+    return (await this.db.run(
+      `UPDATE git_connections SET access_token = ?, refresh_token = ?, expires_at = ?, scopes = ?, gen = ?, status = 'active', updated_at = ?
+       WHERE account_id = ? AND provider = ? AND gen = ?`,
+      this.#seal(scope, gitKey(provider, "access"), t.access_token),
+      t.refresh_token ? this.#seal(scope, gitKey(provider, "refresh"), t.refresh_token) : null,
+      t.expires_at, t.scopes, id("cg", 12), Date.now(), accountId, provider, was,
+    )).changes > 0;
+  }
+  /**
+   * Refreshing failed (revoked or invalid): kept, so the studio can say who to reconnect as. `was`: only if they're
+   * still the tokens that failed (`gen`: not ones refreshed or reconnected meanwhile).
+   */
+  async expireGitConnection(accountId: string, provider: GitProvider, was: string) {
+    await this.db.run(
+      "UPDATE git_connections SET status = 'expired', updated_at = ? WHERE account_id = ? AND provider = ? AND gen = ?",
+      Date.now(), accountId, provider, was,
+    );
+  }
+  async deleteGitConnection(accountId: string, provider: GitProvider): Promise<boolean> {
+    return (await this.db.run("DELETE FROM git_connections WHERE account_id = ? AND provider = ?", accountId, provider)).changes > 0;
+  }
+  getAppRepo(appId: string): Promise<AppRepo | undefined> {
+    return this.db.get<AppRepo>("SELECT * FROM app_repos WHERE app_id = ?", appId);
+  }
+  async setAppRepo(r: Omit<AppRepo, "connected_at" | "updated_at">) {
+    const now = Date.now();
+    await this.db.run(
+      `INSERT INTO app_repos (app_id, provider, repo_id, owner, name, default_branch, subdir, delete_branch, connected_by,
+         last_synced_sha, connected_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (app_id) DO UPDATE SET provider = excluded.provider, repo_id = excluded.repo_id, owner = excluded.owner,
+         name = excluded.name, default_branch = excluded.default_branch, subdir = excluded.subdir,
+         delete_branch = excluded.delete_branch, connected_by = excluded.connected_by,
+         last_synced_sha = excluded.last_synced_sha, connected_at = excluded.connected_at, updated_at = excluded.updated_at`,
+      r.app_id, r.provider, r.repo_id, r.owner, r.name, r.default_branch, r.subdir, r.delete_branch, r.connected_by,
+      r.last_synced_sha, now, now,
+    );
+  }
+  async deleteAppRepo(appId: string): Promise<boolean> {
+    return (await this.db.run("DELETE FROM app_repos WHERE app_id = ?", appId)).changes > 0;
+  }
+  /**
+   * The last commit Cresslet wrote or read, and what the provider says about the repository now (renamed,
+   * transferred, a new default branch). Only onto the link `was` (one relinked meanwhile is left alone).
+   */
+  async updateAppRepoSync(was: AppRepo, p: { sha?: string | null; owner?: string; name?: string; defaultBranch?: string }) {
+    await this.db.run(
+      `UPDATE app_repos SET last_synced_sha = COALESCE(?, last_synced_sha), owner = COALESCE(?, owner), name = COALESCE(?, name),
+         default_branch = COALESCE(?, default_branch), updated_at = ?
+       WHERE app_id = ? AND repo_id = ? AND connected_at = ?`,
+      p.sha ?? null, p.owner ?? null, p.name ?? null, p.defaultBranch ?? null, Date.now(), was.app_id, was.repo_id, was.connected_at,
+    );
   }
 
   // ---- AI credits (millicredits; server/credits.ts)
@@ -1133,5 +1294,8 @@ export class AccountDisabledError extends Error {
 export const inviteLock = (appId: string) => `cresslet:invite:${appId}`;
 
 /** Explicit columns where Postgres has a `rowid` column (SQLite's is implicit): rows look the same in both. */
-const DEPLOY = "id, app_id, created_at, bytes, file_count, has_server, source";
+const DEPLOY = "id, app_id, created_at, bytes, file_count, has_server, source, git_sha, git_branch, git_repo";
+/** SecretBox binding for an account's source control tokens (app secrets use the app id: `app_…`). */
+const gitScope = (accountId: string) => `acct:${accountId}`;
+const gitKey = (provider: string, which: "access" | "refresh") => `git:${provider}:${which}`;
 const INVITE = "id, app_id, email, role, invited_by, created_at";

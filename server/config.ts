@@ -63,6 +63,19 @@ export interface Config {
   /** GitHub OAuth App (web flow for the studio, device flow for the CLI). Null = disabled. */
   github: { clientId: string; clientSecret: string; webUrl: string; apiUrl: string } | null;
   /**
+   * Source control (server/git.ts, docs/self-hosting.md#source-control): apps sync with a GitHub repository, as the
+   * signed-in user. `githubApp`: a GitHub App whose user-to-server tokens Cresslet uses (repository access per
+   * installation; `CRESSLET_GITHUB_APP_*`). `oauthFallback` (`CRESSLET_GITHUB_SYNC_OAUTH_FALLBACK=true`): with no
+   * GitHub App, ask the login OAuth App (`github`) for the `repo` scope instead (every repository the user can push to).
+   */
+  git: {
+    githubApp: { appId: string; clientId: string; clientSecret: string; slug: string } | null;
+    oauthFallback: boolean;
+    /** github.com and its API (`CRESSLET_GITHUB_URL`, `CRESSLET_GITHUB_API_URL`, as for login). */
+    webUrl: string;
+    apiUrl: string;
+  };
+  /**
    * Request header with the real client IP (e.g. `cf-connecting-ip` behind Cloudflare), for per-IP
    * limits. Only set it when every request comes through that proxy: clients can send it too.
    */
@@ -176,6 +189,19 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
         apiUrl: env("CRESSLET_GITHUB_API_URL", "https://api.github.com").replace(/\/+$/, ""),
       }
       : null,
+    git: {
+      githubApp: process.env.CRESSLET_GITHUB_APP_CLIENT_ID && process.env.CRESSLET_GITHUB_APP_CLIENT_SECRET
+        ? {
+          appId: env("CRESSLET_GITHUB_APP_ID", ""),
+          clientId: process.env.CRESSLET_GITHUB_APP_CLIENT_ID,
+          clientSecret: process.env.CRESSLET_GITHUB_APP_CLIENT_SECRET,
+          slug: env("CRESSLET_GITHUB_APP_SLUG", ""),
+        }
+        : null,
+      oauthFallback: env("CRESSLET_GITHUB_SYNC_OAUTH_FALLBACK", "false") === "true",
+      webUrl: env("CRESSLET_GITHUB_URL", "https://github.com").replace(/\/+$/, ""),
+      apiUrl: env("CRESSLET_GITHUB_API_URL", "https://api.github.com").replace(/\/+$/, ""),
+    },
     clientIpHeader: process.env.CRESSLET_CLIENT_IP_HEADER?.trim().toLowerCase() || null,
     customDomains: env("CRESSLET_CUSTOM_DOMAINS", "true") === "true",
     resolveTxt,
@@ -283,8 +309,10 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   if (database.url && process.env.CRESSLET_TEST_SCHEMA_PER_DATA_DIR === "1" && !overrides.database?.schema) {
     database.schema = "t_" + createHash("sha256").update(merged.dataDir).digest("hex").slice(0, 16);
   }
+  const git = { ...base.git, ...overrides.git };
   return {
     ...merged,
+    git,
     database,
     pages,
     sandbox: { ...base.sandbox, ...overrides.sandbox },

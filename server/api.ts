@@ -41,6 +41,7 @@ import { orgRefs, orgRoutes } from "./orgs.ts";
 import type { Runtime } from "./runtime.ts";
 import { type Cluster, singleNode } from "./cluster.ts";
 import { github } from "./github.ts";
+import { githubSync, gitRoutes } from "./git.ts";
 import { cliLogin } from "./cli-login.ts";
 import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
@@ -192,7 +193,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   };
   const toOwnerJson = toOwner(jsonBodyLimit);
   const toOwnerDeploy = toOwner(deployBodyLimit);
-  app.use("/apps/:name/*", toOwnerJson);
+  // Syncing sends the project's files: as big as a deploy's.
+  app.use("/apps/:name/*", (c, next) => (/\/git\/(?:sync|connect)$/.test(c.req.path) ? toOwnerDeploy : toOwnerJson)(c, next));
   app.use("/admin/sites/:name/*", toOwnerJson);
   app.use("/pages/:name", (c, next) => (c.req.method === "PUT" ? toOwnerDeploy : toOwnerJson)(c, next));
   app.use("/pages/:name/*", toOwnerJson);
@@ -224,7 +226,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   };
 
   app.onError((err, c) => {
-    if (err instanceof HttpError) return c.json({ error: err.code, message: err.message }, err.status as 400);
+    if (err instanceof HttpError) return c.json({ ...err.extra, error: err.code, message: err.message }, err.status as 400);
     if (err instanceof AccountDisabledError) return c.json({ error: "account_disabled", message: "this account is disabled" }, 403);
     console.error(err);
     return c.json({ error: "internal", message: "internal error" }, 500);
@@ -390,6 +392,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     }
   };
 
+  // ---- source control (server/git.ts)
+  const git = gitRoutes(app, { cfg, store, body, accountWide, authorize, getApp, deployBodyLimit });
+
   // ---- meta
   app.get("/", (c) =>
     c.json({
@@ -402,6 +407,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       anonDeploys: cfg.anonDeploys,
       customDomains: cfg.customDomains,
       auth: { github: !!cfg.github, cli: !!cfg.github }, // cli: browser login via the studio, which logs in with GitHub
+      git: { github: !!githubSync(cfg) }, // apps can sync with GitHub repositories (docs/api.md#source-control)
       ai: { credits: !!cfg.ai, monthlyCredits: cfg.ai?.monthlyCredits ?? 0 }, // the AI builder can use credits (docs/api.md#ai-credits)
       limits: cfg.limits,
       docs: "https://github.com/ODumpling/cresslet/blob/main/docs/api.md",
@@ -496,6 +502,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     });
 
     app.get("/auth/github/callback", async (c) => {
+      // Source control's OAuth App fallback comes back here too (one callback URL per OAuth App): its states are gs_….
+      if (c.req.query("state")?.startsWith("gs_")) return git.callback(c);
       const { code, state, error, error_description } = c.req.query();
       const cookie = getCookie(c, STATE_COOKIE);
       deleteCookie(c, STATE_COOKIE, { path: "/v1/auth/github" });
@@ -750,7 +758,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         server: !!d.has_server,
         source: d.source,
         current: d.id === a.current_deploy_id,
+        git: d.git_sha ? { sha: d.git_sha, branch: d.git_branch, repo: d.git_repo } : null,
       })),
+      repo: (r => r ? git.repoView(r) : null)(await store.getAppRepo(a.id)),
       runtime: { running: runtime.status(a.id).running }, // no pid or host details for app users
       secrets: await store.secretKeys(a.id),
     });

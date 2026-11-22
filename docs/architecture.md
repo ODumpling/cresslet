@@ -71,6 +71,15 @@ data/apps/<appId>/data/files/          app file storage
 3. Pointer swap (`apps.current_deploy_id`), sandbox stopped → next request cold-starts new code (~70 ms).
 4. Last 10 deploys kept; `rollback` swaps the pointer back. A page (`PUT /v1/pages/:name`) keeps only the version it serves (a replaced one goes a minute later, so requests in flight finish, or sooner past 3 versions).
 
+## Source control
+
+An app can be linked to a GitHub repository ([api.md](api.md#source-control), [self-hosting](self-hosting.md#source-control)). [`server/git.ts`](../server/git.ts) is the only thing that talks to GitHub for it:
+
+- **As the user.** Each account connects its own GitHub (a GitHub App's user-to-server token, refreshed before it expires under a per-account lock; or, opt-in, the login OAuth App with `repo`). Every call uses the calling account's token, so GitHub's permissions, branch protection and commit attribution are that user's; a collaborator who hasn't connected gets 403 `git_not_connected`, never the owner's access. Login keeps its minimal scopes.
+- **Server-proxied.** Tokens are sealed at rest like app secrets (SecretBox, bound to the account and to which token it is) and never sent to a browser: not the studio's origin, not the preview origin. The studio and its container have no `git`; it sends the workspace's files and the server makes commits with GitHub's Git Data API (blobs, a tree on the base commit's, a commit authored as the user, then the branch moved without force, so a branch that moved meanwhile is a 409 and nothing is written).
+- **The same filter as deploy source.** Files that are never source (`.env*local*`, `.dev.vars`, `.envrc`, `node_modules/`, `.git/`, …) are dropped before anything is committed, and other dotenv files keep only their public entries (`sourceFiles` in `server/deploys.ts`); repository files the studio was never sent stay as they are.
+- **Merge, then deploy.** A connected app's Deploy commits the workspace to its branch, merges the branch into the default branch (fast-forward when it can), builds that exact commit (loading the merged files first if the default branch had commits of its own) and records `git_sha` / `git_branch` / `git_repo` on the deploy. A merge conflict or a protected branch stops before anything is deployed.
+
 ## Studio (browser)
 
 Root host serves the studio with COOP/COEP: a React app (TanStack Start in SPA mode; every studio path gets its shell) built by Vite into `studio/dist` ([docs/typescript.md](typescript.md#the-studios-build)), with the Hono `/v1` API as its only backend. It embeds cresslet-container (our in-browser runtime: VFS, shell, npm, esbuild-wasm dev server, service-worker previews) and registers a `cresslet` command so `cresslet dev|build|deploy` work inside the browser. Server code runs in a Web Worker (on the preview origin, below) with the same `Env` API (sql.js DB persisted into the VFS).

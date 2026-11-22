@@ -238,17 +238,50 @@ async function cronPauses(db: Db) {
   if (!(await cols(db, "apps")).includes("paused_crons")) await db.exec("ALTER TABLE apps ADD COLUMN paused_crons TEXT");
 }
 
+/**
+ * Source control (docs/architecture.md#source-control): each account's own connection to a provider (its tokens
+ * sealed: see Store.upsertGitConnection), the repository an app is linked to, and the commit each deploy was built
+ * from. An older server (after a rollback) ignores all of it: apps just aren't linked, deploys have no provenance.
+ */
+async function git(db: Db) {
+  const pg = db.dialect === "postgres";
+  const big = pg ? "BIGINT" : "INTEGER";
+  const blob = pg ? "BYTEA" : "BLOB";
+  const addCol = async (table: string, col: string, def: string) => {
+    if (pg) return db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${def}`);
+    if (!(await cols(db, table)).includes(col)) await db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+  };
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS git_connections (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, provider TEXT NOT NULL,
+      provider_uid TEXT NOT NULL, login TEXT NOT NULL, email TEXT NOT NULL, scopes TEXT,
+      access_token ${blob} NOT NULL, refresh_token ${blob}, expires_at ${big},
+      status TEXT NOT NULL DEFAULT 'active', gen TEXT NOT NULL, created_at ${big} NOT NULL, updated_at ${big} NOT NULL,
+      PRIMARY KEY (account_id, provider));
+    CREATE TABLE IF NOT EXISTS app_repos (
+      app_id TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE, provider TEXT NOT NULL,
+      repo_id TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, default_branch TEXT NOT NULL,
+      subdir TEXT NOT NULL DEFAULT '', delete_branch ${big} NOT NULL DEFAULT 1,
+      connected_by TEXT REFERENCES accounts(id) ON DELETE SET NULL, last_synced_sha TEXT,
+      connected_at ${big} NOT NULL, updated_at ${big} NOT NULL);
+  `);
+  await addCol("deploys", "git_sha", "TEXT");
+  await addCol("deploys", "git_branch", "TEXT");
+  await addCol("deploys", "git_repo", "TEXT");
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
   { version: 2, name: "orgs", up: orgs },
   { version: 3, name: "cron_pauses", up: cronPauses },
+  { version: 4, name: "git", up: git },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */
 export const TABLES = [
   "accounts", "orgs", "apps", "tokens", "deploys", "secrets", "domains", "meta", "collaborators", "invites",
-  "page_sessions", "rate_hits", "ai_wallets", "ai_ledger", "org_members",
+  "page_sessions", "rate_hits", "ai_wallets", "ai_ledger", "org_members", "git_connections", "app_repos",
 ] as const;
 
 export interface MigrateResult {
