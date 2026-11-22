@@ -7,6 +7,7 @@ import { type Env, siteAdminActor, stillSiteAdmin } from "./admin.ts";
 import { HttpError } from "./deploys.ts";
 import {
   type Account,
+  accountLock,
   type App,
   type Org,
   ORG_ROLES,
@@ -208,6 +209,7 @@ export function orgRoutes(
     const o = await store.serialized("cresslet:create-org", async () => {
       await stillSiteAdmin(cfg, store, c);
       if (await store.orgByName(name)) throw new HttpError(409, `an organization is already called ${name}`, "conflict");
+      await store.db.lock(accountLock(found.id)); // a disable can't land between this check and the insert
       const admin = await store.accountById(found.id);
       if (!admin || admin.disabled_at) throw new HttpError(404, `no account has the email ${email}: invite them first`, "no_account");
       const o = await store.createOrg(name, title, sa.id);

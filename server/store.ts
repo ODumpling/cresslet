@@ -380,7 +380,8 @@ export class Store implements RateHits {
     return this.serialized(accountLock(accountId), async () => {
       const orgs = (await this.orgsFor(accountId)).sort((x, y) => (x.id < y.id ? -1 : 1));
       for (const o of orgs) await this.db.lock(orgLock(o.id));
-      for (const o of orgs) if (o.role === "admin" && await this.orgAdminCount(o.id) <= 1) return "last_admin";
+      // Roles as they are now, under the locks.
+      for (const o of orgs) if (await this.orgRole(o.id, accountId) === "admin" && await this.orgAdminCount(o.id) <= 1) return "last_admin";
       return (await this.db.run(
         `DELETE FROM accounts WHERE id = ? AND invited_at IS NOT NULL AND github_id IS NULL AND disabled_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM tokens WHERE account_id = accounts.id)

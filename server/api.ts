@@ -354,6 +354,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     (cfg.clientIpHeader && c.req.header(cfg.clientIpHeader)?.split(",")[0].trim()) || c.env?.remoteAddr || "unknown";
   /** New apps and pages per account per hour: deleting doesn't give the allowance back, so create/delete loops stop. */
   const takeCreate = async (acct: Account) => {
+    // Runs right before the insert: an account disabled while its upload was in flight gets nothing new online.
+    if ((await store.accountById(acct.id))?.disabled_at) throw new HttpError(403, "this account is disabled", "account_disabled");
     if (isSiteAdmin(cfg, acct)) return;
     if (!await accountCreates.take(acct.id)) {
       throw new HttpError(429, `too many new apps and artifacts (${cfg.limits.createsPerHour} per hour): try later`, "rate_limited");
@@ -1387,6 +1389,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
     const { sql, params = [] } = await body<{ sql?: string; params?: unknown[] }>(c);
+    await authorize(c, a, "read"); // again: access may have changed while the body arrived
     if (!sql) throw new HttpError(400, "sql required");
     if (typeof sql !== "string" || !Array.isArray(params)) throw new HttpError(400, "sql must be a string, params an array");
     const r = await inspect<{ rows: unknown[]; truncated: boolean }>(a.id, paths(cfg, a.id).db, {
