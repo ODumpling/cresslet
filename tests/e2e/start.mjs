@@ -81,6 +81,11 @@ try {
     throw new Error("the preview didn't reload");
   };
   await signUpAndTodo(frame, reloadFrame, "preview");
+  // the page's own POSTs pass the template's CSRF check whatever their body type (text/plain, FormData)
+  for (const body of ['"x"', "new FormData()"]) {
+    const st = await (await previewFrame()).evaluate((b) => fetch("/api/health", { method: "POST", body: eval(b) }).then((r) => r.status), body);
+    if (st === 403) throw new Error(`a same-origin POST (${body}) was refused as cross-site`);
+  }
   await page.screenshot({ path: `${shots}/start-dashboard.png` });
 
   // A new file route (dev restarted: the route tree is regenerated), then an edit in the editor: a save rebuilds and

@@ -84,9 +84,6 @@ const sdkPlugin = {
   },
 };
 
-// What a form can send (all another site can send into the preview, see dev's middleware).
-const FORM_TYPES = /^\s*(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)\s*(?:;|$)/i;
-
 const CONTENT_TYPES = {
   html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8",
   css: "text/css; charset=utf-8", json: "application/json", map: "application/json", txt: "text/plain; charset=utf-8",
@@ -445,7 +442,7 @@ export function createCresslet(c, opts) {
 
     // The preview's cookies (an app's session): responses made in its service worker can't set them and its requests
     // don't carry them, so they're kept here for this `cresslet dev` and sent with each request. One jar per preview:
-    // name → { value, lax } (Path/Domain don't matter on one origin; Max-Age=0 or a past Expires removes one).
+    // name → value (Path/Domain don't matter on one origin; Max-Age=0 or a past Expires removes one).
     const jar = new Map();
     function keepCookies(headers) {
       for (const [k, v] of headers) {
@@ -458,9 +455,8 @@ export function createCresslet(c, opts) {
           const [ak, av = ""] = a.split("=").map((x) => x.trim());
           return (/^max-age$/i.test(ak) && /^-?\d+$/.test(av) && Number(av) <= 0) || (/^expires$/i.test(ak) && Date.parse(av) <= Date.now());
         });
-        const lax = !attrs.some((a) => /^\s*samesite\s*=\s*none\s*$/i.test(a));
         if (gone) jar.delete(name);
-        else jar.set(name, { value: pair.slice(i + 1).trim(), lax });
+        else jar.set(name, pair.slice(i + 1).trim());
       }
       return headers.filter(([k]) => k.toLowerCase() !== "set-cookie");
     }
@@ -490,16 +486,12 @@ export function createCresslet(c, opts) {
       const page = c.previewOrigin ?? location.origin; // where preview pages run
       const headers = [...req.headers].map(([k, v]) => (k.toLowerCase() === "origin" && v === page ? [k, appUrl.origin] : [k, v]));
       // Other requests reach this handler as a `Request` cresslet-container made on this page, which drops the
-      // browser's Origin (and Sec-Fetch-Site, Referer), so where one came from is unknown. Another site can only send a
-      // form here (a top-level navigation into the preview: its fetches don't reach the preview's service worker), so a
-      // state-changing request that isn't a form's is the preview page's own: it gets the app's Origin, as it has
-      // deployed, so CSRF checks (TanStack Start's createCsrfMiddleware, `Origin === new URL(req.url).origin`) pass.
-      // Forms get no Origin and only SameSite=None cookies, as a cross-site one would.
-      const unsafe = req.method !== "GET" && req.method !== "HEAD";
-      const form = unsafe && FORM_TYPES.test(req.headers.get("content-type") ?? "");
-      if (unsafe && !form && !req.headers.has("origin")) headers.push(["origin", appUrl.origin]);
-      const cookies = [...jar].filter(([, c]) => !form || !c.lax);
-      if (cookies.length && !req.headers.has("cookie")) headers.push(["cookie", cookies.map(([k, c]) => `${k}=${c.value}`).join("; ")]);
+      // browser's Origin (and Sec-Fetch-Site, Referer). They come from this preview's pages: its service worker only
+      // takes requests from them and navigations to /__cresslet__/<instanceId>/<port>/… (a random id per boot, which
+      // another site would have to know). So a state-changing one gets the app's Origin, as it has deployed, and CSRF
+      // checks (TanStack Start's createCsrfMiddleware, `Origin === new URL(req.url).origin`) pass here too.
+      if (req.method !== "GET" && req.method !== "HEAD" && !req.headers.has("origin")) headers.push(["origin", appUrl.origin]);
+      if (jar.size && !req.headers.has("cookie")) headers.push(["cookie", [...jar].map(([k, v]) => `${k}=${v}`).join("; ")]);
       const res = await new Promise((resolve) => {
         waiting.set(id, { w, done: resolve });
         w.postMessage(
@@ -576,6 +568,7 @@ export function createCresslet(c, opts) {
     for (const w of watchers) w.close();
     server.close();
     builder?.close();
+    reloads?.close();
     retire(worker, 1001, "server stopped", "server stopped");
     worker = null;
     return 0;

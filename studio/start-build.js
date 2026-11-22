@@ -221,10 +221,7 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
     await c.fs.writeFile(p(".cresslet/start/service.cjs"), out.text ?? dec.decode(out.contents));
     if (closed) throw new Error("TanStack Start build closed");
     const proc = await c.spawn("node", [p(".cresslet/start/service.cjs")], { cwd: wd });
-    if (closed) {
-      proc.kill(); // closed while it started
-      throw new Error("TanStack Start build closed");
-    }
+    booting = proc; // close() kills it while it starts
     const me = { proc, pending: new Map(), nextId: 0, input: proc.input.getWriter(), log: "" };
     let resolveReady, rejectReady;
     me.ready = new Promise((res, rej) => ((resolveReady = res), (rejectReady = rej)));
@@ -258,11 +255,20 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
       for (const j of me.pending.values()) j.reject(e);
       me.pending.clear();
     });
-    await me.ready;
+    try {
+      await me.ready;
+    } finally {
+      booting = null;
+    }
+    if (closed) {
+      proc.kill(); // closed while it started
+      throw new Error("TanStack Start build closed");
+    }
     return me;
   }
 
   let starting = null;
+  let booting = null; // the service's process until it's ready
   let closed = false;
   async function rpc(msg) {
     if (!svc) {
@@ -484,8 +490,7 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       if (JSON.stringify(Object.keys(serverFns).sort()) === known) break;
     }
 
-    // ---- outDir: public/ files, then the bundles; then files of earlier builds go (written first: the preview keeps
-    // serving while this runs)
+    // ---- outDir: public/ files, then the bundles; then a deploy's earlier files go
     const files = [];
     const copyPublic = async (dir) => {
       let entries;
@@ -523,12 +528,14 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
         else if (!keep.has(f)) await c.fs.rm(f, { force: true });
       }
     };
-    await prune(p(outDir));
+    // (not the preview's: hashed names don't clash, and its worker serves the last build's pages until a new one is ready)
+    if (!preview) await prune(p(outDir));
     return { files, outDir, server, entry };
   }
 
   function close() {
     closed = true;
+    booting?.kill();
     const me = svc;
     svc = null;
     me?.proc.kill();
