@@ -361,8 +361,11 @@ test("the studio's dotenv filter matches the server's", async () => {
     "# c\nCRESSLET_PUBLIC_API=https://x\nDB=1\nVITE_X=1\nKEY=\"-----BEGIN\nVITE_FAKE=leak\n-----END\"",
     "VITE_A=1\nSECRET=\n\"multi\nVITE_N=leak\n\"", "S=\"abc\" # c\nVITE_Z='q r'\n\nT=x#y\nVITE_A=1\nSECRET: \"x\nVITE_C=leak\n\"",
     "VITE_A=1\nSECRET=\"abc\\\\\"\nVITE_X=leak", "PEM=\"a\u2028b\nVITE_LS=leak\n\"", "\uFEFFVITE_A=1\r\nB=2\rVITE_C=3",
+    "VITE_A=1 # old key sk_live_x\nVITE_B=\"a # b\"  # c\n",
   ];
   for (const c of cases) assert.equal(publicDotenv(c), publicDotenvText(c), JSON.stringify(c));
+  // A public entry's trailing comment isn't kept (a quoted # is the value's).
+  assert.equal(publicDotenvText("VITE_A=1 # old key sk_live_x\nVITE_B=\"a # b\"  # c\n"), "VITE_A=1\nVITE_B=\"a # b\"\n");
 });
 
 test("deploys can carry project source; local secrets and build output are never stored", withServer(async (t) => {

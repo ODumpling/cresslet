@@ -1,0 +1,799 @@
+// Source control (docs/architecture.md#source-control): apps sync with a GitHub repository through this server, as
+// the signed-in user. Each account connects its own GitHub identity (a GitHub App's user-to-server token, or with
+// CRESSLET_GITHUB_SYNC_OAUTH_FALLBACK the login OAuth App with the `repo` scope); its tokens are sealed at rest
+// (Store.upsertGitConnection) and never leave the server. Every call uses the acting account's own token, never the
+// app owner's, so GitHub's permissions and attribution are that user's. Commits go through the Git Data API (blobs,
+// trees, commits, refs): there's no `git` here or in the studio's container.
+import { createHash } from "node:crypto";
+import type { Context, Hono } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { type Config, rootUrl } from "./config.ts";
+import type { Env } from "./admin.ts";
+import { type DeployFile, DOTENV, HttpError, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
+import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
+
+/** Refresh an access token this long before it expires. */
+const REFRESH_EARLY_MS = 5 * 60_000;
+const STATE_TTL = 10 * 60_000;
+const SHA_RE = /^[0-9a-f]{40}$/;
+/** Branch names Cresslet creates or accepts: git's ref rules, a little stricter. */
+const BRANCH_RE = /^(?!\/|.*(?:\/\/|\.\.|@\{|\/\.|\.lock(?:\/|$)))[A-Za-z0-9._\/-]{1,200}(?<![/.])$/;
+const REPO_PART_RE = /^[\w.-]{1,100}$/;
+
+export interface RepoInfo {
+  id: string;
+  owner: string;
+  name: string;
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  url: string;
+  /** The acting user can push to it. */
+  push: boolean;
+}
+export interface Branch {
+  name: string;
+  sha: string;
+  protected: boolean;
+}
+export interface MergeResult {
+  mergedSha: string;
+  /** The head commit that was merged. */
+  headSha: string;
+  /** `into` was moved to `head` (no merge commit). */
+  fastForward: boolean;
+  /** The merged tree differs from `head`'s: `into` had commits of its own (the workspace has to load it). */
+  treeChanged: boolean;
+}
+export type Author = { name: string; email: string };
+type Repo = { owner: string; name: string };
+
+/**
+ * What Cresslet needs from a source control host, as one user. GitHub's is below; another provider is another
+ * implementation (and a GIT_PROVIDERS entry).
+ */
+export interface SourceControlProvider {
+  listRepos(): Promise<RepoInfo[]>;
+  createRepo(input: { owner?: string; name: string; private: boolean; description?: string }): Promise<RepoInfo>;
+  repo(r: Repo): Promise<RepoInfo>;
+  /** A branch's head commit, or null if there's no such branch. */
+  branchHead(r: Repo, branch: string): Promise<string | null>;
+  listBranches(r: Repo): Promise<Branch[]>;
+  createBranch(r: Repo, branch: string, sha: string): Promise<void>;
+  deleteBranch(r: Repo, branch: string): Promise<boolean>;
+  /** The project's files at `sha` (under `subdir`), as the studio and deploys see source (sanitized). */
+  readTree(r: Repo, sha: string, subdir: string): Promise<DeployFile[]>;
+  /** One commit on `branch` (whose head must still be `baseSha`) making `subdir` hold exactly `files`. */
+  commitTree(r: Repo, input: { branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author }): Promise<{ sha: string; changed: boolean }>;
+  merge(r: Repo, input: { into: string; head: string; message: string }): Promise<MergeResult>;
+}
+
+/** GitHub's REST API with one user's token. `unauthorized`: GitHub rejected the token (revoked meanwhile). */
+export class GitHub implements SourceControlProvider {
+  #api: string;
+  #web: string;
+  #token: string;
+  #unauthorized: () => Promise<void>;
+  limits: { files: number; bytes: number };
+
+  constructor(o: { apiUrl: string; webUrl: string; token: string; unauthorized: () => Promise<void>; limits: { files: number; bytes: number } }) {
+    this.#api = o.apiUrl;
+    this.#web = o.webUrl;
+    this.#token = o.token;
+    this.#unauthorized = o.unauthorized;
+    this.limits = o.limits;
+  }
+
+  /** The response as is (callers handle the statuses they expect); 401 and failures to reach GitHub throw. */
+  async req<T>(method: string, path: string, body?: unknown): Promise<{ status: number; body: T }> {
+    let res: Response;
+    try {
+      res = await fetch(this.#api + path, {
+        method,
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${this.#token}`,
+          "user-agent": "cresslet",
+          "x-github-api-version": "2022-11-28",
+          ...(body !== undefined ? { "content-type": "application/json" } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(20_000),
+      });
+    } catch {
+      throw new HttpError(502, "couldn't reach GitHub, try again", "github_error");
+    }
+    if (res.status === 401) {
+      await this.#unauthorized();
+      throw reauth();
+    }
+    return { status: res.status, body: (await res.json().catch(() => null)) as T };
+  }
+
+  /** 2xx or throws: 404 (missing, or no access: GitHub hides private repos), 403, else 502. */
+  async ok<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const r = await this.req<T & { message?: string }>(method, path, body);
+    if (r.status >= 200 && r.status < 300) return r.body;
+    throw ghError(r.status, r.body?.message);
+  }
+
+  #path = (r: Repo, rest = "") => `/repos/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.name)}${rest}`;
+  #ref = (branch: string) => branch.split("/").map(encodeURIComponent).join("/");
+
+  #info = (x: GhRepo): RepoInfo => ({
+    id: String(x.id),
+    owner: x.owner.login,
+    name: x.name,
+    fullName: x.full_name,
+    private: x.private,
+    defaultBranch: x.default_branch,
+    url: x.html_url ?? `${this.#web}/${x.full_name}`,
+    push: !!x.permissions?.push,
+  });
+
+  async listRepos() {
+    const list = await this.ok<GhRepo[]>("GET", "/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member");
+    return list.map(this.#info).filter((x) => x.push);
+  }
+
+  async createRepo(input: { owner?: string; name: string; private: boolean; description?: string }) {
+    const path = input.owner ? `/orgs/${encodeURIComponent(input.owner)}/repos` : "/user/repos";
+    // auto_init: the Git Data API can't write to a repository without a commit.
+    const r = await this.req<GhRepo & { message?: string; errors?: { message?: string }[] }>("POST", path, {
+      name: input.name, private: input.private, description: input.description, auto_init: true,
+    });
+    if (r.status === 422) {
+      throw new HttpError(409, r.body?.errors?.[0]?.message ?? r.body?.message ?? "couldn't create that repository", "repo_exists");
+    }
+    if (r.status < 200 || r.status >= 300) throw ghError(r.status, r.body?.message);
+    return this.#info(r.body);
+  }
+
+  async repo(r: Repo) {
+    return this.#info(await this.ok<GhRepo>("GET", this.#path(r)));
+  }
+
+  /** The repository with this id, wherever it is now (renamed or transferred). */
+  async repoById(id: string) {
+    return this.#info(await this.ok<GhRepo>("GET", `/repositories/${encodeURIComponent(id)}`));
+  }
+
+  async branchHead(r: Repo, branch: string): Promise<string | null> {
+    const res = await this.req<{ object?: { sha: string }; message?: string } | { object?: { sha: string } }[]>(
+      "GET", this.#path(r, `/git/ref/heads/${this.#ref(branch)}`),
+    );
+    // 409: an empty repository. An array: no such branch, only refs under it (`feat` when there's `feat/x`).
+    if (res.status === 404 || res.status === 409 || (res.status === 200 && Array.isArray(res.body))) return null;
+    if (res.status !== 200 || Array.isArray(res.body)) throw ghError(res.status, (res.body as { message?: string })?.message);
+    return res.body.object?.sha ?? null;
+  }
+
+  async listBranches(r: Repo) {
+    const list = await this.ok<{ name: string; commit: { sha: string }; protected: boolean }[]>("GET", this.#path(r, "/branches?per_page=100"));
+    return list.map((b) => ({ name: b.name, sha: b.commit.sha, protected: !!b.protected }));
+  }
+
+  async createBranch(r: Repo, branch: string, sha: string) {
+    const res = await this.req<{ message?: string }>("POST", this.#path(r, "/git/refs"), { ref: `refs/heads/${branch}`, sha });
+    if (res.status === 422 && /already exists/i.test(res.body?.message ?? "")) {
+      throw new HttpError(409, `branch ${branch} already exists`, "branch_exists");
+    }
+    if (res.status !== 201) throw ghError(res.status, res.body?.message);
+  }
+
+  /** True if it was deleted (false: it wasn't there). */
+  async deleteBranch(r: Repo, branch: string): Promise<boolean> {
+    const res = await this.req<{ message?: string }>("DELETE", this.#path(r, `/git/refs/heads/${this.#ref(branch)}`));
+    if (res.status === 204) return true;
+    if (res.status === 404 || res.status === 422) return false;
+    throw ghError(res.status, res.body?.message);
+  }
+
+  /** The commit's whole tree, flat (no submodules followed). */
+  async #tree(r: Repo, commitSha: string) {
+    const commit = await this.ok<{ tree: { sha: string } }>("GET", this.#path(r, `/git/commits/${commitSha}`));
+    const t = await this.ok<{ tree: GhEntry[]; truncated: boolean }>("GET", this.#path(r, `/git/trees/${commit.tree.sha}?recursive=1`));
+    if (t.truncated) throw new HttpError(413, "the repository has too many files to sync", "too_large");
+    return { treeSha: commit.tree.sha, entries: t.tree };
+  }
+
+  async #blob(r: Repo, sha: string): Promise<Uint8Array> {
+    const b = await this.ok<{ content: string; encoding: string }>("GET", this.#path(r, `/git/blobs/${sha}`));
+    return new Uint8Array(Buffer.from(b.content, b.encoding === "base64" ? "base64" : "utf8"));
+  }
+
+  async readTree(r: Repo, sha: string, subdir: string): Promise<DeployFile[]> {
+    const { entries } = await this.#tree(r, sha);
+    const files = sourceEntries(entries, subdir).filter((e) => !NOT_SOURCE.test(e.rel));
+    if (files.length > this.limits.files) throw new HttpError(413, `the repository has more than ${this.limits.files} files`, "too_large");
+    if (files.reduce((n, e) => n + (e.size ?? 0), 0) > this.limits.bytes) {
+      throw new HttpError(413, `the repository's files exceed ${this.limits.bytes} bytes`, "too_large");
+    }
+    const out = await pool(files, 8, async (e): Promise<DeployFile> => {
+      let data = await this.#blob(r, e.sha);
+      if (DOTENV.test(e.rel)) data = publicDotenv(data);
+      try {
+        return { path: e.rel, data: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(data), encoding: "utf8" };
+      } catch {
+        return { path: e.rel, data: Buffer.from(data).toString("base64"), encoding: "base64" };
+      }
+    });
+    return out.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+  }
+
+  async commitTree(r: Repo, input: { branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author }) {
+    const { treeSha, entries } = await this.#tree(r, input.baseSha);
+    const prefix = input.subdir ? input.subdir + "/" : "";
+    const base = new Map(entries.filter((e) => e.type === "blob").map((e) => [e.path, e]));
+    const want = new Map(input.files.map(([p, d]) => [prefix + p, d]));
+    const changes: { path: string; mode: string; data: Uint8Array }[] = [];
+    for (const [path, data] of want) {
+      const b = base.get(path);
+      if (b?.sha === blobSha(data) && b.mode !== "120000") continue;
+      // A dotenv file the studio only ever saw cut to its public entries: unchanged if those are, so the
+      // repository's own copy (whatever else it holds) stays.
+      if (b && b.mode !== "120000" && DOTENV.test(path) &&
+          Buffer.from(publicDotenv(await this.#blob(r, b.sha))).equals(Buffer.from(data))) continue;
+      changes.push({ path, mode: b && b.mode !== "120000" ? b.mode : "100644", data });
+    }
+    // Under subdir, files the studio was never sent stay: never-source ones, symlinks, names it can't hold.
+    const gone = [...base.values()].filter((e) => e.path.startsWith(prefix) && !want.has(e.path) && sourceEntries([e], input.subdir).length &&
+      !NOT_SOURCE.test(e.path.slice(prefix.length))).map((e) => e.path);
+    if (!changes.length && !gone.length) return { sha: input.baseSha, changed: false };
+    const blobs = await pool(changes, 8, (ch) =>
+      this.ok<{ sha: string }>("POST", this.#path(r, "/git/blobs"), { content: Buffer.from(ch.data).toString("base64"), encoding: "base64" }));
+    const tree = await this.ok<{ sha: string }>("POST", this.#path(r, "/git/trees"), {
+      base_tree: treeSha,
+      tree: [
+        ...changes.map((ch, i) => ({ path: ch.path, mode: ch.mode, type: "blob", sha: blobs[i].sha })),
+        ...gone.map((path) => ({ path, mode: "100644", type: "blob", sha: null })),
+      ],
+    });
+    const who = { name: input.author.name, email: input.author.email };
+    const commit = await this.ok<{ sha: string }>("POST", this.#path(r, "/git/commits"), {
+      message: input.message, tree: tree.sha, parents: [input.baseSha], author: who, committer: who,
+    });
+    // Never forced: if the branch moved since baseSha, this fails and nothing changed.
+    const res = await this.req<{ message?: string }>("PATCH", this.#path(r, `/git/refs/heads/${this.#ref(input.branch)}`), { sha: commit.sha, force: false });
+    if (res.status !== 200) {
+      // Moved meanwhile (GitHub says so as a 422 "not a fast forward", or a 409): nothing changed; say where it is now.
+      const now = await this.branchHead(r, input.branch).catch(() => null);
+      if (!isProtected(res.body?.message) && ((now && now !== input.baseSha) || notFastForward(res.status, res.body?.message))) {
+        throw Object.assign(conflict(`${input.branch} moved on GitHub meanwhile: pull first`), { extra: now ? { headSha: now } : {} });
+      }
+      throw refError(res.status, res.body?.message, input.branch);
+    }
+    return { sha: commit.sha, changed: true };
+  }
+
+  async merge(r: Repo, input: { into: string; head: string; message: string }): Promise<MergeResult> {
+    const [intoSha, headSha] = await Promise.all([this.branchHead(r, input.into), this.branchHead(r, input.head)]);
+    if (!intoSha) throw new HttpError(404, `no branch ${input.into} on GitHub`, "branch_not_found");
+    if (!headSha) throw new HttpError(404, `no branch ${input.head} on GitHub`, "branch_not_found");
+    if (intoSha === headSha) return { mergedSha: intoSha, headSha, fastForward: true, treeChanged: false };
+    const cmp = await this.ok<{ status: string }>("GET", this.#path(r, `/compare/${intoSha}...${headSha}`));
+    if (cmp.status === "identical") return { mergedSha: intoSha, headSha, fastForward: true, treeChanged: false };
+    // Already in: nothing to merge, but `into` has more than head.
+    if (cmp.status === "behind") return { mergedSha: intoSha, headSha, fastForward: false, treeChanged: true };
+    if (cmp.status === "ahead") {
+      const res = await this.req<{ message?: string }>("PATCH", this.#path(r, `/git/refs/heads/${this.#ref(input.into)}`), { sha: headSha, force: false });
+      if (res.status === 200) return { mergedSha: headSha, headSha, fastForward: true, treeChanged: false };
+      const now = await this.branchHead(r, input.into).catch(() => null);
+      if (!isProtected(res.body?.message) && ((now && now !== intoSha) || notFastForward(res.status, res.body?.message))) {
+        throw conflict(`${input.into} moved on GitHub meanwhile: try again`);
+      }
+      throw refError(res.status, res.body?.message, input.into);
+    }
+    // Read before merging: once it's merged, nothing that can fail stands between the merge and its result.
+    const head = await this.ok<{ tree: { sha: string } }>("GET", this.#path(r, `/git/commits/${headSha}`));
+    const res = await this.req<{ sha?: string; commit?: { tree: { sha: string } }; message?: string }>(
+      "POST", this.#path(r, "/merges"), { base: input.into, head: headSha, commit_message: input.message },
+    );
+    if (res.status === 201 && res.body?.sha) {
+      return { mergedSha: res.body.sha, headSha, fastForward: false, treeChanged: res.body.commit?.tree.sha !== head.tree.sha };
+    }
+    if (res.status === 204) {
+      // Merged meanwhile (by someone else): where `into` is now.
+      const now = await this.branchHead(r, input.into) ?? intoSha;
+      return { mergedSha: now, headSha, fastForward: false, treeChanged: true };
+    }
+    if (isProtected(res.body?.message)) throw protectedError(input.into);
+    if (res.status === 409) {
+      throw Object.assign(new HttpError(409, `${input.head} doesn't merge cleanly into ${input.into}`, "merge_conflict"), {
+        extra: { paths: await this.#conflicts(r, intoSha, headSha).catch(() => []) },
+      });
+    }
+    throw refError(res.status, res.body?.message, input.into);
+  }
+
+  /** Paths both sides changed since they split: where the conflicts are (GitHub doesn't say). */
+  async #conflicts(r: Repo, intoSha: string, headSha: string): Promise<string[]> {
+    const ours = await this.ok<{ merge_base_commit: { sha: string }; files?: { filename: string }[] }>(
+      "GET", this.#path(r, `/compare/${intoSha}...${headSha}`),
+    );
+    const theirs = await this.ok<{ files?: { filename: string }[] }>("GET", this.#path(r, `/compare/${ours.merge_base_commit.sha}...${intoSha}`));
+    const changed = new Set((theirs.files ?? []).map((f) => f.filename));
+    return (ours.files ?? []).map((f) => f.filename).filter((f) => changed.has(f)).sort();
+  }
+
+  /** A first commit in an empty repository (the Git Data API needs one), on its default branch. */
+  async initialize(r: Repo, branch: string, author: Author): Promise<string> {
+    const res = await this.req<{ commit?: { sha: string }; message?: string }>("PUT", this.#path(r, "/contents/.gitkeep"), {
+      message: "Initialize repository", content: "", branch, author, committer: author,
+    });
+    if (res.status !== 201 || !res.body?.commit) throw ghError(res.status, res.body?.message);
+    return res.body.commit.sha;
+  }
+}
+
+type GhRepo = {
+  id: number; name: string; full_name: string; private: boolean; default_branch: string; html_url?: string;
+  owner: { login: string }; permissions?: { push?: boolean };
+};
+type GhEntry = { path: string; mode: string; type: string; sha: string; size?: number };
+
+/** The tree's regular files under `subdir`, with their paths relative to it (names a deploy can't hold left out). */
+function sourceEntries(entries: GhEntry[], subdir: string) {
+  const prefix = subdir ? subdir + "/" : "";
+  const out: (GhEntry & { rel: string })[] = [];
+  for (const e of entries) {
+    if (e.type !== "blob" || e.mode === "120000" || !e.path.startsWith(prefix)) continue;
+    const rel = e.path.slice(prefix.length);
+    try {
+      if (safePath(rel) === rel) out.push({ ...e, rel });
+    } catch { /* not a path we can hold */ }
+  }
+  return out;
+}
+
+/** Git's object id for a file's contents (what GitHub's tree lists), so unchanged files aren't uploaded again. */
+export const blobSha = (data: Uint8Array) =>
+  createHash("sha1").update(`blob ${data.byteLength}\0`).update(data).digest("hex");
+
+async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  }));
+  return out;
+}
+
+const reauth = () => new HttpError(401, "GitHub access expired or was revoked: connect GitHub again", "git_reauth_required");
+const conflict = (message: string) => new HttpError(409, message, "conflict");
+const notFastForward = (status: number, m?: string) => status === 422 && /fast.?forward/i.test(m ?? "");
+/** GitHub refusing because of branch protection or a ruleset (said in several ways). */
+const isProtected = (m?: string) => /protected|required status|review|rule violation/i.test(m ?? "");
+const protectedError = (branch: string) =>
+  new HttpError(422, `${branch} is protected on GitHub (it needs a pull request or checks): merge it there`, "branch_protected");
+function ghError(status: number, message?: string) {
+  if (status === 404) return new HttpError(404, "not found on GitHub (or you don't have access to it)", "git_not_found");
+  if (status === 403) return new HttpError(403, `GitHub refused: ${message ?? "forbidden"}`, "git_forbidden");
+  return new HttpError(502, `GitHub: ${message ?? `error ${status}`}`, "github_error");
+}
+function refError(status: number, message: string | undefined, branch: string) {
+  if (isProtected(message)) return protectedError(branch);
+  return ghError(status, message);
+}
+
+/** Who Cresslet asks for repository access, and how: a GitHub App, or (fallback) the login OAuth App with `repo`. */
+export function githubSync(cfg: Config) {
+  const app = cfg.git.githubApp;
+  if (app) {
+    return {
+      kind: "app" as const, clientId: app.clientId, clientSecret: app.clientSecret, scope: null,
+      webUrl: cfg.git.webUrl, apiUrl: cfg.git.apiUrl,
+      installUrl: app.slug ? `${cfg.git.webUrl}/apps/${app.slug}/installations/new` : null,
+      // Registered as the GitHub App's callback URL.
+      callbackPath: "/v1/git/github/callback",
+    };
+  }
+  if (cfg.git.oauthFallback && cfg.github) {
+    const gh = cfg.github;
+    return {
+      kind: "oauth" as const, clientId: gh.clientId, clientSecret: gh.clientSecret, scope: "repo read:user user:email",
+      webUrl: gh.webUrl, apiUrl: gh.apiUrl,
+      installUrl: `${gh.webUrl}/settings/connections/applications/${gh.clientId}`,
+      // An OAuth App has one callback URL: login's, which hands source control's states (gs_…) to this flow.
+      callbackPath: "/v1/auth/github/callback",
+    };
+  }
+  return null;
+}
+
+export function gitRoutes(
+  app: Hono<Env>,
+  { cfg, store, body, accountWide, authorize, getApp, deployBodyLimit }: {
+    cfg: Config;
+    store: Store;
+    body: <T>(c: Context<Env>, maxBytes?: number) => Promise<T>;
+    accountWide: (c: Context<Env>, role: Role) => Account;
+    authorize: (c: Context<Env>, a: App, role: Role, opts?: { owner?: boolean; account?: boolean }) => Promise<unknown>;
+    getApp: (name: string) => Promise<App>;
+    deployBodyLimit: number;
+  },
+) {
+  const gh = githubSync(cfg);
+  const provider: GitProvider = "github";
+  const states = new Map<string, { accountId: string; returnTo: string; exp: number }>();
+  const refreshing = new Map<string, Promise<GitConnection>>();
+
+  /** `__Host-` over HTTPS: an app or page on a subdomain can't plant one (and with it, its own state). */
+  const STATE_COOKIE = cfg.scheme === "https" ? "__Host-cresslet_git_state" : "cresslet_git_state";
+  const notConfigured = () => new HttpError(404, "source control isn't set up on this server (docs/self-hosting.md#source-control)", "git_unavailable");
+
+  /** Form POST to GitHub's OAuth endpoints. */
+  async function oauth(params: Record<string, string>): Promise<Record<string, string>> {
+    const res = await fetch(gh!.webUrl + "/login/oauth/access_token", {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: gh!.clientId, client_secret: gh!.clientSecret, ...params }),
+      signal: AbortSignal.timeout(10_000),
+    }).catch(() => null);
+    const j = (await res?.json().catch(() => null)) as Record<string, string> | null;
+    if (!res || (!res.ok && !j?.error) || !j) throw new HttpError(502, "couldn't reach GitHub, try again", "github_error");
+    return j;
+  }
+
+  const tokenFields = (t: Record<string, string>, now = Date.now()) => ({
+    access_token: t.access_token,
+    refresh_token: t.refresh_token || null,
+    expires_at: Number(t.expires_in) > 0 ? now + Number(t.expires_in) * 1000 : null,
+    scopes: t.scope ?? null,
+  });
+
+  /**
+   * The account's connection with a usable access token: refreshed first when it's about to expire. One refresh
+   * per account at a time (GitHub's refresh tokens are single-use): in this process, and across servers on
+   * Postgres (an advisory lock, then the row read again in case another server refreshed it).
+   */
+  async function connection(accountId: string): Promise<GitConnection> {
+    if (!gh) throw notConfigured();
+    const c = await store.getGitConnection(accountId, provider);
+    if (!c) throw new HttpError(403, "connect GitHub first (Settings → Account → Source control)", "git_not_connected");
+    if (c.status !== "active") throw reauth();
+    if (!c.expires_at || c.expires_at > Date.now() + REFRESH_EARLY_MS) return c;
+    let p = refreshing.get(accountId);
+    if (!p) {
+      // Resolves to null when the connection had to be marked expired: thrown after the transaction (on Postgres)
+      // commits, so the mark stays.
+      const run = async (): Promise<GitConnection | null> => {
+        const cur = await store.getGitConnection(accountId, provider);
+        if (!cur || cur.status !== "active") return null;
+        if (!cur.expires_at || cur.expires_at > Date.now() + REFRESH_EARLY_MS) return cur;
+        const t = cur.refresh_token ? await oauth({ grant_type: "refresh_token", refresh_token: cur.refresh_token }) : null;
+        if (!t?.access_token) {
+          // Only the user's grant being gone means reconnecting; anything else (say the operator's client secret is
+          // wrong) is this server's problem, and the connection stays.
+          if (t && t.error !== "bad_refresh_token") throw new HttpError(502, `GitHub refused to refresh the token: ${t.error_description ?? t.error ?? "unknown error"}`, "github_error");
+          await store.expireGitConnection(accountId, provider, cur.gen);
+          return null;
+        }
+        const fields = { ...tokenFields(t), scopes: t.scope ?? cur.scopes };
+        // Disconnected or reconnected meanwhile: that one stands.
+        if (!await store.refreshGitConnection(accountId, provider, cur.gen, fields)) return store.getGitConnection(accountId, provider).then((x) => x?.status === "active" ? x : null);
+        return (await store.getGitConnection(accountId, provider)) ?? null;
+      };
+      p = (store.db.dialect === "postgres" ? store.serialized(`cresslet:git-refresh:${accountId}`, run) : run())
+        .then((x) => x ?? Promise.reject(reauth()))
+        .finally(() => refreshing.delete(accountId));
+      refreshing.set(accountId, p);
+    }
+    return p;
+  }
+
+  /** GitHub as this account (never anyone else: an app's collaborators each use their own). */
+  async function as(acct: Account) {
+    const conn = await connection(acct.id);
+    const client = new GitHub({
+      apiUrl: gh!.apiUrl,
+      webUrl: gh!.webUrl,
+      token: conn.access_token,
+      // A refresh in flight replaces these tokens (and GitHub revokes them as it does): then this 401 is stale.
+      unauthorized: async () => {
+        await refreshing.get(acct.id)?.catch(() => {});
+        await store.expireGitConnection(acct.id, provider, conn.gen);
+      },
+      limits: { files: cfg.limits.deployFiles, bytes: cfg.limits.deployBytes },
+    });
+    return { client, conn, author: { name: conn.login, email: conn.email } };
+  }
+
+  const repoView = (r: AppRepo) => ({
+    provider: r.provider,
+    owner: r.owner,
+    name: r.name,
+    fullName: `${r.owner}/${r.name}`,
+    url: `${gh?.webUrl ?? cfg.git.webUrl}/${r.owner}/${r.name}`,
+    defaultBranch: r.default_branch,
+    subdir: r.subdir,
+    deleteBranch: !!r.delete_branch,
+    lastSyncedSha: r.last_synced_sha,
+    connectedAt: new Date(r.connected_at).toISOString(),
+  });
+
+  // ---- connecting an account (OAuth web flow: the studio starts it with its token, the browser carries the state)
+  app.get("/me/git", async (c) => {
+    const a = accountWide(c, "read");
+    const conn = gh ? await store.getGitConnection(a.id, provider) : undefined;
+    return c.json({
+      provider,
+      available: !!gh,
+      kind: gh?.kind ?? null,
+      connected: !!conn,
+      login: conn?.login ?? null,
+      status: conn?.status ?? null,
+      installUrl: gh?.installUrl ?? null,
+    });
+  });
+
+  app.delete("/me/git/:provider", async (c) => {
+    const a = accountWide(c, "admin");
+    if (c.req.param("provider") !== provider) throw new HttpError(404, "unknown provider", "not_found");
+    const conn = await store.getGitConnection(a.id, provider);
+    if (!conn) throw new HttpError(404, "not connected", "not_found");
+    await store.deleteGitConnection(a.id, provider);
+    // Best effort: revoke the token on GitHub too (the user can also do it there).
+    if (gh) {
+      await fetch(`${gh.apiUrl}/applications/${encodeURIComponent(gh.clientId)}/token`, {
+        method: "DELETE",
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Basic ${Buffer.from(`${gh.clientId}:${gh.clientSecret}`).toString("base64")}`,
+          "content-type": "application/json",
+          "user-agent": "cresslet",
+        },
+        body: JSON.stringify({ access_token: conn.access_token }),
+        signal: AbortSignal.timeout(5_000),
+      }).catch(() => {});
+    }
+    return c.json({ disconnected: provider });
+  });
+
+  // The studio POSTs (with its token) and navigates to `url`; the state cookie binds the flow to this browser and
+  // the state to this account. `returnTo`: a studio path to come back to.
+  app.post("/git/github/connect", async (c) => {
+    const a = accountWide(c, "admin");
+    if (!gh) throw notConfigured();
+    const { returnTo } = await body<{ returnTo?: unknown } | null>(c) ?? {};
+    const back = typeof returnTo === "string" && /^\/(?![/\\])[^\s#\\]{0,500}$/.test(returnTo) ? returnTo : "/settings";
+    const now = Date.now();
+    for (const [k, v] of states) if (v.exp < now) states.delete(k);
+    const state = id("gs", 16);
+    states.set(state, { accountId: a.id, returnTo: back, exp: now + STATE_TTL });
+    setCookie(c, STATE_COOKIE, state, { path: "/", httpOnly: true, sameSite: "Lax", secure: cfg.scheme === "https", maxAge: STATE_TTL / 1000 });
+    const q = new URLSearchParams({ client_id: gh.clientId, redirect_uri: rootUrl(cfg) + gh.callbackPath, state });
+    if (gh.scope) q.set("scope", gh.scope);
+    return c.json({ url: `${gh.webUrl}/login/oauth/authorize?${q}` });
+  });
+
+  const callback = async (c: Context<Env>) => {
+    const { code, state, error, error_description } = c.req.query();
+    const cookie = getCookie(c, STATE_COOKIE);
+    // Consumed only by the browser it was issued to (a stray callback doesn't cancel a flow in progress).
+    const s = state && state === cookie ? states.get(state) : undefined;
+    if (s) {
+      states.delete(state);
+      deleteCookie(c, STATE_COOKIE, { path: "/", secure: cfg.scheme === "https" });
+    }
+    const back = (hash: Record<string, string>) => c.redirect(`${rootUrl(cfg)}${s?.returnTo ?? "/settings"}#${new URLSearchParams(hash)}`);
+    try {
+      if (!gh) throw notConfigured();
+      if (error) throw new HttpError(400, error_description ?? error);
+      // Bound to the browser that started it (no connecting someone else's GitHub to your account, or yours to theirs).
+      if (!code || !s || s.exp < Date.now()) throw new HttpError(400, "connecting GitHub expired, try again");
+      const t = await oauth({ code, redirect_uri: rootUrl(cfg) + gh.callbackPath });
+      if (!t.access_token) throw new HttpError(400, t.error_description ?? t.error ?? "GitHub didn't connect");
+      const api = (path: string) => fetch(gh.apiUrl + path, {
+        headers: { accept: "application/vnd.github+json", authorization: `Bearer ${t.access_token}`, "user-agent": "cresslet" },
+        signal: AbortSignal.timeout(10_000),
+      }).then(async (r) => ({ ok: r.ok, body: await r.json().catch(() => null) }));
+      const u = await api("/user");
+      const user = u.body as { id?: number; login?: string } | null;
+      if (!u.ok || !user?.id || !user.login) throw new HttpError(502, "couldn't read your GitHub user", "github_error");
+      // Commits are authored with a verified email (primary first), else GitHub's noreply address for the user.
+      const e = await api("/user/emails").catch(() => ({ ok: false, body: null }));
+      const emails = e.ok && Array.isArray(e.body) ? (e.body as { email: string; primary: boolean; verified: boolean }[]) : [];
+      const email = emails.filter((x) => x.verified).sort((x, y) => Number(y.primary) - Number(x.primary))[0]?.email ??
+        `${user.id}+${user.login}@users.noreply.github.com`;
+      const acct = await store.accountById(s.accountId);
+      if (!acct || acct.disabled_at) throw new HttpError(400, "your Cresslet account is gone or disabled");
+      await store.upsertGitConnection({
+        account_id: s.accountId, provider, provider_uid: String(user.id), login: user.login, email, ...tokenFields(t),
+      });
+      return back({ cresslet_git: "connected" });
+    } catch (err) {
+      if (!(err instanceof HttpError)) console.error(err);
+      return back({ cresslet_git_error: err instanceof HttpError ? err.message : "connecting GitHub failed" });
+    }
+  };
+  app.get("/git/github/callback", callback);
+
+  // ---- repositories the user can push to, and new ones (as the user)
+  app.get("/git/github/repos", async (c) => {
+    const { client } = await as(accountWide(c, "read"));
+    return c.json({ repos: await client.listRepos() });
+  });
+
+  app.post("/git/github/repos", async (c) => {
+    const { client, conn } = await as(accountWide(c, "admin"));
+    const input = await body<{ name?: unknown; owner?: unknown; private?: unknown; description?: unknown } | null>(c) ?? {};
+    if (typeof input.name !== "string" || !REPO_PART_RE.test(input.name)) throw new HttpError(400, "name: 1-100 letters, digits, . _ -");
+    if (input.owner != null && (typeof input.owner !== "string" || !REPO_PART_RE.test(input.owner))) throw new HttpError(400, "owner must be a GitHub user or organization");
+    const owner = typeof input.owner === "string" && input.owner.toLowerCase() !== conn.login.toLowerCase() ? input.owner : undefined;
+    const repo = await client.createRepo({
+      owner, name: input.name, private: input.private !== false,
+      description: typeof input.description === "string" ? input.description.slice(0, 300) : undefined,
+    });
+    return c.json({ repo }, 201);
+  });
+
+  // ---- an app's repository
+  const linked = async (c: Context<Env>, role: Role) => {
+    const a = await getApp(c.req.param("name") ?? "");
+    if (a.kind === "page") throw new HttpError(409, `${a.name} is an artifact: it can't sync with a repository`, "is_page");
+    await authorize(c, a, role, { account: true });
+    const repo = await store.getAppRepo(a.id);
+    if (!repo) throw new HttpError(404, `${a.name} isn't connected to a repository`, "git_not_linked");
+    const gh = await as(c.get("account")!);
+    // By its id, not the name it had: a renamed or transferred repository is followed, and another one given the
+    // old name isn't written to by a later request. (One renamed, and its name reused, while this request runs isn't
+    // covered: calls below go by name.)
+    const info = await gh.client.repoById(repo.repo_id);
+    if (info.owner !== repo.owner || info.name !== repo.name || info.defaultBranch !== repo.default_branch) {
+      await store.updateAppRepoSync(repo, { owner: info.owner, name: info.name, defaultBranch: info.defaultBranch });
+    }
+    const now = { ...repo, owner: info.owner, name: info.name, default_branch: info.defaultBranch };
+    return { a, repo: now, info, r: { owner: info.owner, name: info.name }, ...gh };
+  };
+  const branchName = (v: unknown, what = "branch") => {
+    if (typeof v !== "string" || !BRANCH_RE.test(v)) throw new HttpError(400, `${what} must be a branch name`);
+    return v;
+  };
+  const shaOf = (v: unknown, what: string) => {
+    if (typeof v !== "string" || !SHA_RE.test(v)) throw new HttpError(400, `${what} must be a full commit SHA`);
+    return v;
+  };
+  const message = (v: unknown, fallback: string) =>
+    typeof v === "string" && v.trim() ? v.trim().slice(0, 5000) : fallback;
+
+  app.post("/apps/:name/git/connect", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    if (a.kind === "page") throw new HttpError(409, `${a.name} is an artifact: it can't sync with a repository`, "is_page");
+    // Which repository it reaches is the account's to choose (an app-scoped token can't point it at another).
+    accountWide(c, "admin");
+    await authorize(c, a, "admin", { account: true });
+    if (!a.account_id && !a.org_id) throw new HttpError(409, `claim ${a.name} first (an anonymous app can't connect a repository)`, "unclaimed");
+    const input = await body<{
+      owner?: unknown; repo?: unknown; subdir?: unknown; deleteBranch?: unknown; initialSync?: unknown; files?: unknown; message?: unknown;
+    } | null>(c, deployBodyLimit) ?? {};
+    await authorize(c, a, "admin", { account: true }); // again: access may have changed while the body arrived
+    if (typeof input.owner !== "string" || !REPO_PART_RE.test(input.owner) || typeof input.repo !== "string" || !REPO_PART_RE.test(input.repo)) {
+      throw new HttpError(400, "owner and repo required (the GitHub repository's owner and name)");
+    }
+    const initialSync = input.initialSync ?? "none";
+    if (initialSync !== "push" && initialSync !== "pull" && initialSync !== "none") throw new HttpError(400, "initialSync must be push, pull or none");
+    let subdir = "";
+    if (input.subdir != null && input.subdir !== "") {
+      if (typeof input.subdir !== "string") throw new HttpError(400, "subdir must be a path");
+      subdir = safePath(input.subdir.replace(/\/+$/, ""));
+    }
+    const files = initialSync === "push" ? sourceFiles(cfg, input.files as DeployFile[]) : null;
+    const { client, author } = await as(c.get("account")!);
+    const r = { owner: input.owner, name: input.repo };
+    const info = await client.repo(r);
+    if (!info.push) throw new HttpError(403, `you can't push to ${info.fullName} on GitHub`, "git_forbidden");
+    let sha = await client.branchHead(r, info.defaultBranch);
+    let out: DeployFile[] | undefined;
+    if (initialSync === "push") {
+      sha ??= await client.initialize(r, info.defaultBranch, author);
+      sha = (await client.commitTree(r, {
+        branch: info.defaultBranch, baseSha: sha, subdir, files: files!, author,
+        message: message(input.message, `Sync ${a.name} from Cresslet`),
+      })).sha;
+    } else if (initialSync === "pull") {
+      if (!sha) throw new HttpError(409, `${info.fullName} is empty: nothing to pull`, "repo_empty");
+      out = await client.readTree(r, sha, subdir);
+    }
+    await store.setAppRepo({
+      app_id: a.id, provider, repo_id: info.id, owner: info.owner, name: info.name, default_branch: info.defaultBranch, subdir,
+      delete_branch: input.deleteBranch === false ? 0 : 1, connected_by: c.get("account")!.id, last_synced_sha: sha,
+    });
+    return c.json({ repo: repoView((await store.getAppRepo(a.id))!), sha, ...(out ? { files: out } : {}) }, 201);
+  });
+
+  app.delete("/apps/:name/git", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    await authorize(c, a, "admin", { account: true });
+    if (!await store.deleteAppRepo(a.id)) throw new HttpError(404, `${a.name} isn't connected to a repository`, "git_not_linked");
+    return c.json({ disconnected: true });
+  });
+
+  app.get("/apps/:name/git/status", async (c) => {
+    const { repo, info, r, client } = await linked(c, "read");
+    const branches = await client.listBranches(r);
+    return c.json({
+      repo: repoView(repo),
+      defaultBranch: info.defaultBranch,
+      mainSha: branches.find((b) => b.name === info.defaultBranch)?.sha ?? null,
+      branches,
+    });
+  });
+
+  app.post("/apps/:name/git/branches", async (c) => {
+    const { r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ name?: unknown; from?: unknown } | null>(c) ?? {};
+    const name = branchName(input.name, "name");
+    const from = input.from != null ? shaOf(input.from, "from") : await client.branchHead(r, repo.default_branch);
+    if (!from) throw new HttpError(409, `${repo.owner}/${repo.name} has no ${repo.default_branch} branch yet`, "repo_empty");
+    await client.createBranch(r, name, from);
+    return c.json({ branch: { name, sha: from } }, 201);
+  });
+
+  app.get("/apps/:name/git/tree", async (c) => {
+    const { r, repo, client } = await linked(c, "read");
+    const ref = c.req.query("ref") || repo.default_branch;
+    let sha: string | null;
+    if (SHA_RE.test(ref)) sha = ref;
+    else sha = await client.branchHead(r, branchName(ref, "ref"));
+    if (!sha) throw new HttpError(404, `no branch ${ref} on GitHub`, "branch_not_found");
+    const files = await client.readTree(r, sha, repo.subdir);
+    if (ref === repo.default_branch) await store.updateAppRepoSync(repo, { sha });
+    c.header("cache-control", "no-store"); // private project source
+    return c.json({ ref, sha, files });
+  });
+
+  // One commit making the branch hold exactly `files` (the workspace). `baseSha`: the commit the workspace is on;
+  // if the branch has moved since, 409 and nothing is written (pull, then sync again).
+  app.post("/apps/:name/git/sync", async (c) => {
+    await linked(c, "deploy"); // before reading what may be a large body
+    const input = await body<{ branch?: unknown; baseSha?: unknown; files?: unknown; message?: unknown } | null>(c, deployBodyLimit) ?? {};
+    const { a, r, repo, client, author } = await linked(c, "deploy");
+    const branch = branchName(input.branch);
+    const baseSha = shaOf(input.baseSha, "baseSha");
+    const files = sourceFiles(cfg, input.files as DeployFile[]);
+    const head = await client.branchHead(r, branch);
+    if (!head) throw new HttpError(404, `no branch ${branch} on GitHub`, "branch_not_found");
+    if (head !== baseSha) {
+      throw Object.assign(conflict(`${branch} moved on GitHub since this workspace loaded it: pull first`), { extra: { headSha: head } });
+    }
+    const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, message: message(input.message, `Update ${a.name}`) });
+    if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha });
+    return c.json({ branch, ...out });
+  });
+
+  // Merge `branch` into the default branch (or `into`), as the user: a fast-forward when it can, else a merge
+  // commit. `treeChanged`: the result isn't `branch`'s tree (the default branch had commits of its own), so its
+  // files come back for the workspace to build from.
+  app.post("/apps/:name/git/merge", async (c) => {
+    const { r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ branch?: unknown; into?: unknown; message?: unknown } | null>(c) ?? {};
+    const branch = branchName(input.branch);
+    const into = input.into != null ? branchName(input.into, "into") : repo.default_branch;
+    const m = await client.merge(r, { into, head: branch, message: message(input.message, `Merge ${branch} into ${into}`) });
+    if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha }).catch((e) => console.error(e));
+    // The merge happened: from here on it's reported, whatever else fails. Its files (when they differ from the
+    // branch's) before the branch goes, so a failure to load them leaves the branch to retry from.
+    let files: DeployFile[] | undefined, filesError: string | undefined;
+    if (m.treeChanged) {
+      try {
+        files = await client.readTree(r, m.mergedSha, repo.subdir);
+      } catch (e) {
+        filesError = e instanceof HttpError ? e.message : "couldn't load the merged files";
+      }
+    }
+    let deletedBranch = false;
+    // Only while it's still the commit that was merged: a push since then keeps it. (GitHub can't delete a ref
+    // conditionally, so a push in between this check and the delete isn't excluded, only unlikely.)
+    if (!filesError && repo.delete_branch && branch !== into && branch !== repo.default_branch && await client.branchHead(r, branch).catch(() => null) === m.headSha) {
+      deletedBranch = await client.deleteBranch(r, branch).catch(() => false);
+    }
+    const { headSha: _, ...out } = m;
+    return c.json({ ...out, branch: into, deletedBranch, ...(files ? { files } : {}), ...(filesError ? { filesError } : {}) });
+  });
+
+  return { repoView, callback };
+}

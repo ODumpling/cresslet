@@ -38,7 +38,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/v1` | server info, limits, app URL template, `customDomains` (whether apps can add custom domains), `auth: {github, cli}` (`cli`: the browser login below), `ai: {credits, monthlyCredits}` ([AI credits](#ai-credits)) |
+| GET | `/v1` | server info, limits, app URL template, `customDomains` (whether apps can add custom domains), `auth: {github, cli}` (`cli`: the browser login below), `ai: {credits, monthlyCredits}` ([AI credits](#ai-credits)), `git: {github}` ([source control](#source-control)) |
 | POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it). 409 `account_disabled` for a disabled account's email |
 | GET | `/v1/me` | `{account: {id, email, github, role}, tokenInfo}` (`github` = login or null; `role` = `"SiteAdmin"` or null); `tokenInfo: {id, name, role, apps, createdAt, lastUsedAt}` for the calling token (any scope) |
 | GET | `/v1/me/tokens` | `{tokens: [{id, name, role, apps, createdAt, lastUsedAt, current}]}`; never the secret |
@@ -58,7 +58,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |
 | GET | `/v1/apps` | apps the account owns, collaborates on or reaches through an [organization](#organizations); each has `access: owner\|admin\|viewer` and `org: {name, title} \| null` |
-| GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 10 deploys, runtime status, secret names |
+| GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 10 deploys (each with `git: {sha, branch, repo} \| null`), runtime status, secret names, `repo` (the linked [repository](#source-control) or null) |
 | DELETE | `/v1/apps/:name?id=` | delete app + data (owner or deploy key; not an invited admin). `id` (optional): only if it's still that app, else 409 `conflict` |
 | PUT | `/v1/apps/:name/org` | owner (org app: an org admin), full-access token: `{org: "name" \| null}` → `{app, org}`. Into an organization you're a member of, or out of one (`null`: your personal app, within your app limit) |
 | GET | `/v1/apps/:name/collaborators` | **owner or admin**: `{owner: {id, email, github} \| null, org: {name, title} \| null, collaborators: [{id, email, github, role, createdAt}], invites: [{id, email, role, invitedBy, createdAt}]}` |
@@ -122,6 +122,29 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/admin/credits` | **site admin**: `{enabled: false}`, or `{enabled: true, creditsPerUsd, monthlyCredits, period, resetsAt, totals: {used, free, usd, requests, granted, grants, balance, overdrawn, accounts, active}, days: [{date, credits, requests}] (last 30, UTC), models: [{model, credits, requests, usd, inputTokens, outputTokens}], accounts: [{id, email, github, available, balance, monthlyUsed, used, requests, lastUsedAt}], recent: [ledger row + {account}]}`. `totals.used/free/usd/requests/granted/grants/active`, `models`, and each account's `used` and `requests` are this month (UTC); `totals.balance`/`overdrawn` are granted credits held / owed across all wallets now, `totals.accounts` counts every wallet; `accounts` lists every account that has used or been given credits, most used first; `recent` is the last 50 rows, which also carry `usd` and `free` (usage) or `by` (grants) |
 | GET | `/v1/admin/credits/accounts/:id` | **site admin**: one account: `{enabled, monthlyCredits, resetsAt, account: {id, email, github, siteAdmin, available, balance, monthlyUsed, used, requests, lastUsedAt}, history}` (last 200 ledger rows), or `{enabled: false}` without AI credits. 404 for an unknown id |
 
+<a id="source-control"></a>
+
+## Source control
+
+Apps can sync with a GitHub repository (when the server has it on: `git.github` in `GET /v1`; [self-hosting](self-hosting.md#source-control)). Cresslet calls GitHub as the signed-in user: each account connects its own GitHub, and every call below uses the calling account's token, never the app owner's (collaborators connect their own). Tokens never leave the server. Files go through the same filter as a deploy's `sources` (no local secrets: see [POST /v1/deploys](#post-v1deploys)); a dotenv file whose public entries are unchanged keeps the repository's copy.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/v1/me/git` | `read` token over the account: `{provider: "github", available, kind: app\|oauth\|null, connected, login, status: active\|expired\|null, installUrl}` (`installUrl`: where the user picks which repositories the GitHub App reaches) |
+| POST | `/v1/git/github/connect` | full-access token: `{returnTo?: "/studio/path"}` → `{url}`. Navigate the browser to `url` (GitHub's consent); it comes back to `returnTo` with `#cresslet_git=connected` or `#cresslet_git_error=…`. A state cookie binds the flow to that browser |
+| DELETE | `/v1/me/git/github` | full-access token: forget the connection (and revoke the token on GitHub) |
+| GET | `/v1/git/github/repos` | `{repos: [{id, owner, name, fullName, private, defaultBranch, url, push}]}`: up to 100 the user can push to, recently updated first |
+| POST | `/v1/git/github/repos` | full-access token: `{name, owner?: org, private?: true}` → `{repo}` (201), created as the user with a first commit. 409 `repo_exists` |
+| POST | `/v1/apps/:name/git/connect` | **owner or admin**, claimed apps: `{owner, repo, subdir?, deleteBranch?: true, initialSync: push\|pull\|none, files?, message?}` → `{repo, sha, files?}` (201). `push`: commit `files` (the workspace) to the default branch; `pull`: its files back; `none`: just link. 403 `git_forbidden` if you can't push to it |
+| DELETE | `/v1/apps/:name/git` | **owner or admin**: unlink (the repository is left alone) |
+| GET | `/v1/apps/:name/git/status` | `{repo, defaultBranch, mainSha, branches: [{name, sha, protected}]}` |
+| POST | `/v1/apps/:name/git/branches` | `deploy`: `{name, from?: sha}` → `{branch: {name, sha}}` (201), cut from the default branch's head by default. 409 `branch_exists` |
+| GET | `/v1/apps/:name/git/tree?ref=` | `{ref, sha, files}`: the project's files at a branch (default: the default branch) or commit, under `subdir` |
+| POST | `/v1/apps/:name/git/sync` | `deploy`: `{branch, baseSha, files, message?}` → `{branch, sha, changed}`. One commit making the branch hold exactly `files`. `baseSha`: the commit the workspace is on; 409 `conflict` with `headSha` if the branch moved since (nothing written). Never force-pushes |
+| POST | `/v1/apps/:name/git/merge` | `deploy`: `{branch, into?, message?}` → `{mergedSha, fastForward, treeChanged, branch, deletedBranch, files?, filesError?}`. Fast-forward when it can, else a merge commit. `treeChanged`: `into` had commits of its own, so `files` (the merged tree) come back to build from; if they can't be loaded (e.g. too many), it's still merged: `filesError` says why, and the branch is kept. 409 `merge_conflict` with `paths`; 422 `branch_protected` when `into` needs a pull request or checks. Afterwards the merged branch is deleted, best effort: not the default branch or `into`, not with `deleteBranch: false`, and only while it still points at the commit merged; `deletedBranch: true` means GitHub deleted it |
+
+Errors: 403 `git_not_connected` (connect GitHub first), 401 `git_reauth_required` (the user revoked access or it expired: connect again; the Cresslet token itself is fine), 404 `git_not_linked`, 404 `git_unavailable` (off on this server). Deploys record what they were built from with `git: {sha, branch?, repo?}` in [POST /v1/deploys](#post-v1deploys).
+
 <a id="pages"></a>
 
 ## Artifacts
@@ -177,6 +200,7 @@ With `CRESSLET_ANTHROPIC_API_KEY` set ([self-hosting](self-hosting.md#configurat
 - `files` = built static output. `server` = single ESM bundle (or omit for static).
 - `config.crons` (optional, ≤ 5, needs `server`): cron expressions that call the server's `scheduled()` export (claimed apps; see app-format.md).
 - `sources` (optional, same shape as `files`): the project source, stored with the deploy (not served) so another client can open it. Shares the size/file limits with `files`; if it doesn't fit, the deploy succeeds without it and the response's `deploy.warning` says so. Dropped (case-insensitive): any `.env*` name containing `local` or `cresslet`, `.envrc*`, `.dev.vars*`, top-level `dist/`, any `node_modules/`, `.git/` or `.cresslet/`. Other `.env*` files keep only their `CRESSLET_PUBLIC_*` / `VITE_*` entries, fail-closed: only single-line `NAME=value` lines (non-empty unquoted, or backslash-free `'…'`/`"…"`) are understood, comments are dropped, and the first other line ends the file. The studio sends it.
+- `git` (optional): `{sha, branch?, repo?: "owner/name"}`, the commit it was built from, shown with the deploy.
 - Each deploy is immutable; activation is atomic; sandbox restarts on next request.
 
 Response `201`:

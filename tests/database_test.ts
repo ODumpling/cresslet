@@ -142,8 +142,16 @@ async function fill(store: Store) {
   const { app } = await store.createApp("shop", null, owner.id);
   await store.setCurrentDeploy(app.id, "dep_1", { routes: ["/api/*"], crons: ["* * * * *"] });
   for (const [i, d] of ["dep_1", "dep_2", "dep_3"].entries()) {
-    await store.addDeploy({ id: d, app_id: app.id, created_at: 1000 + i, bytes: 10, file_count: 1, has_server: 1, source: "cli" });
+    await store.addDeploy({ id: d, app_id: app.id, created_at: 1000 + i, bytes: 10, file_count: 1, has_server: 1, source: "cli", git_sha: i ? null : "a".repeat(40), git_branch: i ? null : "main", git_repo: i ? null : "own/shop" });
   }
+  await store.upsertGitConnection({
+    account_id: owner.id, provider: "github", provider_uid: "7", login: "own", email: "owner@b.co", scopes: null,
+    access_token: "ghu_abc", refresh_token: "ghr_def", expires_at: 5000,
+  });
+  await store.setAppRepo({
+    app_id: app.id, provider: "github", repo_id: "9", owner: "own", name: "shop", default_branch: "main", subdir: "",
+    delete_branch: 1, connected_by: owner.id, last_synced_sha: "a".repeat(40),
+  });
   await store.setSecret(app.id, "API_KEY", "s3cret");
   await store.setSecret(app.id, "OTHER", "ünïcode ✓");
   await store.addDomain(app.id, "shop.example.com");
@@ -189,7 +197,7 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
     const rows = Object.fromEntries(report.tables.map((t) => [t.table, t.rows]));
     assert.deepEqual(rows, {
       accounts: 2, apps: 3, tokens: 2, deploys: 3, secrets: 2, domains: 1, meta: 1, collaborators: 1, invites: 1,
-      page_sessions: 1, rate_hits: 1, ai_wallets: 1, ai_ledger: 2, orgs: 1, org_members: 2,
+      page_sessions: 1, rate_hits: 1, ai_wallets: 1, ai_ledger: 2, orgs: 1, org_members: 2, git_connections: 1, app_repos: 1,
     });
 
     // The copy works as the database of a server.
@@ -198,6 +206,10 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
       assert.equal((await store.useToken(seed.token))?.account.email, "owner@b.co");
       assert.deepEqual(await store.secrets(seed.app.id), { API_KEY: "s3cret", OTHER: "ünïcode ✓" });
       assert.deepEqual((await store.deploys(seed.app.id)).map((d) => d.id), ["dep_3", "dep_2", "dep_1"]);
+      assert.equal((await store.deploys(seed.app.id))[2].git_repo, "own/shop");
+      const conn = await store.getGitConnection(seed.owner.id, "github");
+      assert.deepEqual([conn?.access_token, conn?.refresh_token], ["ghu_abc", "ghr_def"]);
+      assert.equal((await store.getAppRepo(seed.app.id))?.name, "shop");
       assert.deepEqual((await store.appsWithCrons()).map((a) => a.name), ["shop"]);
       assert.equal(await store.access(seed.app, seed.guest.id), "admin");
       assert.equal(await store.access(seed.orgApp, seed.guest.id), "admin", "an org member");

@@ -47,9 +47,9 @@ const DOTENV = /(?:^|\/)\.env[^/]*$/i;
  * Same as server/deploys.ts publicDotenvText. Fail closed: dotenv parsers differ (multi-line quotes, escapes, values starting on the next line, `KEY: v`), so
  * only lines that every parser reads as one complete single-line entry are understood: `NAME=value`, a non-empty
  * unquoted value or a backslash-free single-line '…' / "…", optional `# comment`. Public ones (CRESSLET_PUBLIC_*,
- * VITE_*) are kept verbatim, comments are dropped, and the first line not understood ends the file.
+ * VITE_*) are kept (a trailing comment cut off: it could hold anything), comments are dropped, and the first line not understood ends the file.
  */
-const SAFE_ENTRY = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][\w.-]*)[ \t]*=[ \t]*(?:[^\s"'\x60\\#][^"'\x60\\\r\n#]*|"[^"\\\r\n]*"|'[^'\\\r\n]*')[ \t]*(?:#[^"'\x60\\\r\n]*)?$/;
+const SAFE_ENTRY = /^([ \t]*(?:export[ \t]+)?([A-Za-z_][\w.-]*)[ \t]*=[ \t]*(?:[^\s"'\x60\\#][^"'\x60\\\r\n#]*|"[^"\\\r\n]*"|'[^'\\\r\n]*'))[ \t]*(?:#[^"'\x60\\\r\n]*)?$/;
 export function publicDotenv(text: string) {
   const out: string[] = [];
   for (const l of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
@@ -58,7 +58,7 @@ export function publicDotenv(text: string) {
     else if (!/^[ \t]*#/.test(l)) {
       const m = SAFE_ENTRY.exec(l);
       if (!m) break; // anything else may open a value that runs on: drop it and the rest
-      if (/^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[1]!)) out.push(l); // the name group always matches
+      if (/^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[2]!)) out.push(m[1]!.trimEnd()); // both groups always match; its comment dropped
     }
   }
   return out.join("\n");
