@@ -11,6 +11,7 @@ import { connect, type Socket } from "node:net";
 import { serve } from "@hono/node-server";
 import { createServer } from "../server/main.ts";
 import { type Config, loadConfig } from "../server/config.ts";
+import { ownerAuth } from "./owner.ts";
 
 const SERVER = `
 export default {
@@ -44,10 +45,11 @@ async function setup(limits: Partial<Config["limits"]>, apps: string[]) {
   await new Promise((r) => http.once("listening", r));
   const port = (http.address() as { port: number }).port;
   const ids: Record<string, string> = {};
+  const auth = await ownerAuth(srv.store);
   for (const name of apps) {
     const r = await srv.handler(new Request("http://test.local/v1/deploys", {
       method: "POST",
-      headers: { host: "test.local", "content-type": "application/json" },
+      headers: { host: "test.local", "content-type": "application/json", ...auth },
       body: JSON.stringify({ app: name, files: [{ path: "index.html", data: "x" }], server: SERVER }),
     }));
     assert.equal(r.status, 201, await r.clone().text());

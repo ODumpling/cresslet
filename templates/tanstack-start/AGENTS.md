@@ -29,7 +29,7 @@ store, `files` and `secrets`; built assets are served statically. Ships with ema
 - `npx cresslet build` — `vite build` + bundles the server into `.cresslet/build/server.js`.
 - `npx cresslet deploy` — build + deploy, prints the URL. First deploy creates the app and stores a deploy key in
   `.cresslet/app.json` (gitignored; keep it).
-- `npx cresslet logs [-f]`, `npx cresslet db [sql]`, `npx cresslet secrets set KEY=value` (claimed apps), `npx cresslet open`.
+- `npx cresslet logs [-f]`, `npx cresslet db [sql]`, `npx cresslet secrets set KEY=value`, `npx cresslet open`.
 
 ## Server code
 - Server functions: `createServerFn({ method }).middleware([authed]).validator(fn).handler(async ({ data, context }) => …)`.
@@ -42,7 +42,7 @@ store, `files` and `secrets`; built assets are served statically. Ships with ema
   - `files.put/get/delete/list`, `secrets.get("KEY")`, `app.name/url`.
 - Web-standard APIs (`fetch`, `crypto.subtle`, streams). `node:` built-ins work on the platform (workerd Node compat).
   npm packages are bundled; pure-JS only. 30s per request, 256MB memory. Keep state in db/kv/files, not globals.
-- Outbound `fetch` and secrets need a claimed app (`npx cresslet login && npx cresslet claim`). Unclaimed deploys expire after 72h.
+- Deploying needs `npx cresslet login`: every app belongs to an account.
 
 ## Verify
 After deploy: `curl <url>/api/health` and `npx cresslet logs`.

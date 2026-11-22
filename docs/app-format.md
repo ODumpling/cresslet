@@ -75,7 +75,7 @@ if (req.headers.get("upgrade") === "websocket") {
 }
 ```
 
-Cron triggers: each `crons` entry in `cresslet.json` (standard 5-field expression incl. `MON-FRI`/`JAN` names, UTC, ≤ 5, claimed apps; one run at a time per app) calls the server's `scheduled` export; the result is logged (`cresslet logs`). The studio's Crons tab shows each one's next runs and recent results, and pauses, resumes or runs one now.
+Cron triggers: each `crons` entry in `cresslet.json` (standard 5-field expression incl. `MON-FRI`/`JAN` names, UTC, ≤ 5; one run at a time per app) calls the server's `scheduled` export; the result is logged (`cresslet logs`). The studio's Crons tab shows each one's next runs and recent results, and pauses, resumes or runs one now.
 
 ```ts
 export default {
@@ -89,7 +89,7 @@ export default {
 | `db` | ``sql`…${v}` `` → a statement whose values are parameters (a nested `db.sql` is spliced in); `query(q)` → rows (or `await q`), `first(q)` → row \| null, `run(q)` → `{changes, lastInsertRowid}`; each also takes `(sql, ...params)` with `?`. `exec(sql)` (DDL, no params). `batch([q, "sql", {sql, params}, …])` → `{rows, changes, lastInsertRowid}[]`: one transaction (a savepoint), all or none, with no other statement in between; transaction control (`BEGIN`, `COMMIT`, `SAVEPOINT`, …) isn't allowed in it, nor are `PRAGMA`, `ATTACH` and `DETACH` (a rollback doesn't undo them). Each item is one statement: as with `query`/`run`, SQL after its first statement isn't run (use `exec` for scripts). Inside a transaction the app opened with `exec("BEGIN")`, a batch is part of it, and SQLite's `OR ROLLBACK` conflict clause rolls back that whole transaction. Per-app SQLite, SQLite SQL (`ATTACH`/`VACUUM INTO`, temp tables, `temp_store_directory`, `fts3_tokenizer` and the size/journal pragmas are refused; plain `VACUUM` works) |
 | `kv` | SDK only (cresslet ≥ 0.3.0, contract 1): `get(key)` → JSON value \| null, `set(key, value, { ttl })` (seconds), `delete(key)`, `incr(key, by = 1, { ttl })` (atomic; ttl applies when the counter starts), `list(prefix, { limit })` → `{key, value, expiresAt}[]`. Kept in the app's database (table `_cresslet_kv`), so it counts toward its size and moves with it |
 | `files` | `put(key, body, {contentType})`, `get(key) → Response \| null`, `delete(key)`, `list(prefix) → {key,size,contentType,updatedAt}[]` |
-| `secrets` | `get(name)` (throws, naming it, if unset), `optional(name) → string \| undefined`, record access (`secrets.NAME`, `Object.keys(secrets)`). Set via `cresslet secrets set` (claimed apps); `.env.cresslet` locally |
+| `secrets` | `get(name)` (throws, naming it, if unset), `optional(name) → string \| undefined`, record access (`secrets.NAME`, `Object.keys(secrets)`). Set via `cresslet secrets set`; `.env.cresslet` locally |
 | `app` | `{ id, name, url, deployId }` |
 
 `env` has the same `db` (minus `sql`; `query/first/run/exec` take SQL strings, `batch` takes `{sql, params}[]`), `files`,
@@ -129,9 +129,8 @@ Runtime: Web-standard APIs (fetch, Request/Response, URL, crypto, streams, TextE
 | Request | 30 s (runaway handler → sandbox killed, restarted on next request) |
 | Memory | 256 MB per app |
 | Idle | sandbox stopped after 5 min, cold start ~70 ms |
-| Unclaimed apps | expire after 72 h; no outbound network; no secrets |
-| Outbound network | claimed apps: any public host, or only an allowlist (`PUT /v1/apps/:name/egress`) |
-| Deploy history | last 10 (rollback) |
+| Outbound network | any public host, or only an allowlist (`PUT /v1/apps/:name/egress`) |
+| Deploy history | last 5 (rollback) |
 | Database | 512 MB per app (writes past it fail with "database or disk is full") |
 | Files | 1 GB per app in all, 25 MB per file (`put` past it fails with "storage quota exceeded") |
 | Apps | 50 per account |

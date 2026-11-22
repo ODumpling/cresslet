@@ -4,6 +4,13 @@
 //   cd tests/e2e && npm i && npx playwright install chromium && CRESSLET_ADMIN_TOKEN=e2e-admin node studio.ts
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
+const admin = process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin";
+/** An operator-issued account (every app belongs to one). */
+const newAccount = async (email: string): Promise<{ token: string }> => (await fetch(base + "/v1/accounts", {
+  method: "POST",
+  headers: { authorization: `Bearer ${admin}`, "content-type": "application/json" },
+  body: JSON.stringify({ email }),
+})).json();
 const browser = await chromium.launch();
 const page = await browser.newPage();
 const logs: string[] = [];
@@ -52,7 +59,9 @@ try {
   const got = await leaked;
   if (got && got.includes("clv_acct_studio_secret")) throw new Error("studio-origin blob URL ran with the studio's origin inside the preview frame");
   if ((await pf.evaluate(() => location.origin)) !== previewOrigin) throw new Error("preview frame left the preview origin");
-  await page.evaluate(() => localStorage.removeItem("cresslet.token"));
+  // Logged in for real from here: deploying needs an account.
+  const deployer = await newAccount(`deployer-${Date.now()}@example.com`);
+  await page.evaluate((t) => localStorage.setItem("cresslet.token", t), deployer.token);
   console.log("preview isolated on", previewOrigin);
   await frame.getByPlaceholder("Add a todo").fill("from studio");
   await frame.getByRole("button", { name: "Add" }).click();
@@ -60,11 +69,7 @@ try {
   console.log("api + sql.js works");
   // First deploy: a generated address, editable; a taken one is refused before anything is built.
   const taken = `taken-${Date.now().toString(36)}`, mine = `mine-${Date.now().toString(36)}`;
-  const owner = await (await fetch(base + "/v1/accounts", {
-    method: "POST",
-    headers: { authorization: `Bearer ${process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin"}`, "content-type": "application/json" },
-    body: JSON.stringify({ email: `taken-${Date.now()}@example.com` }),
-  })).json();
+  const owner = await newAccount(`taken-${Date.now()}@example.com`);
   const made = await fetch(base + "/v1/deploys", {
     method: "POST",
     headers: { authorization: `Bearer ${owner.token}`, "content-type": "application/json" },

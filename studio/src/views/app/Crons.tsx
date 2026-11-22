@@ -97,7 +97,7 @@ function Body({ v: loaded, onChange }: { v: API.Crons; onChange: () => Promise<b
       <p className="muted lead">Each cron calls your server's <code>scheduled(event, env, ctx)</code> export on its schedule, in UTC.
         {" Declare them in cresslet.json, as "}<code>{'"crons": ["*/15 * * * *"]'}</code>{" (at most 5): deploying changes them. "}
         Pausing one skips its scheduled runs until you resume it (a deploy that drops it forgets the pause); Run now still runs it.</p>
-      {!a.claimed ? <p className="muted small">Crons run in claimed apps only: run cresslet claim, or deploy it while logged in.</p>
+      {!a.claimed ? <p className="muted small">Crons don't run in an app without an owner (an anonymous app from before every app needed an account).</p>
         : !canManage(a.access) ? <p className="muted small">Only the owner and admins can pause or run crons.</p> : null}
       <div className="panel">
         <div className="panel-head"><h2 id="crons-title" tabIndex={-1}>Schedules</h2>
@@ -114,7 +114,7 @@ function Body({ v: loaded, onChange }: { v: API.Crons; onChange: () => Promise<b
                 </td>
                 <td className="wrap">
                   {x.paused ? <span className="muted">Paused</span>
-                    : !a.claimed ? <span className="muted">Not while unclaimed</span>
+                    : !a.claimed ? <span className="muted">Not without an owner</span>
                     : x.next[0] ? <><time dateTime={x.next[0]} title={new Date(x.next[0]).toLocaleString()}>{ago(x.next[0])}</time>
                       <span className="sub">{at(x.next[0])}{x.next[1] ? `, then ${at(x.next[1])}` : ""}</span></>
                     : <span className="muted">Never (no such date)</span>}

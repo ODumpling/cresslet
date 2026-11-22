@@ -26,9 +26,7 @@ export function Landing() {
   // This server's own app domain, and what visitors can do without an account.
   const url = m.appUrlTemplate ? m.appUrlTemplate.replace("{name}", "my-app") : "https://my-app.cresslet.dev";
   const host = url.replace(/^https?:\/\//, "");
-  const hours = Math.round((m.limits?.anonTtlMs ?? 0) / 3600_000);
   const note = m.auth?.github ? "Free and open source. Log in with GitHub to start building."
-    : m.anonDeploys ? `Free and open source. No account needed: apps deployed without one last ${hours} hours.`
     : m.auth ? "Free and open source. Try it without an account." : "Free and open source. No account needed to try it.";
   const ctaNote = m.auth?.github ? "Free and open source. Log in with GitHub to start building." : "Free and open source. Start in the browser, no account needed.";
 
@@ -128,7 +126,7 @@ export function Landing() {
           <ul className="features">
             {([
               ["window", "Runs in your browser", <>npm, a dev server and hot reload run in the tab on Cresslet's own runtime. No VM, no install.</>],
-              ["rocket", "Live in a second", <>Deploys go live on their own subdomain in under a second. Your last 10 stay a rollback away.</>],
+              ["rocket", "Live in a second", <>Deploys go live on their own subdomain in under a second. Your last 5 stay a rollback away.</>],
               ["database", "Database and files built in", <>Each app gets a SQLite database, file storage and secrets. No services to set up.</>],
               ["shield", "Every app in its own sandbox", <>Apps run isolated from each other, with memory, request and network limits.</>],
               ["bot", "Made for agents", <>Templates ship <code>AGENTS.md</code>, every CLI command speaks <code>--json</code>, and the server serves <code>/llms.txt</code>.</>],

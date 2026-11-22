@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
+import { makeLegacyAnonymous } from "./owner.ts";
 
 test("custom domains: DNS-verified, first verifier wins, routed, TLS ask endpoint", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-dom-"));
@@ -188,8 +189,9 @@ test("CRESSLET_CUSTOM_DOMAINS=false: adding and verifying refused, reported in G
       assert.equal(r.status, 403);
       assert.notEqual(JSON.parse(r.text).error, "custom_domains_disabled", r.text);
     }
-    // An unclaimed app's owner hears that domains are off, not that claiming would help.
-    const anon = JSON.parse((await on.json("/v1/deploys", { method: "POST", body: JSON.stringify({ files: [{ path: "index.html", data: "anon" }] }) })).text);
+    // An app without an owner (anonymous, from before every app needed one): its deploy key hears that domains are off.
+    const anon = JSON.parse((await on.json("/v1/deploys", { method: "POST", headers: alice, body: JSON.stringify({ files: [{ path: "index.html", data: "anon" }] }) })).text);
+    await makeLegacyAnonymous(on.srv.store, anon.app.id);
     const r = await on.json(`/v1/apps/${anon.app.name}/domains`, { method: "POST", headers: { "x-cresslet-deploy-key": anon.deployKey }, body: '{"domain":"new.example.com"}' });
     assert.equal(JSON.parse(r.text).error, "custom_domains_disabled", r.text);
     // Listing and removing still work, and the domain verified earlier still routes.

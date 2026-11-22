@@ -77,17 +77,15 @@ test("site admins: list accounts, invite, withdraw, disable and enable, roles", 
     assert.equal((await t.send("PATCH", `/v1/admin/accounts/${dev.id}`, boss.token, { disabled: "yes" })).status, 400);
 
     // Disable: tokens, private page sessions, deploys by its personal apps' deploy key, login by email all stop.
-    const anon = await t.deploy("", "anon", {});
-    assert.equal(anon.status, 201);
-    const claimed = await t.json("/v1/apps/anon/claim", { method: "POST", headers: t.bearer(dev.token), body: JSON.stringify({ deployKey: anon.body.deployKey }) });
-    assert.equal(claimed.status, 200);
+    const keyed = await t.deploy(dev.token, "keyed");
+    assert.equal(keyed.status, 201);
     const dis = await t.send("PATCH", `/v1/admin/accounts/${dev.id}`, boss.token, { disabled: true });
     assert.equal(dis.status, 200);
     assert.equal(dis.body.account.status, "disabled");
     assert.equal(dis.body.account.email, "dev@b.co");
     assert.equal((await t.send("GET", "/v1/me", dev.token)).status, 401);
     assert.equal((await t.visit(page.name, "/", cookie)).status, 302);
-    assert.equal((await t.deploy("", "anon", { "x-cresslet-deploy-key": anon.body.deployKey })).status, 403);
+    assert.equal((await t.deploy("", "keyed", { "x-cresslet-deploy-key": keyed.body.deployKey })).status, 403);
     assert.equal((await t.json("/", { host: "shop.test.local" })).status, 200, "its sites keep serving");
     // Its sign-in identity is moved aside: a server from before disabling (after a rollback) can't find it.
     const stored = (await t.srv.store.accountById(dev.id))!;
@@ -109,7 +107,7 @@ test("site admins: list accounts, invite, withdraw, disable and enable, roles", 
     assert.equal(en.body.account.status, "active");
     const again = await t.account("dev@b.co");
     assert.equal(again.id, dev.id);
-    assert.deepEqual((await t.send("GET", "/v1/apps", again.token)).body.apps.map((a: { name: string }) => a.name).sort(), ["anon", "shop"]);
+    assert.deepEqual((await t.send("GET", "/v1/apps", again.token)).body.apps.map((a: { name: string }) => a.name).sort(), ["keyed", "shop"]);
 
     // Roles by id: grant, remove; not your own.
     assert.equal((await t.send("PATCH", `/v1/admin/accounts/${dev.id}`, boss.token, { siteAdmin: true })).body.account.siteAdmin, true);

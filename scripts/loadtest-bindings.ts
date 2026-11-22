@@ -4,7 +4,7 @@
 //                                     [--scenarios idle,noop,db,files,scan,mixed] [--json out.json]
 //
 // Starts a real server (`node server/main.ts`, temp data dir) with a preload that reports its main
-// thread's event-loop delay, deploys `--apps` anonymous apps, then for each scenario runs closed-loop
+// thread's event-loop delay, deploys `--apps` apps (as a site admin: no quotas), then for each scenario runs closed-loop
 // app traffic from a separate process while this process probes the control plane open-loop (a
 // request every 10 ms on a fixed schedule, latency counted from the scheduled time, so a stalled
 // server can't hide its stall by delaying the probes). Probes: GET /healthz (just the event loop)
@@ -199,8 +199,8 @@ const srv = spawn(process.execPath, ["--import", join(ROOT, "scripts/loadtest-el
     CRESSLET_DATA_DIR: dataDir,
     CRESSLET_SOCK_DIR: sockDir,
     CRESSLET_DOMAIN: DOMAIN,
-    CRESSLET_ANON_APPS_PER_HOUR: "10000",
-    CRESSLET_MAX_ANON_APPS_PER_IP: "10000", // every app comes from loopback
+    CRESSLET_ADMIN_TOKEN: "load-admin",
+    CRESSLET_SITE_ADMINS: "load@test.local", // exempt from the app quota and the hourly creates limit
     CRESSLET_DEPLOYS_PER_HOUR: "10000",
     CRESSLET_IDLE_MS: String(3600_000),
   },
@@ -224,11 +224,18 @@ try {
     if (i > 200) throw new Error("server didn't start");
     await new Promise((r) => setTimeout(r, 50));
   }
+  const acct = await call(port, "/v1/accounts", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer load-admin" },
+    body: JSON.stringify({ email: "load@test.local" }),
+  });
+  if (acct.status !== 201) throw new Error(`account: ${acct.status} ${acct.text}`);
+  const auth = { authorization: `Bearer ${JSON.parse(acct.text).token}` };
   const apps: { name: string; host: string; key: string }[] = [];
   for (let i = 0; i < nApps; i++) {
     const r = await call(port, "/v1/deploys", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...auth },
       body: JSON.stringify({ files: [{ path: "index.html", data: "hi" }], server: APP }),
     });
     if (r.status !== 201) throw new Error(`deploy: ${r.status} ${r.text}`);

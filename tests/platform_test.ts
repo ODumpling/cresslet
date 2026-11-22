@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { type Config, loadConfig } from "../server/config.ts";
 import "./studio-imports.ts"; // studio modules' ./x.js imports → x.ts
+import { makeLegacyAnonymous, ownerAuth } from "./owner.ts";
 
 const SERVER = `
 export default {
@@ -59,6 +60,8 @@ async function setup(overrides: Partial<Config> = {}) {
     srv,
     call,
     json,
+    /** An account's token: every app has an owner. */
+    auth: await ownerAuth(srv.store),
     async dispose() {
       await srv.close();
       await rm(dataDir, { recursive: true, force: true });
@@ -93,13 +96,22 @@ const deployBody = (extra: Record<string, unknown> = {}) =>
     ...extra,
   });
 
-test("anonymous deploy, static + server routes, sandbox limits, claim, secrets, rollback", withServer(async (t) => {
-  const d = await t.json("/v1/deploys", { method: "POST", body: deployBody() });
+test("deploy, static + server routes, sandbox limits, an app without an owner, secrets, rollback", withServer(async (t) => {
+  const acct = await t.json("/v1/accounts", {
+    method: "POST",
+    headers: { authorization: "Bearer adm" },
+    body: '{"email":"a@b.co"}',
+  });
+  const auth = { authorization: `Bearer ${acct.body.token}` };
+  const d = await t.json("/v1/deploys", { method: "POST", headers: auth, body: deployBody() });
   assert.deepEqual(d.status, 201);
   const { app, deployKey } = d.body;
   assert.match(app.name, /^[a-z]+-[a-z]+-[0-9a-f]{4}$/);
-  assert.deepEqual(app.claimed, false);
-  assert.ok(app.expiresAt);
+  assert.deepEqual(app.claimed, true);
+  assert.deepEqual(app.expiresAt, null);
+  // An anonymous app from before every app needed an account (still on old instances until it expires).
+  const owner = (await t.srv.store.appById(app.id))!.account_id;
+  await makeLegacyAnonymous(t.srv.store, app.id);
   const host = `${app.name}.test.local`;
 
   // static
@@ -118,7 +130,7 @@ test("anonymous deploy, static + server routes, sandbox limits, claim, secrets, 
   assert.deepEqual((await t.json("/api/count", { host })).body.n, 2);
   assert.deepEqual(await (await t.call("/api/files", { host })).text(), "hello");
 
-  // sandbox: unclaimed → no outbound net, no host fs
+  // sandbox: no owner → no outbound net, no host fs
   const probe = (await t.json("/api/probe", { host })).body;
   assert.notEqual(probe.net, "ok");
   assert.notEqual(probe.local, "ok");
@@ -140,23 +152,14 @@ test("anonymous deploy, static + server routes, sandbox limits, claim, secrets, 
   const redeployNoKey = await t.json("/v1/deploys", { method: "POST", body: deployBody({ app: app.name }) });
   assert.deepEqual(redeployNoKey.status, 401);
 
-  // secrets need claim
+  // secrets need an owner
   const s1 = await t.json(`/v1/apps/${app.name}/secrets`, { method: "PUT", headers: keyH, body: '{"FOO":"bar"}' });
   assert.deepEqual(s1.status, 403);
+  assert.equal((await t.json(`/v1/apps/${app.name}/claim`, { method: "POST", headers: auth, body: JSON.stringify({ deployKey }) })).status, 404, "no claiming");
 
-  const acct = await t.json("/v1/accounts", {
-    method: "POST",
-    headers: { authorization: "Bearer adm" },
-    body: '{"email":"a@b.co"}',
-  });
-  const auth = { authorization: `Bearer ${acct.body.token}` };
-  const claim = await t.json(`/v1/apps/${app.name}/claim`, {
-    method: "POST",
-    headers: auth,
-    body: JSON.stringify({ deployKey }),
-  });
-  assert.deepEqual(claim.body.app.claimed, true);
-  assert.deepEqual(claim.body.app.expiresAt, null);
+  // Owned again: secrets and the public internet.
+  await t.srv.store.db.run("UPDATE apps SET account_id = ?, expires_at = NULL WHERE id = ?", owner, app.id);
+  t.srv.runtime.stop(app.id);
   const s2 = await t.json(`/v1/apps/${app.name}/secrets`, { method: "PUT", headers: auth, body: '{"FOO":"bar"}' });
   assert.deepEqual(s2.body.keys, ["FOO"]);
   const before = t.srv.runtime.logs.recent(app.id, 1000).length;
@@ -165,7 +168,7 @@ test("anonymous deploy, static + server routes, sandbox limits, claim, secrets, 
   assert.equal(probe2.fs, "blocked");
   assert.notEqual(probe2.local, "ok"); // public internet only: no loopback/LAN
   const logs2 = t.srv.runtime.logs.recent(app.id, 1000).slice(before).map((l) => l.msg).join("\n");
-  assert.ok(!denied(logs2, "example.com:443"), `claimed app should have net:\n${logs2}`);
+  assert.ok(!denied(logs2, "example.com:443"), `an owned app should have net:\n${logs2}`);
   assert.ok(denied(logs2, "127.0.0.1:9"), logs2);
 
   // redeploy (static only) then rollback
@@ -206,6 +209,7 @@ test("anonymous deploy, static + server routes, sandbox limits, claim, secrets, 
 test("routes: `!pattern` exclusions are served statically (SSR apps: everything but built assets)", withServer(async (t) => {
   const d = await t.json("/v1/deploys", {
     method: "POST",
+    headers: t.auth,
     body: deployBody({
       server: `export default { fetch: (req) => new Response("ssr " + new URL(req.url).pathname) };`,
       config: { routes: ["/*", "!/assets/*", "!/about.html"] },
@@ -219,19 +223,23 @@ test("routes: `!pattern` exclusions are served statically (SSR apps: everything 
   assert.deepEqual(await (await t.call("/about.html", { host })).text(), "about");
   const missing = await t.call("/assets/nope.js", { host }); // excluded: a static 404, not the server
   assert.deepEqual([missing.status, (await missing.text()).startsWith("ssr")], [404, false]);
-  assert.deepEqual((await t.json("/v1/deploys", { method: "POST", body: deployBody({ config: { routes: ["!assets"] } }) })).status, 400);
+  assert.deepEqual((await t.json("/v1/deploys", { method: "POST", headers: t.auth, body: deployBody({ config: { routes: ["!assets"] } }) })).status, 400);
 }));
 
 test("deploy validation", withServer(async (t) => {
-  const bad = async (body: unknown) => (await t.json("/v1/deploys", { method: "POST", body: JSON.stringify(body) })).status;
+  const send = async (body: unknown, headers: Record<string, string> = {}) =>
+    (await t.json("/v1/deploys", { method: "POST", headers, body: JSON.stringify(body) })).status;
+  const bad = (body: unknown) => send(body, t.auth);
   assert.deepEqual(await bad({ files: [{ path: "../x", data: "" }] }), 400);
   assert.deepEqual(await bad({ files: [{ path: "a", data: "" }, { path: "./a", data: "" }] }), 400);
   assert.deepEqual(await bad({ app: "Bad_Name", files: [] }), 400);
   assert.deepEqual(await bad({ app: "api", files: [] }), 400);
   assert.deepEqual(await bad({ files: [], config: { routes: ["nope"] } }), 400);
-  // named anonymous deploy works and the name is then taken
+  // No account, no new app (named or not); a named deploy then takes the name
+  assert.equal(await send({ files: [{ path: "index.html", data: "x" }] }), 401);
+  assert.equal(await send({ app: "my-app", files: [{ path: "index.html", data: "x" }] }), 401);
   assert.deepEqual(await bad({ app: "my-app", files: [{ path: "index.html", data: "x" }] }), 201);
-  assert.equal(await bad({ app: "my-app", files: [] }), 401);
+  assert.equal(await send({ app: "my-app", files: [] }), 401);
 }));
 
 test("templates are served", withServer(async (t) => {
@@ -285,7 +293,7 @@ test("studio is cross-origin isolated", withServer(async (t) => {
   assert.match(await llms.text(), /POST \/v1\/deploys/);
 }));
 
-test("closed instance: no anonymous deploys, admin-only accounts", withServer(async (t) => {
+test("closed instance: admin-only accounts; no deploys without one", withServer(async (t) => {
   const files = [{ path: "index.html", data: "x" }];
   const anon = await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ files }) });
   assert.equal(anon.status, 401);
@@ -310,7 +318,7 @@ test("closed instance: no anonymous deploys, admin-only accounts", withServer(as
   });
   assert.equal(d.status, 201);
   assert.equal(d.body.app.claimed, true);
-}, { openSignup: false, anonDeploys: false, adminToken: "s3cret-admin" }));
+}, { openSignup: false, adminToken: "s3cret-admin" }));
 
 test("preview host serves only the container's relay + service worker, framable by the studio only", withServer(async (t) => {
   const info = await t.json("/v1");
@@ -331,7 +339,7 @@ test("preview host serves only the container's relay + service worker, framable 
     assert.equal(r.status, 404, p);
   }
   // "preview" can't be an app name.
-  const d = await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ app: "preview", files: [] }) });
+  const d = await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ app: "preview", files: [] }), headers: t.auth });
   assert.equal(d.status, 400);
   // The old studio-origin worker is replaced by one that unregisters itself.
   const sw2 = await t.call("/cresslet-sw.js");
@@ -346,7 +354,7 @@ test("preview host serves only the container's relay + service worker, framable 
 
 test("a configured preview host is normalized and its name reserved", withServer(async (t) => {
   assert.equal(t.srv.cfg.previewHost, "sandbox.test.local");
-  const d = await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ app: "sandbox", files: [] }) });
+  const d = await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ app: "sandbox", files: [] }), headers: t.auth });
   assert.equal(d.status, 400);
   const sw = await t.call("/cresslet-sw.js", { host: "SANDBOX.test.local." });
   await sw.body?.cancel();
@@ -371,6 +379,7 @@ test("the studio's dotenv filter matches the server's", async () => {
 test("deploys can carry project source; local secrets and build output are never stored", withServer(async (t) => {
   const d = await t.json("/v1/deploys", {
     method: "POST",
+    headers: t.auth,
     body: JSON.stringify({
       files: [{ path: "index.html", data: "built" }],
       sources: [
@@ -405,7 +414,7 @@ test("deploys can carry project source; local secrets and build output are never
   });
   assert.equal(d.status, 201);
   const keyH = { "x-cresslet-deploy-key": d.body.deployKey };
-  assert.equal((await t.json(`/v1/apps/${d.body.app.name}/source`)).status, 401);
+  assert.equal((await t.json(`/v1/apps/${d.body.app.name}/source`)).status, 403); // an owned app: 403 without auth
   const src = await t.json(`/v1/apps/${d.body.app.name}/source`, { headers: keyH });
   assert.equal(src.body.deployId, d.body.app.currentDeployId);
   const byPath = Object.fromEntries(src.body.files.map((f: { path: string }) => [f.path, f]));
@@ -436,5 +445,5 @@ test("deploys can carry project source; local secrets and build output are never
   assert.equal(conflict.status, 400);
   const deploysDir = join(t.srv.cfg.dataDir, "apps", d.body.app.id, "deploys");
   assert.equal((await readdir(deploysDir)).length, 3);
-  assert.equal((await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ files: [], sources: [{ path: "../x", data: "" }] }) })).status, 400);
+  assert.equal((await t.json("/v1/deploys", { method: "POST", headers: t.auth, body: JSON.stringify({ files: [], sources: [{ path: "../x", data: "" }] }) })).status, 400);
 }));

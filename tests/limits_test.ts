@@ -42,7 +42,7 @@ async function setup(limits: Partial<Config["limits"]>, extra: Partial<Config> =
   return { srv, json, bearer, account, deploy, done, stop, dataDir, store: srv.store };
 }
 
-test("app quota per account: new apps and claims stop at the limit; site admins are exempt", async () => {
+test("app quota per account: new apps stop at the limit; site admins are exempt", async () => {
   const t = await setup({ maxAppsPerAccount: 2 });
   try {
     const a = t.bearer(await t.account("a@b.co"));
@@ -53,39 +53,11 @@ test("app quota per account: new apps and claims stop at the limit; site admins 
     assert.equal(over.body.error, "quota");
     assert.equal((await t.deploy(a, "one")).status, 201, "redeploying an existing app is fine");
 
-    const anon = await t.deploy({}, "stray");
-    assert.equal(anon.status, 201);
-    const claim = await t.json("/v1/apps/stray/claim", { method: "POST", headers: a, body: JSON.stringify({ deployKey: anon.body.deployKey }) });
-    assert.equal(claim.status, 403);
-    assert.equal(claim.body.error, "quota");
-
     assert.equal((await t.json("/v1/apps/two", { method: "DELETE", headers: a })).status, 200);
     assert.equal((await t.deploy(a, "three")).status, 201, "room again after a delete");
 
     const boss = t.bearer(await t.account("boss@b.co"));
     for (const n of ["b1", "b2", "b3"]) assert.equal((await t.deploy(boss, n)).status, 201);
-  } finally {
-    await t.done();
-  }
-});
-
-test("anonymous apps: per client IP per hour, and a cap on the whole instance", async () => {
-  const t = await setup({ anonAppsPerHour: 2, maxAnonApps: 3 }, { clientIpHeader: "cf-connecting-ip" });
-  try {
-    const ip = (x: string) => ({ "cf-connecting-ip": x });
-    assert.equal((await t.deploy(ip("1.1.1.1"))).status, 201);
-    assert.equal((await t.deploy(ip("1.1.1.1"))).status, 201);
-    const limited = await t.deploy(ip("1.1.1.1"));
-    assert.equal(limited.status, 429);
-    assert.equal(limited.body.error, "rate_limited");
-    assert.equal((await t.deploy(ip("1.1.1.1"), "Bad Name")).status, 400, "invalid requests don't reach the limiter");
-    assert.equal((await t.deploy(ip("2.2.2.2"))).status, 201, "another address has its own allowance");
-    const full = await t.deploy(ip("3.3.3.3"));
-    assert.equal(full.status, 429, "instance-wide cap");
-    assert.match(full.body.message, /log in/);
-
-    const a = t.bearer(await t.account("a@b.co"));
-    assert.equal((await t.deploy(a, "mine")).status, 201, "accounts aren't held back by the anonymous cap");
   } finally {
     await t.done();
   }
@@ -172,61 +144,24 @@ test("two first deploys of one name: the loser gets 409 and keeps its hourly all
 });
 
 test("hourly limits survive a restart", async () => {
-  const t = await setup({ createsPerHour: 1, anonAppsPerHour: 1 }, { clientIpHeader: "cf-connecting-ip" });
+  const t = await setup({ createsPerHour: 1 });
   let tok: string;
   try {
     tok = await t.account("a@b.co");
-    assert.equal((await t.deploy(t.bearer(tok), "one")).status, 201);
-    const anon = await t.deploy({ "cf-connecting-ip": "1.1.1.1" });
-    assert.equal(anon.status, 201);
-    assert.equal((await t.json(`/v1/apps/${anon.body.app.name}`, { method: "DELETE", headers: { "x-cresslet-deploy-key": anon.body.deployKey } })).status, 200);
+    const one = await t.deploy(t.bearer(tok), "one");
+    assert.equal(one.status, 201);
+    assert.equal((await t.json("/v1/apps/one", { method: "DELETE", headers: t.bearer(tok) })).status, 200);
     t.stop();
   } catch (e) {
     await t.done();
     throw e;
   }
-  const again = await setup({ createsPerHour: 1, anonAppsPerHour: 1 }, { clientIpHeader: "cf-connecting-ip" }, t.dataDir);
+  const again = await setup({ createsPerHour: 1 }, {}, t.dataDir);
   try {
-    assert.equal((await again.deploy(again.bearer(tok), "two")).status, 429);
-    assert.equal((await again.deploy({ "cf-connecting-ip": "1.1.1.1" })).status, 429);
-    assert.equal((await again.deploy({ "cf-connecting-ip": "2.2.2.2" })).status, 201);
+    assert.equal((await again.deploy(again.bearer(tok), "two")).status, 429, "deleting didn't give the allowance back, nor did the restart");
+    assert.equal((await again.deploy(again.bearer(await again.account("b@b.co")), "three")).status, 201, "another account has its own");
   } finally {
     await again.done();
-  }
-});
-
-test("anonymous pool under saturation: live apps per client IP (IPv6 by /64), freed by delete or claim", async () => {
-  const t = await setup({ anonAppsPerHour: 100, maxAnonAppsPerIp: 2, maxAnonApps: 5 }, { clientIpHeader: "cf-connecting-ip" });
-  try {
-    const ip = (x: string) => ({ "cf-connecting-ip": x });
-    const mine = [await t.deploy(ip("1.1.1.1")), await t.deploy(ip("1.1.1.1"))];
-    for (const r of mine) assert.equal(r.status, 201);
-    const held = await t.deploy(ip("1.1.1.1"));
-    assert.equal(held.status, 429, "one address can't take the whole pool");
-    assert.match(held.body.message, /live anonymous apps from your address \(2\)/);
-
-    assert.equal((await t.deploy(ip("2001:db8:1:2::1"))).status, 201);
-    assert.equal((await t.deploy(ip("2001:db8:1:2:ffff::9"))).status, 201);
-    assert.equal((await t.deploy(ip("2001:db8:1:2::abcd"))).status, 429, "the same IPv6 /64 is one client");
-
-    const third = await t.deploy(ip("3.3.3.3"));
-    assert.equal(third.status, 201, "pool: 5 of 5");
-    const full = await t.deploy(ip("4.4.4.4"));
-    assert.equal(full.status, 429, "a full pool still turns new clients away");
-    assert.match(full.body.message, /too many anonymous apps on this server/);
-
-    const del = await t.json(`/v1/apps/${third.body.app.name}`, { method: "DELETE", headers: { "x-cresslet-deploy-key": third.body.deployKey } });
-    assert.equal(del.status, 200);
-    assert.equal((await t.deploy(ip("4.4.4.4"))).status, 201, "a delete frees a slot");
-
-    // 1.1.1.1 is still at its cap (2 live): a claim takes one off it, and off the pool.
-    const a = t.bearer(await t.account("a@b.co"));
-    const claim = await t.json(`/v1/apps/${mine[1].body.app.name}/claim`, { method: "POST", headers: a, body: JSON.stringify({ deployKey: mine[1].body.deployKey }) });
-    assert.equal(claim.status, 200);
-    assert.equal((await t.deploy(ip("1.1.1.1"))).status, 201, "a claim frees the address's live slot and a pool slot");
-    assert.equal((await t.deploy(ip("1.1.1.1"))).status, 429, "pool full again");
-  } finally {
-    await t.done();
   }
 });
 
@@ -335,13 +270,11 @@ test("storage caps apply to a running app's env.db and env.files", async () => {
 });
 
 test("quotas hold under concurrent requests", async () => {
-  const t = await setup({ maxAppsPerAccount: 2, maxAnonApps: 2, anonAppsPerHour: 100 });
+  const t = await setup({ maxAppsPerAccount: 2 });
   try {
     const a = t.bearer(await t.account("a@b.co"));
     const mine = await Promise.all(["c1", "c2", "c3", "c4"].map((n) => t.deploy(a, n)));
     assert.equal(mine.filter((r) => r.status === 201).length, 2, "account quota");
-    const anon = await Promise.all([1, 2, 3, 4].map(() => t.deploy({})));
-    assert.equal(anon.filter((r) => r.status === 201).length, 2, "instance-wide anonymous cap");
   } finally {
     await t.done();
   }
@@ -589,23 +522,7 @@ test("JSON request body caps: config validation, default tiers, Content-Length p
     assert.equal(overSecretRes.status, 413);
     assert.equal(overSecretRes.body.error, "body_too_large");
 
-    // 5. Optional-body metadata endpoints (/claim and /pages/:name/view) must not swallow 413.
-    const anon = await t.deploy({}, "unclaimed");
-    assert.equal(anon.status, 201);
-    const bigClaim = await t.json("/v1/apps/unclaimed/claim", {
-      method: "POST",
-      headers: { ...auth, "x-cresslet-deploy-key": anon.body.deployKey },
-      body: JSON.stringify({ deployKey: "x".repeat(jsonCap) }),
-    });
-    assert.equal(bigClaim.status, 413);
-    assert.equal(bigClaim.body.error, "body_too_large");
-    // Empty body on /claim still succeeds using header key.
-    assert.equal((await t.json("/v1/apps/unclaimed/claim", {
-      method: "POST",
-      headers: { ...auth, "x-cresslet-deploy-key": anon.body.deployKey },
-    })).status, 200);
-
-    // 6. Deploy/page tier: exact deployCap passes, deployCap + 1 returns 413.
+    // 5. Deploy/page tier: exact deployCap passes, deployCap + 1 returns 413.
     const dPrefix = '{"app":"demo","files":[{"path":"index.html","data":"';
     const dSuffix = '"}]}';
     const exactDeploy = dPrefix + "a".repeat(deployCap - dPrefix.length - dSuffix.length) + dSuffix;
@@ -684,8 +601,8 @@ test("JSON request body caps: config validation, default tiers, Content-Length p
   }
 });
 
-test("closed instance rejects unauthenticated POST /v1/deploys before reading body", async () => {
-  const t = await setup({ deployBodyBytes: 2048 }, { anonDeploys: false });
+test("unauthenticated POST /v1/deploys is rejected before reading the body", async () => {
+  const t = await setup({ deployBodyBytes: 2048 });
   try {
     const unread = trackedStream(512, 10);
     const res = await t.srv.handler(new Request("http://test.local/v1/deploys", {
@@ -695,7 +612,7 @@ test("closed instance rejects unauthenticated POST /v1/deploys before reading bo
       duplex: "half",
     } as RequestInit));
     assert.equal(res.status, 401);
-    assert.equal(unread.stats().pulled, 0, "must not read body before 401 on closed instance");
+    assert.equal(unread.stats().pulled, 0, "must not read body before 401");
   } finally {
     await t.done();
   }

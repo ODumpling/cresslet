@@ -59,7 +59,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
   scheduler.start();
 
   /**
-   * Purges expired anonymous apps and pages past their retention, and sites a site admin deleted longer
+   * Purges expired apps (pages past their retention, and anonymous apps from before they were removed), and sites a site admin deleted longer
    * ago than the retention period (owned here), and pages' old versions.
    */
   async function reap() {

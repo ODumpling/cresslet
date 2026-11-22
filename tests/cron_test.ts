@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
 import { cronMatches, CronRuns, nextRuns, normalizeCrons, parseCron, Scheduler, upcoming } from "../server/cron.ts";
+import { makeLegacyAnonymous } from "./owner.ts";
 
 const at = (iso: string) => new Date(iso);
 const matches = (expr: string, iso: string) => cronMatches(parseCron(expr), at(iso));
@@ -112,7 +113,7 @@ export default {
   },
 };`;
 
-test("crons run the scheduled() export of claimed apps", async () => {
+test("crons run the scheduled() export of apps with an owner", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-cron-"));
   const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80, adminToken: "adm" }));
   const call = (path: string, init: RequestInit & { host?: string } = {}) => {
@@ -123,26 +124,24 @@ test("crons run the scheduled() export of claimed apps", async () => {
   };
   srv.scheduler.stop(); // the test drives ticks itself
   try {
+    const acct = await (await call("/v1/accounts", { method: "POST", headers: { authorization: "Bearer adm" }, body: '{"email":"a@b.co"}' })).json();
     const deploy = (extra: Record<string, unknown>) =>
-      call("/v1/deploys", { method: "POST", body: JSON.stringify({ files: [{ path: "index.html", data: "x" }], ...extra }) });
+      call("/v1/deploys", { method: "POST", headers: { authorization: `Bearer ${acct.token}` }, body: JSON.stringify({ files: [{ path: "index.html", data: "x" }], ...extra }) });
     assert.equal((await deploy({ server: SERVER, config: { crons: ["nope"] } })).status, 400);
     assert.equal((await deploy({ config: { crons: ["* * * * *"] } })).status, 400); // no server
     const d = await (await deploy({ server: SERVER, config: { crons: ["*/5 * * * *", "0 3 * * *"] } })).json();
     const host = `${d.app.name}.test.local`;
     const runs = async () => (await call("/api/runs", { host })).json();
 
-    // Unclaimed: not scheduled, and no Run now.
+    // Without an owner (an anonymous app from before every app needed one): not scheduled, and no Run now.
+    const owner = (await srv.store.appById(d.app.id))!.account_id;
+    await makeLegacyAnonymous(srv.store, d.app.id);
     await srv.scheduler.tick(at("2026-11-19T10:05:00Z"));
     assert.deepEqual(await runs(), []);
     const early = await call(`/v1/apps/${d.app.name}/crons/run`, { method: "POST", headers: { "x-cresslet-deploy-key": d.deployKey }, body: '{"cron":"0 3 * * *"}' });
     assert.equal(early.status, 403);
 
-    const acct = await (await call("/v1/accounts", { method: "POST", headers: { authorization: "Bearer adm" }, body: '{"email":"a@b.co"}' })).json();
-    await call(`/v1/apps/${d.app.name}/claim`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${acct.token}` },
-      body: JSON.stringify({ deployKey: d.deployKey }),
-    });
+    await srv.store.db.run("UPDATE apps SET account_id = ?, expires_at = NULL WHERE id = ?", owner, d.app.id);
     await srv.scheduler.tick(at("2026-11-19T10:05:00Z"));
     await srv.scheduler.tick(at("2026-11-19T10:07:00Z")); // nothing due
     await srv.scheduler.tick(at("2026-11-20T03:00:00Z")); // both due

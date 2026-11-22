@@ -12,6 +12,7 @@ import { createEgressProxy, egressAllows, isPublicIp, normalizeEgress, publicLoo
 import { createServer as createHttp, request as httpRequest } from "node:http";
 import { connect as netConnect, createServer as createNetServer, type LookupFunction } from "node:net";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { makeLegacyAnonymous, ownerAuth } from "./owner.ts";
 
 const SERVER = `
 import { connect } from "cloudflare:sockets";
@@ -172,7 +173,7 @@ test("secrets: encrypted at rest, plaintext rows migrated, env key takes over fr
   const dir = await tmp();
   try {
     let store = await Store.open(dir);
-    const { app } = await store.createApp("a", null, null);
+    const { app } = await store.createApp("a", (await store.createAccount("a@b.co")).id);
     await store.setSecret(app.id, "TOKEN", "hunter2");
     // Simulate a database from before encryption: plaintext TEXT rows (one written by an older
     // version after a rollback that happens to look sealed), and a secret deleted back then.
@@ -229,7 +230,7 @@ test("secrets: encrypted at rest, plaintext rows migrated, env key takes over fr
   }
 });
 
-test("claimed app: egress allowlist enforced at the network level; secrets never on disk", async () => {
+test("egress allowlist enforced at the network level; secrets never on disk", async () => {
   const dataDir = await tmp();
   // Left behind by older versions (run dir with plaintext secrets): swept at startup.
   await mkdir(join(dataDir, "apps", "app_old", "run"), { recursive: true });
@@ -309,9 +310,10 @@ test("concurrent requests to an app that crashes on start share one failed start
   const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
   try {
     const req = (path: string, host = "test.local", init: RequestInit = {}) =>
-      srv.handler(new Request(`http://${host}${path}`, { ...init, headers: { host, "content-type": "application/json" } }));
+      srv.handler(new Request(`http://${host}${path}`, { ...init, headers: { host, "content-type": "application/json", ...init.headers } }));
     const d = await (await req("/v1/deploys", "test.local", {
       method: "POST",
+      headers: await ownerAuth(srv.store),
       body: JSON.stringify({ files: [{ path: "index.html", data: "x" }], server: 'throw new Error("boom-at-start"); export default {}' }),
     })).json();
     const host = `${d.app.name}.test.local`;
@@ -327,13 +329,14 @@ test("concurrent requests to an app that crashes on start share one failed start
   }
 });
 
-test("unclaimed apps can't set an egress allowlist", async () => {
+test("apps without an owner (anonymous, from before they were removed) can't set an egress allowlist", async () => {
   const dataDir = await tmp();
   const srv = await createServer(loadConfig({ dataDir, domain: "test.local", publicPort: 80 }));
   try {
     const req = (path: string, init: RequestInit = {}) =>
       srv.handler(new Request(`http://test.local${path}`, { ...init, headers: { host: "test.local", "content-type": "application/json", ...init.headers } }));
-    const d = await (await req("/v1/deploys", { method: "POST", body: JSON.stringify({ files: [{ path: "index.html", data: "x" }] }) })).json();
+    const d = await (await req("/v1/deploys", { method: "POST", headers: await ownerAuth(srv.store), body: JSON.stringify({ files: [{ path: "index.html", data: "x" }] }) })).json();
+    await makeLegacyAnonymous(srv.store, d.app.id);
     const r = await req(`/v1/apps/${d.app.name}/egress`, {
       method: "PUT",
       headers: { "x-cresslet-deploy-key": d.deployKey },
@@ -358,6 +361,7 @@ test("app SQL can't reach other databases (ATTACH / VACUUM INTO)", async () => {
       srv.handler(new Request(`http://${host}${path}`, { ...init, headers: { host, "content-type": "application/json", ...init.headers } }));
     const d = await (await req("/v1/deploys", "test.local", {
       method: "POST",
+      headers: await ownerAuth(srv.store),
       body: JSON.stringify({ files: [{ path: "index.html", data: "x" }], server: SQL }),
     })).json();
     const host = `${d.app.name}.test.local`;

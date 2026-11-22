@@ -9,7 +9,7 @@ import { type Account, type AiAccountRow, type App, ORG_ROLES, orgLock, type Org
 import { credits as toCredits, ledgerEntry, nextPeriod, period, periodStart } from "./credits.ts";
 import type { Runtime } from "./runtime.ts";
 import { inspect } from "./inspect.ts";
-import { HttpError, removeAppFiles } from "./deploys.ts";
+import { HttpError, KEEP_DEPLOYS, removeAppFiles } from "./deploys.ts";
 
 export type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
 
@@ -191,7 +191,7 @@ export function adminRoutes(
     }
     return c.json({
       site: await siteView(a),
-      deploys: (await store.deploys(a.id, 10)).map((d) => ({
+      deploys: (await store.deploys(a.id, KEEP_DEPLOYS)).map((d) => ({
         id: d.id,
         createdAt: iso(d.created_at),
         bytes: d.bytes,
