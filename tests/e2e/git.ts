@@ -5,6 +5,7 @@
 // Needs the studio built (npm run build). Run: cd tests/e2e && node git.ts [outdir]
 import { chromium } from "@playwright/test";
 import { serve } from "@hono/node-server";
+import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +25,7 @@ const dataDir = await mkdtemp(join(tmpdir(), "cresslet-e2e-git-"));
 const defaults = loadConfig({ dataDir });
 const srv = await createServer(loadConfig({
   dataDir, port: PORT, publicPort: PORT, domain: "localhost", adminToken: "adm",
-  git: { ...defaults.git, githubApp: { appId: "1", clientId: "cid", clientSecret: "csecret", slug: "cresslet-e2e" }, webUrl: gh.base, apiUrl: gh.base },
+  git: { ...defaults.git, githubApp: { appId: "1", clientId: "cid", clientSecret: "csecret", slug: "cresslet-e2e" }, webUrl: gh.base, apiUrl: gh.base, webhookSecret: "whsec" },
 }));
 const http = serve({ fetch: srv.handler, port: PORT });
 http.on("upgrade", srv.upgrade);
@@ -37,7 +38,40 @@ const { token } = await call("/v1/accounts", "adm", { email: "octo@example.com" 
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
-await page.addInitScript((t) => localStorage.setItem("cresslet.token", t), token);
+await page.addInitScript((t) => (localStorage.setItem("cresslet.token", t), localStorage.setItem("cresslet.anthropicKey", "sk-ant-e2e")), token);
+
+// Claude, scripted (api.anthropic.com is replaced): resolves the conflict when asked to.
+type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: object };
+function sse(content: Block[], stopReason: string) {
+  const ev = (type: string, data: object) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  let s = ev("message_start", { message: { id: "msg_e2e", type: "message", role: "assistant", model: "claude-opus-5-5", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } } });
+  content.forEach((b, index) => {
+    if (b.type === "text") {
+      s += ev("content_block_start", { index, content_block: { type: "text", text: "" } });
+      s += ev("content_block_delta", { index, delta: { type: "text_delta", text: b.text } });
+    } else {
+      s += ev("content_block_start", { index, content_block: { type: "tool_use", id: b.id, name: b.name, input: {} } });
+      s += ev("content_block_delta", { index, delta: { type: "input_json_delta", partial_json: JSON.stringify(b.input) } });
+    }
+    s += ev("content_block_stop", { index });
+  });
+  return s + ev("message_delta", { delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: 5 } }) + ev("message_stop", {});
+}
+const RESOLVED = "export function App() {\n  return <h1>Both</h1>;\n}\n";
+const replies: [Block[], string][] = [
+  [[{ type: "tool_use", id: "r1", name: "write_file", input: { path: "src/App.tsx", content: RESOLVED } }], "tool_use"],
+  [[{ type: "text", text: "Resolved the conflict." }], "end_turn"],
+];
+const claudeAsked: string[] = [];
+const cors = { "access-control-allow-origin": base, "access-control-allow-headers": "*", "access-control-allow-methods": "POST, OPTIONS" };
+await page.route("https://api.anthropic.com/**", async (route) => {
+  const req = route.request();
+  if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
+  claudeAsked.push(JSON.stringify(req.postDataJSON()?.messages?.at(-1)?.content ?? ""));
+  const r = replies.shift();
+  if (!r) return route.fulfill({ status: 500, headers: cors, body: "{}" });
+  return route.fulfill({ status: 200, headers: { ...cors, "content-type": "text/event-stream" }, body: sse(...r) });
+});
 page.on("dialog", (d) => d.accept());
 const logs: string[] = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
@@ -125,6 +159,55 @@ try {
   if (still.app.currentDeployId !== dep.id) fail("the live deploy changed after a conflict");
   await page.screenshot({ path: `${out}/git-conflict.png` });
   console.log("conflict stopped the deploy");
+
+  // Resolved with the AI builder: main's merge loaded with markers, Claude rewrites the file, the turn commits the
+  // merge (main as a parent), and Deploy fast-forwards main to it.
+  await page.locator("#toast").getByRole("button", { name: "Resolve with the AI builder" }).click();
+  const input = page.getByLabel("Message to Claude");
+  await page.waitForFunction(() => (document.getElementById("builder-input") as HTMLTextAreaElement | null)?.value.includes("<<<<<<<"), null, { timeout: 30000 });
+  if (!(await page.locator(".cm-content").innerText()).includes("<<<<<<< edit/src-app")) fail("markers not in the editor");
+  await input.press("Enter");
+  await page.locator(".msg.assistant", { hasText: "Resolved the conflict." }).waitFor({ timeout: 60000 });
+  await page.locator("#builder-log .notice", { hasText: /^Committed to edit\/src-app/ }).waitFor({ timeout: 30000 });
+  if (!claudeAsked[0]?.includes("Source control: this project is linked")) fail("no source control note to Claude");
+  const resolvedHead = gh.repo(full).refs.get("edit/src-app")!;
+  if (gh.commit(resolvedHead).parents[1] !== gh.repo(full).refs.get("main")) fail("not committed as a merge of main");
+  await page.locator("#deploy-btn").click();
+  await toast("Deployed:", 180000);
+  if (gh.repo(full).refs.get("main") !== resolvedHead) fail("main didn't fast-forward to the resolution");
+  if (gh.files(full)["src/App.tsx"] !== RESOLVED) fail("resolution not on main");
+  await page.screenshot({ path: `${out}/git-resolved.png` });
+  console.log("conflict resolved by the AI builder and deployed");
+
+  // A protected main takes a pull request.
+  gh.repo(full).protected.add("main");
+  await page.locator("#view-code").click();
+  await page.locator('#tree button[data-path="src/App.tsx"]').click();
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.type("// needs review\n");
+  await page.locator("#git-btn-branch", { hasText: "edit/src-app" }).waitFor({ timeout: 30000 });
+  await page.waitForTimeout(1500);
+  await page.locator("#deploy-btn").click();
+  await toast(/Not deployed: main is protected/, 60000);
+  await page.locator("#toast").getByRole("button", { name: "Open a pull request" }).click();
+  await toast(/Pull request #1/, 30000);
+  if (gh.repo(full).pulls.length !== 1 || gh.repo(full).pulls[0].head !== "edit/src-app") fail("no pull request");
+  await page.screenshot({ path: `${out}/git-pull-request.png` });
+  console.log("protected main: pull request opened");
+
+  // A webhook says main moved on GitHub: the branch pill shows it.
+  const upstreamSha = gh.write(gh.repo(full), "main", { "CHANGELOG.md": "x\n" }, "Changelog", "teammate");
+  const payload = JSON.stringify({ ref: "refs/heads/main", after: upstreamSha, repository: { id: gh.repo(full).id } });
+  const hook = await fetch(`${base}/v1/webhooks/github`, {
+    method: "POST", body: payload,
+    headers: { "x-github-event": "push", "x-hub-signature-256": "sha256=" + createHmac("sha256", "whsec").update(payload).digest("hex") },
+  });
+  if (!hook.ok) fail(`webhook ${hook.status}`);
+  await page.reload();
+  await page.locator("#git-btn .git-upstream", { hasText: "main" }).waitFor({ timeout: 180000 });
+  await page.screenshot({ path: `${out}/git-upstream.png` });
+  console.log("webhook: upstream main shown");
 
   // A project never deployed: its address reserved (nothing live), then a repository linked.
   await page.goto(base + "/");

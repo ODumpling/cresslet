@@ -3,7 +3,7 @@
 // this server, as the signed-in user.
 import { type Ref, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type * as API from "../../../api-types.ts";
-import { gitCode, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
+import { gitCode, type GitFile, type GitWorkspace, type ProjectGitState, type PullRequest } from "../../../git.ts";
 import { api, errorMessage, json } from "../../lib/api.ts";
 import { toast } from "../../lib/toast.tsx";
 import { ExtLink, Icon } from "../../ui/icons.tsx";
@@ -18,7 +18,7 @@ export async function connectGithub(returnTo = location.pathname) {
   location.assign(url);
 }
 
-type Load = { me: API.MeGit; status: API.GitStatus | null; repos: API.GitRepo[] | null; linked: API.AppRepo | null; error?: string };
+type Load = { me: API.MeGit; status: API.GitStatus | null; repos: API.GitRepo[] | null; linked: API.AppRepo | null; pull?: PullRequest | null; error?: string };
 
 export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
   ref: Ref<GitDialogHandle>;
@@ -54,12 +54,14 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
     const me = await api<API.MeGit>("/v1/me/git").catch(() => null);
     if (!me) return setLoad({ me: { provider: "github", available: false, kind: null, connected: false, login: null, status: null, installUrl: null }, status: null, repos: null, linked: null });
     let status: API.GitStatus | null = null, repos: API.GitRepo[] | null = null, linked: API.AppRepo | null = null, err: string | undefined;
+    let pull: PullRequest | null | undefined;
     try {
       if (me.connected && me.status === "active" && git?.state && app) {
         try {
           status = await api<API.GitStatus>(`/v1/apps/${encodeURIComponent(app)}/git/status`);
           const st = git.state;
           setBranch(status.branches.some((b) => b.name === st.activeBranch) ? st.activeBranch : status.defaultBranch);
+          if (st.activeBranch !== st.defaultBranch) pull = await git.pullRequest().catch(() => undefined);
         } catch (e) {
           // Unlinked elsewhere (another browser, the CLI): so is this workspace.
           if (gitCode(e) !== "git_not_linked") throw e;
@@ -78,7 +80,7 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
       err = errorMessage(e);
       if (gitCode(e) === "git_reauth_required") me.status = "expired";
     }
-    setLoad({ me, status, repos, linked, error: err });
+    setLoad({ me, status, repos, linked, pull, error: err });
   }
 
   useImperativeHandle(ref, () => ({
@@ -216,6 +218,24 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
                 <p className="muted small">Changes not pushed yet are pushed to {s.activeBranch} first. Deploy merges the branch into {s.defaultBranch}.</p>
               </div>
             ) : null}
+            {s.activeBranch !== s.defaultBranch && load.pull !== undefined ? (
+              <div className="field" id="git-pr">
+                <strong className="small">Pull request</strong>
+                {load.pull ? (
+                  <p><ExtLink href={load.pull.url}>{`#${load.pull.number} ${load.pull.title}`}</ExtLink>
+                    <span className="muted small">{` · review ${load.pull.review.replace("_", " ")} · checks ${load.pull.checks}`}</span></p>
+                ) : (
+                  <div className="row start">
+                    <button className="btn sm" type="button" id="git-open-pr" disabled={!!busy} onClick={() => void run("Opening a pull request…", async () => {
+                      const pr = await git!.openPullRequest();
+                      return `Pull request #${pr.number} opened`;
+                    })}>Open a pull request</button>
+                    <span className="muted small">For a {s.defaultBranch} that needs reviews or checks: merge it on GitHub, then pull {s.defaultBranch} and deploy.</span>
+                  </div>
+                )}
+              </div>
+            ) : null}
+            {s.conflicts?.length ? <p className="muted small" id="git-conflicts">{`Merging ${s.defaultBranch} in: resolve ${s.conflicts.join(", ")} (remove the conflict markers), then push or deploy.`}</p> : null}
             <div className="modal-foot row">
               <button className="btn danger sm" type="button" id="git-unlink" disabled={!!busy} onClick={() => {
                 if (!confirm(`Unlink ${app} from ${s.owner}/${s.repo}? The repository is left as it is.`)) return;

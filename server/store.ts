@@ -133,6 +133,8 @@ export interface AppRepo {
   delete_branch: number;
   connected_by: string | null;
   last_synced_sha: string | null;
+  /** The default branch's head a webhook last reported (migration 5; undefined before it). */
+  upstream_sha?: string | null;
   connected_at: number;
   updated_at: number;
 }
@@ -1130,6 +1132,13 @@ export class Store implements RateHits {
       r.app_id, r.provider, r.repo_id, r.owner, r.name, r.default_branch, r.subdir, r.delete_branch, r.connected_by,
       r.last_synced_sha, now, now,
     );
+  }
+  /** A push to a repository's `branch` (webhook): noted on the apps linked to it with that default branch. */
+  async noteUpstreamPush(repoId: string, branch: string, sha: string): Promise<number> {
+    return (await this.db.run(
+      "UPDATE app_repos SET upstream_sha = ?, updated_at = ? WHERE provider = 'github' AND repo_id = ? AND default_branch = ?",
+      sha, Date.now(), repoId, branch,
+    )).changes;
   }
   async deleteAppRepo(appId: string): Promise<boolean> {
     return (await this.db.run("DELETE FROM app_repos WHERE app_id = ?", appId)).changes > 0;

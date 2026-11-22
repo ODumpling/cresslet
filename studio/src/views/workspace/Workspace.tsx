@@ -156,6 +156,22 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     void meta().then((m) => live && setGitOn(!!m.git?.github));
     return () => void (live = false);
   }, []);
+  // The default branch moved on GitHub (a webhook said: GET /v1/apps/:name `repo.upstreamSha`), checked every minute.
+  const [upstream, setUpstream] = useState<string | null>(null);
+  useEffect(() => {
+    const name = deploy?.name;
+    if (!gitState || !token || !name) return;
+    let live = true;
+    const check = () => void api<API.AppDetail>(`/v1/apps/${encodeURIComponent(name)}`).then((d) => live && setUpstream(d.repo?.upstreamSha ?? null), () => {});
+    check();
+    const t = setInterval(check, 60_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [gitState?.owner, gitState?.repo, token, deploy?.name]);
+  const upstreamMoved = !!gitState && !!upstream && upstream !== gitState.baseSha && upstream !== gitState.headSha;
+
   // Back from connecting GitHub (server/git.ts redirects here with the outcome in the hash): once the project runs,
   // the dialog opens again where it left off.
   useEffect(() => {
@@ -244,6 +260,31 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (focus) document.getElementById(`tab-${t}`)?.focus();
   }
 
+  /** Loads the default branch merged into this one, conflicts marked, and asks the AI builder to resolve them. */
+  async function resolveConflicts() {
+    const g = engine.current?.git;
+    if (!g?.connected) return;
+    try {
+      const paths = await g.resolveConflicts();
+      const s = g.state!;
+      if (!paths.length) return toast(`${s.defaultBranch} merged into ${s.activeBranch} without conflicts: deploy again`, 8000);
+      builder.current?.prefill(`Merging ${s.defaultBranch} into ${s.activeBranch} conflicts in ${paths.join(", ")}. Each of those files holds both versions between <<<<<<< ${s.activeBranch}, ======= and >>>>>>> ${s.defaultBranch} lines. Resolve them: keep what both sides meant, remove the marker lines, and check the dev server builds. Then I'll deploy.`);
+      toast(`Conflicts in ${paths.join(", ")}: resolve them (the AI builder can), then deploy`, 10000);
+    } catch (e) {
+      toast(`Couldn't load the merge: ${errorMessage(e)}`, 10000);
+    }
+  }
+  async function openPullRequest() {
+    const g = engine.current?.git;
+    if (!g?.connected) return;
+    try {
+      const pr = await g.openPullRequest();
+      toast(<span>{`Pull request #${pr.number}: `}<ExtLink href={pr.url}>{pr.title}</ExtLink></span>, 15000);
+    } catch (e) {
+      toast(`Couldn't open a pull request: ${errorMessage(e)}`, 10000);
+    }
+  }
+
   /** A new app's address, reserved with nothing deployed (to link a repository first). */
   async function reserveApp(): Promise<string | null> {
     const name = await dialog.current!.ask({ reserve: true }); // mounted
@@ -288,11 +329,15 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       toast(<span>Deployed: <ExtLink href={r.app.url}>{r.app.url}</ExtLink></span>, 10000);
     } catch (err) {
       setDeployLog((l) => l + `\nerror: ${errorMessage(err)}\n`);
-      // A merge that can't go through (conflict, protected branch): nothing was deployed; a pull request can do it.
-      const compare = (err as { compare?: string }).compare;
-      toast(compare
-        ? <span>{`Not deployed: ${errorMessage(err).split(". ")[0]}. `}<ExtLink href={compare}>Open a pull request</ExtLink></span>
-        : `Deploy failed: ${errorMessage(err)}`, 12000);
+      // A merge that can't go through (conflict, protected branch): nothing was deployed. A conflict can be resolved
+      // here (the AI builder, or by hand); a protected branch takes a pull request.
+      const code = (err as { code?: string }).code;
+      if (code === "merge_conflict" || code === "branch_protected") {
+        toast(<span>{`Not deployed: ${errorMessage(err).split(". ")[0]}. `}
+          {code === "merge_conflict" ? <><button type="button" className="btn sm" onClick={() => void resolveConflicts()}>Resolve with the AI builder</button>{" "}</> : null}
+          <button type="button" className="btn sm" onClick={() => void openPullRequest()}>Open a pull request</button>
+        </span>, 20000);
+      } else toast(`Deploy failed: ${errorMessage(err)}`, 10000);
     } finally {
       setDeploying(false);
     }
@@ -326,6 +371,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             <button className="btn git-pill" id="git-btn" type="button" title={`${gitState.owner}/${gitState.repo}`} onClick={() => gitDialog.current?.open()}>
               <Icon name="branch" /><span id="git-btn-branch">{gitState.activeBranch}</span>
               {gitState.dirty ? <span className="git-dirty" aria-hidden="true" /> : null}
+              {upstreamMoved ? <span className="git-upstream" title={`${gitState.defaultBranch} was updated on GitHub`}>{`↓ ${gitState.defaultBranch}`}</span> : null}
+              {upstreamMoved ? <SrOnly>{` (${gitState.defaultBranch} was updated on GitHub: pull, or deploy to merge it)`}</SrOnly> : null}
               <SrOnly>{gitState.dirty ? " (changes not pushed)" : ""}</SrOnly><span aria-hidden="true">· Sync</span><SrOnly>: source control</SrOnly>
             </button>
           ) : (

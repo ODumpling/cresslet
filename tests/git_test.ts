@@ -1,4 +1,5 @@
 // Source control (server/git.ts) against a fake GitHub (tests/fake_github.ts).
+import { createHmac } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -542,4 +543,97 @@ test("migration 4 re-runs cleanly, and an older server's deploy rows (no git col
   const r = await t.send("GET", "/v1/apps/shop", tok);
   assert.equal(r.body.deploys[0].id, "dep_old");
   assert.equal(r.body.deploys[0].git, null);
+}));
+
+// ---- pull requests, webhooks, conflicts (#104)
+
+async function linkedShop(t: T) {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "pull" });
+  return { tok, linked: linked.body as { sha: string; files: { path: string; data: string }[] } };
+}
+
+test("pull requests: opened once from a branch as the user, with its review and checks", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/a" });
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/a", baseSha: linked.sha, files: [...linked.files, { path: "a", data: "1" }] });
+  assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/pulls?branch=feat/a", tok)).body, { pull: null });
+  const opened = await t.send("POST", "/v1/apps/shop/git/pulls", tok, { branch: "feat/a" });
+  assert.equal(opened.status, 201, JSON.stringify(opened.body));
+  assert.equal(opened.body.pull.number, 1);
+  assert.equal(opened.body.pull.review, "pending");
+  assert.equal(opened.body.pull.checks, "none");
+  assert.equal(t.gh.repo("octo/shop").pulls[0].base, "main");
+  // Asked again: the same one.
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/pulls", tok, { branch: "feat/a" })).status, 200);
+  assert.equal(t.gh.repo("octo/shop").pulls.length, 1);
+  t.gh.repo("octo/shop").pulls[0].reviews.push({ user: { login: "rev" }, state: "APPROVED" });
+  t.gh.check(s.body.sha, "in_progress", null);
+  let p = (await t.send("GET", "/v1/apps/shop/git/pulls?branch=feat/a", tok)).body.pull;
+  assert.deepEqual([p.review, p.checks], ["approved", "pending"]);
+  t.gh.repo("octo/shop").pulls[0].reviews.push({ user: { login: "rev" }, state: "CHANGES_REQUESTED" });
+  t.gh.check(s.body.sha, "completed", "failure");
+  p = (await t.send("GET", "/v1/apps/shop/git/pulls?branch=feat/a", tok)).body.pull;
+  assert.deepEqual([p.review, p.checks], ["changes_requested", "failure"]);
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/pulls", tok, { branch: "main" })).status, 400);
+}));
+
+test("webhooks: signed pushes to a linked repository's default branch are noted; anything else isn't", withServer(async (t) => {
+  const { tok } = await linkedShop(t);
+  const repo = t.gh.repo("octo/shop");
+  const hook = (payload: unknown, secret = "whsec", event = "push") => {
+    const raw = JSON.stringify(payload);
+    const sig = "sha256=" + createHmac("sha256", secret).update(raw).digest("hex");
+    return t.call("/v1/webhooks/github", { method: "POST", headers: { "x-hub-signature-256": sig, "x-github-event": event }, body: raw });
+  };
+  const after = "f".repeat(40);
+  assert.equal((await hook({ ref: "refs/heads/main", after, repository: { id: repo.id } }, "wrong")).status, 401);
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.repo.upstreamSha, null);
+  assert.equal((await hook({ zen: "hi" }, "whsec", "ping")).status, 200);
+  const other = await hook({ ref: "refs/heads/feat/x", after, repository: { id: repo.id } });
+  assert.equal((await other.json()).apps, 0); // not the default branch
+  const ok = await hook({ ref: "refs/heads/main", after, repository: { id: repo.id } });
+  assert.deepEqual(await ok.json(), { ok: true, apps: 1 });
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.repo.upstreamSha, after);
+}, { webhookSecret: "whsec" }));
+
+test("webhooks off: 404", withServer(async (t) => {
+  assert.equal((await t.call("/v1/webhooks/github", { method: "POST", body: "{}" })).status, 404);
+}));
+
+test("conflicts: main merged into the branch with markers; resolved and committed with main as a parent, the deploy merge fast-forwards", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const base = [...linked.files, { path: "app.txt", data: "hello\n" }, { path: "keep.txt", data: "k\n" }];
+  const m0 = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "main", baseSha: linked.sha, files: base });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/c" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/c", baseSha: m0.body.sha, files: base.map((f) => (f.path === "app.txt" ? { ...f, data: "hello from the branch\n" } : f)).concat([{ path: "new.txt", data: "n\n" }]),
+  });
+  const theirs = t.gh.write(t.gh.repo("octo/shop"), "main", { "app.txt": "hello from main\n", "keep.txt": null, "upstream.txt": "u\n" });
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: "feat/c" })).body.error, "merge_conflict");
+
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/c", tok);
+  assert.equal(cf.status, 200, JSON.stringify(cf.body));
+  assert.deepEqual(cf.body.conflicts, ["app.txt"]);
+  assert.equal(cf.body.intoSha, theirs);
+  assert.equal(cf.body.headSha, mine.body.sha);
+  const files = Object.fromEntries(cf.body.files.map((f: { path: string; data: string }) => [f.path, f.data]));
+  assert.equal(files["app.txt"], "<<<<<<< feat/c\nhello from the branch\n=======\nhello from main\n>>>>>>> main\n");
+  assert.equal(files["new.txt"], "n\n"); // the branch's own
+  assert.equal(files["upstream.txt"], "u\n"); // main's own
+  assert.equal(files["keep.txt"], undefined); // main deleted it, the branch didn't touch it
+
+  // Resolved, committed as a merge of main into the branch; then the deploy's merge is a fast-forward.
+  const resolved = cf.body.files.map((f: { path: string; data: string }) => (f.path === "app.txt" ? { ...f, data: "hello from both\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/c", baseSha: mine.body.sha, files: resolved, mergeParent: theirs });
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  assert.deepEqual(t.gh.commit(s.body.sha).parents, [mine.body.sha, theirs]);
+  const m = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: "feat/c" });
+  assert.equal(m.status, 200, JSON.stringify(m.body));
+  assert.equal(m.body.fastForward, true);
+  assert.equal(t.gh.files("octo/shop")["app.txt"], "hello from both\n");
+  assert.equal(t.gh.files("octo/shop")["upstream.txt"], "u\n");
 }));

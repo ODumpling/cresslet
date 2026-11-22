@@ -119,6 +119,8 @@ export interface AppRepo {
   subdir: string;
   deleteBranch: boolean;
   lastSyncedSha: string | null;
+  /** The default branch's head a GitHub webhook last reported. */
+  upstreamSha?: string | null;
   connectedAt: string;
 }
 /** GET /v1/me/git */
