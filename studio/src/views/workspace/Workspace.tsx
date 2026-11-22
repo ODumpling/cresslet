@@ -495,7 +495,12 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                   // Conflicts: the workspace holds them with markers; the AI builder is offered to resolve them.
                   toast(`"${r.title}" has conflicts in ${r.conflicts.join(", ")}: resolve them (the AI builder can), then it's committed with the next request or Push.`, 15000);
                   builder.current?.prefill(`Resolve the conflict markers in ${r.conflicts.join(", ")}: this undoes "${change.title}" while keeping the later changes.`);
-                }, (e) => toast(`Not undone: ${errorMessage(e)}`, 12000)).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+                }, (e) => {
+                  // Loaded, but npm install failed (not because of a conflicted package.json): resolve, then fix the install.
+                  const u = (e as { filesWritten?: boolean }).filesWritten ? g.state?.undo : undefined;
+                  if (u?.conflicts.length) builder.current?.prefill(`Resolve the conflict markers in ${u.conflicts.join(", ")}: this undoes "${change.title}" while keeping the later changes. npm install also failed: check the terminal.`);
+                  toast(u ? `"${u.title}" is loaded, but: ${errorMessage(e)}` : `Not undone: ${errorMessage(e)}`, 12000);
+                }).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
               onFold={(change) => {
                 const g = engine.current?.git;
