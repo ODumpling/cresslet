@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Repo, SourceControlProvider } from "../server/git.ts";
-import { commitChange, type Ctx, landed, readStacks, slug } from "../server/stack.ts";
+import { assertMergeable, commitChange, type Ctx, landed, readStacks, slug } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
 /** Branches and commits in memory: a commit is its files and its parent. */
@@ -127,21 +127,29 @@ test("stack: a turn that changes nothing leaves no branch and no change", async 
   assert.deepEqual(await readStacks(t.ctx), []);
 });
 
-test("stack: only the default branch or a stack's top change takes a new change", async () => {
+test("stack: a stack's top change takes the next change; a change below it doesn't; any other branch starts a stack", async () => {
   await using t = await setup();
   const main = t.provider.refs.get("main")!;
   const c1 = ok(await t.change("main", main, "One", "1"));
   const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
-  t.provider.refs.set("edit/x", main);
   const code = (e: unknown) => (e as HttpError).code;
-  await assert.rejects(t.change("edit/x", main, "Three", "3"), (e) => code(e) === "not_on_stack"); // a branch of its own
-  await assert.rejects(t.change(c1.branch, c1.sha, "Three", "3"), (e) => code(e) === "not_on_stack" && /isn't the top/.test((e as Error).message));
+  // Below the top (another browser added one since): refused, nothing made.
+  const refs = t.provider.refs.size;
+  await assert.rejects(t.change(c1.branch, c1.sha, "Three", "3"), (e) => code(e) === "not_on_top" && /below its top/.test((e as Error).message));
   await assert.rejects(t.change(c2.branch, c1.sha, "Three", "3"), (e) => code(e) === "not_on_stack"); // not where it's recorded
+  assert.equal(t.provider.refs.size, refs);
+  // A branch of its own (an older feature branch): a stack from its commit.
+  const own = t.provider.push("main", { "x": "y" });
+  t.provider.refs.set("feat/older", own);
+  t.provider.refs.set("main", main);
+  const o1 = ok(await t.change("feat/older", own, "Go on", "o"));
+  assert.deepEqual([o1.branch, o1.change.baseSha], ["feat/go-on/1-go-on", own]);
   // From the default branch again: a second stack, the first left as it is.
   const other = ok(await t.change("main", main, "Another thing", "x"));
   assert.notEqual(other.stack.id, c1.stack.id);
   const stacks = await readStacks(t.ctx);
-  assert.deepEqual(stacks.map((s) => [s.name, s.changes.length]), [["another-thing", 1], ["one", 2]]); // newest first
+  // (Newest first; these can share a millisecond.)
+  assert.deepEqual(stacks.map((s) => [s.name, s.changes.length]).sort(), [["another-thing", 1], ["go-on", 1], ["one", 2]]);
 });
 
 test("stack: a name in the way picks the next one, and the commit isn't made twice", async () => {
@@ -193,9 +201,9 @@ test("stack: merging the top change lands the stack, and the branches below go w
   const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
   const moved = t.provider.push(c2.branch, { "y.txt": "a push from outside" });
   // Not the top: nothing lands.
-  assert.equal(await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: c1.sha }), null);
-  assert.equal(await landed(t.ctx, { branch: c3.branch, headSha: "e".repeat(40), mergedSha: c3.sha }), null);
-  assert.deepEqual(await landed(t.ctx, { branch: c3.branch, headSha: c3.sha, mergedSha: c3.sha }), { stack: "one", changes: 3 });
+  assert.equal(await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: c1.sha, deleteBelow: true }), null);
+  assert.equal(await landed(t.ctx, { branch: c3.branch, headSha: "e".repeat(40), mergedSha: c3.sha, deleteBelow: true }), null);
+  assert.deepEqual(await landed(t.ctx, { branch: c3.branch, headSha: c3.sha, mergedSha: c3.sha, deleteBelow: true }), { stack: "one", changes: 3 });
   assert.deepEqual(await readStacks(t.ctx), []);
   assert.equal(t.provider.refs.has(c1.branch), false);
   assert.equal(t.provider.refs.get(c2.branch), moved); // pushed to since: kept
@@ -203,11 +211,33 @@ test("stack: merging the top change lands the stack, and the branches below go w
   const rows = await t.store.db.all<{ state: string; landed_sha: string }>("SELECT state, landed_sha FROM stack_changes ORDER BY position");
   assert.deepEqual(rows.map((r) => [r.state, r.landed_sha]), [["landed", c3.sha], ["landed", c3.sha], ["landed", c3.sha]]);
 
+  // A change added on top after the merge read the stack isn't landed with it; without deleteBelow (the merged files
+  // didn't load), the branches below stay.
+  const e1 = ok(await t.change("main", main, "Six", "6"));
+  const e2 = ok(await t.change(e1.branch, e1.sha, "Seven", "7"));
+  const e3 = ok(await t.change(e2.branch, e2.sha, "Eight", "8"));
+  await t.store.landStack(t.app.id, e3.stack.id, 2, e2.sha);
+  assert.deepEqual((await readStacks(t.ctx)).find((x) => x.id === e3.stack.id)!.changes.map((c) => c.title), ["Eight"]);
+  const f1 = ok(await t.change("main", main, "Nine", "9"));
+  const f2 = ok(await t.change(f1.branch, f1.sha, "Ten", "10"));
+  await landed(t.ctx, { branch: f2.branch, headSha: f2.sha, mergedSha: f2.sha, deleteBelow: false });
+  assert.equal(t.provider.refs.get(f1.branch), f1.sha);
+
   // With the app's delete-branch setting off, every branch stays.
   const d1 = ok(await t.change("main", main, "Four", "4"));
   const d2 = ok(await t.change(d1.branch, d1.sha, "Five", "5"));
-  await landed({ ...t.ctx, repo: { ...t.repo, delete_branch: 0 } }, { branch: d2.branch, headSha: d2.sha, mergedSha: d2.sha });
+  await landed({ ...t.ctx, repo: { ...t.repo, delete_branch: 0 } }, { branch: d2.branch, headSha: d2.sha, mergedSha: d2.sha, deleteBelow: true });
   assert.equal(t.provider.refs.get(d1.branch), d1.sha);
+});
+
+test("stack: a change below its stack's top can't be merged on its own", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  await assert.rejects(assertMergeable(t.ctx, c1.branch), (e) => (e as HttpError).code === "not_on_top");
+  await assertMergeable(t.ctx, c2.branch);
+  await assertMergeable(t.ctx, "feat/anything");
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {

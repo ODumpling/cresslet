@@ -1186,11 +1186,11 @@ export class Store implements RateHits {
       to, Date.now(), appId, branch, from,
     )).changes > 0;
   }
-  /** A stack's open changes, landed in the default branch at `sha`. */
-  async landStack(appId: string, stackId: string, sha: string): Promise<number> {
+  /** A stack's open changes up to `position`, landed in the default branch at `sha`. */
+  async landStack(appId: string, stackId: string, position: number, sha: string): Promise<number> {
     return (await this.db.run(
-      "UPDATE stack_changes SET state = 'landed', landed_sha = ?, updated_at = ? WHERE app_id = ? AND stack_id = ? AND state = 'open'",
-      sha, Date.now(), appId, stackId,
+      "UPDATE stack_changes SET state = 'landed', landed_sha = ?, updated_at = ? WHERE app_id = ? AND stack_id = ? AND state = 'open' AND position <= ?",
+      sha, Date.now(), appId, stackId, position,
     )).changes;
   }
   /**

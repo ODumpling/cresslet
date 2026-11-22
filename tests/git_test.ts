@@ -813,7 +813,12 @@ test("stack: each change on its own branch, read by a collaborator too; a push o
   assert.equal([...t.gh.repo("octo/shop").refs.keys()].filter((b) => b.startsWith("feat/")).length, 2);
   // Not from a stack's top: said, nothing written.
   const below = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c1.body.branch, baseSha: c1.body.sha, files: files("3"), title: "Three" });
-  assert.deepEqual([below.status, below.body.error], [409, "not_on_stack"]);
+  assert.deepEqual([below.status, below.body.error], [409, "not_on_top"]);
+
+  // Deploying a change below the top on its own: refused before anything merges (the top lands them all).
+  const low = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: c1.body.branch });
+  assert.deepEqual([low.status, low.body.error], [409, "not_on_top"]);
+  assert.equal(t.gh.repo("octo/shop").refs.get("main"), linked.sha);
 
   // A collaborator (their own GitHub) sees the same stack.
   const bob = await t.account("bob@b.co");
@@ -845,4 +850,15 @@ test("stack: each change on its own branch, read by a collaborator too; a push o
   assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks, []);
   assert.equal(t.gh.repo("octo/shop").refs.has(c2.body.branch), false);
   assert.equal(t.gh.repo("octo/shop").refs.has(c1.body.branch), true);
+}));
+
+test("stack: an older branch named like the stack (feat/<name>) moves it to the next name", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  t.gh.repo("octo/shop").refs.set("feat/dark-mode", linked.sha); // GitHub refuses feat/dark-mode/… ("Reference update failed")
+  const c = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: "main", baseSha: linked.sha, files: [...linked.files, { path: "a", data: "1" }], title: "Dark mode" });
+  assert.equal(c.status, 201, JSON.stringify(c.body));
+  assert.equal(c.body.branch, "feat/dark-mode-2/1-dark-mode");
+  // From a branch of its own: a stack starts there.
+  const own = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: "feat/dark-mode", baseSha: linked.sha, files: [...linked.files, { path: "b", data: "1" }], title: "Go on" });
+  assert.deepEqual([own.status, own.body.branch, own.body.change.baseSha], [201, "feat/go-on/1-go-on", linked.sha]);
 }));

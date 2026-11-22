@@ -92,11 +92,6 @@ const tail = (s: string, n = MAX_OUTPUT) => (s.length > n ? `[… ${s.length - n
 export interface ToolsOptions {
   devLog?: () => string;
   onChange?: (path: string) => void;
-  /**
-   * Before the first change to a file (write_file, edit_file, delete_file): source control moves the workspace off
-   * the default branch here (studio/git.ts). If it throws, the file isn't changed and the tool reports why.
-   */
-  beforeChange?: () => Promise<void>;
   timeoutMs?: number;
   paused?: () => boolean;
   clock?: () => number;
@@ -113,7 +108,7 @@ export interface ToolResult {
 /** Tool inputs after `validate`: an object of strings. */
 type Input = Record<string, string>;
 
-export function createTools(c: Pick<Container, "fs" | "spawn" | "workdir">, { devLog = () => "", onChange = () => {}, beforeChange = async () => {}, timeoutMs = COMMAND_TIMEOUT_MS, paused = () => false, clock = () => performance.now() }: ToolsOptions = {}) {
+export function createTools(c: Pick<Container, "fs" | "spawn" | "workdir">, { devLog = () => "", onChange = () => {}, timeoutMs = COMMAND_TIMEOUT_MS, paused = () => false, clock = () => performance.now() }: ToolsOptions = {}) {
   const wd = c.workdir;
   let running = 0;
   const abs = (rel: string) => (rel ? `${wd}/${rel}` : wd);
@@ -148,7 +143,6 @@ export function createTools(c: Pick<Container, "fs" | "spawn" | "workdir">, { de
   }
 
   async function write(rel: string, content: string) {
-    await beforeChange();
     const i = rel.lastIndexOf("/");
     if (i > 0) await c.fs.mkdir(abs(rel.slice(0, i)), { recursive: true });
     await c.fs.writeFile(abs(rel), content);
@@ -251,7 +245,6 @@ export function createTools(c: Pick<Container, "fs" | "spawn" | "workdir">, { de
         case "delete_file": {
           const rel = projectPath(input.path);
           if (!(await exists(rel))) throw new Error(`no such file: ${rel}`);
-          await beforeChange();
           await c.fs.rm(abs(rel));
           onChange(rel);
           return { text: `deleted ${rel}`, summary: `Deleted ${rel}` };

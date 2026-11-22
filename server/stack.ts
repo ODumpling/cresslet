@@ -76,11 +76,16 @@ export interface Ctx {
 }
 
 const notOnStack = (message: string) => new HttpError(409, message, "not_on_stack");
+const notOnTop = (c: StackChange, top: StackChange) => new HttpError(
+  409, `${c.branch} is change ${c.position} of ${c.stack_name}, below its top (${top.branch}, added since): load the top change first`, "not_on_top",
+);
 
 /**
- * Commits the workspace as a new change. `from`: the branch the workspace is on, at `baseSha`. On the default branch
- * it starts a new stack; on the top change of an open stack it goes on top. Anywhere else, 409 `not_on_stack`
- * (the caller commits to its branch as before). Nothing changed: no branch, no change.
+ * Commits the workspace as a new change. `from`: the branch the workspace is on, at `baseSha`. On the top change of
+ * an open stack it goes on top; on any other branch that isn't one of a stack's changes (the default branch, a
+ * branch of its own) it starts a new stack from there. On a change below a stack's top, 409 `not_on_top`; on a top
+ * change recorded at another commit than `baseSha`, 409 `not_on_stack` (the caller commits to its branch as before).
+ * Nothing changed: no branch, no change.
  */
 export function commitChange(ctx: Ctx, input: {
   from: string; baseSha: string; files: [string, Uint8Array][]; title: string; prompt: string; author: Author; by: string | null;
@@ -89,11 +94,10 @@ export function commitChange(ctx: Ctx, input: {
   return locked(appId, async () => {
     const stacks = byStack(await store.openStackChanges(appId));
     let below: StackChange | undefined;
-    if (input.from !== repo.default_branch) {
-      const on = stacks.find((s) => s.some((c) => c.branch === input.from));
-      if (!on) throw notOnStack(`${input.from} isn't a change of a stack`);
+    const on = input.from === repo.default_branch ? undefined : stacks.find((s) => s.some((c) => c.branch === input.from));
+    if (on) {
       const top = on.at(-1)!; // a stack listed has a change
-      if (top.branch !== input.from) throw notOnStack(`${input.from} isn't the top of its stack (${top.branch} is)`);
+      if (top.branch !== input.from) throw notOnTop(on.find((c) => c.branch === input.from)!, top);
       if (top.sha !== input.baseSha) throw notOnStack(`${input.from} is recorded at another commit than the workspace's`);
       below = top;
     }
@@ -165,16 +169,28 @@ export async function readStacks(ctx: Ctx): Promise<StackView[]> {
 }
 
 /**
- * `branch` at `headSha` was merged into the default branch at `mergedSha`. If that's an open stack's top change, the
- * whole stack is in: it's landed, and the branches below the top go (the merge route deletes the top's) when the
- * app's delete-branch setting is on and they still point at their change.
+ * Before `branch` is merged into the default branch: a change below its stack's top can't be (its stack would be
+ * left open on a branch that's gone). Landing part of a stack is a later step; until then the top lands them all.
  */
-export async function landed(ctx: Ctx, input: { branch: string; headSha: string; mergedSha: string }): Promise<{ stack: string; changes: number } | null> {
+export async function assertMergeable(ctx: Ctx, branch: string) {
+  for (const s of byStack(await ctx.store.openStackChanges(ctx.appId))) {
+    const c = s.find((x) => x.branch === branch), top = s.at(-1)!;
+    if (c && c !== top) throw notOnTop(c, top);
+  }
+}
+
+/**
+ * `branch` at `headSha` was merged into the default branch at `mergedSha`. If that's an open stack's top change, the
+ * whole stack is in: it's landed (that change and the ones below it: one added meanwhile isn't), and with
+ * `deleteBelow` the branches below the top go (the merge route deletes the top's) when the app's delete-branch
+ * setting is on and they still point at their change.
+ */
+export async function landed(ctx: Ctx, input: { branch: string; headSha: string; mergedSha: string; deleteBelow: boolean }): Promise<{ stack: string; changes: number } | null> {
   const s = byStack(await ctx.store.openStackChanges(ctx.appId)).find((x) => x.at(-1)!.branch === input.branch);
   const top = s?.at(-1);
   if (!s || !top || top.sha !== input.headSha) return null;
-  const n = await ctx.store.landStack(ctx.appId, top.stack_id, input.mergedSha);
-  if (ctx.repo.delete_branch) {
+  const n = await ctx.store.landStack(ctx.appId, top.stack_id, top.position, input.mergedSha);
+  if (ctx.repo.delete_branch && input.deleteBelow) {
     await pool(s.slice(0, -1), 4, async (c) => {
       if (await ctx.provider.branchHead(ctx.r, c.branch).catch(() => null) === c.sha) await ctx.provider.deleteBranch(ctx.r, c.branch).catch(() => false);
     });

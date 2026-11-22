@@ -165,9 +165,10 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
   }
 
   /**
-   * The workspace committed as a new change (server/stack.ts): a branch of its own, cut from the commit it's on. On
-   * the default branch that starts a stack, on a stack's top change it goes on top. Anywhere else (a branch of
-   * its own, a change below the top), or finishing a merge, it's committed to the active branch as before.
+   * The workspace committed as a new change (server/stack.ts): a branch of its own, cut from the commit it's on. On a
+   * stack's top change it goes on top; on any other branch (the default one, a branch of its own) it starts a stack.
+   * Finishing a merge, or on a top change GitHub moved, it's committed to the active branch as before. Below a
+   * stack's top: 409 `not_on_top`, nothing committed.
    */
   async function changeNow(title: string, prompt: string): Promise<{ sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string } }> {
     const s = o.state();
@@ -179,8 +180,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     try {
       r = await post("/stack", { from: s.activeBranch, baseSha: s.headSha, files, title, prompt });
     } catch (e) {
-      if (gitCode(e) !== "not_on_stack") throw e;
-      if (s.activeBranch === s.defaultBranch) await branchNow("feat", prompt || title);
+      if (gitCode(e) !== "not_on_stack") throw e; // not_on_top: kept here (the stack has changes above this one)
       return syncNow(title);
     }
     if (!r.changed || !r.branch) {
@@ -244,22 +244,10 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     get connected() {
       return !!o.state() && !!o.app();
     },
-    /** On the default branch (where changes shouldn't go straight). */
-    get onDefault() {
-      const s = o.state();
-      return !!s && s.activeBranch === s.defaultBranch;
-    },
     /** Files changed in the workspace. */
     markDirty() {
       const s = o.state();
       if (s && !s.dirty) void set({ dirty: true });
-    },
-    /**
-     * Branch first: on the default branch, moves the workspace to a new branch (`feat/<hint>`) before it changes.
-     * Resolves to the branch created, or null when already on another branch (or not connected).
-     */
-    ensureBranch(prefix: string, hint: string): Promise<string | null> {
-      return serial(async () => (this.connected && this.onDefault ? branchNow(prefix, hint) : null));
     },
     /** Linked (the repository's state as the connect call answered), or unlinked (undefined). */
     attach: (st: ProjectGitState | undefined) => serial(async () => o.save(st)),
@@ -346,20 +334,25 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * of its own, and resolves to the commit to build and record. Throws, before anything is built, on a conflict
      * or a protected branch.
      */
-    prepareDeploy: (log: (line: string) => void = () => {}, signal?: AbortSignal) => serial(async (): Promise<Provenance> => {
+    prepareDeploy: (log: (line: string) => void = () => {}, signal?: AbortSignal, turn?: { title: string; prompt: string } | null) => serial(async (): Promise<Provenance> => {
       signal?.throwIfAborted();
-      // Edits on the default branch (by hand): a change of their own first, so they merge like any other.
+      // Changes here that are a change of their own first, merged like any other: an AI builder turn's (it's deploying
+      // mid-turn), or edits on the default branch (by hand).
       const was = o.state()!;
-      if (was.activeBranch === was.defaultBranch && was.dirty && !was.mergeParent) {
+      let synced: { sha: string; files: GitFile[] } | undefined;
+      if (was.dirty && !was.mergeParent && (turn || was.activeBranch === was.defaultBranch)) {
         log(`committing the changes here as a change…`);
-        await changeNow("Edits made in the studio", "");
+        const c = await changeNow(turn?.title ?? "Edits made in the studio", turn?.prompt ?? "");
+        if (!o.state()!.dirty) synced = c; // nothing more since: that commit is what's built
         signal?.throwIfAborted();
       }
       const s = o.state()!;
       const repo = `${s.owner}/${s.repo}`;
-      log(`syncing ${s.activeBranch} with ${repo}…`);
       const rev = revision();
-      const synced = await syncNow(`Deploy from ${s.activeBranch}`);
+      if (!synced) {
+        log(`syncing ${s.activeBranch} with ${repo}…`);
+        synced = await syncNow(`Deploy from ${s.activeBranch}`);
+      }
       // What's built must be what was committed: a change made since stops the deploy (it stays, unpushed).
       unchangedSince(rev, "deploying");
       if (s.activeBranch === s.defaultBranch) return { sha: synced.sha, branch: s.defaultBranch, repo, files: synced.files };

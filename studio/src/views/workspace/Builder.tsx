@@ -35,20 +35,22 @@ export interface BuilderHandle {
   approve(text: string, signal?: AbortSignal): Promise<boolean>;
   /** One of its commands is running (in a process it started). */
   running(): boolean;
+  /** A request is being worked on. */
+  busy(): boolean;
+  /** The request being worked on, as a change's title and prompt (null when none is). */
+  turn(): { title: string; prompt: string } | null;
   /** Focus into the pane (it was just opened). */
   focusIn(): void;
   /** Opens the pane with a message written for the user to send (or change first). */
   prefill(text: string): void;
 }
 
-export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, stack = null, onCommitted = () => {}, ref }: {
+export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, stack = null, ref }: {
   c: Container;
   /** Source control: the project's repository, when linked (a finished turn is committed as a change of its stack). */
   git: GitWorkspace | null;
   /** The stack panel (StackPanel.tsx), shown above the chat. */
   stack?: React.ReactNode;
-  /** A turn was committed (the stack has a new change). */
-  onCommitted?: () => void;
   /** Workspace changes that weren't hand edits (a command's), counted (engine.ts). */
   commandRev?: () => number;
   devLog: () => string;
@@ -81,7 +83,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
     approved: false, stopped: false, busy: false, locked,
     bubble: null as number | null, step: null as number | null,
     replied: "", failed: "", id: 0, stick: false,
-    git, // the project's repository
+    git, prompt: "", // the project's repository; the message being worked on
     // This turn changed files (its file tools); the count of non-hand changes when it was sent (commands':
     // `commandRev`, studio/src/views/workspace/engine.ts).
     turnChanged: false, cmdRev: 0,
@@ -234,6 +236,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
     setWorking("Thinking…");
     setStatus("Sent. Claude is working on it.");
     r.turnChanged = false;
+    r.prompt = text;
     r.cmdRev = commandRev();
     try {
       await r.agent.send(text);
@@ -267,7 +270,6 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
       if (out.changed) {
         const s = g.state!;
         on({ type: "notice", text: out.change ? `Committed as change ${out.change.position} of the stack, on ${s.activeBranch}. ${s.defaultBranch} stays as deployed until you deploy.` : `Committed to ${s.activeBranch}.` });
-        onCommitted();
       }
     } catch (e) {
       on({ type: "notice", text: `Couldn't commit to GitHub: ${errorMessage(e)}. The changes are kept here (the next request's commit takes them too, or push them from the branch menu).`, error: true });
@@ -276,6 +278,8 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
 
   useImperativeHandle(ref, () => ({
     running: () => tools.running > 0,
+    busy: () => r.busy,
+    turn: () => (r.busy && r.prompt ? { title: commitMessage(r.prompt), prompt: r.prompt } : null),
     focusIn: () => (sourceRef.current ? chatFocus() : setupFocus()),
     prefill(text) {
       setOpen(true, { focus: false });
@@ -351,7 +355,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
         </button>
       </div>
       <p className="sr-only" id="builder-status" role="status">{status}</p>
-      {setupShown ? null : stack}
+      {stack}
       <div id="builder-setup" className="builder-setup" hidden={!setupShown}>
         <p>Ask Claude to change this project. It edits files, runs commands in this tab's terminal and, when you ask, deploys with your session, like the CLI.</p>
         <div id="builder-credits-offer" className="builder-offer" hidden={!creditsOn || !!token}>

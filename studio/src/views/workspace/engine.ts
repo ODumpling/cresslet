@@ -30,11 +30,11 @@ export interface Callbacks {
   deployed(d: Deploy): void;
   /** The AI builder: whether one of its commands runs, and asking the user to approve a deploy. */
   builderRunning(): boolean;
+  /** The request it's working on (a deploy it starts commits that turn as a change first). */
+  builderTurn(): { title: string; prompt: string } | null;
   approveDeploy(text: string, signal?: AbortSignal): Promise<boolean>;
   /** Source control: the project's repository and branch changed (or it was linked or unlinked). */
   git(state: ProjectGitState | undefined): void;
-  /** Something to tell the user (a branch was started for their edit). */
-  notice(text: string): void;
 }
 
 // ANSI colors too: xterm's defaults are made for black and fail AA on these surfaces (≥ 4.5:1 here).
@@ -265,7 +265,7 @@ export class Engine {
       // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
       beforeDeploy: async (log, signal, app) => {
         if (this.git.connected && (!app || app === project.deploy?.name)) {
-          const { files, ...p } = await this.git.prepareDeploy(log, signal);
+          const { files, ...p } = await this.git.prepareDeploy(log, signal, cb.builderRunning() ? cb.builderTurn() : null);
           return { ...p, source: sourceDigest(files) };
         }
         // Linked to a repository elsewhere (another browser, the CLI), not here: deploying this workspace would skip it.

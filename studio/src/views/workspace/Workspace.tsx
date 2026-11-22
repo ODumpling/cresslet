@@ -149,8 +149,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       },
       deployed: setDeploy,
       git: setGitState,
-      notice: (text) => toast(text, 8000),
       builderRunning: () => builder.current?.running() ?? false,
+      builderTurn: () => builder.current?.turn() ?? null,
       approveDeploy: (text, signal) => builder.current?.approve(text, signal) ?? Promise.resolve(false),
     }, editorEl.current!); // mounted
     engine.current = e;
@@ -435,11 +435,11 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         <h1 className="sr-only" id="workspace-title" tabIndex={-1}>{`${name}: AI builder, preview, code and database`}</h1>
         {container ? (
           <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
-            onCommitted={() => setGitTick((n) => n + 1)}
             stack={stack && gitState && gitOn && token && !locked ? (
-              <StackPanel stack={stack} state={gitState} busy={stackBusy} onContinue={(branch) => {
+              <StackPanel stack={stack} state={gitState} busy={stackBusy || deploying} onContinue={(branch) => {
                 const g = engine.current?.git;
-                if (!g || builder.current?.running()) return;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
                 if (!confirm(`Load ${branch} (the top of ${stack.name}) into this workspace?${gitState.dirty ? " Changes not pushed yet are pushed first." : ""}`)) return;
                 setStackBusy(true);
                 void g.switchTo(branch).then(() => toast(`On ${branch}`), (e) => toast(`Couldn't load ${branch}: ${errorMessage(e)}`, 10000)).finally(() => setStackBusy(false));

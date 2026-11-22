@@ -10,7 +10,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
-import { commitChange, landed, readStacks } from "./stack.ts";
+import { assertMergeable, commitChange, landed, readStacks } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -186,10 +186,17 @@ export class GitHub implements SourceControlProvider {
   async createBranch(r: Repo, branch: string, sha: string) {
     const res = await this.req<{ message?: string }>("POST", this.#path(r, "/git/refs"), { ref: `refs/heads/${branch}`, sha });
     // Taken: by a branch of that name, or one whose name is in the way (`feat/x` for `feat/x/1-y`, or the other way).
-    if (res.status === 422 && /already exists|cannot be created|conflict/i.test(res.body?.message ?? "")) {
+    if (res.status === 422 && (/already exists|cannot be created|conflict/i.test(res.body?.message ?? "") || await this.#inTheWay(r, branch))) {
       throw new HttpError(409, `branch ${branch} already exists`, "branch_exists");
     }
     if (res.status !== 201) throw ghError(res.status, res.body?.message);
+  }
+
+  /** A branch of that name, or of a folder of it (`feat/x` for `feat/x/1-y`), exists: what a refused create meant. */
+  async #inTheWay(r: Repo, branch: string) {
+    const parts = branch.split("/");
+    const names = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+    return (await Promise.all(names.map((n) => this.branchHead(r, n).catch(() => null)))).some(Boolean);
   }
 
   /** True if it was deleted (false: it wasn't there). */
@@ -1053,12 +1060,10 @@ export function gitRoutes(
     const branch = branchName(input.branch);
     const into = input.into != null ? branchName(input.into, "into") : repo.default_branch;
     const expect = input.headSha != null ? shaOf(input.headSha, "headSha") : undefined;
+    const ctx = { provider: client, store, appId: a.id, repo, r };
+    if (into === repo.default_branch) await assertMergeable(ctx, branch);
     const m = await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
     if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha, upstream: m.mergedSha }).catch((e) => console.error(e));
-    // A stack's top change merged: the stack is in (its lower branches go with the top's, below).
-    const stack = into === repo.default_branch
-      ? await landed({ provider: client, store, appId: a.id, repo, r }, { branch, headSha: m.headSha, mergedSha: m.mergedSha }).catch((e) => (console.error(e), null))
-      : null;
     // The merge happened: from here on it's reported, whatever else fails. Its files (when they differ from the
     // branch's) before the branch goes, so a failure to load them leaves the branch to retry from.
     let files: DeployFile[] | undefined, filesError: string | undefined;
@@ -1069,6 +1074,11 @@ export function gitRoutes(
         filesError = e instanceof HttpError ? e.message : "couldn't load the merged files";
       }
     }
+    // A stack's top change merged: the stack is in. Its lower branches go with the top's (not when the files didn't
+    // load: the branch is kept to retry from).
+    const stack = into === repo.default_branch
+      ? await landed(ctx, { branch, headSha: m.headSha, mergedSha: m.mergedSha, deleteBelow: !filesError }).catch((e) => (console.error(e), null))
+      : null;
     let deletedBranch = false;
     // Only while it's still the commit that was merged: a push since then keeps it. (GitHub can't delete a ref
     // conditionally, so a push in between this check and the delete isn't excluded, only unlikely.)
