@@ -1138,7 +1138,7 @@ test("stack: undo refuses bringing back an executable, and a folder's dotenv fil
   const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
     (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
   const main = t.gh.write(t.gh.repo("octo/shop"), "main", { "run.sh": "#!/bin/sh\n" });
-  t.gh.commit(main).tree.get("run.sh")!.mode = "100755";
+  t.gh.commit(main).tree.set("run.sh", { ...t.gh.commit(main).tree.get("run.sh")!, mode: "100755" });
   // Change 1 deleted the executable run.sh: undone, the studio's commit would bring it back as a plain file.
   const c1 = await add("main", main, "Drop run.sh", {});
   const c2 = await add(c1.branch, c1.sha, "Add b", { "b.txt": "b\n" });
@@ -1155,4 +1155,28 @@ test("stack: undo refuses bringing back an executable, and a folder's dotenv fil
   // The change as the studio saw it: since folded into (another base), refused.
   const w = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}&sha=${c4.sha}&base=${c2.sha}`, tok);
   assert.deepEqual([w.status, w.body.error], [409, "conflict"]);
+}));
+
+test("stack: undo keeps a file a later change made of a symlink, and refuses undoing a change that only made a file executable", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const main = t.gh.write(t.gh.repo("octo/shop"), "main", { asset: "target", "run.sh": "#!/bin/sh\n" });
+  t.gh.commit(main).tree.set("asset", { ...t.gh.commit(main).tree.get("asset")!, mode: "120000" });
+  // Change 1 left the symlink alone; change 2 made it a file: undoing 1 keeps that file.
+  const c1 = await add("main", main, "Add a", { "run.sh": "#!/bin/sh\n", "a.txt": "a\n" });
+  const c2 = await add(c1.branch, c1.sha, "Asset file", { "run.sh": "#!/bin/sh\n", "a.txt": "a\n", asset: "real\n" });
+  assert.equal(t.gh.commit(c2.sha).tree.get("asset")!.mode, "100644");
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.equal(u.status, 200, JSON.stringify(u.body));
+  const files = Object.fromEntries(u.body.files.map((f: { path: string; data: string }) => [f.path, f.data]));
+  assert.deepEqual([files.asset, files["a.txt"]], ["real\n", undefined]);
+
+  // Change 3 only made run.sh executable (on GitHub, pulled in as the top), change 4 touched another file.
+  const c3 = await add(c2.branch, c2.sha, "Add b", { "run.sh": "#!/bin/sh\n", "a.txt": "a\n", asset: "real\n", "b.txt": "b\n" });
+  t.gh.commit(c3.sha).tree.set("run.sh", { ...t.gh.commit(c3.sha).tree.get("run.sh")!, mode: "100755" });
+  await add(c3.branch, c3.sha, "Add c", { "run.sh": "#!/bin/sh\n", "a.txt": "a\n", asset: "real\n", "b.txt": "b\n", "c.txt": "c\n" });
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c3.change.id}`, tok);
+  assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["run.sh"]]);
 }));

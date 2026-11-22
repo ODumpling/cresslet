@@ -484,8 +484,10 @@ export class GitHub implements SourceControlProvider {
     const full = await Promise.all([input.change, input.top, input.parent].map((sha) => this.#entries(r, sha))) as [Entries, Entries, Entries];
     const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
     // (Taking those from the parent would need a commit the workspace can't make.)
-    // An executable the change deleted or made plain, still so at the top: the studio's commit can't make it one again.
-    const exec = [...full[2].values()].filter((e) => e.mode === "100755" && full[0].get(e.path)?.mode !== "100755" && full[1].get(e.path)?.mode !== "100755");
+    // The studio's commit can't set modes: an executable the change deleted or made plain (still so at the top), or a
+    // file it made executable (still so), can't be put back.
+    const exec = [...full[2].values()].filter((e) => e.mode === "100755" && full[0].get(e.path)?.mode !== "100755" && full[1].get(e.path)?.mode !== "100755")
+      .concat([...full[0].values()].filter((e) => e.mode === "100755" && full[2].get(e.path)?.mode === "100644" && full[1].get(e.path)?.mode === "100755"));
     const refused = [...new Set([...outside.both, ...outside.take.map((x) => x.path), ...exec.map((e) => e.path)])].sort();
     const refuse = (paths: string[]) => Object.assign(
       new HttpError(409, `${paths.join(", ")} can't be undone in the studio (outside what it holds, binary, an executable, or a file where a folder is now): undo it on GitHub`, "merge_unresolvable"),
@@ -513,9 +515,10 @@ export class GitHub implements SourceControlProvider {
     const paths = [...new Set([...base.keys(), ...ours.keys(), ...theirs.keys()])];
     // Dotenv files (merged by mergeOutside): the result's, read below for their public entries.
     const taken = new Map(outside.take.map((x) => [x.path, x]));
-    for (const [path, e] of full[1]) if (!taken.has(path) && path.startsWith(prefix) && DOTENV.test(path)) taken.set(path, { path, mode: e.mode, type: e.type, sha: e.sha });
+    // …and ours where the merge keeps it though another side has something the studio doesn't hold (a symlink turned file).
+    for (const [path, e] of full[1]) if (!taken.has(path) && path.startsWith(prefix) && (DOTENV.test(path) || outside.outside.has(path))) taken.set(path, { path, mode: e.mode, type: e.type, sha: e.sha });
     // …and files the merge takes from the default branch that the workspace holds (a symlink there turned into a file).
-    const envs = [...taken.values()].filter((x) => !!x.sha && workspaceFile(x, x.path, prefix) && (DOTENV.test(x.path) || outside.take.includes(x)));
+    const envs = [...taken.values()].filter((x) => !!x.sha && workspaceFile(x, x.path, prefix));
     if (paths.length + envs.length > this.limits.files) throw new HttpError(413, `the repository has more than ${this.limits.files} files`, "too_large");
     const sizeOf = (sha: string) => [...full[1].values(), ...full[2].values()].find((e) => e.sha === sha)?.size ?? 0;
     // What's read: one side of a file only one side changed, both of a conflict, and the dotenv files.
