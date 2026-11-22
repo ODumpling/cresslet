@@ -173,7 +173,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     // An undo being finished is a change of its own (its title, its markers checked), never a commit onto the top.
     if (s.undo && !s.mergeParent) {
       // (Landed or carried on from in another browser: no stack to put it on.)
-      if (snap) throw Object.assign(new Error(`${s.activeBranch} isn't a stack's top any more, so the undo held here can't be committed: pull the branch to drop it`), { code: "changed" });
+      if (snap) throw Object.assign(new Error(`${s.activeBranch} isn't a stack's top any more, so the undo held here can't be committed: pull the branch to drop it`), { code: "stack_gone" });
       return changeNow(message, "", false);
     }
     const rev = snap?.rev ?? revision(); // before the snapshot: a change after it keeps the workspace dirty

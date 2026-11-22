@@ -552,7 +552,8 @@ export class GitHub implements SourceControlProvider {
       out.set(x.path.slice(prefix.length), DOTENV.test(x.path) ? publicDotenv(d) : d);
     }
     // A file where the result has a folder (a file deleted, then one added under its name): can't be held.
-    const clash = [...out.keys()].filter((p) => [...out.keys()].some((q) => q.startsWith(p + "/"))).sort();
+    const folders = new Set([...out.keys()].flatMap((p) => p.split("/").slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join("/"))));
+    const clash = [...out.keys()].filter((p) => folders.has(p)).sort();
     if (clash.length) throw refuse(clash.map((p) => prefix + p));
     const files: DeployFile[] = [...out].sort(([x], [y]) => (x < y ? -1 : 1)).map(([path, d]) => {
       const t = text(d);

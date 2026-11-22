@@ -502,7 +502,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                   const u = filesWritten || held ? g.state?.undo : undefined;
                   if (u?.conflicts.length) builder.current?.prefill(`Resolve the conflict markers in ${u.conflicts.join(", ")}: this undoes "${change.title}" while keeping the later changes. npm install also failed: check the terminal.`);
                   toast(!u ? `Not undone: ${errorMessage(e)}`
-                    : held ? `"${u.title}" is loaded but not committed (${errorMessage(e)}): it's committed with the next request or Push; Pull drops it.`
+                    : held && (e as { code?: string }).code !== "stack_gone" ? `"${u.title}" is loaded but not committed (${errorMessage(e)}): it's committed with the next request or Push; Pull drops it.`
                     : `"${u.title}" is loaded, but: ${errorMessage(e)}`, 15000);
                 }).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
