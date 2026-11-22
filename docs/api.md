@@ -6,7 +6,7 @@ Auth (either):
 - `Authorization: Bearer clv_acct_…` (or `clv_scoped_…`) — account token (GitHub login, or created in the studio under Settings → API tokens).
 - `X-Cresslet-Deploy-Key: clv_app_…` (or `Authorization: Bearer clv_app_…`) — per-app key, returned once on app creation.
 
-Site admin = an account with the `SiteAdmin` role (or listed in `CRESSLET_SITE_ADMINS`) using a full-access token (`admin`, all apps), or the operator's `CRESSLET_ADMIN_TOKEN`. The studio shows them an **Admin** page (`/#/admin`), and, with AI credits on, an **AI credits** page (`/#/admin-credits`): use per day, model and account, and giving or taking back credits.
+Site admin = an account with the `SiteAdmin` role (or listed in `CRESSLET_SITE_ADMINS`) using a full-access token (`admin`, all apps), or the operator's `CRESSLET_ADMIN_TOKEN`. The studio shows them an **Admin** page (`/#/admin`), **Users** (`/#/admin-users`) and **Organizations** (`/#/admin-orgs`), and, with AI credits on, an **AI credits** page (`/#/admin-credits`): use per day, model and account, and giving or taking back credits.
 
 Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 
@@ -21,12 +21,25 @@ Account tokens have a **role** and optionally a list of **apps** (403 `forbidden
 - `admin`: everything on the app, including deploys, secrets, egress, domains and managing collaborators, but not deleting it (owner only).
 - Managing collaborators needs an account (a deploy key isn't one). Shared apps are listed in `GET /v1/apps` with `access: owner|admin|viewer`, can be named in a token's `apps`, and don't count toward the invitee's app limit. At most 50 collaborators and pending invites per app. Deleting the app removes them.
 
+**Accounts (site admins).** Site admins list every account (`/#/admin-users` in the studio), invite people, disable accounts and grant the `SiteAdmin` role:
+- **Invite**: sets up an account for an email (status `invited`). The person signs in with GitHub; any verified email on their GitHub account that matches links it, also while signup is closed (`CRESSLET_OPEN_SIGNUP=false`). No email is sent. An invite can be withdrawn (the account deleted) until they sign in. Optionally adds them to an [organization](#organizations).
+- **Disable**: signs the account out everywhere (tokens and private-page sessions deleted), refuses its GitHub login (by GitHub id or any of its verified emails), its tokens, and deploys with its personal apps' deploy keys. Its sites keep serving: delete them on the Sites page. Its email and GitHub id are moved aside while it's disabled (`email` reads `disabled+<id>@invalid` in the database), so a server from before this release, after a rollback, can't sign it in either. **Enable** puts them back (409 if another account took that email or GitHub id meanwhile).
+- You can't disable or demote yourself, nor an account listed in `CRESSLET_SITE_ADMINS` (change the config).
+
+<a id="organizations"></a>
+**Organizations.** Site admins create organizations (`/#/admin-orgs`) and pick a first admin. Org admins add and remove members (existing accounts, by email: only site admins invite new people) and change roles; an organization keeps at least one enabled admin (site admins too: promote another first). Disabling an org's only admin is allowed; until a site admin makes someone else admin, no app moves in and nobody holding its apps can leave. An app or artifact moved into an organization (`PUT /v1/apps/:name/org`, by its owner, who must be a member) belongs to it:
+- org `admin`: owner access to every org app (delete, move out, everything).
+- org `member`: collaborator `admin` access to every org app (deploy, roll back, secrets, domains, sharing; not deleting).
+- A collaborator role on the app adds to that; the app's `account_id` (who created it or last held it) no longer counts on its own. Members who leave or are removed (or disabled) lose access, and the apps they held are handed to an enabled org admin (else member), so a rolled-back server (which ignores organizations and treats `account_id` as the owner) keeps them with the org. Org apps don't count toward anyone's app limit; moving one out makes it the caller's personal app, within their limit.
+- Site admins manage organizations but get no access to their apps unless they're members. An organization with apps (deleted ones included) can't be deleted: move them out first (a deleted one: restore it, or purge it on the Sites page). A member who holds org apps can't be removed while there's nobody (enabled) to hand them to (409 `no_successor`), and apps can't move into an organization with no enabled admin (409 `no_admin`).
+- Not covered: deploy keys stay valid when an app changes hands (whoever holds the key keeps full access to that app); collaborators stay too.
+
 Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin` over all apps. Tokens issued before named tokens, and login tokens, are `admin` over all apps. `GET /v1/me` works with any token. Deploy keys (`clv_app_…`) are unchanged: full access to their one app.
 
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/v1` | server info, limits, app URL template, `customDomains` (whether apps can add custom domains), `auth: {github, cli}` (`cli`: the browser login below), `ai: {credits, monthlyCredits}` ([AI credits](#ai-credits)) |
-| POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it) |
+| POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it). 409 `account_disabled` for a disabled account's email |
 | GET | `/v1/me` | `{account: {id, email, github, role}, tokenInfo}` (`github` = login or null; `role` = `"SiteAdmin"` or null); `tokenInfo: {id, name, role, apps, createdAt, lastUsedAt}` for the calling token (any scope) |
 | GET | `/v1/me/tokens` | `{tokens: [{id, name, role, apps, createdAt, lastUsedAt, current}]}`; never the secret |
 | POST | `/v1/me/tokens` | `{name, role?: read\|deploy\|admin (default admin), apps?: ["name", …] \| null}` → `{token, info}` (201). The secret is only in this response. Scoped tokens start `clv_scoped_` |
@@ -44,10 +57,11 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/names/:name` | no auth: can a new app or artifact have this name? → `{name, available: true, url}` or `{name, available: false, reason: invalid\|reserved\|taken, message}` |
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |
-| GET | `/v1/apps` | apps the account owns or collaborates on; each has `access: owner\|admin\|viewer` |
+| GET | `/v1/apps` | apps the account owns, collaborates on or reaches through an [organization](#organizations); each has `access: owner\|admin\|viewer` and `org: {name, title} \| null` |
 | GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 10 deploys, runtime status, secret names |
 | DELETE | `/v1/apps/:name` | delete app + data (owner or deploy key; not an invited admin) |
-| GET | `/v1/apps/:name/collaborators` | **owner or admin**: `{owner: {id, email, github}, collaborators: [{id, email, github, role, createdAt}], invites: [{id, email, role, invitedBy, createdAt}]}` |
+| PUT | `/v1/apps/:name/org` | owner (org app: an org admin), full-access token: `{org: "name" \| null}` → `{app, org}`. Into an organization you're a member of, or out of one (`null`: your personal app, within your app limit) |
+| GET | `/v1/apps/:name/collaborators` | **owner or admin**: `{owner: {id, email, github} \| null, org: {name, title} \| null, collaborators: [{id, email, github, role, createdAt}], invites: [{id, email, role, invitedBy, createdAt}]}` |
 | POST | `/v1/apps/:name/collaborators` | **owner or admin**: `{email, role?: viewer\|admin (default viewer)}` → `{invite}` (201; 200 if that email had a pending invite, now with this role). 409 if that account already has access |
 | PUT | `/v1/apps/:name/collaborators/:accountId` | **owner or admin**: `{role}` |
 | DELETE | `/v1/apps/:name/collaborators/:accountId` | **owner or admin**: remove one. Your own id: leave the app (any role; needs an `admin` token covering the app) |
@@ -86,6 +100,18 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | DELETE | `/v1/admin/sites/:name` | **site admin**: soft delete. Offline at once (not served, no crons, 404 to its owner, name stays taken) and restorable until purged after `CRESSLET_DELETED_RETENTION_DAYS`. `?purge=1` deletes it and its data permanently now |
 | POST | `/v1/admin/sites/:name/restore` | **site admin**: undo a soft delete |
 | PUT | `/v1/admin/accounts/role` | **site admin**: `{email, role: "SiteAdmin" \| null}` grant/revoke (not your own) |
+| GET | `/v1/admin/accounts` | **site admin**: `{totals: {accounts, active, invited, disabled, siteAdmins}, openSignup, accounts: [{id, email, github, status: active\|invited\|disabled, siteAdmin, siteAdminFromConfig, apps, orgs: [{name, title, role}], invitedBy, createdAt, lastActiveAt, disabledAt}]}` (`apps`: personal apps and artifacts; `lastActiveAt`: a token's last use) |
+| POST | `/v1/admin/accounts` | **site admin**: invite `{email, siteAdmin?, org?, orgRole?: member\|admin}` → `{account}` (201). 409 if the email has an account |
+| PATCH | `/v1/admin/accounts/:id` | **site admin**: `{siteAdmin?: bool, disabled?: bool}` → `{account}`. 400 for yourself, 400 `config_admin` for one in `CRESSLET_SITE_ADMINS` |
+| DELETE | `/v1/admin/accounts/:id` | **site admin**: withdraw an invite (deletes an `invited` account that owns nothing); 409 `not_invited` otherwise, 409 `last_admin` while it's an organization's only admin |
+| GET | `/v1/orgs` | token with `read` or more over the whole account: `{orgs: [{id, name, title, createdAt, role}]}` you belong to |
+| GET | `/v1/orgs/:org` | members and site admins: `{org, role, canManage, members: [{id, email, github, role, disabled, createdAt}], apps: [{name, kind, url, updatedAt}]}`; 404 to others |
+| POST | `/v1/orgs/:org/members` | org admin (full-access token) or site admin: `{email, role?: member\|admin}` → `{member}` (201). 404 `no_account` if no account has that email, 409 if already a member. At most 500 |
+| PUT | `/v1/orgs/:org/members/:accountId` | org admin or site admin: `{role}`. 400 `last_admin` demoting the last enabled admin |
+| DELETE | `/v1/orgs/:org/members/:accountId` | org admin or site admin; your own id: leave (full-access token). 400 `last_admin` as above. The apps they held go to an enabled org admin |
+| GET | `/v1/admin/orgs` | **site admin**: `{orgs: [{id, name, title, createdAt, members, apps}]}` |
+| POST | `/v1/admin/orgs` | **site admin**: `{name, title?, admin: email}` → `{org}` (201); `admin`: its first admin, an existing account. `name`: 1-40 of a-z, 0-9, single dashes. 404 `no_account` for an unknown admin email, 409 if taken |
+| DELETE | `/v1/admin/orgs/:org` | **site admin**: delete an empty organization; 409 `not_empty` while it has apps or artifacts |
 | GET | `/v1/me/credits` | token with `read` or more over the whole account: `{enabled: false}`, or `{enabled: true, available, balance, monthly: {allowance, used, remaining, resetsAt}, creditsPerUsd, history: [{at, kind: usage\|grant, credits, model?, inputTokens?, outputTokens?, cacheReadTokens?, cacheWriteTokens?, estimated?, note?}]}` (last 50) |
 | POST | `/v1/ai/v1/messages` | `deploy` token over the whole account: a streamed Anthropic Messages request, on [AI credits](#ai-credits) |
 | POST | `/v1/admin/accounts/credits` | **site admin**: `{email, credits, note?}` adds credits to the account (negative: takes some back) → `{account, balance}`. 409 `ai_disabled` without AI credits |

@@ -318,3 +318,39 @@ test("regenerate token revokes all others", withServer(async (t) => {
   for (const old of [a, b]) assert.equal((await t.json("/v1/me", { headers: bearer(old) })).status, 401);
   assert.equal((await t.json("/v1/me", { headers: bearer(r.body.token) })).status, 200);
 }));
+
+test("site admin invites: closed signup, any verified email links; disabled accounts can't sign in, enabled ones can", withServer(async (t) => {
+  const inv = await t.json("/v1/admin/accounts", { method: "POST", headers: bearer("adm"), body: '{"email":"work@corp.co"}' });
+  assert.equal(inv.status, 201);
+  assert.equal(inv.body.account.status, "invited");
+  // The invite is for a secondary (verified) email on their GitHub account.
+  const nine: FakeUser = {
+    id: 9,
+    login: "nine",
+    emails: [{ email: "me@home.co", primary: true, verified: true }, { email: "Work@corp.co", primary: false, verified: true }],
+  };
+  const d = await deviceLogin(t, nine);
+  assert.equal(d.status, 200);
+  assert.equal(d.body.account.id, inv.body.account.id);
+  const row = async () =>
+    (await t.json("/v1/admin/accounts", { headers: bearer("adm") })).body.accounts.find((a: { id: string }) => a.id === inv.body.account.id);
+  assert.equal((await row()).status, "active");
+  assert.equal((await row()).github, "nine");
+  // Signed in: no longer an invite to withdraw.
+  assert.equal((await t.json(`/v1/admin/accounts/${inv.body.account.id}`, { method: "DELETE", headers: bearer("adm") })).status, 409);
+
+  // Disabled: its token stops, and GitHub login is refused, by GitHub id or by any verified email.
+  const off = await t.json(`/v1/admin/accounts/${inv.body.account.id}`, { method: "PATCH", headers: bearer("adm"), body: '{"disabled":true}' });
+  assert.equal(off.body.account.status, "disabled");
+  assert.equal((await t.json("/v1/me", { headers: bearer(d.body.token) })).status, 401);
+  assert.equal((await deviceLogin(t, nine)).body.error, "account_disabled");
+  assert.equal((await deviceLogin(t, { ...nine, id: 10 })).body.error, "account_disabled", "same email, another GitHub account");
+  const web = await t.webLogin(nine);
+  assert.match(new URLSearchParams(web.hash.slice(1)).get("cresslet_login_error")!, /disabled/);
+
+  // Enabled: the same account again.
+  await t.json(`/v1/admin/accounts/${inv.body.account.id}`, { method: "PATCH", headers: bearer("adm"), body: '{"disabled":false}' });
+  const back = await deviceLogin(t, nine);
+  assert.equal(back.body.account.id, inv.body.account.id);
+  assert.equal((await t.json("/v1/me", { headers: bearer(back.body.token) })).status, 200);
+}, { openSignup: false }));

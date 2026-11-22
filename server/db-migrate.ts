@@ -20,9 +20,9 @@ import { MIGRATIONS, TABLES } from "./migrations.ts";
 import { type DatabaseConfig, Store } from "./store.ts";
 
 /** Tables that keep SQLite's implicit `rowid` (lists sort by it); Postgres has it as a column. */
-const ROWID_TABLES = new Set(["tokens", "deploys", "collaborators", "invites"]);
+const ROWID_TABLES = new Set(["tokens", "deploys", "collaborators", "invites", "org_members"]);
 /** Columns Postgres generates (identity): their sequences continue after the copied rows. */
-const IDENTITY: Record<string, string> = { tokens: "rowid", deploys: "rowid", collaborators: "rowid", invites: "rowid", ai_ledger: "id" };
+const IDENTITY: Record<string, string> = { tokens: "rowid", deploys: "rowid", collaborators: "rowid", invites: "rowid", org_members: "rowid", ai_ledger: "id" };
 
 async function columns(db: Db, table: string): Promise<string[]> {
   const cols = db instanceof PostgresDb

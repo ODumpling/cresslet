@@ -1,7 +1,7 @@
 // GitHub OAuth: web flow (studio) and device flow (CLI, proxied so the client secret stays here).
 import type { Config } from "./config.ts";
 import { HttpError } from "./deploys.ts";
-import { type Account, id, type Store } from "./store.ts";
+import { type Account, AccountDisabledError, id, type Store } from "./store.ts";
 
 const SCOPE = "read:user user:email";
 const STATE_TTL = 10 * 60_000;
@@ -61,24 +61,43 @@ export function github(cfg: Config, store: Store) {
       }
     } else {
       const e = await ghApi<{ email: string; primary: boolean; verified: boolean }[]>("/user/emails", accessToken);
-      const verified = e.ok && Array.isArray(e.body) ? e.body.filter((x) => x.verified) : [];
-      // Public profile emails are verified by GitHub; /user/emails can 403 for some token types.
-      const email = (verified.find((x) => x.primary) ?? verified[0])?.email ?? user.email ??
-        `${user.id}+${user.login}@users.noreply.github.com`;
-      const existing = await store.accountByEmail(email);
-      if (existing && !existing.github_id) {
-        // Operator-created (or legacy email-login) account: tokens issued before this link weren't proven
-        // to belong to this person.
-        await store.linkGithub(existing.id, ident);
-        await store.revokeTokens(existing.id);
-        account = { ...existing, github_id: ident.id, github_login: ident.login };
+      // Primary first. Public profile emails are verified by GitHub; /user/emails can 403 for some token types.
+      const verified = (e.ok && Array.isArray(e.body) ? e.body.filter((x) => x.verified) : [])
+        .sort((x, y) => Number(y.primary) - Number(x.primary)).map((x) => x.email.toLowerCase());
+      if (!verified.length && user.email) verified.push(user.email.toLowerCase());
+      if (await store.disabledAccount({ githubId: user.id, emails: verified })) {
+        throw new HttpError(403, "this account is disabled; ask a site admin", "account_disabled");
+      }
+      // An account set up for one of the verified emails (invited by a site admin, or operator-created) that
+      // isn't linked to GitHub yet: primary email first.
+      let existing: Account | undefined, linkable: Account | undefined;
+      for (const email of verified) {
+        const a = await store.accountByEmail(email);
+        existing ??= a;
+        if (a && !a.github_id) {
+          linkable = a;
+          break;
+        }
+      }
+      const email = verified[0] ?? `${user.id}+${user.login}@users.noreply.github.com`;
+      if (linkable) {
+        // Tokens issued before this link (operator-created accounts) weren't proven to belong to this person.
+        await store.linkGithub(linkable.id, ident);
+        await store.revokeTokens(linkable.id);
+        account = { ...linkable, github_id: ident.id, github_login: ident.login };
       } else {
-        if (!cfg.openSignup) throw new HttpError(403, "signup is closed; ask the operator for an account", "forbidden");
+        if (!cfg.openSignup) throw new HttpError(403, "signup is closed; ask a site admin for an invite", "forbidden");
         // Email already taken by another GitHub-linked account: fall back to the GitHub noreply address.
         account = await store.createAccount(existing ? `${user.id}+${user.login}@users.noreply.github.com` : email, ident);
       }
     }
-    return { account, token: (await store.issueToken(account.id, { name: tokenName })).token };
+    if (account.disabled_at) throw new HttpError(403, "this account is disabled; ask a site admin", "account_disabled");
+    try {
+      return { account, token: (await store.issueToken(account.id, { name: tokenName })).token };
+    } catch (e) {
+      if (e instanceof AccountDisabledError) throw new HttpError(403, "this account is disabled; ask a site admin", "account_disabled");
+      throw e;
+    }
   }
 
   return {

@@ -32,8 +32,11 @@ import {
   SITE_ADMIN,
   type Store,
   type Token,
+  AccountDisabledError,
+  accountLock,
   inviteLock,
 } from "./store.ts";
+import { orgRefs, orgRoutes } from "./orgs.ts";
 import type { Runtime } from "./runtime.ts";
 import { type Cluster, singleNode } from "./cluster.ts";
 import { github } from "./github.ts";
@@ -219,6 +222,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.code, message: err.message }, err.status as 400);
+    if (err instanceof AccountDisabledError) return c.json({ error: "account_disabled", message: "this account is disabled" }, 403);
     console.error(err);
     return c.json({ error: "internal", message: "internal error" }, 500);
   });
@@ -274,6 +278,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   ): Promise<AppAccess | undefined> {
     const acct = c.get("account"), t = c.get("token");
     let scopeError: string | undefined;
+    // The app as it is now: callers check again after reading a body, and it may have moved organizations since.
+    a = (await store.appById(a.id, true)) ?? a;
     const access = acct && t ? await store.access(a, acct.id) : undefined;
     if (access) {
       const apps = tokenApps(t!);
@@ -285,7 +291,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     }
     if (opts.account && !acct) throw new HttpError(401, "login required (a deploy key can't do this)", "unauthorized");
     const key = opts.account ? undefined : deployKey(c);
-    if (key && await store.checkDeployKey(a.id, key)) return;
+    if (key && await store.checkDeployKey(a.id, key)) {
+      // A disabled account's personal apps take no deploys (an org app's key keeps working for the org).
+      const owner = !a.org_id && a.account_id ? await store.accountById(a.account_id) : undefined;
+      if (owner?.disabled_at) throw new HttpError(403, `the owner of ${a.name} is disabled`, "account_disabled");
+      return;
+    }
     throw new HttpError(a.account_id || key || acct ? 403 : 401, scopeError ?? `not authorized for app ${a.name}`, "forbidden");
   }
 
@@ -320,9 +331,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     };
   };
 
-  const view = (a: App) => ({
+  const view = (a: App, org?: { name: string; title: string | null } | null) => ({
     id: a.id,
     name: a.name,
+    ...(org !== undefined ? { org } : {}),
     url: appUrl(cfg, a.name),
     claimed: !!a.account_id,
     expiresAt: a.expires_at ? new Date(a.expires_at).toISOString() : null,
@@ -343,6 +355,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     (cfg.clientIpHeader && c.req.header(cfg.clientIpHeader)?.split(",")[0].trim()) || c.env?.remoteAddr || "unknown";
   /** New apps and pages per account per hour: deleting doesn't give the allowance back, so create/delete loops stop. */
   const takeCreate = async (acct: Account) => {
+    // Runs right before the insert: an account disabled while its upload was in flight gets nothing new online.
+    // Its lock (disabling takes it) keeps a disable from landing between this check and the insert.
+    await store.db.lock(accountLock(acct.id));
+    if ((await store.accountById(acct.id))?.disabled_at) throw new HttpError(403, "this account is disabled", "account_disabled");
     if (isSiteAdmin(cfg, acct)) return;
     if (!await accountCreates.take(acct.id)) {
       throw new HttpError(429, `too many new apps and artifacts (${cfg.limits.createsPerHour} per hour): try later`, "rate_limited");
@@ -395,6 +411,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!isAdmin(c.get("bearer"))) throw new HttpError(403, "log in with GitHub", "forbidden");
     const { email } = await body<{ email?: string }>(c);
     if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
+    if (await store.disabledAccount({ emails: [email] })) throw new HttpError(409, `${email} belongs to a disabled account: enable it first`, "account_disabled");
     const account = await store.accountByEmail(email) ?? await store.createAccount(email);
     const { token } = await store.issueToken(account.id, { name: "Operator-issued" });
     return c.json({ account: accountView(account), token }, 201);
@@ -711,17 +728,17 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = c.get("account"), t = c.get("token");
     if (!a || !t) throw new HttpError(401, "login required", "unauthorized");
     const only = tokenApps(t);
-    // Owned and shared apps; `access`: owner, admin or viewer.
-    return c.json({
-      apps: (await store.appsFor(a.id)).filter((x) => !only || only.includes(x.id)).map((x) => ({ ...view(x), access: x.access })),
-    });
+    // Owned, shared and organization apps; `access`: owner, admin or viewer; `org`: the organization it's in.
+    const apps = (await store.appsFor(a.id)).filter((x) => !only || only.includes(x.id));
+    const org = await orgRefs(store, apps);
+    return c.json({ apps: apps.map((x) => ({ ...view(x, org(x)), access: x.access })) });
   });
 
   app.get("/apps/:name", async (c) => {
     const a = await getApp(c.req.param("name"));
     const access = await authorize(c, a, "read");
     return c.json({
-      app: { ...view(a), access: access ?? null },
+      app: { ...view(a, (await orgRefs(store, [a]))(a)), access: access ?? null },
       deploys: (await store.deploys(a.id, 10)).map((d) => ({
         id: d.id,
         createdAt: new Date(d.created_at).toISOString(),
@@ -845,9 +862,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   app.get("/apps/:name/collaborators", async (c) => {
     const a = await manage(c);
-    const owner = (await store.accountById(a.account_id!))!;
+    const owner = a.account_id ? await store.accountById(a.account_id) : undefined;
     return c.json({
-      owner: person(owner),
+      // An app in an organization: its admins own it (`owner` is who last held it, for older clients).
+      owner: owner ? person({ ...owner, email: owner.disabled_email ?? owner.email }) : null,
+      org: (await orgRefs(store, [a]))(a),
       collaborators: (await store.collaborators(a.id)).map((x) =>
         ({ ...person({ id: x.account_id, email: x.email, github_login: x.github_login }), role: x.role, createdAt: iso(x.created_at) })),
       invites: await Promise.all((await store.invites(a.id)).map(inviteView)),
@@ -866,7 +885,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     // Checks and write under the app's invite lock: concurrent invites can't pass the cap together.
     const r = await store.serialized(inviteLock(a.id), async () => {
       const invitee = await store.accountByEmail(email);
-      if (invitee && invitee.id === a.account_id) throw new HttpError(400, `${email} owns ${a.name}`);
+      if (invitee && !a.org_id && invitee.id === a.account_id) throw new HttpError(400, `${email} owns ${a.name}`);
       if (invitee && await store.access(a, invitee.id)) {
         throw new HttpError(409, `${email} already has access: change their role instead`, "conflict");
       }
@@ -897,11 +916,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       const a = await getApp(c.req.param("name"));
       const access = await store.access(a, me.id), apps = tokenApps(t);
       if (!access) throw new HttpError(404, "collaborator not found", "not_found");
-      if (access === "owner") throw new HttpError(400, "the owner can't leave their own app");
+      if (access === "owner" && !a.org_id) throw new HttpError(400, "the owner can't leave their own app");
       if ((apps && !apps.includes(a.id)) || !atLeast(t, "admin")) {
         throw new HttpError(403, `this token can't do that (needs admin access to ${a.name})`, "forbidden");
       }
-      await store.removeCollaborator(a.id, me.id);
+      // Access through an organization isn't left here (leave the organization).
+      if (!await store.removeCollaborator(a.id, me.id)) throw new HttpError(404, "collaborator not found", "not_found");
       return c.json({ removed: me.id });
     }
     const a = await manage(c);
@@ -976,10 +996,16 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     const access = await authorize(c, a, "read");
     const n = Math.min(Number(c.req.query("n") ?? 200), cfg.limits.logLines);
-    // A collaborator's stream ends when they lose access (removed, or left): checked per line and every 15s.
+    // An account's stream ends when it loses access (removed, left, out of the org, disabled): checked per line
+    // and every 15s.
     const acct = c.get("account");
-    const collaborator = access === "admin" || access === "viewer";
-    const revoked = async () => collaborator && !await store.access(a, acct!.id);
+    const viaAccount = !!access; // not a deploy key
+    // The app as it is now (it may have moved out of an organization since).
+    const revoked = async () => {
+      if (!viaAccount) return false;
+      const now = await store.appById(a.id);
+      return !now || !await store.access(now, acct!.id);
+    };
     const follow = c.req.query("follow") === "1";
     const enc = new TextEncoder();
     const line = (l: unknown) => enc.encode(JSON.stringify(l) + "\n");
@@ -1004,7 +1030,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
             else if (!ended) ctrl.enqueue(line(l));
           }).catch(end);
         });
-        const timer = collaborator ? setInterval(() => void revoked().then((r) => r && end(), () => {}), 15_000) : undefined;
+        const timer = viaAccount ? setInterval(() => void revoked().then((r) => r && end(), () => {}), 15_000) : undefined;
         timer?.unref();
         unsub = () => {
           sub();
@@ -1366,6 +1392,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
     const { sql, params = [] } = await body<{ sql?: string; params?: unknown[] }>(c);
+    await authorize(c, a, "read"); // again: access may have changed while the body arrived
     if (!sql) throw new HttpError(400, "sql required");
     if (typeof sql !== "string" || !Array.isArray(params)) throw new HttpError(400, "sql must be a string, params an array");
     const r = await inspect<{ rows: unknown[]; truncated: boolean }>(a.id, paths(cfg, a.id).db, {
@@ -1384,6 +1411,14 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   });
 
   adminRoutes(app, { cfg, store, runtime, isAdminToken: isAdmin, body });
+  orgRoutes(app, {
+    cfg,
+    store,
+    isAdminToken: isAdmin,
+    body,
+    accountWide,
+    checkQuota: (acct, kind) => (kind === "page" ? checkPageQuota(acct) : checkAppQuota(acct)),
+  });
 
   app.notFound((c) => c.json({ error: "not_found", message: "no such endpoint" }, 404));
   return app;

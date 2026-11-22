@@ -65,16 +65,17 @@ for (const d of dialects) {
   test(`migrations (${d.name}): applied once, in order, all or nothing; a newer database is reported`, { skip: d.skip }, async () => {
     const { db, done } = await d.open();
     try {
-      assert.deepEqual(await migrate(db), { applied: [1], unknown: [] });
+      const all = MIGRATIONS.map((m) => m.version), n = all.length;
+      assert.deepEqual(await migrate(db), { applied: all, unknown: [] });
       assert.deepEqual(await migrate(db), { applied: [], unknown: [] }, "nothing left to apply");
 
-      const v2: Migration = { version: 2, name: "apps.note", up: (db) => db.exec("ALTER TABLE apps ADD COLUMN note TEXT") };
-      assert.deepEqual((await migrate(db, [...MIGRATIONS, v2])).applied, [2]);
+      const v2: Migration = { version: n + 1, name: "apps.note", up: (db) => db.exec("ALTER TABLE apps ADD COLUMN note TEXT") };
+      assert.deepEqual((await migrate(db, [...MIGRATIONS, v2])).applied, [n + 1]);
       assert.ok((await cols(db, "apps")).includes("note"));
 
       // A migration that fails halfway: its earlier statements are rolled back, nothing is recorded.
       const v3: Migration = {
-        version: 3,
+        version: n + 2,
         name: "broken",
         async up(db) {
           await db.exec("ALTER TABLE apps ADD COLUMN half TEXT");
@@ -84,10 +85,10 @@ for (const d of dialects) {
       await assert.rejects(migrate(db, [...MIGRATIONS, v2, v3]));
       assert.ok(!(await cols(db, "apps")).includes("half"), "rolled back");
       const recorded = (await db.all<{ version: number; name: string }>("SELECT version, name FROM schema_migrations ORDER BY version"));
-      assert.deepEqual(recorded.map((r) => [r.version, r.name]), [[1, "baseline"], [2, "apps.note"]]);
+      assert.deepEqual(recorded.map((r) => [r.version, r.name]), [...MIGRATIONS.map((m) => [m.version, m.name]), [n + 1, "apps.note"]]);
 
       // Rolled back to a release without v2: it runs, and says the database is ahead.
-      assert.deepEqual(await migrate(db), { applied: [], unknown: [{ version: 2, name: "apps.note" }] });
+      assert.deepEqual(await migrate(db), { applied: [], unknown: [{ version: n + 1, name: "apps.note" }] });
       await assert.rejects(migrate(db, [v2, MIGRATIONS[0]]), /increasing order/);
     } finally {
       await done();
@@ -100,8 +101,8 @@ test("migrations (postgres): servers starting together apply each migration once
   const dbs = Array.from({ length: 4 }, () => s.db());
   try {
     const results = await Promise.all(dbs.map((db) => migrate(db)));
-    assert.deepEqual(results.map((r) => r.applied).flat(), [1]);
-    assert.equal((await dbs[0].all("SELECT * FROM schema_migrations")).length, 1);
+    assert.deepEqual(results.map((r) => r.applied).flat(), MIGRATIONS.map((m) => m.version));
+    assert.equal((await dbs[0].all("SELECT * FROM schema_migrations")).length, MIGRATIONS.length);
   } finally {
     for (const db of dbs) await db.close();
     await s.drop();
@@ -121,7 +122,7 @@ test("a SQLite database from before migrations upgrades in place, data kept", as
 
     store = await Store.open(dir);
     try {
-      assert.deepEqual((await store.db.all<{ version: number }>("SELECT version FROM schema_migrations")).map((r) => r.version), [1]);
+      assert.deepEqual((await store.db.all<{ version: number }>("SELECT version FROM schema_migrations ORDER BY version")).map((r) => r.version), MIGRATIONS.map((m) => m.version));
       assert.equal((await store.appByName("old"))?.account_id, acct.id);
       assert.deepEqual(await store.secrets(app.id), { K: "v" });
     } finally {
@@ -155,7 +156,12 @@ async function fill(store: Store) {
   await store.uidSeq(app.id);
   await store.grantAi(owner.id, 5000, { by: "test" });
   await store.chargeAi(owner.id, "2026-11", 1000, 1500, { model: "claude-opus-5-5", input: 3, output: 4, usd: 0.25 });
-  return { owner, guest, token, app };
+  const org = await store.createOrg("acme", "Acme", owner.id);
+  await store.setOrgMember(org.id, owner.id, "admin");
+  await store.setOrgMember(org.id, guest.id, "member");
+  const { app: orgApp } = await store.createApp("tool", null, owner.id);
+  await store.setAppOrg(orgApp.id, org.id, owner.id);
+  return { owner, guest, token, app, orgApp: (await store.appById(orgApp.id))! };
 }
 
 test("SQLite → Postgres → SQLite: every row and secret copied and checked; the source untouched", { skip: needsPg }, async () => {
@@ -182,8 +188,8 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
     assert.equal(createHash("sha256").update(await readFile(join(dir, "cresslet.db"))).digest("hex"), before, "source file unchanged");
     const rows = Object.fromEntries(report.tables.map((t) => [t.table, t.rows]));
     assert.deepEqual(rows, {
-      accounts: 2, apps: 2, tokens: 2, deploys: 3, secrets: 2, domains: 1, meta: 1, collaborators: 1, invites: 1,
-      page_sessions: 1, rate_hits: 1, ai_wallets: 1, ai_ledger: 2,
+      accounts: 2, apps: 3, tokens: 2, deploys: 3, secrets: 2, domains: 1, meta: 1, collaborators: 1, invites: 1,
+      page_sessions: 1, rate_hits: 1, ai_wallets: 1, ai_ledger: 2, orgs: 1, org_members: 2,
     });
 
     // The copy works as the database of a server.
@@ -194,6 +200,8 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
       assert.deepEqual((await store.deploys(seed.app.id)).map((d) => d.id), ["dep_3", "dep_2", "dep_1"]);
       assert.deepEqual((await store.appsWithCrons()).map((a) => a.name), ["shop"]);
       assert.equal(await store.access(seed.app, seed.guest.id), "admin");
+      assert.equal(await store.access(seed.orgApp, seed.guest.id), "admin", "an org member");
+      assert.equal(await store.access(seed.orgApp, seed.owner.id), "owner", "an org admin");
       assert.equal(await store.uidSeq(seed.app.id), 1);
       assert.deepEqual(await store.aiWallet(seed.owner.id, "2026-11"), { balance: 4500, periodUsed: 1000 });
       // Generated ids carry on after the copied ones.

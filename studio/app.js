@@ -285,6 +285,7 @@ function setAccount(r) {
   $("admin-item").hidden = r.account.role !== "SiteAdmin";
   meta.then((m) => ($("admin-credits-item").hidden = !m.ai?.credits));
   renderAccount();
+  loadMyOrgs();
 }
 
 function logOut() {
@@ -292,6 +293,8 @@ function logOut() {
   myAccountId = null;
   auth.email = null;
   $("admin-item").hidden = true;
+  $("nav-orgs-item").hidden = true;
+  myOrgs = [];
   renderAccount();
   if (!$("cli-login").hidden) route(); // its Authorize button needs the session
   // Projects need the session: leave them for the landing page.
@@ -630,33 +633,34 @@ function siteActions(site, after) {
 }
 
 /** Resolves true if this render is still the current view (no later route or admin render), so callers may move focus.
- *  `credits`: the AI credits pages (`name`: an account id), else the sites pages (`name`: a site). */
-async function renderAdmin(name, { credits = false } = {}) {
+ *  `credits`: the AI credits pages (`name`: an account id); `section` "users" or "orgs": those pages; else the
+ *  sites pages (`name`: a site). */
+async function renderAdmin(name, { credits = false, section = credits ? "credits" : "sites" } = {}) {
   if (!auth.token) {
     location.hash = "#/";
     return false;
   }
-  $("admin-title").replaceChildren(credits ? "AI credits" : name || "Sites"); // before showOnly() focuses it
+  const TITLES = { credits: "AI credits", users: "Users", orgs: "Organizations" };
+  $("admin-title").replaceChildren(TITLES[section] ?? (name || "Sites")); // before showOnly() focuses it
   $("admin-sub").textContent = "";
   showOnly("admin");
-  if (credits) {
-    $("admin-link").removeAttribute("aria-current");
-    $("admin-credits-link").setAttribute("aria-current", "page");
-  }
+  navCurrent(section === "sites" ? "admin" : `admin-${section}`);
   const gen = ++adminView.gen, route = routeGen;
   const current = () => gen === adminView.gen && route === routeGen;
   $("admin-actions").replaceChildren();
   $("admin-body").replaceChildren(el("p", { className: "muted", textContent: "Loading…" }));
   try {
     if (credits) await (name ? renderAdminCreditsAccount(name) : renderAdminCredits());
+    else if (section === "users") await renderAdminUsers();
+    else if (section === "orgs") await renderAdminOrgs();
     else if (name) await renderAdminSite(name);
     else await renderAdminSites();
   } catch (e) {
     if (!current()) return false;
-    if (credits) $("admin-title").replaceChildren("AI credits");
+    if (TITLES[section]) $("admin-title").replaceChildren(TITLES[section]);
     $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 403 ? "Only site admins can see this page." : `Could not load: ${e.message}` }));
     if (e.status !== 403) {
-      const retry = el("button", { className: "btn", type: "button", onclick: () => renderAdmin(name, { credits }).then((ok) => ok && refocus(name ? null : $("admin-actions").querySelector("button"))) }, icon("refresh"), "Retry");
+      const retry = el("button", { className: "btn", type: "button", onclick: () => renderAdmin(name, { credits, section }).then((ok) => ok && refocus(name ? null : $("admin-actions").querySelector("button"))) }, icon("refresh"), "Retry");
       $("admin-actions").replaceChildren(retry);
       refocus(retry); // the Refresh/Retry that was clicked is gone
     }
@@ -824,7 +828,8 @@ async function renderSite(name, tab = "", arg = "") {
     const d = await api(appPath(name));
     if (!current()) return false;
     const a = d.app;
-    $("site-sub").textContent = [ACCESS_LABEL[a.access] ? `You're ${a.access === "owner" ? "the owner" : `${a.access === "admin" ? "an" : "a"} ${a.access}`}` : null,
+    $("site-sub").textContent = [ACCESS_LABEL[a.access] ? `You're ${a.access === "owner" ? (a.org ? "an owner" : "the owner") : `${a.access === "admin" ? "an" : "a"} ${a.access}`}` : null,
+      a.org ? `In ${a.org.title ?? a.org.name}` : null,
       a.config?.server ? "Server app" : "Static site", a.claimed ? null : `Unclaimed${a.expiresAt ? `, expires ${ago(a.expiresAt)}` : ""}`].filter(Boolean).join(" · ");
     const refresh = el("button", {
       className: "btn", type: "button", title: "Refresh",
@@ -1271,6 +1276,403 @@ function siteLogs(name, current) {
   })();
 }
 
+// ------------------------------------------------------------------ admin: users (#/admin-users)
+const ACCOUNT_STATUS = { active: ["live", "Active"], invited: ["idle", "Invited"], disabled: ["deleted", "Disabled"] };
+const adminUsersView = { filter: "all", q: "" };
+const field = (label, input, hint) => el("div", { className: "field" },
+  el("label", { htmlFor: input.id, textContent: label }), input, hint ? el("p", { className: "muted small", id: `${input.id}-hint`, textContent: hint }) : null);
+const formError = () => el("p", { className: "error small", role: "alert", hidden: true });
+const showError = (err, text) => {
+  err.textContent = text;
+  err.hidden = !text;
+};
+
+/** Thrown by a row action's `run` when its confirmation is declined: nothing to report. */
+const CANCELLED = Symbol("cancelled");
+/** Runs a row action: disables the button meanwhile, toasts the outcome, re-renders on success. */
+async function rowAction(b, run, done, after) {
+  const gen = routeGen;
+  b.disabled = true;
+  try {
+    await run();
+  } catch (e) {
+    if (e !== CANCELLED) toast(e.message);
+    if (gen === routeGen) {
+      b.disabled = false;
+      refocus(b.isConnected ? b : null);
+    }
+    return;
+  }
+  toast(done);
+  if (gen === routeGen) after();
+}
+
+async function renderAdminUsers() {
+  document.title = "Users · Admin · Cresslet Studio";
+  $("admin-title").replaceChildren("Users");
+  $("admin-sub").textContent = "Every account on this server";
+  const gen = adminView.gen, route = routeGen;
+  const [d, orgs] = await Promise.all([api("/v1/admin/accounts"), api("/v1/admin/orgs").then((r) => r.orgs, () => [])]);
+  if (gen !== adminView.gen || route !== routeGen) return;
+  const again = (focus) => renderAdmin("", { section: "users" }).then((ok) => ok && refocus(focus?.()));
+  $("admin-actions").replaceChildren(el("button", { className: "btn", type: "button", onclick: () => again(() => $("admin-actions").querySelector("button")) }, icon("refresh"), "Refresh"));
+
+  const t = d.totals;
+  const stats = el("div", { className: "stats" },
+    stat("Accounts", [String(t.accounts)], `${t.siteAdmins} site admin${t.siteAdmins === 1 ? "" : "s"}`),
+    stat("Active", [String(t.active)], "Signed in at least once"),
+    stat("Invited", [String(t.invited)], "Not signed in yet"),
+    stat("Disabled", [String(t.disabled)], "Can't sign in; their sites keep serving"));
+
+  // Invite: sets up the account; they sign in with GitHub using that email (no email is sent).
+  const email = el("input", { className: "input", id: "invite-account-email", type: "email", required: true, maxLength: 254, autocomplete: "off", spellcheck: false, placeholder: "name@example.com" });
+  email.setAttribute("aria-describedby", "invite-account-email-hint");
+  const asAdmin = el("input", { type: "checkbox", id: "invite-account-admin" });
+  const org = el("select", { className: "input", id: "invite-account-org" },
+    el("option", { value: "", textContent: "None" }), ...orgs.map((o) => el("option", { value: o.name, textContent: o.title ? `${o.title} (${o.name})` : o.name })));
+  const orgRole = el("select", { className: "input", id: "invite-account-org-role" },
+    el("option", { value: "member", textContent: "Member" }), el("option", { value: "admin", textContent: "Admin" }));
+  const orgRoleField = field("Organization role", orgRole);
+  orgRoleField.hidden = true;
+  org.addEventListener("change", () => (orgRoleField.hidden = !org.value));
+  const err = formError();
+  const submit = el("button", { className: "btn primary", type: "submit" }, icon("plus"), "Invite");
+  const form = el("form", { className: "panel form grant-form", ariaLabel: "Invite someone" },
+    el("h2", { textContent: "Invite someone" }),
+    field("Email", email, `They sign in with GitHub, with this as one of their verified emails${d.openSignup ? "" : ", even though signup is closed"}. No email is sent: let them know.`),
+    orgs.length ? field("Organization (optional)", org) : null,
+    orgs.length ? orgRoleField : null,
+    el("label", { className: "check" }, asAdmin, el("span", { textContent: "Site admin" })),
+    err,
+    el("div", { className: "row start" }, submit));
+  form.addEventListener("input", () => showError(err, ""));
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    showError(err, "");
+    const gen = routeGen;
+    submit.disabled = true;
+    try {
+      const r = await api("/v1/admin/accounts", {
+        method: "POST",
+        body: JSON.stringify({ email: email.value.trim(), siteAdmin: asAdmin.checked, ...(org.value ? { org: org.value, orgRole: orgRole.value } : {}) }),
+      });
+      toast(`Invited ${r.account.email}. They can sign in with GitHub now.`);
+      if (gen === routeGen) again(() => $("invite-account-email"));
+    } catch (x) {
+      if (gen !== routeGen) return;
+      if (!form.isConnected) return void toast(`Could not invite: ${x.message}`);
+      showError(err, `Could not invite: ${x.message}`);
+      submit.disabled = false;
+      email.focus();
+    }
+  });
+
+  const actions = (a) => {
+    const btn = (label, aria, run, done, danger) => el("button", {
+      className: `btn sm${danger ? " danger" : ""}`, type: "button", textContent: label, ariaLabel: `${aria} ${a.email}`,
+      onclick: (e) => rowAction(e.currentTarget, run, done, () => again()),
+    });
+    const patch = (input) => () => api(`/v1/admin/accounts/${encodeURIComponent(a.id)}`, { method: "PATCH", body: JSON.stringify(input) });
+    const me = a.id === myAccountId, out = [];
+    if (a.status === "invited") {
+      out.push(btn("Withdraw invite", "Withdraw the invite for", async () => {
+        if (!confirm(`Withdraw the invite for ${a.email}? They won't be able to sign in.`)) throw CANCELLED;
+        await api(`/v1/admin/accounts/${encodeURIComponent(a.id)}`, { method: "DELETE" });
+      }, `Withdrew the invite for ${a.email}`, true));
+    }
+    if (!me && !a.siteAdminFromConfig) {
+      out.push(a.siteAdmin
+        ? btn("Remove admin", "Remove the site admin role from", patch({ siteAdmin: false }), `${a.email} is no longer a site admin`)
+        : btn("Make admin", "Make site admin:", patch({ siteAdmin: true }), `${a.email} is now a site admin`));
+      if (a.status === "disabled") out.push(btn("Enable", "Enable", patch({ disabled: false }), `${a.email} can sign in again`));
+      else if (a.status === "active") {
+        out.push(btn("Disable", "Disable", async () => {
+          if (!confirm(`Disable ${a.email}? They're signed out everywhere and can't sign in or deploy. Their sites keep serving.`)) throw CANCELLED;
+          await patch({ disabled: true })();
+        }, `${a.email} is disabled`, true));
+      }
+    }
+    return out;
+  };
+
+  const tbody = el("tbody");
+  const counts = { all: t.accounts, active: t.active, invited: t.invited, disabled: t.disabled };
+  const seg = el("div", { className: "seg", role: "group", ariaLabel: "Show" },
+    ...[["all", "All"], ["active", "Active"], ["invited", "Invited"], ["disabled", "Disabled"]].map(([k, l]) =>
+      el("button", { type: "button", textContent: `${l} ${counts[k]}`, dataset: { k }, onclick: () => { adminUsersView.filter = k; draw(); } })));
+  const search = el("input", { type: "search", className: "input", placeholder: "Search accounts, organizations", ariaLabel: "Search accounts", value: adminUsersView.q, oninput: () => { adminUsersView.q = search.value; draw(); } });
+  const shown = el("p", { className: "sr-only", role: "status" });
+  function draw() {
+    for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.k === adminUsersView.filter));
+    const q = adminUsersView.q.trim().toLowerCase();
+    const rows = d.accounts.filter((a) => (adminUsersView.filter === "all" || a.status === adminUsersView.filter) &&
+      (!q || [a.email, a.github, ...a.orgs.map((o) => o.name)].some((v) => v?.toLowerCase().includes(q))));
+    shown.textContent = `${rows.length} account${rows.length === 1 ? "" : "s"} shown`;
+    tbody.replaceChildren(...(rows.length ? rows.map((a) => {
+      const [s, label] = ACCOUNT_STATUS[a.status];
+      return el("tr", { dataset: a.status === "disabled" ? { deleted: "" } : {} },
+        el("td", {},
+          el("span", { textContent: a.email }, a.id === myAccountId ? el("span", { className: "badge", textContent: "you" }) : null),
+          el("span", { className: "sub", textContent: a.github ? `@${a.github}` : a.invitedBy ? `invited by ${ownerText(a.invitedBy)}` : "no GitHub login yet" })),
+        el("td", {}, statusPill(s, label)),
+        el("td", {}, a.siteAdmin ? el("span", { textContent: "Site admin" }, a.siteAdminFromConfig ? el("span", { className: "sub", textContent: "in the server's config" }) : null) : el("span", { className: "muted", textContent: "—" })),
+        el("td", { className: "orgs" }, a.orgs.length
+          ? el("span", {}, ...a.orgs.flatMap((o, i) => [i ? ", " : null, el("a", { href: `#/orgs/${encodeURIComponent(o.name)}`, textContent: o.name }), o.role === "admin" ? " (admin)" : null]))
+          : el("span", { className: "muted", textContent: "—" })),
+        el("td", { className: "num", textContent: String(a.apps) }),
+        el("td", {}, a.lastActiveAt ? timeAgo(a.lastActiveAt) : el("span", { className: "muted", textContent: "never" })),
+        el("td", { className: "actions multi" }, ...actions(a)));
+    }) : [el("tr", {}, el("td", { colSpan: 7, className: "empty", textContent: q ? "No accounts match." : "No accounts here." }))]));
+  }
+  draw();
+
+  $("admin-body").replaceChildren(stats,
+    el("div", { className: "detail-grid" },
+      el("div", { className: "stack" },
+        el("div", { className: "panel" }, el("h2", { textContent: "How accounts work" }),
+          el("p", { className: "muted small", textContent: `Everyone signs in with GitHub. ${d.openSignup ? "Signup is open: anyone can create an account." : "Signup is closed: only invited people (and accounts that already exist) can sign in."} Disabling an account signs it out everywhere and blocks its login, tokens and deploys; its sites keep serving until you delete them on the Sites page.` }))),
+      form),
+    el("div", { className: "toolbar" }, el("h2", { className: "toolbar-title", textContent: "Accounts" }),
+      el("div", { className: "search" }, icon("search"), search), seg, shown),
+    el("div", { className: "table-wrap", tabIndex: 0, role: "region", ariaLabel: "Accounts table" },
+      el("table", { className: "table" },
+        el("caption", { className: "sr-only", textContent: "Accounts, oldest first" }),
+        el("thead", {}, el("tr", {}, ...["Account", "Status", "Role", "Organizations", "Apps", "Last active", "Actions"].map((h, i) =>
+          el("th", { scope: "col", className: i === 4 ? "num" : "" }, i === 6 ? srOnly(h) : h)))),
+        tbody)),
+    el("p", { className: "muted small", textContent: "Apps: apps and artifacts the account owns personally. Last active: the last time one of its tokens was used." }));
+}
+
+// ------------------------------------------------------------------ admin: organizations (#/admin-orgs)
+async function renderAdminOrgs() {
+  document.title = "Organizations · Admin · Cresslet Studio";
+  $("admin-title").replaceChildren("Organizations");
+  $("admin-sub").textContent = "Teams whose members share apps";
+  const gen = adminView.gen, route = routeGen;
+  const { orgs } = await api("/v1/admin/orgs");
+  if (gen !== adminView.gen || route !== routeGen) return;
+  const again = (focus) => renderAdmin("", { section: "orgs" }).then((ok) => ok && refocus(focus?.()));
+  $("admin-actions").replaceChildren(el("button", { className: "btn", type: "button", onclick: () => again(() => $("admin-actions").querySelector("button")) }, icon("refresh"), "Refresh"));
+
+  const name = el("input", { className: "input mono", id: "org-name", required: true, maxLength: 40, pattern: "[a-z0-9](?:[a-z0-9]|-(?!-))*[a-z0-9]|[a-z0-9]", autocomplete: "off", spellcheck: false, placeholder: "acme" });
+  name.setAttribute("aria-describedby", "org-name-hint");
+  const title = el("input", { className: "input", id: "org-title", maxLength: 100, autocomplete: "off", placeholder: "Acme Inc." });
+  const admin = el("input", { className: "input", id: "org-admin", type: "email", required: true, maxLength: 254, autocomplete: "off", spellcheck: false, placeholder: "name@example.com" });
+  admin.setAttribute("aria-describedby", "org-admin-hint");
+  const err = formError();
+  const submit = el("button", { className: "btn primary", type: "submit" }, icon("plus"), "Create organization");
+  const form = el("form", { className: "panel form grant-form", ariaLabel: "New organization" },
+    el("h2", { textContent: "New organization" }),
+    field("Name", name, "Lowercase letters, digits and single dashes, up to 40."),
+    field("Display name (optional)", title),
+    field("First admin", admin, "The email of an existing account. Admins add and remove members; invite new people on the Users page first."),
+    err,
+    el("div", { className: "row start" }, submit));
+  form.addEventListener("input", () => showError(err, ""));
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    showError(err, "");
+    const gen = routeGen;
+    submit.disabled = true;
+    try {
+      const r = await api("/v1/admin/orgs", {
+        method: "POST",
+        body: JSON.stringify({ name: name.value.trim(), ...(title.value.trim() ? { title: title.value.trim() } : {}), admin: admin.value.trim() }),
+      });
+      toast(`Created ${r.org.name}`);
+      if (gen === routeGen) again(() => $("org-name"));
+    } catch (x) {
+      if (gen !== routeGen) return;
+      if (!form.isConnected) return void toast(`Could not create it: ${x.message}`);
+      showError(err, `Could not create it: ${x.message}`);
+      submit.disabled = false;
+      (x.status === 404 ? admin : name).focus();
+    }
+  });
+
+  const tbody = el("tbody", {}, ...(orgs.length ? orgs.map((o) =>
+    el("tr", {},
+      el("td", {}, el("a", { href: `#/orgs/${encodeURIComponent(o.name)}`, textContent: o.title ?? o.name }), o.title ? el("span", { className: "sub mono", textContent: o.name }) : null),
+      el("td", { className: "num", textContent: String(o.members) }),
+      el("td", { className: "num", textContent: String(o.apps) }),
+      el("td", {}, timeAgo(o.createdAt)),
+      el("td", { className: "actions" }, el("button", {
+        className: "btn sm danger", type: "button", textContent: "Delete", ariaLabel: `Delete ${o.name}`,
+        onclick: (e) => rowAction(e.currentTarget, async () => {
+          if (!confirm(`Delete the organization ${o.name}? Its members lose its apps' access; apps must be moved out first.`)) throw CANCELLED;
+          await api(`/v1/admin/orgs/${encodeURIComponent(o.name)}`, { method: "DELETE" });
+        }, `Deleted ${o.name}`, () => again()),
+      }))))
+    : [el("tr", {}, el("td", { colSpan: 5, className: "empty", textContent: "No organizations yet." }))]));
+
+  $("admin-body").replaceChildren(
+    el("div", { className: "detail-grid" },
+      el("div", { className: "stack" },
+        el("div", { className: "panel" }, el("h2", { textContent: "How organizations work" }),
+          el("p", { className: "muted small", textContent: "An app moved into an organization belongs to it: the organization's admins own it, and its members can deploy and change it. Admins manage members. As a site admin you manage organizations, but you don't get access to their apps unless you're a member." })),
+        el("div", { className: "table-wrap", tabIndex: 0, role: "region", ariaLabel: "Organizations table" },
+          el("table", { className: "table" },
+            el("caption", { className: "sr-only", textContent: "Organizations" }),
+            el("thead", {}, el("tr", {}, ...["Organization", "Members", "Apps", "Created", "Actions"].map((h, i) =>
+              el("th", { scope: "col", className: i === 1 || i === 2 ? "num" : "" }, i === 4 ? srOnly(h) : h)))),
+            tbody))),
+      form));
+}
+
+// ------------------------------------------------------------------ organizations (#/orgs[/<name>])
+const ORG_ROLE_LABEL = { admin: "Admin", member: "Member" };
+let myOrgs = [];
+async function loadMyOrgs() {
+  myOrgs = auth.token ? await api("/v1/orgs").then((r) => r.orgs, () => []) : [];
+  $("nav-orgs-item").hidden = !myOrgs.length;
+  return myOrgs;
+}
+
+/** Your organizations, or one of them (members, apps; admins manage members). Uses the admin page's layout. */
+async function renderOrg(name) {
+  if (!auth.token) {
+    location.hash = "#/";
+    return false;
+  }
+  $("admin-title").replaceChildren(name || "Organizations");
+  $("admin-sub").textContent = "";
+  showOnly("admin");
+  navCurrent("orgs");
+  const gen = ++adminView.gen, route = routeGen;
+  const current = () => gen === adminView.gen && route === routeGen;
+  $("admin-actions").replaceChildren();
+  $("admin-body").replaceChildren(el("p", { className: "muted", textContent: "Loading…" }));
+  try {
+    if (!name) {
+      document.title = "Organizations · Cresslet Studio";
+      const orgs = await loadMyOrgs();
+      if (!current()) return false;
+      $("admin-sub").textContent = "Organizations you belong to";
+      $("admin-body").replaceChildren(orgs.length
+        ? el("ul", { className: "list" }, ...orgs.map((o) => el("li", { className: "list-row" },
+          el("div", { className: "tok" }, el("a", { href: `#/orgs/${encodeURIComponent(o.name)}`, textContent: o.title ?? o.name }),
+            el("span", { className: "meta", textContent: `${o.name} · ${ORG_ROLE_LABEL[o.role]}` })))))
+        : el("div", { className: "empty-state" }, el("strong", { textContent: "You're not in an organization" }),
+          el("span", { textContent: "A site admin creates organizations, and their admins add members." })));
+      return current();
+    }
+    const d = await api(`/v1/orgs/${encodeURIComponent(name)}`);
+    if (!current()) return false;
+    drawOrg(d);
+  } catch (e) {
+    if (!current()) return false;
+    $("admin-body").replaceChildren(el("p", { className: "error", textContent: e.status === 404 ? "This organization doesn't exist, or you're not in it." : `Could not load: ${e.message}` }));
+  }
+  return current();
+}
+
+function drawOrg(d) {
+  const o = d.org, name = o.name;
+  document.title = `${o.title ?? name} · Organizations · Cresslet Studio`;
+  $("admin-title").replaceChildren(el("a", { href: "#/orgs", textContent: "Organizations" }), " / ", o.title ?? name);
+  $("admin-sub").textContent = [o.title ? name : null, d.role ? `You're ${d.role === "admin" ? "an admin" : "a member"}` : "You manage it as a site admin"].filter(Boolean).join(" · ");
+  const again = (focus) => renderOrg(name).then((ok) => ok && refocus(focus?.()));
+  $("admin-actions").replaceChildren(el("button", { className: "btn", type: "button", onclick: () => again(() => $("admin-actions").querySelector("button")) }, icon("refresh"), "Refresh"));
+  const memberUrl = (id) => `/v1/orgs/${encodeURIComponent(name)}/members/${encodeURIComponent(id)}`;
+
+  const members = el("ul", { className: "list", ariaLabel: "Members" }, ...d.members.map((m) => {
+    const me = m.id === myAccountId;
+    const meta = [ORG_ROLE_LABEL[m.role], m.disabled ? "disabled" : null, `added ${when(m.createdAt)}`].filter(Boolean).join(" · ");
+    const row = [el("div", { className: "tok" },
+      el("strong", { textContent: personText(m) }, me ? el("span", { className: "badge", textContent: "you" }) : null),
+      el("span", { className: "meta", textContent: meta }))];
+    if (d.canManage) {
+      const role = el("select", { className: "input role-select", ariaLabel: `Role for ${personText(m)}` },
+        ...["member", "admin"].map((v) => el("option", { value: v, textContent: ORG_ROLE_LABEL[v], selected: v === m.role })));
+      role.addEventListener("change", async () => {
+        if (me && role.value === "member" && !confirm(`Make yourself a member of ${name}? You won't be able to manage it any more.`)) return void (role.value = m.role);
+        const gen = routeGen;
+        try {
+          m.role = (await api(memberUrl(m.id), { method: "PUT", body: JSON.stringify({ role: role.value }) })).role;
+          toast(`${personText(m)} is now ${ORG_ROLE_LABEL[m.role].toLowerCase()}`);
+          if (gen === routeGen) again(); // its subtitle, and (yourself) what you can still do
+        } catch (e) {
+          toast(`Could not change the role: ${e.message}`);
+          role.value = m.role;
+        }
+      });
+      row.push(role);
+    }
+    if (d.canManage || me) {
+      row.push(el("button", {
+        className: "btn sm danger", type: "button", textContent: me ? "Leave" : "Remove", ariaLabel: me ? `Leave ${name}` : `Remove ${personText(m)}`,
+        onclick: (e) => rowAction(e.currentTarget, async () => {
+          if (!confirm(me ? `Leave ${name}? You lose access to its apps.` : `Remove ${personText(m)} from ${name}? They lose access to its apps.`)) throw CANCELLED;
+          await api(memberUrl(m.id), { method: "DELETE" });
+        }, me ? `You left ${name}` : `Removed ${personText(m)}`, () => {
+          if (me && d.role) { // you left (as a site admin you still manage it, but its page is the admin's)
+            loadMyOrgs();
+            location.hash = "#/orgs";
+          } else again(() => $("org-members-title"));
+        }),
+      }));
+    }
+    return el("li", { className: "list-row" }, ...row);
+  }));
+
+  let form = null;
+  if (d.canManage) {
+    const email = el("input", { className: "input", id: "org-member-email", type: "email", required: true, maxLength: 254, autocomplete: "off", spellcheck: false });
+    email.setAttribute("aria-describedby", "org-member-email-hint");
+    const role = el("select", { className: "input", id: "org-member-role" },
+      el("option", { value: "member", textContent: "Member: deploy and change the organization's apps" }),
+      el("option", { value: "admin", textContent: "Admin: also own them and manage members" }));
+    const err = formError();
+    const submit = el("button", { className: "btn primary", type: "submit" }, icon("plus"), "Add member");
+    form = el("form", { className: "panel form grant-form", ariaLabel: "Add a member" },
+      el("h2", { textContent: "Add a member" }),
+      field("Email", email, "The email on their Cresslet account. Someone new to this server needs a site admin's invite first."),
+      field("Role", role),
+      err,
+      el("div", { className: "row start" }, submit));
+    form.addEventListener("input", () => showError(err, ""));
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showError(err, "");
+      const gen = routeGen;
+      submit.disabled = true;
+      try {
+        const r = await api(`/v1/orgs/${encodeURIComponent(name)}/members`, { method: "POST", body: JSON.stringify({ email: email.value.trim(), role: role.value }) });
+        toast(`Added ${r.member.email} as ${ORG_ROLE_LABEL[r.member.role].toLowerCase()}`);
+        if (gen === routeGen) again(() => $("org-member-email"));
+      } catch (x) {
+        if (gen !== routeGen) return;
+        if (!form.isConnected) return void toast(`Could not add them: ${x.message}`);
+        showError(err, x.message);
+        submit.disabled = false;
+        email.focus();
+      }
+    });
+  }
+
+  const apps = d.apps.length
+    ? el("ul", { className: "list", ariaLabel: "Apps" }, ...d.apps.map((a) => el("li", { className: "list-row" },
+      el("div", { className: "tok" },
+        d.role ? el("a", { href: a.kind === "page" ? `#/share/${encodeURIComponent(a.name)}` : siteHref(a.name), textContent: a.name }) : el("strong", { textContent: a.name }),
+        el("span", { className: "meta", textContent: `${a.kind === "page" ? "Artifact" : "App"} · updated ${when(a.updatedAt)}` })),
+      extLink(a.url, "Visit", "btn sm"))))
+    : el("p", { className: "muted small", textContent: "No apps yet. An app's owner moves it in from its Share page." });
+
+  $("admin-body").replaceChildren(el("div", { className: "detail-grid" },
+    el("div", { className: "stack" },
+      el("div", { className: "panel" }, el("h2", { id: "org-members-title", tabIndex: -1, textContent: `Members (${d.members.length})` }), members),
+      el("div", { className: "panel" }, el("h2", { textContent: `Apps (${d.apps.length})` }), apps)),
+    form));
+}
+
+/** Marks the sidebar link for `key` (its data-nav) as the current page. */
+function navCurrent(key) {
+  for (const a of document.querySelectorAll("[data-nav]")) {
+    if (a.dataset.nav === key) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  }
+}
+
 // ------------------------------------------------------------------ admin: AI credits (#/admin-credits[/<account id>])
 const creditNum = (x) => new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(x); // millicredits: exact
 const creditsText = (x) => `${creditNum(x)} ${creditNum(x) === "1" ? "credit" : "credits"}`;
@@ -1598,7 +2000,7 @@ function renderApps() {
               icon("download"), "Open source"),
             a.access === "viewer" ? null
               : el("a", { className: "btn sm", href: `#/share/${encodeURIComponent(a.name)}` }, icon("users"), "Share", srOnly(` ${a.name}`)),
-            a.access === "owner" ? null
+            a.access === "owner" || a.org ? null // org apps: leave the organization instead
               : el("button", { className: "btn sm danger", type: "button", id: `leave-${a.id}`, ariaLabel: `Leave ${a.name}`, onclick: () => leaveApp(a) }, "Leave")))))
       : emptyState("Nothing deployed yet", "Open a project and press Deploy, or run cresslet deploy."));
   }).catch((e) => $("apps").replaceChildren(el("p", { className: "error", textContent: `Could not load apps: ${e.message}` })));
@@ -2197,8 +2599,50 @@ async function renderShare(name) {
   $("people").replaceChildren(el("li", { className: "list-row muted", textContent: "Loading…" }));
   const gen = routeGen;
   if (!myAccountId) await api("/v1/me").then(setAccount, () => {});
-  await renderPeople(gen);
+  $("org-block").hidden = true;
+  await Promise.all([renderPeople(gen), renderOrgBlock(gen)]);
 }
+
+/** Moving the app into one of your organizations, or back out: for its owner (in an organization: an org admin). */
+async function renderOrgBlock(gen = routeGen) {
+  const name = shareApp;
+  let app, orgs;
+  try {
+    [{ app }, orgs] = await Promise.all([api(`/v1/apps/${encodeURIComponent(name)}`), loadMyOrgs()]);
+  } catch {
+    return;
+  }
+  if (gen !== routeGen || shareApp !== name) return;
+  $("org-block").hidden = app.access !== "owner" || (!orgs.length && !app.org);
+  const sel = $("org-select");
+  const inMine = !app.org || orgs.some((o) => o.name === app.org.name);
+  sel.replaceChildren(
+    el("option", { value: "", textContent: app.org ? "Nobody: make it my personal app" : "Nobody: my personal app" }),
+    ...(inMine ? [] : [el("option", { value: app.org.name, textContent: app.org.title ?? app.org.name })]),
+    ...orgs.map((o) => el("option", { value: o.name, textContent: o.title ? `${o.title} (${o.name})` : o.name })));
+  sel.value = app.org?.name ?? "";
+  $("org-form-text").textContent = app.org
+    ? `In ${app.org.title ?? app.org.name}: its admins own it and its members can deploy and change it. Moved out, it becomes your personal app.`
+    : "Move it into an organization you're in: the organization's admins will own it, and its members can deploy and change it. People you've shared it with keep their access.";
+  $("org-form").dataset.current = app.org?.name ?? "";
+}
+$("org-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = shareApp, to = $("org-select").value || null, gen = routeGen;
+  if ((to ?? "") === $("org-form").dataset.current) return void toast("It's already there.");
+  if (!confirm(to ? `Move ${name} into ${to}? Its admins will own it.` : `Make ${name} your personal app? The organization's members lose access to it.`)) return;
+  $("org-move").disabled = true;
+  try {
+    await api(`/v1/apps/${encodeURIComponent(name)}/org`, { method: "PUT", body: JSON.stringify({ org: to }) });
+    toast(to ? `Moved ${name} into ${to}` : `${name} is your personal app now`);
+  } catch (x) {
+    toast(`Could not move it: ${x.message}`);
+  } finally {
+    $("org-move").disabled = false;
+  }
+  if (gen !== routeGen) return;
+  await Promise.all([renderPeople(gen), renderOrgBlock(gen)]);
+});
 
 async function renderPeople(gen = routeGen) {
   const name = shareApp;
@@ -2216,7 +2660,11 @@ async function renderPeople(gen = routeGen) {
       el("strong", { textContent: text }, badge ? el("span", { className: "badge", textContent: badge }) : null),
       el("span", { className: "meta", textContent: meta }));
   $("people").replaceChildren(
-    el("li", { className: "list-row" }, who(personText(d.owner), "Owner", d.owner.id === myAccountId ? "you" : null)),
+    d.org
+      // In an organization: its admins own it (`owner` is just who last held it).
+      ? el("li", { className: "list-row" }, who(d.org.title ?? d.org.name, "Organization: its admins own this, its members can change it"),
+        el("a", { className: "btn sm", href: `#/orgs/${encodeURIComponent(d.org.name)}`, textContent: "Members", ariaLabel: `Members of ${d.org.name}` }))
+      : el("li", { className: "list-row" }, who(personText(d.owner), "Owner", d.owner.id === myAccountId ? "you" : null)),
     ...d.collaborators.map((p) => {
       const me = p.id === myAccountId;
       const role = el("select", {
@@ -3236,6 +3684,9 @@ function route() {
     const [n, tab = "", arg = ""] = location.hash.slice("#/apps/".length).split("/").map(decodeURIComponent);
     renderSite(n, tab, arg);
   }
+  else if (location.hash === "#/admin-users") renderAdmin("", { section: "users" });
+  else if (location.hash === "#/admin-orgs") renderAdmin("", { section: "orgs" });
+  else if (location.hash === "#/orgs" || location.hash.startsWith("#/orgs/")) renderOrg(decodeURIComponent(location.hash.slice("#/orgs/".length)));
   else if (location.hash.startsWith("#/admin-credits")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin-credits/".length)), { credits: true });
   else if (location.hash.startsWith("#/admin")) renderAdmin(decodeURIComponent(location.hash.slice("#/admin/".length)));
   else renderHome();
