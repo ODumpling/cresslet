@@ -290,6 +290,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       }
       const sha = commit(out, [ours, theirs], body.commit_message, null, u.login);
       r.refs.set(body.base, sha);
+      for (const pr of r.pulls) if (pr.state === "open" && pr.base === body.base && r.refs.has(pr.head) && ancestors(sha).has(r.refs.get(pr.head)!)) Object.assign(pr, { state: "closed", merged: true });
       return json(201, { sha, commit: { tree: { sha: treeId(out) } } });
     }
     const pullJson = (pr: Pull) => ({

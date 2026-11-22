@@ -205,7 +205,7 @@ try {
   await movedRow.getByRole("button", { name: /Pull in change 2/ }).click();
   await toast(/Pulled in/, 60000);
   await page.locator('#tree button[data-path="OUTSIDE.md"]').waitFor({ state: "attached", timeout: 30000 });
-  if (await movedRow.getByRole("button", { name: /Pull in change 2/ }).count()) fail("still shown as changed on GitHub");
+  await movedRow.getByRole("button", { name: /Pull in change 2/ }).waitFor({ state: "detached", timeout: 30000 }); // read again after it
   void outside;
   console.log("pulled in the push from outside");
 

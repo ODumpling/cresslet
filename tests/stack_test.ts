@@ -253,11 +253,11 @@ test("stack: merging the top change lands the stack, and the branches below go w
   const moved = t.provider.push(c2.branch, { "y.txt": "a push from outside" });
   // Not at its recorded commit: nothing lands.
   assert.equal(await landed(t.ctx, { branch: c3.branch, headSha: "e".repeat(40), mergedSha: c3.sha, deleteBelow: true }), null);
-  assert.deepEqual(await landed(t.ctx, { branch: c3.branch, headSha: c3.sha, mergedSha: c3.sha, deleteBelow: true }), { stack: "one", changes: 3 });
+  assert.deepEqual(await landed(t.ctx, { branch: c3.branch, headSha: c3.sha, mergedSha: c3.sha, deleteBelow: true }), { stack: "one", changes: 3, deleted: [c1.branch, c3.branch] });
   assert.deepEqual(await readStacks(t.ctx), []);
   assert.equal(t.provider.refs.has(c1.branch), false);
   assert.equal(t.provider.refs.get(c2.branch), moved); // pushed to since: kept
-  assert.equal(t.provider.refs.has(c3.branch), true); // the merge route deletes the merged branch itself
+  assert.equal(t.provider.refs.has(c3.branch), false); // the merged one too (the stack's cleanup decides about it)
   const rows = await t.store.db.all<{ state: string; landed_sha: string }>("SELECT state, landed_sha FROM stack_changes ORDER BY position");
   assert.deepEqual(rows.map((r) => [r.state, r.landed_sha]), [["landed", c3.sha], ["landed", c3.sha], ["landed", c3.sha]]);
 
@@ -267,7 +267,7 @@ test("stack: merging the top change lands the stack, and the branches below go w
   const e1 = ok(await t.change("main", main, "Six", "6"));
   const e2 = ok(await t.change(e1.branch, e1.sha, "Seven", "7"));
   const e3 = ok(await t.change(e2.branch, e2.sha, "Eight", "8"));
-  assert.deepEqual(await landed(t.ctx, { branch: e2.branch, headSha: e2.sha, mergedSha: e2.sha, deleteBelow: true }), { stack: "six", changes: 2 });
+  assert.deepEqual(await landed(t.ctx, { branch: e2.branch, headSha: e2.sha, mergedSha: e2.sha, deleteBelow: true }), { stack: "six", changes: 2, deleted: [e1.branch, e2.branch] });
   assert.deepEqual((await readStacks(t.ctx)).find((x) => x.id === e3.stack.id)!.changes.map((c) => c.title), ["Eight"]);
   assert.equal(t.provider.refs.has(e1.branch), false);
   const f1 = ok(await t.change("main", main, "Nine", "9"));
@@ -708,6 +708,18 @@ test("stack: a change to land whose branch is gone on GitHub isn't landed; one l
   const l = await landUpTo(t.ctx, c1.change.id);
   assert.deepEqual([l.landed.map((c) => c.title), l.sha], [["One", "Two", "Three"], c3.sha]);
   assert.deepEqual(await readStacks(t.ctx), []);
+});
+
+test("stack: merged in one merge, a submitted stack's branches under pull requests left open are kept (the top's too), and said", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  await submitStack(t.ctx, c1.stack.id);
+  const r = await landed(t.ctx, { branch: c2.branch, headSha: c2.sha, mergedSha: "e".repeat(40), deleteBelow: true });
+  // #1 (on main) and #2 (on change 1's branch) are open: everything kept, nothing closed unmerged.
+  assert.deepEqual([r?.deleted, r?.pullErrors?.map((x) => x.position).sort()], [[], [1, 2]]);
+  assert.deepEqual([t.provider.refs.has(c1.branch), t.provider.refs.has(c2.branch)], [true, true]);
 });
 
 test("stack: the default branch moved past changes outside Cresslet with their pull requests still open: their branches are kept, and said", async () => {

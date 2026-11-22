@@ -11,7 +11,7 @@ import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, commitChange, deleteSetAside, followed, goBack, landed, landUpTo, locked, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, followed, goBack, landed, landUpTo, locked, pullIn, readStacks, restore,
   setAsideBranches, stackPulls, submitStack,
 } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
@@ -568,11 +568,14 @@ export class GitHub implements SourceControlProvider {
     // Classic protection: only what stands between a fast-forward and the branch (not force pushes or deletion).
     const p = await this.req<{
       required_pull_request_reviews?: unknown; required_status_checks?: unknown; restrictions?: unknown; required_signatures?: { enabled?: boolean };
+      lock_branch?: { enabled?: boolean };
     }>("GET", this.#path(r, `/branches/${this.#ref(branch)}/protection`));
-    if (p.status !== 200) return { reason: `${branch} is protected on GitHub`, known: false };
+    // Not readable by this user (only admins can): GitHub enforces it on them. Any other failure: never moved on a guess.
+    if (p.status === 403 || p.status === 404) return { reason: `${branch} is protected on GitHub`, known: false };
+    if (p.status !== 200) return { reason: `${branch}'s protection on GitHub couldn't be read`, known: true };
     const needs = [
       p.body.required_pull_request_reviews && "reviews", p.body.required_status_checks && "status checks", p.body.restrictions && "push restrictions",
-      p.body.required_signatures?.enabled && "signed commits",
+      p.body.required_signatures?.enabled && "signed commits", p.body.lock_branch?.enabled && "locked",
     ].filter(Boolean);
     return needs.length ? { reason: `${branch} is protected on GitHub (${needs.join(", ")})`, known: true } : null;
   }
@@ -1251,23 +1254,21 @@ export function gitRoutes(
     const ctx = { provider: client, store, appId: a.id, repo, r };
     if (into === repo.default_branch) await assertNotBelowTop(ctx, branch);
     // A stack's top into the default branch: landed change by change when it can (its pull requests merged, each with
-    // its own turn); when it can't (protected, the default branch moved, a change pushed to), merged as before.
-    let m: MergeResult | undefined, stackLanded: { stack: string; changes: number } | undefined;
+    // its own turn); when it can't (the default branch moved, a change pushed to), merged as before.
+    let m: MergeResult | undefined, stackLanded: { stack: string; changes: number; deleted: string[]; pullErrors?: PullError[] } | undefined;
     const top = into === repo.default_branch ? (await store.openStackChanges(a.id)).find((x) => x.branch === branch) : undefined;
-    let deletedTop = false;
     if (top) {
       try {
         const l = await landUpTo(ctx, top.id, expect);
         m = { mergedSha: l.sha, headSha: l.sha, fastForward: true, treeChanged: false };
-        stackLanded = { stack: l.stack, changes: l.landed.length };
-        deletedTop = l.deleted.includes(branch);
+        stackLanded = { stack: l.stack, changes: l.landed.length, deleted: l.deleted, ...(l.pullErrors ? { pullErrors: l.pullErrors } : {}) };
       } catch (e) {
         // A protected default branch is refused (Cresslet checks it first: GitHub lets an admin through when protection
         // isn't enforced for admins), unless it's protection this user can't read (GitHub enforces it on them). A
         // change gone on GitHub is refused too. The rest merge as before: the default branch moved, a change pushed
         // to, a commit other than the one synced (the merge checks it against GitHub).
         const asBefore = ["default_moved", "moved", "not_synced"].includes((e as HttpError).code) ||
-          ((e as HttpError).code === "branch_protected" && (e as HttpError).extra?.known === false);
+          ((e as HttpError).code === "branch_protected" && (e as HttpError & { known?: boolean }).known === false);
         if (!(e instanceof HttpError) || !asBefore) throw e;
       }
     }
@@ -1288,14 +1289,16 @@ export function gitRoutes(
     const stack = stackLanded ?? (into === repo.default_branch
       ? await landed(ctx, { branch, headSha: m.headSha, mergedSha: m.mergedSha, deleteBelow: !filesError }).catch((e) => (console.error(e), null))
       : null);
-    let deletedBranch = deletedTop;
+    // A stack's own cleanup decided about its branches (the merged one too: not under a pull request still open).
+    let deletedBranch = !!stack?.deleted.includes(branch);
     // Only while it's still the commit that was merged: a push since then keeps it. (GitHub can't delete a ref
     // conditionally, so a push in between this check and the delete isn't excluded, only unlikely.)
-    if (!filesError && repo.delete_branch && branch !== into && branch !== repo.default_branch && await client.branchHead(r, branch).catch(() => null) === m.headSha) {
+    if (!stack && !filesError && repo.delete_branch && branch !== into && branch !== repo.default_branch && await client.branchHead(r, branch).catch(() => null) === m.headSha) {
       deletedBranch = await client.deleteBranch(r, branch).catch(() => false);
     }
     const { headSha: _, ...out } = m;
-    return c.json({ ...out, branch: into, deletedBranch, ...(stack ? { landed: stack } : {}), ...(files ? { files } : {}), ...(filesError ? { filesError } : {}) });
+    const landedOut = stack ? { stack: stack.stack, changes: stack.changes, ...(stack.pullErrors ? { pullErrors: stack.pullErrors } : {}) } : null;
+    return c.json({ ...out, branch: into, deletedBranch, ...(landedOut ? { landed: landedOut } : {}), ...(files ? { files } : {}), ...(filesError ? { filesError } : {}) });
   });
 
   // The default branch merged into `branch`, conflicts marked, for the workspace to resolve (then sync with

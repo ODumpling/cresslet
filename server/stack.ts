@@ -309,7 +309,7 @@ export async function assertNotBelowTop(ctx: Ctx, branch: string) {
  * landed, and with `deleteBelow` the branches below it go (the merge route deletes its own) when the app's
  * delete-branch setting is on and they still point at their change. A change added on top stays open.
  */
-export async function landed(ctx: Ctx, input: { branch: string; headSha: string; mergedSha: string; deleteBelow: boolean }): Promise<{ stack: string; changes: number } | null> {
+export async function landed(ctx: Ctx, input: { branch: string; headSha: string; mergedSha: string; deleteBelow: boolean }): Promise<{ stack: string; changes: number; deleted: string[]; pullErrors?: PullError[] } | null> {
   let s: StackChange[] = [], top: StackChange | undefined;
   for (const x of byStack(await ctx.store.openStackChanges(ctx.appId))) {
     const i = x.findIndex((c) => c.branch === input.branch && c.sha === input.headSha);
@@ -317,12 +317,15 @@ export async function landed(ctx: Ctx, input: { branch: string; headSha: string;
   }
   if (!top) return null;
   const n = await ctx.store.landStack(ctx.appId, top.stack_id, top.position, input.mergedSha);
+  const pullErrors: PullError[] = [];
+  let deleted: string[] = [];
   if (ctx.repo.delete_branch && input.deleteBelow) {
-    // (The merged one is the merge route's; this stack's landed ones below it, also from an earlier run, go here.)
-    await dropLanded(ctx, top.stack_id, top.branch, []);
+    // This stack's landed branches, the merged one too (also from an earlier run), but not under a pull request still
+    // open: merged in one merge, the ones above the bottom can't be marked merged any more.
+    deleted = await dropLanded(ctx, top.stack_id, undefined, pullErrors);
     await dropLandedAside(ctx, top.stack_id);
   }
-  return { stack: top.stack_name, changes: n };
+  return { stack: top.stack_name, changes: n, deleted, ...(pullErrors.length ? { pullErrors } : {}) };
 }
 
 // ---- pull requests: one per change, each based on the branch of the change below (the bottom one on the default
@@ -616,7 +619,7 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
     const def = repo.default_branch;
     // Protection first: no refusal below may let a caller fall back to a move past it.
     const guarded = await provider.branchProtection(r, def);
-    if (guarded) throw Object.assign(new HttpError(422, `${guarded.reason}: land the stack through its pull requests on GitHub`, "branch_protected"), { extra: { known: guarded.known } });
+    if (guarded) throw Object.assign(new HttpError(422, `${guarded.reason}: land the stack through its pull requests on GitHub`, "branch_protected"), { known: guarded.known });
     // The commit the caller synced and will build (Deploy): the change must still be at it, checked under the lock.
     if (expect && c.sha !== expect) throw new HttpError(409, `${c.branch} isn't at the commit that was synced`, "not_synced");
     const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
@@ -665,7 +668,7 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
     if (repo.delete_branch) {
       // This stack's landed branches (also ones landed by an earlier run), while at their change; GitHub's own "delete
       // branch on merge" may have done it: gone is fine.
-      deleted.push(...await dropLanded(ctx, c.stack_id, keep, pullErrors));
+      deleted.push(...await dropLanded(ctx, c.stack_id, keep, pullErrors, new Set(s.slice(from, k + 1).map((x) => x.id))));
       await dropLandedAside(ctx, c.stack_id);
     }
     return {
@@ -680,14 +683,22 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
  * that's the head or base of a pull request still open (the default branch moved past it outside Cresslet: deleting
  * it would close that pull request unmerged), said in `errors`. Gone already (GitHub's "delete branch on merge") is fine.
  */
-async function dropLanded(ctx: Ctx, stackId: string, keep: string | undefined, errors: PullError[]): Promise<string[]> {
+async function dropLanded(ctx: Ctx, stackId: string, keep: string | undefined, errors: PullError[], moved: Set<string> = new Set()): Promise<string[]> {
   const rows = await ctx.store.db.all<StackChange>("SELECT * FROM stack_changes WHERE app_id = ? AND stack_id = ? AND state = 'landed'", ctx.appId, stackId);
   const held = new Set<string>(keep ? [keep] : []);
-  await pool(rows.filter((x) => x.pr_number), 4, async (x) => {
-    const p = await ctx.provider.getPull(ctx.r, x.pr_number!).catch(() => null);
-    if (p?.state === "open") {
-      held.add(p.head).add(p.base);
-      errors.push({ change: x.id, position: x.position, error: `pull request #${p.number} is still open (its change is in ${ctx.repo.default_branch} already): its branches are kept, close it on GitHub` });
+  // (Not the ones this run moved: their pull requests were on the default branch as it reached them, so merged.)
+  await pool(rows.filter((x) => !moved.has(x.id)), 4, async (x) => {
+    try {
+      let p = x.pr_number ? await ctx.provider.getPull(ctx.r, x.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e))) : null;
+      if (!p || p.head !== x.branch) p = await ctx.provider.findPull(ctx.r, x.branch);
+      if (p?.state === "open") {
+        held.add(p.head).add(p.base);
+        errors.push({ change: x.id, position: x.position, error: `pull request #${p.number} is still open (its change is in ${ctx.repo.default_branch} already): its branches are kept, close it on GitHub` });
+      }
+    } catch (e) {
+      // Not known whether a pull request is on it: kept.
+      held.add(x.branch);
+      errors.push({ change: x.id, position: x.position, error: `${x.branch} is kept (its pull request couldn't be read: ${why(e)})` });
     }
   });
   const deleted: string[] = [];

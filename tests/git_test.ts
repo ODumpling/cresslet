@@ -1033,15 +1033,26 @@ test("stack: land up to a change (each pull request merged with its own turn); d
   assert.equal(pulls[2].merged, true);
   assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks, []);
 
+  // main moved to a top outside Cresslet, its pull request still open: Deploy lands it on record but keeps its branch.
+  const o1 = await add("main", c3.sha, "Outside", "o1");
+  await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: o1.stack.id });
+  repo.refs.set("main", o1.sha);
+  const out = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: o1.branch, headSha: o1.sha });
+  assert.equal(out.status, 200, JSON.stringify(out.body));
+  assert.deepEqual([out.body.deletedBranch, out.body.landed.pullErrors.length, repo.refs.get(o1.branch)], [false, 1, o1.sha]);
+  const o1pr = pulls.find((p) => p.head === o1.branch)!;
+  assert.equal(o1pr.state, "open");
+  o1pr.state = "closed";
+
   // A change's branch gone on GitHub: Deploy doesn't merge past it either.
-  const g1 = await add("main", c3.sha, "Gone", "g1");
+  const g1 = await add("main", o1.sha, "Gone", "g1");
   const g2 = await add(g1.branch, g1.sha, "Gone 2", "g2");
   repo.refs.delete(g1.branch);
   const gone = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: g2.branch, headSha: g2.sha });
-  assert.deepEqual([gone.status, gone.body.error, repo.refs.get("main")], [404, "branch_not_found", c3.sha]);
+  assert.deepEqual([gone.status, gone.body.error, repo.refs.get("main")], [404, "branch_not_found", o1.sha]);
 
   // A default branch that moved: nothing landed (deploy still merges, as before).
-  const d1 = await add("main", c3.sha, "Four", "4");
+  const d1 = await add("main", o1.sha, "Four", "4");
   t.gh.write(repo, "main", { "TEAM.md": "teammate" });
   const moved = await t.send("POST", "/v1/apps/shop/git/stack/land", tok, { change: d1.change.id });
   assert.deepEqual([moved.status, moved.body.error], [409, "default_moved"]);
