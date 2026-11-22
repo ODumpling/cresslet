@@ -39,7 +39,10 @@ function SettingsPage() {
   }, []);
   useEffect(() => {
     if (!account.error) return;
-    if (!auth.token) void navigate({ to: "/" }); // the session expired
+    if (!auth.token) {
+      rememberAfterLogin("#/settings"); // the session expired: back here once logged in again
+      void navigate({ to: "/" });
+    }
     else toast(`Could not load account: ${account.error.message}`);
   }, [account.error, navigate]);
 

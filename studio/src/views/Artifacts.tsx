@@ -1,6 +1,6 @@
 // #/artifacts (was #/pages): deploy and manage artifacts, static HTML with a visibility and a retention. Logged out:
 // what they are, and a login.
-import { Link } from "@tanstack/react-router";
+import { Link, useRouter } from "@tanstack/react-router";
 import { type ReactNode, type Ref, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type * as API from "../../api-types.ts";
@@ -291,6 +291,11 @@ interface DialogHandle {
 /** The new-artifact dialog: its files, address, who can open it and how long it's kept. */
 function NewArtifactDialog({ ref, reload }: { ref: Ref<DialogHandle>; reload: () => Promise<boolean> }) {
   const alive = useAlive();
+  // Navigation away has started (the next view may still be loading, with this dialog still open): a deploy not yet
+  // sent isn't sent.
+  const leaving = useRef(false);
+  const router = useRouter();
+  useEffect(() => router.subscribe("onBeforeNavigate", () => void (leaving.current = true)), [router]);
   const dlgRef = useRef<HTMLDialogElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const dirRef = useRef<HTMLInputElement>(null);
@@ -380,7 +385,8 @@ function NewArtifactDialog({ ref, reload }: { ref: Ref<DialogHandle>; reload: ()
       }
       const content = chosen.html ? { html: await chosen.html.text() } : await folderBody(chosen.files);
       // Left the page (or another account logged in) before it was sent: don't act on it. (Once sent, it finishes.)
-      if (!alive.current || !dlg.open || session().token !== account) throw new Error("you left the page before it was sent, so it wasn't deployed");
+      if (session().token !== account) throw new Error("another account logged in meanwhile, so it wasn't deployed");
+      if (!alive.current || !dlg.open || leaving.current) throw new Error("you left the page before it was sent, so it wasn't deployed");
       const { page } = await api<{ page: API.Page }>("/v1/pages", {
         method: "POST",
         body: JSON.stringify({ ...content, name, title: chosen.title, visibility, retentionDays: keepParse(retention), source: "studio" }),

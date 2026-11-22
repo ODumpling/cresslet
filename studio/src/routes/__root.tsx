@@ -38,7 +38,7 @@ const RECOVER = `(() => {
     location.replace(u.pathname + u.search + u.hash);
     return true;
   };
-  const stale = (m) => /does not provide an export|dynamically imported module|Importing a module script failed|Failed to fetch dynamically/i.test(String(m));
+  const stale = (m) => /provide an export|Importing binding name|star export|dynamically imported module|Importing a module script failed|Failed to fetch dynamically/i.test(String(m));
   addEventListener("vite:preloadError", (e) => { if (reload()) e.preventDefault(); });
   addEventListener("error", (e) => { if (stale(e.message)) reload(); });
   addEventListener("unhandledrejection", (e) => { if (stale(e.reason && e.reason.message)) reload(); });

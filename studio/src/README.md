@@ -17,7 +17,7 @@ from `views/`. Code that isn't UI stays in the plain modules beside `src/` (`sto
   resolves after the view is gone. `reload()` resolves `true` once the new data is in the page (it commits with
   `flushSync`), so a caller can move focus right after.
 - **`api<T>(path, init)`** (`lib/api.ts`): JSON in and out, the session's token sent; throws an `ApiError`
-  (`message`, `status`). A 401 with a token logs out and retries logged out. `meta()`: `GET /v1`, once per page.
+  (`message`, `status`). A 401 for the session's token logs out and retries logged out (a 401 for a token the tab has since left is just thrown). `meta()`: `GET /v1`, once per page.
 - **`useSession()`** (`lib/session.ts`): `{ token, email, accountId, siteAdmin, orgs }`. Key a view's data on `token`
   (pass it in `useLoad` deps, or `key={token}`) so another account's data never stays shown. `logIn(after?)` goes to
   GitHub and comes back to `after` (a `#/…` hash); `logOut()`.

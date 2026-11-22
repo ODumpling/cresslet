@@ -14,16 +14,20 @@ export const setOnExpired = (fn: () => void) => void (onExpired = fn);
 
 type Init = Omit<RequestInit, "headers"> & { headers?: Record<string, string> };
 /** A JSON API call; `T`: the response's shape (api-types.ts). Throws an ApiError when it isn't ok. */
-export async function api<T = unknown>(path: string, init: Init = {}): Promise<T> {
+export function api<T = unknown>(path: string, init: Init = {}): Promise<T> {
+  return call<T>(path, init, false);
+}
+/** `anonymous`: without the session's token (the retry after it was refused). */
+async function call<T>(path: string, init: Init, anonymous: boolean): Promise<T> {
   const headers: Record<string, string> = { "content-type": "application/json", ...init.headers };
-  const sent = auth.token;
+  const sent = anonymous ? null : auth.token;
   if (sent) headers.authorization = `Bearer ${sent}`;
   const res = await fetch(path, { ...init, headers });
   if (res.status === 401 && sent && auth.token === sent) {
     // Token revoked (e.g. regenerated elsewhere): drop it and retry logged out. (If the session changed meanwhile,
     // the refusal was for the old account: it's reported below, never sent again as the new one.)
     onExpired();
-    return api<T>(path, init);
+    return call<T>(path, init, true); // logged out, even if another tab logs in meanwhile
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(body.message ?? `${res.status}`), { status: res.status });
