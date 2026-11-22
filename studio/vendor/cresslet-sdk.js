@@ -5,19 +5,186 @@
 // `env` is null while the app's module evaluates (bindings exist once a handler runs). `contract` grows by one with
 // each addition to the env the SDK relies on; FEATURES says which contract each part of the SDK needs, so a new SDK on
 // an older runtime fails with a message saying what to update. Keep in sync with docs/app-format.md (cresslet repo).
+//
+// One self-contained file with erasable TypeScript only: the cresslet repo vendors it into the studio by stripping its
+// types (node:module stripTypeScriptTypes), and its declarations are the package's published types.
+// Types: the SDK, the `env` handler argument, and the Workers globals the runtime provides. See
+// https://github.com/ODumpling/cresslet/blob/main/docs/app-format.md
 
-const VERSION = "0.3.0";
+/** A value that can be a SQL parameter. */
+                                                                    
+                                          
+
+                            
+                  
+                                                                                                              
+                          
+ 
+/** One statement's result in db.batch: its rows (if it returns any), and the rows it changed. */
+                                                         
+            
+ 
+/** A statement for env.db.batch. */
+                            
+              
+                      
+ 
+
+/** The database as the `env` argument has it: SQL strings with `?` parameters. */
+                              
+                                                                   
+                                                                        
+                                                              
+                                   
+                                                                                                  
+                                                         
+ 
+
+                        
+      
+                
+                                                                                
+                                    
+                   
+                                             
+                                     
+                                                                                                          
+ 
+
+                          
+             
+               
+              
+                   
+ 
+
+/** The `env` argument of fetch(req, env, ctx) and scheduled(event, env, ctx). */
+                      
+                                 
+                  
+                              
+               
+                                                                       
+                                            
+               
+ 
+
+/** Argument of `scheduled(event, env, ctx)`, run for each `crons` entry in cresslet.json (UTC). */
+                                 
+                    
+                                                 
+               
+                                          
+                        
+ 
+
+                                   
+                                             
+ 
+
+/**
+ * A parameterized statement from db.sql`...`: each `${value}` is a parameter, never SQL text, written as the
+ * database's placeholder when it runs. Awaiting it runs it (the rows, like db.query).
+ */
+                                                          
+                                      
+                                       
+                                                                                                    
+                                                         
+ 
+
+// `Query<any>` (public API, as published before): a query of any row type is accepted where its rows aren't used.
+                           
+     
+                                                                                                                     
+                                                                                                        
+     
+                                                                                              
+                                                
+                                                                   
+                                                     
+                                                                        
+                                             
+                                                              
+                                                               
+                                   
+     
+                                                                                                                     
+                                                                                                                                             
+                                                
+     
+                                                                                 
+ 
+
+                          
+                                                                       
+                            
+                                                          
+                                             
+ 
+
+                                       
+              
+           
+                                                       
+                           
+ 
+/** Key → JSON value store with optional TTLs, kept in the app's own database (table `_cresslet_kv`). */
+                     
+                                                                                
+                                                   
+                                         
+                                                                              
+                                     
+                                                                                                                              
+                                                                              
+                                                                                     
+                                                                                          
+ 
+
+                
+                  
+                                    
+   
+                                                                                                    
+                       
+                 
+                                      
+   
+                       
+                   
+   
+                          
+                                                                                      
+                          
+   
+ 
+
+/** What a runtime publishes on globalThis[KEY] (checked at each use: it may be missing, older, or not set up yet). */
+                   
+                   
+                   
+                      
+                  
+ 
+/** A runtime whose bindings are there (a handler is running). */
+                                            
+
+/** This SDK's version. */
+const VERSION         = "0.3.0";
 const KEY = Symbol.for("cresslet.runtime");
 /** Runtime contract each SDK feature needs. 1: env published for the SDK, db.batch, paramStyle. */
-const FEATURES = { db: 1, "db.batch": 1, kv: 1, files: 1, secrets: 1, app: 1 };
-const CONTRACT = Math.max(...Object.values(FEATURES));
+const FEATURES                         = { db: 1, "db.batch": 1, kv: 1, files: 1, secrets: 1, app: 1 };
+/** The runtime contract this SDK needs for all of its features. */
+const CONTRACT         = Math.max(...Object.values(FEATURES));
 
+/** Thrown for SDK misuse: no runtime, used at module top level, a runtime too old for a feature, a missing secret. */
 class CressletError extends Error {
-  name = "CressletError";
+           name = "CressletError";
 }
 
-function runtime(feature) {
-  const rt = globalThis[KEY];
+function runtime(feature        )                {
+  const rt = (globalThis                                      )[KEY];
   const need = FEATURES[feature] ?? FEATURES[feature.split(".")[0]] ?? CONTRACT;
   if (!rt || typeof rt !== "object") {
     throw new CressletError(
@@ -27,37 +194,40 @@ function runtime(feature) {
         `running on Cresslet. The \`env\` argument of fetch(req, env) works on every version.`,
     );
   }
-  if (!(rt.contract >= need)) {
+  const r = rt                    ;
+  if (!((r.contract ?? NaN) >= need)) {
     throw new CressletError(
-      `cresslet: \`${feature}\` needs Cresslet runtime contract ${need}, but this runtime (${rt.runtime ?? "unknown"}) ` +
-        `provides contract ${rt.contract}. Update the platform / \`cresslet dev\` / studio, or use an older cresslet SDK.`,
+      `cresslet: \`${feature}\` needs Cresslet runtime contract ${need}, but this runtime (${r.runtime ?? "unknown"}) ` +
+        `provides contract ${r.contract}. Update the platform / \`cresslet dev\` / studio, or use an older cresslet SDK.`,
     );
   }
-  if (!rt.env) {
+  if (!r.env) {
     throw new CressletError(
       `cresslet: \`${feature}\` was used while the app's module was loading. Bindings (db, files, secrets, app) exist ` +
         `only once a handler runs: call them inside fetch() / scheduled() or code they call, not at module top level.`,
     );
   }
-  return rt;
+  return r                 ; // contract and env checked above
 }
-const env = (feature) => runtime(feature).env;
+const env = (feature        )      => runtime(feature).env;
 
 // ---- db
 
 /** A parameterized statement built by db.sql`...`; placeholders are written for the runtime's provider when it runs. */
 // Brand, not instanceof: a query from another copy of the SDK (one a dependency bundled) is still a query.
-const QUERY = Symbol.for("cresslet.query");
-const isQuery = (q) => !!q && q[QUERY] === true;
+const QUERY                = Symbol.for("cresslet.query");
+const isQuery = (q         )                => !!q && (q                         )[QUERY] === true;
 
-class Query {
-  get [QUERY]() {
+class SqlQuery                              {
+                                              
+                                               
+  get [QUERY]()       {
     return true;
   }
-  constructor(strings, values) {
+  constructor(strings                   , values                    ) {
     // Nested queries (db.sql fragments) are spliced in, their values kept as parameters.
     const s = [strings[0]];
-    const v = [];
+    const v             = [];
     values.forEach((value, i) => {
       if (isQuery(value)) {
         s[s.length - 1] += value.strings[0];
@@ -68,7 +238,7 @@ class Query {
         s[s.length - 1] += strings[i + 1];
       } else {
         if (value === undefined) throw new CressletError(`cresslet: db.sql value ${i + 1} is undefined (use null for SQL NULL)`);
-        v.push(value);
+        v.push(value            ); // other values are the runtime's to accept or refuse, as with db.query params
         s.push(strings[i + 1]);
       }
     });
@@ -77,25 +247,28 @@ class Query {
     Object.freeze(this);
   }
   /** SQL text with placeholders in `style` ("?" or "$n"), and its parameters. */
-  compile(style = "?") {
+  compile(style = "?")                                      {
     if (style !== "?" && style !== "$n") throw new CressletError(`cresslet: unknown placeholder style ${style}`);
     const sql = this.strings.reduce((acc, part, i) => acc + (style === "?" ? "?" : `$${i}`) + part);
     return { sql, params: [...this.values] };
   }
   /** `await db.sql\`...\`` runs it like db.query: the rows. */
-  then(resolve, reject) {
+  then                      (
+    resolve                                               ,
+    reject                                                     ,
+  )                   {
     return db.query(this).then(resolve, reject);
   }
-  catch(reject) {
+  catch           (reject                                                   )                   {
     return db.query(this).catch(reject);
   }
-  finally(f) {
+  finally(f                      )               {
     return db.query(this).finally(f);
   }
 }
 
 /** (sql, params) for a call: a db.sql query (no extra params), or a SQL string and its params. */
-function statement(feature, q, params) {
+function statement(feature        , q         , params            )                                                       {
   const rt = runtime(feature);
   if (isQuery(q)) {
     if (params.length) throw new CressletError(`cresslet: ${feature}(db.sql\`...\`) takes no extra parameters; interpolate them`);
@@ -105,44 +278,49 @@ function statement(feature, q, params) {
   return [rt, { sql: q, params }];
 }
 
-function sql(strings, ...values) {
+function sql         (strings                      , ...values           )           {
   if (!Array.isArray(strings) || !Array.isArray(strings.raw)) {
     throw new CressletError("cresslet: db.sql is a tagged template: db.sql`SELECT * FROM t WHERE id = ${id}`");
   }
-  if (strings.includes(undefined)) throw new CressletError("cresslet: db.sql has an invalid escape sequence in its SQL text");
-  return new Query(strings, values);
+  // (an invalid escape sequence's cooked string is undefined)
+  if ((strings                                   ).includes(undefined)) {
+    throw new CressletError("cresslet: db.sql has an invalid escape sequence in its SQL text");
+  }
+  return new SqlQuery   (strings, values);
 }
 
-export const db = Object.freeze({
+/** The app's database. SQL is the provider's own dialect (SQLite). */
+export const db           = Object.freeze({
   sql,
-  async query(q, ...params) {
+  async query   (q                   , ...params            )               {
     const [rt, s] = statement("db.query", q, params);
-    return rt.env.db.query(s.sql, ...s.params);
+    return rt.env.db.query   (s.sql, ...s.params);
   },
-  async first(q, ...params) {
+  async first   (q                   , ...params            )                    {
     const [rt, s] = statement("db.first", q, params);
-    return rt.env.db.first(s.sql, ...s.params);
+    return rt.env.db.first   (s.sql, ...s.params);
   },
-  async run(q, ...params) {
+  async run(q                         , ...params            )                     {
     const [rt, s] = statement("db.run", q, params);
     return rt.env.db.run(s.sql, ...s.params);
   },
-  async exec(q) {
+  async exec(q        )                {
     if (typeof q !== "string") throw new CressletError("cresslet: db.exec takes a SQL string (no parameters)");
     return env("db.exec").db.exec(q);
   },
   /** Runs the statements in one transaction (all or none), with no other statement in between. */
-  async batch(statements) {
+  async batch(statements                                         )                         {
     const rt = runtime("db.batch");
     if (!Array.isArray(statements)) throw new CressletError("cresslet: db.batch takes an array of statements");
-    const list = statements.map((q, i) => {
+    const list = statements.map((q         , i) => {
       if (isQuery(q)) return q.compile(rt.paramStyle ?? "?");
       if (typeof q === "string") return { sql: q, params: [] };
-      if (q && typeof q.sql === "string") {
-        if (q.params !== undefined && !Array.isArray(q.params)) {
+      const st = q                             ;
+      if (st && typeof st.sql === "string") {
+        if (st.params !== undefined && !Array.isArray(st.params)) {
           throw new CressletError(`cresslet: db.batch statement ${i + 1}: params must be an array`);
         }
-        return { sql: q.sql, params: [...(q.params ?? [])] };
+        return { sql: st.sql, params: [...(st.params ?? [])] };
       }
       throw new CressletError(`cresslet: db.batch statement ${i + 1} is not a db.sql query, SQL string or { sql, params }`);
     });
@@ -157,20 +335,20 @@ export const db = Object.freeze({
 // nothing from the runtime beyond db (contract 1) and lives, is backed up and is rolled back with the app's data.
 
 const KV_TABLE = "_cresslet_kv";
-const kvSchema = new WeakMap(); // env.db → Promise (once per runtime env)
-const kvKey = (key) => {
+const kvSchema = new WeakMap                            (); // env.db → Promise (once per runtime env)
+const kvKey = (key         )         => {
   if (typeof key !== "string" || key === "" || key.length > 512) {
     throw new CressletError("cresslet: kv keys are non-empty strings of up to 512 characters");
   }
   return key;
 };
-const kvTtl = (opts) => {
+const kvTtl = (opts                               )                => {
   const ttl = opts?.ttl;
   if (ttl === undefined || ttl === null) return null;
   if (typeof ttl !== "number" || !(ttl > 0) || !Number.isFinite(ttl)) throw new CressletError("cresslet: kv ttl is a number of seconds > 0");
   return Date.now() + Math.round(ttl * 1000);
 };
-async function kvDb(feature) {
+async function kvDb(feature        )                    {
   const e = env(feature);
   let ready = kvSchema.get(e.db);
   if (!ready) {
@@ -184,22 +362,28 @@ async function kvDb(feature) {
   await ready;
   return db;
 }
-const live = (now) => sql`(expires_at IS NULL OR expires_at > ${now})`;
+/** A _cresslet_kv row as SQLite returns it. */
+                 
+              
+                
+                            
+ 
+const live = (now        ) => sql`(expires_at IS NULL OR expires_at > ${now})`;
 // Each write also drops a few expired entries, so they don't pile up.
-const sweep = (now) =>
+const sweep = (now        ) =>
   sql`DELETE FROM _cresslet_kv WHERE key IN (SELECT key FROM _cresslet_kv WHERE expires_at <= ${now} LIMIT 20)`;
 
-export const kv = Object.freeze({
+export const kv     = Object.freeze({
   /** The value stored under `key` (as set: JSON round-tripped), or null when missing or expired. */
-  async get(key) {
+  async get   (key        )                    {
     const d = await kvDb("kv.get");
-    const row = await d.first(sql`SELECT value FROM _cresslet_kv WHERE key = ${kvKey(key)} AND ${live(Date.now())}`);
-    return row ? JSON.parse(row.value) : null;
+    const row = await d.first(sql                      `SELECT value FROM _cresslet_kv WHERE key = ${kvKey(key)} AND ${live(Date.now())}`);
+    return row ? (JSON.parse(row.value)     ) : null;
   },
   /** Stores a JSON-serializable value; `{ ttl }` (seconds) makes it expire. */
-  async set(key, value, opts) {
+  async set(key        , value         , opts                   )                {
     const k = kvKey(key);
-    const text = JSON.stringify(value);
+    const text                     = JSON.stringify(value);
     if (text === undefined) throw new CressletError("cresslet: kv.set value must be JSON-serializable (not undefined)");
     const expires = kvTtl(opts);
     const d = await kvDb("kv.set");
@@ -210,7 +394,7 @@ export const kv = Object.freeze({
     ]);
   },
   /** Removes `key` (no error when it isn't there). */
-  async delete(key) {
+  async delete(key        )                {
     const d = await kvDb("kv.delete");
     await d.run(sql`DELETE FROM _cresslet_kv WHERE key = ${kvKey(key)}`);
   },
@@ -218,7 +402,7 @@ export const kv = Object.freeze({
    * Adds `by` (default 1) to the number under `key` atomically and returns the result; a missing, expired or
    * non-number value counts as 0. `{ ttl }` applies when the counter starts (a fixed window: rate limits).
    */
-  async incr(key, by = 1, opts) {
+  async incr(key        , by         = 1, opts                   )                  {
     if (typeof by !== "number" || !Number.isFinite(by)) throw new CressletError("cresslet: kv.incr amount must be a finite number");
     const k = kvKey(key);
     const now = Date.now();
@@ -238,22 +422,23 @@ export const kv = Object.freeze({
     return Number(res.rows[0].value);
   },
   /** Live entries whose key starts with `prefix`, in key order: `{ key, value, expiresAt }[]` (at most `limit`, 1000). */
-  async list(prefix = "", { limit = 1000 } = {}) {
+  async list   (prefix         = "", { limit = 1000 }                     = {})                        {
     if (typeof prefix !== "string") throw new CressletError("cresslet: kv.list prefix must be a string");
     const n = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 1000)));
     const d = await kvDb("kv.list");
     const like = prefix.replace(/[\\%_]/g, (c) => "\\" + c) + "%";
     const rows = await d.query(
-      sql`SELECT key, value, expires_at FROM _cresslet_kv WHERE key LIKE ${like} ESCAPE '\\' AND ${live(Date.now())}
+      sql       `SELECT key, value, expires_at FROM _cresslet_kv WHERE key LIKE ${like} ESCAPE '\\' AND ${live(Date.now())}
           ORDER BY key LIMIT ${n}`,
     );
-    return rows.map((r) => ({ key: r.key, value: JSON.parse(r.value), expiresAt: r.expires_at ?? null }));
+    return rows.map((r) => ({ key: r.key, value: JSON.parse(r.value)     , expiresAt: r.expires_at ?? null }));
   },
 });
 
 // ---- files
 
-export const files = Object.freeze({
+/** The app's file storage. */
+export const files        = Object.freeze       ({
   put: (key, body, opts) => env("files").files.put(key, body, opts),
   get: (key) => env("files").files.get(key),
   delete: (key) => env("files").files.delete(key),
@@ -262,8 +447,8 @@ export const files = Object.freeze({
 
 // ---- secrets: secrets.get(name) (required), secrets.optional(name), and plain record access (secrets.NAME)
 
-const own = (o, k) => typeof k === "string" && Object.prototype.hasOwnProperty.call(o, k);
-const methods = {
+const own = (o        , k             )              => typeof k === "string" && Object.prototype.hasOwnProperty.call(o, k);
+const methods          = {
   get(name) {
     const all = env("secrets").secrets;
     if (!own(all, name)) {
@@ -280,7 +465,11 @@ const methods = {
   },
 };
 // The target stays empty and extensible: every trap answers from the live env.secrets.
-export const secrets = new Proxy(Object.create(null), {
+/**
+ * The app's secrets: `secrets.get("NAME")` (throws if unset), `secrets.optional("NAME")`, or record access
+ * (`secrets.NAME`, `Object.keys(secrets)`). A secret named `get` or `optional` is read with secrets.get(name).
+ */
+export const secrets = new Proxy        (Object.create(null)          , {
   get(_t, k) {
     if (k === "get" || k === "optional") return methods[k];
     if (typeof k !== "string") return undefined;
@@ -297,11 +486,12 @@ export const secrets = new Proxy(Object.create(null), {
   defineProperty: () => false,
   deleteProperty: () => false,
   preventExtensions: () => false, // Object.freeze(secrets) throws instead of breaking the proxy's other traps
-});
+})                                              ; // the traps above provide both
 
 // ---- app
 
-export const app = Object.freeze({
+/** The app's id, name, public URL and current deploy id. */
+export const app                                            = Object.freeze({
   get id() {
     return env("app").app.id;
   },
@@ -314,7 +504,7 @@ export const app = Object.freeze({
   get deployId() {
     return env("app").app.deployId;
   },
-  toJSON() {
+  toJSON()          {
     return { ...env("app").app };
   },
 });
