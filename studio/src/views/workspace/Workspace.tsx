@@ -446,6 +446,37 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 if (!confirm(`Load ${branch} (the top of ${stack.name}) into this workspace?${gitState.dirty ? " Changes not pushed yet are pushed first." : ""}`)) return;
                 setStackBusy(true);
                 void g.switchTo(branch).then(() => toast(`On ${branch}`), (e) => toast(`Couldn't load ${branch}: ${errorMessage(e)}`, 10000)).finally(() => setStackBusy(false));
+              }}
+              onBack={(change) => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                const above = stack.changes.filter((c) => c.position > change.position);
+                const top = stack.changes.at(-1)!;
+                // Edits here are committed first, on the top: with changes set aside above it already, that drops them.
+                const dropped = gitState.dirty && stack.setAside.length;
+                if (!confirm(`Go back to change ${change.position}, "${change.title}"?\n\n` +
+                  `${above.length} later ${above.length === 1 ? "change is" : "changes are"} set aside: kept on GitHub, and you can restore them until something is committed on change ${change.position}.` +
+                  `${gitState.dirty ? ` Changes not pushed yet are committed first, as a change on ${top.position}, set aside with them.` : ""}` +
+                  `${dropped ? ` That's a commit on ${top.position}: the ${stack.setAside.length} set aside before can't be restored after it.` : ""}\n\n` +
+                  "The preview's database isn't taken back: tables and rows from later changes stay.")) return;
+                setStackBusy(true);
+                void g.goBack(change).then(
+                  () => toast(`Back on change ${change.position}. The next request starts a new change from here.`, 8000),
+                  (e) => toast(`Couldn't go back: ${errorMessage(e)}`, 10000),
+                ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+              }}
+              onRestore={() => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                const discard = gitState.dirty;
+                if (discard && !confirm("This workspace has changes not pushed yet. Restoring loads the top change and drops them. Restore anyway?")) return;
+                setStackBusy(true);
+                void g.restore(stack.id, stack.setAside.at(-1)!, discard).then(
+                  (r) => toast(`Restored ${r.restored} ${r.restored === 1 ? "change" : "changes"}: on change ${r.change.position}`, 8000),
+                  (e) => toast(`Couldn't restore: ${errorMessage(e)}`, 10000),
+                ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }} />
             ) : null}
             devLog={() => engine.current?.termOut ?? ""}

@@ -10,7 +10,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
-import { assertNotBelowTop, commitChange, landed, locked, readStacks } from "./stack.ts";
+import { assertNotBelowTop, commitChange, followed, goBack, landed, locked, readStacks, restore } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -1032,7 +1032,7 @@ export function gitRoutes(
       const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
       if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
       // Onto a stack's top change from where it's recorded (a hand edit pushed, a merge resolved): the change follows.
-      else if (out.changed) await store.followStackTop(a.id, branch, baseSha, out.sha).catch((e) => console.error(e));
+      else if (out.changed) await followed({ provider: client, store, appId: a.id, repo, r }, branch, baseSha, out.sha).catch((e) => console.error(e));
       return out;
     });
     return c.json({ branch, ...out });
@@ -1044,6 +1044,24 @@ export function gitRoutes(
     const stacks = await readStacks({ provider: client, store, appId: a.id, repo, r });
     c.header("cache-control", "no-store");
     return c.json({ defaultBranch: repo.default_branch, stacks });
+  });
+  // Going back to a change (the ones above it set aside), and putting them back.
+  app.post("/apps/:name/git/stack/back", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ change?: unknown; sha?: unknown; top?: unknown; topSha?: unknown } | null>(c) ?? {};
+    if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
+    if (input.top != null && typeof input.top !== "string") throw new HttpError(400, "top must be a change's id");
+    const top = typeof input.top === "string" ? { id: input.top, sha: shaOf(input.topSha, "topSha") } : undefined;
+    return c.json(await goBack({ provider: client, store, appId: a.id, repo, r }, input.change, input.sha != null ? shaOf(input.sha, "sha") : undefined, top));
+  });
+  app.post("/apps/:name/git/stack/restore", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ stack?: unknown; only?: unknown; top?: unknown; sha?: unknown } | null>(c) ?? {};
+    if (typeof input.stack !== "string") throw new HttpError(400, "stack must be a stack's id");
+    if (input.only != null && (!Array.isArray(input.only) || !input.only.every((x) => typeof x === "string"))) throw new HttpError(400, "only must be change ids");
+    if (input.top != null && typeof input.top !== "string") throw new HttpError(400, "top must be a change's id");
+    const top = typeof input.top === "string" ? { id: input.top, sha: shaOf(input.sha, "sha") } : undefined;
+    return c.json(await restore({ provider: client, store, appId: a.id, repo, r }, input.stack, { only: input.only as string[] | undefined, top }));
   });
   // The workspace committed as a new change: on the default branch a new stack, on a stack's top change the next one.
   app.post("/apps/:name/git/stack", async (c) => {

@@ -26,6 +26,8 @@ export interface ProjectGitState {
    */
   mergeParent?: string;
   conflicts?: string[];
+  /** Gone back to a change of the stack (the AI builder is told): it, and the later changes set aside. */
+  back?: { position: number; title: string; setAside: string[] };
 }
 
 /** An open pull request (GET /v1/apps/:name/git/pulls). */
@@ -58,6 +60,8 @@ export interface Stack {
   baseSha: string;
   /** Bottom first. */
   changes: StackChange[];
+  /** Changes gone back from (above the top, bottom first): restorable until a change is built on the top. */
+  setAside: StackChange[];
 }
 
 /** A file as the API takes and returns them (POST /v1/deploys's shape). */
@@ -158,7 +162,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       throw e;
     }
     await set({
-      headSha: r.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined,
+      headSha: r.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, ...(r.changed ? { back: undefined } : {}),
       // A merge of the default branch committed: the branch is on top of that now.
       ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : s.mergeParent ? { baseSha: s.mergeParent } : {}),
     });
@@ -189,7 +193,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       return { sha: r.sha, changed: false, files };
     }
     await set({
-      activeBranch: r.branch, headSha: r.sha, dirty: revision() !== rev,
+      activeBranch: r.branch, headSha: r.sha, dirty: revision() !== rev, back: undefined,
       ...(s.activeBranch === s.defaultBranch ? { baseSha: s.headSha } : {}),
     });
     o.log?.(`committed change ${r.change?.position ?? "?"} of ${r.stack?.name ?? "the stack"}: ${r.branch} @ ${r.sha.slice(0, 7)}`);
@@ -201,14 +205,21 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     if (revision() !== rev) throw Object.assign(new Error(`the workspace changed while ${what}: nothing was overwritten, try again`), { code: "changed" });
   };
 
-  async function pullNow(branch: string) {
+  /**
+   * Loads `branch` (at its commit `ref`, when given) into the workspace. `rev`: the change count it must still be at
+   * (default: as of now). `before`: run once its files are in hand and nothing changed here, before they're written
+   * (a server step that goes with the load); resolves to more state for once it's on it.
+   */
+  async function pullNow(branch: string, ref = branch, opts: { rev?: number; before?: () => Promise<Partial<ProjectGitState> | void> } = {}) {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
-    const rev = revision();
-    const t = await o.api<{ sha: string; files: GitFile[] }>(path(`/tree?ref=${encodeURIComponent(branch)}`));
+    const rev = opts.rev ?? revision();
+    const t = await o.api<{ sha: string; files: GitFile[] }>(path(`/tree?ref=${encodeURIComponent(ref)}`));
+    unchangedSince(rev, `loading ${branch}`);
+    const extra = (await opts.before?.()) ?? {};
     unchangedSince(rev, `loading ${branch}`);
     // Edited while it loaded (npm install, say): those are changes, kept dirty.
-    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
+    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, back: undefined, ...extra, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
     try {
       await o.hydrate(t.files);
     } catch (e) {
@@ -231,7 +242,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         if (gitCode(e) === "branch_exists") continue;
         throw e;
       }
-      await set({ activeBranch: name, baseSha: s.headSha });
+      await set({ activeBranch: name, baseSha: s.headSha, back: undefined });
       o.log?.(`working on branch ${name} (from ${s.activeBranch} @ ${s.headSha.slice(0, 7)})`);
       return name;
     }
@@ -309,6 +320,55 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     newBranch: (prefix: string, hint: string) => serial(() => branchNow(prefix, hint)),
     /** Commits the workspace to the active branch. 409 `conflict`: it moved on GitHub (pull first). */
     sync: (message: string) => serial(() => syncNow(message)),
+    /**
+     * Goes back to a change of the stack: changes here are committed first (as a change, set aside with the later
+     * ones), the changes above it are set aside (server/stack.ts), and its files are loaded. The next change goes on it.
+     */
+    goBack: (change: StackChange) => serial(async () => {
+      if (o.state()!.dirty) await changeNow("Edits made in the studio", "");
+      if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: go back again"), { code: "changed" });
+      // Its files first: the server sets the later changes aside only once they're in hand and nothing changed here.
+      let r!: { change: StackChange; stack: { id: string }; now: string[]; setAside: StackChange[] };
+      const rev = revision();
+      await pullNow(change.branch, change.sha, {
+        rev,
+        before: async () => {
+          r = await post("/stack/back", { change: change.id, sha: change.sha });
+          // Edited while the server set them aside: put back the ones it did (nothing was built there), keep the edit.
+          if (revision() !== rev && r.now.length) {
+            await post("/stack/restore", { stack: r.stack.id, only: r.now }).catch(() => {
+              throw Object.assign(new Error("the workspace changed while going back, and the changes set aside couldn't be put back: restore them from the stack"), { code: "changed" });
+            });
+          }
+          return { back: { position: r.change.position, title: r.change.title, setAside: r.setAside.map((x) => x.title) } };
+        },
+      });
+      return r;
+    }),
+    /**
+     * Puts a stack's changes set aside back, and loads the top one (`top`, the last set aside). Changes here would be
+     * lost: refused (`dirty`) unless `discard`.
+     */
+    restore: (stack: string, top: StackChange, discard = false) => serial(async () => {
+      if (o.state()!.dirty && !discard) throw Object.assign(new Error("this workspace has changes not pushed yet: restoring would replace them"), { code: "dirty" });
+      let r!: { change: StackChange; below: StackChange; restored: number };
+      const rev = revision();
+      await pullNow(top.branch, top.sha, {
+        rev,
+        before: async () => {
+          r = await post("/stack/restore", { stack, top: top.id, sha: top.sha });
+          // Edited while the server restored them: set them aside again (the workspace is still below them), keep the edit.
+          if (revision() !== rev) {
+            await post("/stack/back", { change: r.below.id, sha: r.below.sha, top: r.change.id, topSha: r.change.sha }).catch(() => {
+              throw Object.assign(new Error("the workspace changed while restoring, and the stack couldn't be put back: load its top change"), { code: "changed" });
+            });
+          }
+        },
+      });
+      return r;
+    }),
+    /** Resolves once the steps queued so far have run (the AI builder sends a request on the workspace they leave). */
+    idle: () => serial(async () => {}),
     /** Commits the workspace as a new change of the app's stack (see changeNow). */
     commitChange: (title: string, prompt = "") => serial(() => changeNow(title, prompt)),
     /** The app's open stacks, newest first, and the one the workspace is on (its active branch is one of its changes). */
@@ -327,8 +387,9 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         try {
           await syncNow(`Work in progress on ${o.state()!.activeBranch}`);
         } catch (e) {
-          // On a change below its stack's top (one was added in another browser): they go on a branch of their own.
-          if (gitCode(e) !== "not_on_top") throw e;
+          // On a change below its stack's top (one was added in another browser), or set aside: they go on a branch of
+          // their own.
+          if (gitCode(e) !== "not_on_top" && gitCode(e) !== "set_aside") throw e;
           await branchNow("keep", o.state()!.activeBranch);
           await syncNow(`Work in progress on ${o.state()!.activeBranch}`);
         }
@@ -401,11 +462,11 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
           await o.hydrate(m.files);
         } catch (e) {
           // The files are main's now (only installing failed): the workspace is on main, at the merge.
-          if ((e as { filesWritten?: boolean }).filesWritten) await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: revision() !== rev });
+          if ((e as { filesWritten?: boolean }).filesWritten) await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: revision() !== rev, back: undefined });
           throw e;
         }
       }
-      await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: revision() !== rev });
+      await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: revision() !== rev, back: undefined });
       log(`merged into ${s.defaultBranch} @ ${m.mergedSha.slice(0, 7)}${m.fastForward ? " (fast-forward)" : ""}`);
       // The files built must be the commit's (the plugin checks the upload): what was synced, or the merge's own. If
       // npm install rewrote its lockfile, they aren't: that deploy stops, and the change is pushed with the next one.
