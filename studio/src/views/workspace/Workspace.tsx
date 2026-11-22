@@ -479,11 +479,11 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 const above = stack.changes.filter((c) => c.position > change.position).length;
                 const text = how === "pull-in"
                   ? `Pull in ${change.branch} as GitHub has it, as the top of the stack?${above ? ` The ${above} ${above === 1 ? "change" : "changes"} above it are set aside for good (they don't hold that push; their branches stay).` : ""}`
-                  : `Carry on from ${change.branch} as a branch of its own? It${above ? ` and the ${above} above it` : ""} leave the stack (branches kept), and new requests commit to it as one branch.`;
+                  : `Carry on from ${change.branch} as a branch of its own? The stack ends: its changes leave it (branches kept), and new requests commit to ${change.branch} as one branch.`;
                 if (!confirm(`${text}${gitState.dirty ? "\n\nThis workspace's changes not pushed yet are dropped." : ""}`)) return;
                 setStackBusy(true);
                 void g.takeOutside(how, change, gitState.dirty).then(
-                  () => toast(how === "pull-in" ? `Pulled in ${change.branch}: the next request goes on it` : `On ${change.branch}, as a branch of its own`, 8000),
+                  (r) => toast(`${how === "pull-in" ? `Pulled in ${change.branch}: the next request goes on it.` : `On ${change.branch}, as a branch of its own.`}${pullsSaid(r.pullErrors, "closed")}`, r.pullErrors?.length ? 15000 : 8000),
                   (e) => toast(`Couldn't load ${change.branch}: ${errorMessage(e)}`, 10000),
                 ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}

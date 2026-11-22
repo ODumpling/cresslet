@@ -502,12 +502,33 @@ test("stack: a change pushed to on GitHub is pulled in as the top (the ones abov
   const n3 = ok(await t.change(c2.branch, pushed, "Three again", "3b"));
   assert.equal(t.provider.commits.get(n3.sha)!.parent, pushed);
 
-  // Carried on from: it and the ones above leave the stack; it's committed to as one branch (as before stacks).
-  const other = t.provider.push(c1.branch, { "y.txt": "more from outside" });
-  const left = await carryOn(t.ctx, c1.change.id, other);
+  // Taken in already (another tab replaying it): refused, nothing above it touched.
+  await assert.rejects(pullIn(t.ctx, c2.change.id, pushed), (e) => code(e) === "conflict");
+  assert.equal((await readStacks(t.ctx))[0].changes.length, 3);
+  // A turn on a top pushed to since (a workspace that hasn't seen it): refused, so the push isn't left out.
+  t.provider.push(n3.branch, { "w.txt": "pushed again" });
+  await assert.rejects(t.change(n3.branch, n3.sha, "Four", "4"), (e) => code(e) === "moved");
+
+  // Carried on from (change 2): the stack ends, all of it, the ones set aside too; its branch takes commits as one branch.
+  const other = t.provider.push(c2.branch, { "y.txt": "more from outside" });
+  const left = await carryOn(t.ctx, c2.change.id, other);
   assert.equal(left.left, 3);
   assert.deepEqual(await readStacks(t.ctx), []);
-  await assert.rejects(t.change(c1.branch, other, "Four", "4"), (e) => code(e) === "not_on_stack");
+  await assert.rejects(t.change(c2.branch, other, "Four", "4"), (e) => code(e) === "not_on_stack");
+  await assert.rejects(t.change(c1.branch, c1.sha, "Four", "4"), (e) => code(e) === "not_on_stack");
+});
+
+test("stack: carrying on from a change with ones set aside above: they can't come back over it", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await goBack(t.ctx, c2.change.id);
+  const pushed = t.provider.push(c2.branch, { "x": "outside" });
+  await carryOn(t.ctx, c2.change.id, pushed);
+  await assert.rejects(restore(t.ctx, c1.stack.id), (e) => (e as HttpError).code === "nothing_set_aside");
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => [c.title, c.restorable]), [["Three", false]]);
 });
 
 test("stack: changes set aside are listed and deleted (with the ones above them); a landed stack's go with it", async () => {
@@ -519,23 +540,32 @@ test("stack: changes set aside are listed and deleted (with the ones above them)
   const c4 = ok(await t.change(c3.branch, c3.sha, "Four", "4"));
   await goBack(t.ctx, c1.change.id);
   assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => [c.title, c.restorable]).sort(), [["Four", true], ["Three", true], ["Two", true]]);
-  // Deleting 3 takes 4 with it; 2 stays restorable.
-  const moved = t.provider.push(c4.branch, { "z.txt": "pushed" });
+  // Deleting 3 takes 4 with it; 4 was pushed to: kept (said), and out of the stack, since 3 below it is gone.
+  t.provider.push(c4.branch, { "z.txt": "pushed" });
   let d = await deleteSetAside(t.ctx, c3.change.id);
-  assert.deepEqual([d.dropped, d.kept.map((k) => k.position)], [[c3.change.id], [4]]); // 4 was pushed to: kept, said
+  assert.deepEqual([d.dropped, d.kept.map((k) => k.position)], [[c3.change.id], [4]]);
   assert.equal(t.provider.refs.has(c3.branch), false);
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => [c.title, c.restorable]).sort(), [["Four", false], ["Two", true]]);
   t.provider.refs.set(c4.branch, c4.sha);
   d = await deleteSetAside(t.ctx, c4.change.id);
   assert.deepEqual(d.dropped, [c4.change.id]);
-  void moved;
   assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => c.title), ["Two"]);
   assert.equal((await restore(t.ctx, c1.stack.id)).change.id, c2.change.id);
 
-  // Going back to 1 and landing it: the ones set aside go (the app deletes merged branches).
+  // Deleting the one set aside and building on: the new change takes its place.
   await goBack(t.ctx, c1.change.id);
+  await deleteSetAside(t.ctx, c2.change.id);
+  const n2 = ok(await t.change(c1.branch, c1.sha, "Two again", "2b"));
+  assert.equal(n2.change.position, 2);
+  await goBack(t.ctx, c1.change.id); // n2 set aside, to land below
+
+  // Landing change 1: its ones set aside go (the app deletes merged branches); another stack's don't.
+  const other = ok(await t.change("main", main, "Elsewhere", "e1"));
+  ok(await t.change(other.branch, other.sha, "Elsewhere 2", "e2"));
+  await goBack(t.ctx, other.change.id);
   await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: c1.sha, deleteBelow: true });
-  assert.equal(t.provider.refs.has(c2.branch), false);
-  assert.deepEqual(await setAsideBranches(t.ctx), []);
+  assert.equal(t.provider.refs.has(n2.branch), false);
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => c.title), ["Elsewhere 2"]);
 });
 
 test("stack: at its most changes, a turn joins the top change and says so", async () => {

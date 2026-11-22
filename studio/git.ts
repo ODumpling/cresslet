@@ -392,7 +392,9 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       if (!change.headSha) throw new Error(`${change.branch} wasn't pushed to on GitHub`);
       if (o.state()!.dirty && !discard) throw Object.assign(new Error("this workspace has changes not pushed yet: loading the branch would replace them"), { code: "dirty" });
       const rev = revision();
-      await pullNow(change.branch, change.headSha, { rev, before: async () => void (await post(`/stack/${how}`, { change: change.id, sha: change.headSha })) });
+      let r: { pullErrors?: PullError[] } = {};
+      await pullNow(change.branch, change.headSha, { rev, before: async () => void (r = await post(`/stack/${how}`, { change: change.id, sha: change.headSha })) });
+      return r;
     }),
     /** Every change set aside (Source control lists them), and deleting one (with the ones set aside above it). */
     setAside: () => o.api<{ changes: (StackChange & { stackName: string; restorable: boolean })[] }>(path("/stack/aside")).then((r) => r.changes),

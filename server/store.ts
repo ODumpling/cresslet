@@ -119,6 +119,8 @@ export interface StackChange {
   /** The default branch's commit that took it in (landed). */
   landed_sha: string | null;
   pr_number: number | null;
+  /** The stack it was moved out of (set aside for good, dropped, carried on from: migration 8). */
+  origin_stack_id?: string | null;
   /** The provider login it was committed as. */
   author: string | null;
   created_by: string | null;
@@ -1230,10 +1232,20 @@ export class Store implements RateHits {
     )).changes;
   }
   /** A new change was built where they were: a stack's changes set aside leave it (for good; their branches stay). */
-  async detachSetAside(appId: string, stackId: string, to: string): Promise<number> {
+  async detachSetAside(appId: string, stackId: string, to: string, above = 0): Promise<number> {
     return (await this.db.run(
-      "UPDATE stack_changes SET stack_id = ?, updated_at = ? WHERE app_id = ? AND stack_id = ? AND state = 'set_aside'",
-      to, Date.now(), appId, stackId,
+      `UPDATE stack_changes SET origin_stack_id = COALESCE(origin_stack_id, stack_id), stack_id = ?, updated_at = ?
+       WHERE app_id = ? AND stack_id = ? AND state = 'set_aside' AND position > ?`,
+      to, Date.now(), appId, stackId, above,
+    )).changes;
+  }
+  /** Changes moved out of their stack, to `to` (their positions stay theirs), in `state`. */
+  async moveStackChanges(appId: string, ids: string[], to: string, state: StackChange["state"]): Promise<number> {
+    if (!ids.length) return 0;
+    return (await this.db.run(
+      `UPDATE stack_changes SET origin_stack_id = COALESCE(origin_stack_id, stack_id), stack_id = ?, state = ?, updated_at = ?
+       WHERE app_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
+      to, state, Date.now(), appId, ...ids,
     )).changes;
   }
   /** A commit onto the top change's branch from its recorded commit (a hand edit pushed, a merge resolved): it follows. */

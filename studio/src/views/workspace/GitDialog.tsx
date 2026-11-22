@@ -271,8 +271,13 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
                         if (!confirm(`Delete ${c.branch}${c.restorable ? ", which can't be restored after" : ""}, and any set aside above it, on GitHub?`)) return;
                         void run("Deleting…", async () => {
                           const r = await git!.deleteSetAside(c.id);
-                          if (r.kept.length) throw new Error(`Not deleted: ${r.kept.map((x) => `change ${x.position} (${x.error})`).join(", ")}`);
-                          return `Deleted ${r.dropped.length} ${r.dropped.length === 1 ? "branch" : "branches"}`;
+                          if (r.dropped.length) onPull(); // the stack (and its Restore) changed
+                          const done = `Deleted ${r.dropped.length} ${r.dropped.length === 1 ? "branch" : "branches"}`;
+                          if (r.kept.length) {
+                            await refresh(); // what was deleted leaves the list either way
+                            throw new Error(`${done}. Not deleted: ${r.kept.map((x) => `change ${x.position} (${x.error})`).join(", ")}`);
+                          }
+                          return done;
                         });
                       }}>Delete</button>
                     </li>
