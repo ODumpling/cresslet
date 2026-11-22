@@ -10,7 +10,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
-import { assertNotBelowTop, commitChange, landed, readStacks } from "./stack.ts";
+import { assertNotBelowTop, commitChange, landed, locked, readStacks } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -198,10 +198,10 @@ export class GitHub implements SourceControlProvider {
    */
   async #inTheWay(r: Repo, branch: string) {
     const parts = branch.split("/");
-    const folders = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
-    // The name itself: GitHub answers a branch, or the refs under it (an array).
-    const self = this.req<unknown>("GET", this.#path(r, `/git/ref/heads/${this.#ref(branch)}`)).then((x) => x.status === 200 && (!Array.isArray(x.body) || x.body.length > 0), () => false);
-    return (await Promise.all([self, ...folders.map((n) => this.branchHead(r, n).then(Boolean, () => false))])).some(Boolean);
+    const names = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+    const under = this.req<unknown>("GET", this.#path(r, `/git/matching-refs/heads/${this.#ref(branch)}/`))
+      .then((x) => x.status === 200 && Array.isArray(x.body) && x.body.length > 0, () => false);
+    return (await Promise.all([under, ...names.map((n) => this.branchHead(r, n).then(Boolean, () => false))])).some(Boolean);
   }
 
   /** True if it was deleted (false: it wasn't there). */
@@ -1021,16 +1021,20 @@ export function gitRoutes(
     const branch = branchName(input.branch);
     const baseSha = shaOf(input.baseSha, "baseSha");
     const files = sourceFiles(cfg, input.files as DeployFile[]);
-    await assertNotBelowTop({ provider: client, store, appId: a.id, repo, r }, branch);
-    const head = await client.branchHead(r, branch);
-    if (!head) throw new HttpError(404, `no branch ${branch} on GitHub`, "branch_not_found");
-    if (head !== baseSha) {
-      throw Object.assign(conflict(`${branch} moved on GitHub since this workspace loaded it: pull first`), { extra: { headSha: head } });
-    }
-    const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
-    if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
-    // Onto a stack's top change from where it's recorded (a hand edit pushed, a merge resolved): the change follows.
-    else if (out.changed) await store.followStackTop(a.id, branch, baseSha, out.sha).catch((e) => console.error(e));
+    // With the app's stack changes (in this process): a change added meanwhile doesn't turn this one into a lower one.
+    const out = await locked(a.id, async () => {
+      await assertNotBelowTop({ provider: client, store, appId: a.id, repo, r }, branch);
+      const head = await client.branchHead(r, branch);
+      if (!head) throw new HttpError(404, `no branch ${branch} on GitHub`, "branch_not_found");
+      if (head !== baseSha) {
+        throw Object.assign(conflict(`${branch} moved on GitHub since this workspace loaded it: pull first`), { extra: { headSha: head } });
+      }
+      const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
+      if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
+      // Onto a stack's top change from where it's recorded (a hand edit pushed, a merge resolved): the change follows.
+      else if (out.changed) await store.followStackTop(a.id, branch, baseSha, out.sha).catch((e) => console.error(e));
+      return out;
+    });
     return c.json({ branch, ...out });
   });
 

@@ -59,7 +59,7 @@ function byStack(changes: StackChange[]) {
 
 /** One change at a time per app in this process (another server racing it loses on the stack's unique position). */
 const locks = new Map<string, Promise<unknown>>();
-function locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
+export function locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const p = (locks.get(key) ?? Promise.resolve()).then(fn, fn);
   const tail = p.catch(() => {});
   locks.set(key, tail);

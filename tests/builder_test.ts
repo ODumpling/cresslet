@@ -450,14 +450,15 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       return { branch: { name: body.name, sha: body.from } };
     }
     if (path.endsWith("/git/stack") && init.method === "POST") {
-      if (opts.stackError) throw Object.assign(new Error(opts.stackError), { status: 409, code: opts.stackError });
       duringStack();
+      if (opts.stackError) throw Object.assign(new Error(opts.stackError), { status: 409, code: opts.stackError });
       if (body.from !== "main" && body.from !== "feat/s/1-one") throw Object.assign(new Error("not a change of a stack"), { status: 409, code: "not_on_stack" });
       if (body.files.some((f: Json) => f.data === "same")) return { changed: false, sha: body.baseSha };
       return { changed: true, sha: String(++n).padStart(40, "c"), branch: "feat/s/2-two", change: { position: 2 }, stack: { id: "stk_1", name: "s" } };
     }
     if (path.endsWith("/git/stack")) return { defaultBranch: "main", stacks: [{ id: "stk_1", name: "s", baseSha: "a".repeat(40), changes: [{ branch: "feat/s/1-one" }] }] };
     if (path.endsWith("/git/sync")) {
+      if (body.branch === "feat/s/1-lower") throw Object.assign(new Error("below its top"), { status: 409, code: "not_on_top" });
       duringSync();
       if (body.branch === "gone") throw Object.assign(new Error("no branch"), { status: 404, code: "branch_not_found" });
       return { branch: body.branch, sha: String(++n).padStart(40, "b"), changed: true };
@@ -544,6 +545,25 @@ test("git: a turn's commit is a change of the stack: on its own branch from the 
   on.state.activeBranch = "feat/s/1-one";
   assert.equal((await on.git.stacks()).current?.id, "stk_1");
   assert.equal((await fakeGit().git.stacks()).current, null);
+});
+
+test("git: edits on a change below its stack's top (one added elsewhere) go on a branch of their own when switching away", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.activeBranch = "feat/s/1-lower";
+  g.state.dirty = true;
+  await g.git.switchTo("feat/s/2-two");
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1].split("?")[0]), ["/sync", "/branches", "/sync", "/tree"]);
+  assert.deepEqual([g.calls[1].body.name, g.calls[2].body.branch, g.state.activeBranch], ["keep/feat-s-1-lower", "keep/feat-s-1-lower", "feat/s/2-two"]);
+});
+
+test("git: a change's fallback commit (its top moved on GitHub) commits what was read, not an edit made meanwhile", async () => {
+  let g: Json;
+  g = fakeGit({ onDefault: false, stackError: "not_on_stack", duringStack: () => void g.rev.n++ });
+  g.state.dirty = true;
+  await g.git.commitChange("One");
+  assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack", "/sync"]);
+  assert.deepEqual(g.calls[1].body.files, g.calls[0].body.files);
+  assert.equal(g.state.dirty, true); // the edit stays to commit
 });
 
 test("git: switching away from the default branch with edits puts them on a branch of their own first", async () => {

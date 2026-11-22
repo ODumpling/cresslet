@@ -137,11 +137,12 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
 
   const revision = () => o.revision?.() ?? 0;
 
-  async function syncNow(message: string): Promise<{ sha: string; changed: boolean; files: GitFile[] }> {
+  /** `snap`: files already read (and the revision before), to commit exactly those. */
+  async function syncNow(message: string, snap?: { files: GitFile[]; rev: number }): Promise<{ sha: string; changed: boolean; files: GitFile[] }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
-    const rev = revision(); // before the snapshot: a change after it keeps the workspace dirty
-    const files = await o.files();
+    const rev = snap?.rev ?? revision(); // before the snapshot: a change after it keeps the workspace dirty
+    const files = snap?.files ?? await o.files();
     // A merge being resolved: not committed while a conflicted file still has its markers.
     const left = (s.conflicts ?? []).filter((p) => files.some((f) => f.path === p && f.encoding !== "base64" && /^(?:<<<<<<<|>>>>>>>) /m.test(f.data)));
     if (left.length) throw Object.assign(new Error(`resolve the merge conflicts first (markers left in ${left.join(", ")})`), { code: "conflicts_left" });
@@ -181,7 +182,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       r = await post("/stack", { from: s.activeBranch, baseSha: s.headSha, files, title, prompt });
     } catch (e) {
       if (gitCode(e) !== "not_on_stack") throw e; // not_on_top: kept here (the stack has changes above this one)
-      return syncNow(title);
+      return syncNow(title, { files, rev }); // what was read: an edit since stays here
     }
     if (!r.changed || !r.branch) {
       await set({ dirty: revision() !== rev });
@@ -322,7 +323,16 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     switchTo: (branch: string) => serial(async () => {
       // Edits on the default branch go on a branch of their own (it takes changes only through Deploy's merge).
       if (o.state()!.dirty && o.state()!.activeBranch === o.state()!.defaultBranch) await branchNow("edit", "changes");
-      if (o.state()!.dirty) await syncNow(`Work in progress on ${o.state()!.activeBranch}`);
+      if (o.state()!.dirty) {
+        try {
+          await syncNow(`Work in progress on ${o.state()!.activeBranch}`);
+        } catch (e) {
+          // On a change below its stack's top (one was added in another browser): they go on a branch of their own.
+          if (gitCode(e) !== "not_on_top") throw e;
+          await branchNow("keep", o.state()!.activeBranch);
+          await syncNow(`Work in progress on ${o.state()!.activeBranch}`);
+        }
+      }
       if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: switch again"), { code: "changed" });
       return pullNow(branch);
     }),

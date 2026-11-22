@@ -312,7 +312,7 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
                 }}>Discard changes and switch to {s.defaultBranch}</button>
               </div>
             ) : null}
-            {error.code === "conflict" && s ? (
+            {(error.code === "conflict" || error.code === "not_on_top") && s ? (
               <div className="row start">
                 <button className="btn sm" type="button" onClick={() => void run("Pushing to a new branch…", async () => {
                   const b = await git!.newBranch("keep", s.activeBranch);
