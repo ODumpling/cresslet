@@ -53,7 +53,11 @@ export interface StackChange {
   /** Where its branch is on GitHub: at `sha`, somewhere else (`headSha`), or gone. */
   github: "ok" | "moved" | "gone";
   headSha?: string;
+  /** Its pull request's number, once the stack was submitted. */
+  pull: number | null;
 }
+/** A change's pull request, as submitting the stack left it (`error`: GitHub refused it, or its description). */
+export interface Submitted { change: string; position: number; number?: number; url?: string; created?: boolean; error?: string }
 export interface Stack {
   id: string;
   name: string;
@@ -175,13 +179,16 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
    * Finishing a merge, or on a top change GitHub moved, it's committed to the active branch as before. Below a
    * stack's top: 409 `not_on_top`, nothing committed.
    */
-  async function changeNow(title: string, prompt: string): Promise<{ sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string } }> {
+  async function changeNow(title: string, prompt: string): Promise<{
+    sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string };
+    submitted?: { pulls: Submitted[]; error?: string };
+  }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
     if (s.mergeParent) return syncNow(title);
     const rev = revision();
     const files = await o.files();
-    let r: { changed: boolean; sha: string; branch?: string; change?: StackChange; stack?: { id: string; name: string } };
+    let r: { changed: boolean; sha: string; branch?: string; change?: StackChange; stack?: { id: string; name: string }; submitted?: { pulls: Submitted[]; error?: string } };
     try {
       r = await post("/stack", { from: s.activeBranch, baseSha: s.headSha, files, title, prompt });
     } catch (e) {
@@ -197,7 +204,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       ...(s.activeBranch === s.defaultBranch ? { baseSha: s.headSha } : {}),
     });
     o.log?.(`committed change ${r.change?.position ?? "?"} of ${r.stack?.name ?? "the stack"}: ${r.branch} @ ${r.sha.slice(0, 7)}`);
-    return { sha: r.sha, changed: true, files, change: r.change, stack: r.stack };
+    return { sha: r.sha, changed: true, files, change: r.change, stack: r.stack, submitted: r.submitted };
   }
 
   /** Changes made since `rev` would be overwritten: stop instead. */
@@ -367,6 +374,10 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       });
       return r;
     }),
+    /** Opens or updates a pull request per change of a stack, each on the branch below (server/stack.ts). */
+    submitStack: (stack: string) => post<{ pulls: Submitted[] }>("/stack/submit", { stack }),
+    /** The review and checks of a stack's pull requests, by change id. */
+    stackPulls: (stack: string) => o.api<{ pulls: Record<string, PullRequest> }>(path(`/stack/pulls?stack=${encodeURIComponent(stack)}`)).then((r) => r.pulls),
     /** Resolves once the steps queued so far have run (the AI builder sends a request on the workspace they leave). */
     idle: () => serial(async () => {}),
     /** Commits the workspace as a new change of the app's stack (see changeNow). */

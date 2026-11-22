@@ -225,6 +225,18 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
                 <p className="muted small">Changes not pushed yet are pushed to {s.activeBranch} first. Deploy merges the branch into {s.defaultBranch}.</p>
               </div>
             ) : null}
+            {load.status ? (
+              <label className="check small">
+                <input type="checkbox" id="git-auto-submit" checked={load.status.repo.stackAutoSubmit} disabled={!!busy} onChange={(e) => {
+                  const on = e.target.checked;
+                  void run("Saving…", async () => {
+                    await api(`/v1/apps/${encodeURIComponent(app)}/git`, json("PATCH", { stackAutoSubmit: on }));
+                    return on ? "A pull request opens for each change as it's made" : "Pull requests open when you submit the stack";
+                  });
+                }} />
+                Open a pull request for each change as it's made (otherwise: Submit stack, above the AI builder's chat)
+              </label>
+            ) : null}
             {s.activeBranch !== s.defaultBranch && load.pull !== undefined ? (
               <div className="field" id="git-pr">
                 <strong className="small">Pull request</strong>

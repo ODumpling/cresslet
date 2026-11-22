@@ -2,13 +2,17 @@
 // change on a branch of its own, newest on top, the default branch at the bottom. The change the workspace is on is
 // marked, and a branch that moved or is gone on GitHub says so. Any change below the top can be gone back to (the
 // ones above are set aside, shown struck through), and set-aside changes restored.
-import type { ProjectGitState, Stack, StackChange } from "../../../git.ts";
+import type { ProjectGitState, PullRequest, Stack, StackChange } from "../../../git.ts";
 import { ExtLink } from "../../ui/icons.tsx";
 
-export function StackPanel({ stack, state, busy, onContinue, onBack, onRestore }: {
+export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit }: {
   stack: Stack;
   state: ProjectGitState;
   busy: boolean;
+  /** Its changes' pull requests, by change id (review and checks). */
+  pulls?: Record<string, PullRequest>;
+  /** Opens or updates a pull request per change. */
+  onSubmit: () => void;
   /** Loads the stack's top change into the workspace (it's on another branch). */
   onContinue: (branch: string) => void;
   /** Goes back to a change (the ones above it set aside). */
@@ -37,6 +41,12 @@ export function StackPanel({ stack, state, busy, onContinue, onBack, onRestore }
             ) : null}
           </span>
           <ExtLink className="ext stack-branch mono" href={tree(c.branch)}>{c.branch}</ExtLink>
+          {!aside && c.pull ? (
+            <span className="stack-pull small">
+              <ExtLink href={`${state.url}/pull/${c.pull}`}>{`Pull request #${c.pull}`}</ExtLink>
+              {pulls[c.id] ? <span className="muted">{` · ${pulls[c.id].review.replace("_", " ")} · checks ${pulls[c.id].checks}`}</span> : null}
+            </span>
+          ) : null}
         </div>
       </li>
     );
@@ -49,6 +59,12 @@ export function StackPanel({ stack, state, busy, onContinue, onBack, onRestore }
         <div className="stack-note small">
           <span className="muted">{`This workspace is on ${state.activeBranch}, not on this stack.`}</span>
           <button className="btn sm" type="button" id="stack-continue" disabled={busy} onClick={() => onContinue(top.branch)}>Continue on it</button>
+        </div>
+      ) : null}
+      {on ? (
+        <div className="stack-note small">
+          <span className="muted">{stack.changes.some((c) => c.pull) ? "Pull requests: one per change, each on the one below." : "Review it on GitHub as a chain of pull requests, one per change."}</span>
+          <button className="btn sm" type="button" id="stack-submit" disabled={busy} onClick={onSubmit}>{stack.changes.some((c) => c.pull) ? "Update pull requests" : "Submit stack"}</button>
         </div>
       ) : null}
       {aside.length ? (

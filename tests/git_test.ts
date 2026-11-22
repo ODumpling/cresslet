@@ -914,3 +914,41 @@ test("stack: go back to a change (later ones set aside, branches kept), restore 
   assert.deepEqual([s.changes.map((c: { title: string }) => c.title), s.setAside], [["One", "Other two"], []]);
   assert.equal((await t.send("POST", "/v1/apps/shop/git/stack/back", tok, { change: "chg_nope" })).status, 404);
 }));
+
+test("stack: submitted as a chain of pull requests (as the user), their review and checks read; submitted by itself after each change when the app says so", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];
+  const add = async (from: string, baseSha: string, title: string, x: string) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: files(x), title, prompt: `${title} please` })).body;
+  const c1 = await add("main", linked.sha, "One", "1");
+  const c2 = await add(c1.branch, c1.sha, "Two", "2");
+  const sub = await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: c1.stack.id });
+  assert.equal(sub.status, 200, JSON.stringify(sub.body));
+  assert.deepEqual(sub.body.pulls.map((p: { number: number; created: boolean }) => [p.number, p.created]), [[1, true], [2, true]]);
+  const pulls = t.gh.repo("octo/shop").pulls;
+  assert.deepEqual(pulls.map((p) => [p.head, p.base, p.title, p.state]), [[c1.branch, "main", "One", "open"], [c2.branch, c1.branch, "Two", "open"]]);
+  assert.match(pulls[1].body, /^> Two please\n[^]*\| → \| 2 · Two \| #2 \|/);
+  assert.ok(t.gh.stats.calls.filter((x) => x.path.endsWith("/pulls")).every((x) => x.login === "octo"));
+  const stack = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
+  assert.deepEqual(stack.changes.map((c: { pull: number }) => c.pull), [1, 2]);
+  pulls[0].reviews.push({ user: { login: "rev" }, state: "APPROVED" });
+  t.gh.check(c1.sha, "completed", "success");
+  const st = (await t.send("GET", `/v1/apps/shop/git/stack/pulls?stack=${stack.id}`, tok)).body.pulls;
+  assert.deepEqual([st[c1.change.id].review, st[c1.change.id].checks, st[c2.change.id].review], ["approved", "success", "pending"]);
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: stack.id })).body.pulls.filter((p: { created: boolean }) => p.created).length, 0);
+
+  // Going back closes change 2's pull request; restoring reopens it.
+  await t.send("POST", "/v1/apps/shop/git/stack/back", tok, { change: c1.change.id });
+  assert.equal(pulls[1].state, "closed");
+  await t.send("POST", "/v1/apps/shop/git/stack/restore", tok, { stack: stack.id });
+  assert.equal(pulls[1].state, "open");
+
+  // The app's setting (owner or admin): after each change, the stack is submitted.
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.repo.stackAutoSubmit, false);
+  const set = await t.send("PATCH", "/v1/apps/shop/git", tok, { stackAutoSubmit: true });
+  assert.deepEqual([set.status, set.body.repo.stackAutoSubmit], [200, true]);
+  assert.equal((await t.send("PATCH", "/v1/apps/shop/git", tok, { stackAutoSubmit: "yes" })).status, 400);
+  const c3 = await add(c2.branch, c2.sha, "Three", "3");
+  assert.deepEqual(c3.submitted.pulls.map((p: { number: number }) => p.number), [1, 2, 3]);
+  assert.equal(pulls[2].base, c2.branch);
+}));

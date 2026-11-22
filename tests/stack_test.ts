@@ -5,8 +5,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
-import type { CommitInput, Repo, SourceControlProvider } from "../server/git.ts";
-import { assertNotBelowTop, commitChange, type Ctx, followed, goBack, landed, readStacks, restore, slug } from "../server/stack.ts";
+import type { CommitInput, Pull, Repo, SourceControlProvider } from "../server/git.ts";
+import { assertNotBelowTop, commitChange, type Ctx, followed, goBack, landed, readStacks, restore, slug, stackPulls, submitStack } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
 /** Branches and commits in memory: a commit is its files and its parent. */
@@ -23,8 +23,38 @@ function fakeProvider() {
   const no = () => { throw new Error("not used here"); };
   // A name in the way: an existing branch, or one that's a folder of it (or the other way), as git refuses.
   const taken = (b: string) => [...refs.keys()].some((x) => x === b || b.startsWith(x + "/") || x.startsWith(b + "/"));
-  const p: SourceControlProvider & { refs: Map<string, string>; commits: typeof commits; push(branch: string, files: Record<string, string>): string } = {
-    refs, commits,
+  const pulls: (Pull & { title: string; body: string })[] = [];
+  const refuse = new Set<string>(); // branches GitHub won't open a pull request from
+  const pullOf = (n: number) => {
+    const x = pulls[n - 1];
+    if (!x) throw new HttpError(404, "not found on GitHub", "git_not_found");
+    return x;
+  };
+  const p: SourceControlProvider & {
+    refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; push(branch: string, files: Record<string, string>): string;
+  } = {
+    refs, commits, pulls, refuse,
+    async getPull(_r: Repo, n: number) {
+      return { ...pullOf(n) };
+    },
+    async findPull(_r: Repo, head: string) {
+      const x = pulls.find((y) => y.head === head && y.state === "open");
+      return x ? { ...x } : null;
+    },
+    async createPull(_r: Repo, input: { head: string; base: string; title: string; body: string }) {
+      if (refuse.has(input.head)) throw new HttpError(422, "Validation Failed", "pull_invalid");
+      const x = { number: pulls.length + 1, url: `https://github.example/octo/shop/pull/${pulls.length + 1}`, state: "open" as const, merged: false, ...input };
+      pulls.push(x);
+      return { ...x };
+    },
+    async updatePull(_r: Repo, n: number, input: { base?: string; title?: string; body?: string; state?: "open" | "closed" }) {
+      Object.assign(pullOf(n), Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)));
+      return { ...pullOf(n) };
+    },
+    async pullStatus(_r: Repo, n: number) {
+      const x = pullOf(n);
+      return { number: n, url: x.url, title: x.title, draft: false, headSha: refs.get(x.head) ?? "", review: "approved" as const, checks: "success" as const };
+    },
     push(branch, files) {
       const head = refs.get(branch)!;
       const sha = make(new Map([...commits.get(head)!.files, ...Object.entries(files)]), head);
@@ -343,6 +373,75 @@ test("stack: go back and restore check the commit the caller saw; an undo restor
   await followed(t.ctx, c2.branch, c2.sha, "f".repeat(40));
   [s] = await readStacks(t.ctx);
   assert.deepEqual(s.setAside, []);
+});
+
+test("stack: submitting opens a pull request per change, each on the branch below, with the stack's table", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "Due dates", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Dark | mode", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "CSV export", "3"));
+  const id = c1.stack.id;
+  const r = await submitStack(t.ctx, id);
+  assert.deepEqual(r.pulls.map((x) => [x.position, x.number, x.created, x.error]), [[1, 1, true, undefined], [2, 2, true, undefined], [3, 3, true, undefined]]);
+  const pr = t.provider.pulls;
+  assert.deepEqual(pr.map((x) => [x.head, x.base, x.title]), [[c1.branch, "main", "Due dates"], [c2.branch, c1.branch, "Dark | mode"], [c3.branch, c2.branch, "CSV export"]]);
+  assert.equal(pr[1].body, [
+    "> Dark | mode, please",
+    "",
+    "**Stack `due-dates`**: one pull request per AI builder request in Cresslet, each based on the one below it, so this one shows only its own change.",
+    "",
+    "| | Change | Pull request |",
+    "| --- | --- | --- |",
+    "|  | 3 · CSV export | #3 |",
+    "| → | 2 · Dark \\| mode | #2 |",
+    "|  | 1 · Due dates | #1 |",
+    "| | `main` | |",
+  ].join("\n"));
+  assert.deepEqual((await readStacks(t.ctx))[0].changes.map((c) => c.pull), [1, 2, 3]);
+  assert.deepEqual(Object.keys(await stackPulls(t.ctx, id)).length, 3);
+
+  // Again, with a fourth change: nothing duplicated, one more, every table refreshed.
+  const c4 = ok(await t.change(c3.branch, c3.sha, "Four", "4"));
+  const again = await submitStack(t.ctx, id);
+  assert.deepEqual(again.pulls.map((x) => [x.number, x.created]), [[1, false], [2, false], [3, false], [4, true]]);
+  assert.equal(pr.length, 4);
+  assert.match(pr[0].body, /\| {2}\| 4 · Four \| #4 \|/);
+  assert.equal(pr[3].base, c3.branch);
+  void c4;
+});
+
+test("stack: an open pull request from a change's branch is reused (on the right base); one refused doesn't stop the others", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await t.provider.createPull(t.ctx.r, { head: c1.branch, base: "develop", title: "by hand", body: "" }); // #1, on another base
+  t.provider.refuse.add(c2.branch);
+  const r = await submitStack(t.ctx, c1.stack.id);
+  assert.deepEqual(r.pulls.map((x) => [x.position, x.number ?? null, !!x.error]), [[1, 1, false], [2, null, true], [3, 2, false]]);
+  assert.match(r.pulls[1].error!, /Validation Failed/);
+  assert.deepEqual(t.provider.pulls.map((x) => [x.head, x.base]), [[c1.branch, "main"], [c3.branch, c2.branch]]);
+  // Fixed on GitHub's side: submitting again opens the missing one.
+  t.provider.refuse.clear();
+  assert.deepEqual((await submitStack(t.ctx, c1.stack.id)).pulls.map((x) => x.number), [1, 3, 2]);
+});
+
+test("stack: going back closes the set-aside changes' pull requests; restore reopens them", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await submitStack(t.ctx, c1.stack.id);
+  await goBack(t.ctx, c1.change.id);
+  assert.deepEqual(t.provider.pulls.map((x) => x.state), ["open", "closed", "closed"]);
+  // Submitting the stack now: only the open change has a pull request.
+  assert.deepEqual((await submitStack(t.ctx, c1.stack.id)).pulls.map((x) => x.number), [1]);
+  await restore(t.ctx, c1.stack.id);
+  assert.deepEqual(t.provider.pulls.map((x) => x.state), ["open", "open", "open"]);
+  void c3;
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {

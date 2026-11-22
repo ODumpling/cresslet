@@ -159,6 +159,17 @@ try {
   await page.locator('#tree button[data-path="src/dark.css"]').waitFor({ state: "attached", timeout: 30000 });
   console.log("restored change 2");
 
+  // Submit stack: a pull request per change, change 2's on change 1's branch; the stack shows them.
+  await page.locator("#stack-submit", { hasText: "Submit stack" }).click();
+  await toast(/Submitted: 2 pull requests \(2 new\)/, 60000);
+  const prs = gh.repo(full).pulls;
+  if (prs.length !== 2 || prs[0].base !== "main" || prs[1].base !== `${STACK}/1-add-due-dates-to-tasks` || prs[1].head !== DARK) fail(`pull requests: ${JSON.stringify(prs.map((p) => [p.head, p.base]))}`);
+  if (!prs[1].body.includes("| → | 2 · Dark mode | #2 |")) fail(`no stack table: ${prs[1].body}`);
+  await page.locator("#stack-panel .stack-row", { hasText: "2 · Dark mode" }).getByRole("link", { name: /Pull request #2/ }).waitFor({ timeout: 30000 });
+  await page.locator("#stack-submit", { hasText: "Update pull requests" }).waitFor();
+  await page.locator("#stack-panel").screenshot({ path: `${out}/git-stack-pulls.png` });
+  console.log("submitted the stack: #1 and #2");
+
   // Back again, and a new request: it's a new change 2 on change 1 (Claude is told where the workspace is), and the
   // one set aside is dropped.
   await page.locator("#stack-panel .stack-row", { hasText: "1 · Add due dates to tasks" }).getByRole("button", { name: /Go back/ }).click();
@@ -172,6 +183,7 @@ try {
   if (gh.commit(gh.repo(full).refs.get(DARKER)!).parents[0] !== c1) fail("the new change isn't on change 1");
   await page.locator("#stack-panel .stack-row[data-here]", { hasText: "2 · Dark mode, darker" }).waitFor({ timeout: 30000 });
   if (await page.locator("#stack-panel .stack-row[data-aside]").count()) fail("the change set aside is still shown");
+  if (gh.repo(full).pulls[1].state !== "closed") fail("the pull request of the change set aside isn't closed");
   console.log("built a new change 2 on change 1");
 
   // A hand edit after them: it goes into the top change (pushed with the deploy).
@@ -255,8 +267,8 @@ try {
   await page.locator("#deploy-btn").click();
   await toast(/Not deployed: main is protected/, 60000);
   await page.locator("#toast").getByRole("button", { name: "Open a pull request" }).click();
-  await toast(/Pull request #1/, 30000);
-  if (gh.repo(full).pulls.length !== 1 || gh.repo(full).pulls[0].head !== EDITS) fail(`no pull request from ${EDITS}`);
+  await toast(/Pull request #\d+/, 30000);
+  if (!gh.repo(full).pulls.some((p) => p.head === EDITS && p.state === "open")) fail(`no pull request from ${EDITS}`);
   await page.screenshot({ path: `${out}/git-pull-request.png` });
   console.log("protected main: pull request opened");
 

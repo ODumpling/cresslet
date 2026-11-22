@@ -8,7 +8,7 @@ import { projects, type Deploy, type StoredProject } from "../../../store.ts";
 import type { CressletConfig } from "../../../cresslet-plugin.ts";
 import type * as API from "../../../api-types.ts";
 import { api, errorMessage, meta, mustLogIn } from "../../lib/api.ts";
-import type { ProjectGitState, PullRequest, Stack } from "../../../git.ts";
+import type { ProjectGitState, PullRequest, Stack, Submitted } from "../../../git.ts";
 import { viewShown } from "../../lib/focus.ts";
 import { useView } from "../../lib/hooks.ts";
 import { projectsChanged } from "../../lib/projects.ts";
@@ -194,6 +194,17 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   // workspace moves (a turn committed a change) and with the checks above.
   const [stack, setStack] = useState<Stack | null>(null);
   const [stackBusy, setStackBusy] = useState(false);
+  // Its pull requests' review and checks (read when it has some).
+  const [stackPulls, setStackPulls] = useState<Record<string, PullRequest>>({});
+  const pulled = stack?.changes.filter((c) => c.pull).map((c) => `${c.id}:${c.pull}`).join(",") ?? "";
+  useEffect(() => {
+    const g = engine.current?.git;
+    setStackPulls({});
+    if (!stack || !pulled || !g) return;
+    let live = true;
+    void g.stackPulls(stack.id).then((p) => live && setStackPulls(p), () => {});
+    return () => void (live = false);
+  }, [stack?.id, pulled]);
   useEffect(() => {
     const g = engine.current?.git;
     if (!gitState || !token || !deploy?.name || !g) return setStack(null);
@@ -439,7 +450,21 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         {container ? (
           <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
             stack={stack && gitState && gitOn && token && !locked ? (
-              <StackPanel stack={stack} state={gitState} busy={stackBusy || deploying} onContinue={(branch) => {
+              <StackPanel stack={stack} state={gitState} busy={stackBusy || deploying} pulls={stackPulls}
+              onSubmit={() => {
+                const g = engine.current?.git;
+                if (!g) return;
+                setStackBusy(true);
+                const said = (p: Submitted[]) => {
+                  const failed = p.filter((x) => x.error);
+                  const made = p.filter((x) => x.created).length;
+                  if (failed.length) toast(`Pull requests: ${failed.map((x) => `change ${x.position}: ${x.error}`).join("; ")}`, 15000);
+                  else toast(`Submitted: ${p.length} ${p.length === 1 ? "pull request" : "pull requests"}${made ? ` (${made} new)` : ""}`, 8000);
+                };
+                void g.submitStack(stack.id).then((r) => said(r.pulls), (e) => toast(`Couldn't submit the stack: ${errorMessage(e)}`, 10000))
+                  .finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+              }}
+              onContinue={(branch) => {
                 const g = engine.current?.git;
                 if (!g) return;
                 if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);

@@ -5,7 +5,7 @@
 // when one moved or is gone). Routes are with the other git routes (server/git.ts); this takes the provider and the
 // store, so it's tested without a network (tests/stack_test.ts).
 import { HttpError } from "./deploys.ts";
-import { type Author, pool, type Repo, type SourceControlProvider } from "./git.ts";
+import { type Author, type Pull, type PullInfo, pool, type Repo, type SourceControlProvider } from "./git.ts";
 import { type AppRepo, id, type StackChange, type Store } from "./store.ts";
 
 /** A branch name part from a title: lowercase words, at most `max` characters (as the studio's branchSlug). */
@@ -34,6 +34,8 @@ export interface ChangeView {
   github: "ok" | "moved" | "gone";
   /** The branch's head on GitHub, when it moved. */
   headSha?: string;
+  /** Its pull request's number, once the stack was submitted. */
+  pull: number | null;
 }
 export interface StackView {
   id: string;
@@ -48,7 +50,7 @@ export interface StackView {
 
 const view = (c: StackChange): Omit<ChangeView, "github"> => ({
   id: c.id, position: c.position, branch: c.branch, sha: c.sha, baseSha: c.base_sha, title: c.title, prompt: c.prompt,
-  author: c.author, createdAt: new Date(c.created_at).toISOString(),
+  author: c.author, createdAt: new Date(c.created_at).toISOString(), pull: c.pr_number ?? null,
 });
 
 /** Open changes by stack, each bottom first; stacks oldest first. */
@@ -196,7 +198,7 @@ const stackChanged = () => new HttpError(409, "the stack changed meanwhile (in a
  * aside (their branches kept), so it's the top and the next change goes on it. `now`: the ones this set aside;
  * `setAside`: all the stack's, earlier ones too.
  */
-export function goBack(ctx: Ctx, changeId: string, sha?: string, top?: { id: string; sha: string }): Promise<{ change: ChangeView; stack: { id: string; name: string }; now: string[]; setAside: ChangeView[] }> {
+export function goBack(ctx: Ctx, changeId: string, sha?: string, top?: { id: string; sha: string }): Promise<{ change: ChangeView; stack: { id: string; name: string }; now: string[]; setAside: ChangeView[]; pullErrors?: PullError[] }> {
   return locked(ctx.appId, async () => {
     const open = await ctx.store.openStackChanges(ctx.appId);
     const c = open.find((x) => x.id === changeId);
@@ -205,10 +207,15 @@ export function goBack(ctx: Ctx, changeId: string, sha?: string, top?: { id: str
     // `top`: the stack's top the caller expects (undoing a restore: nothing added on it since).
     const was = byStack(open.filter((x) => x.stack_id === c.stack_id))[0]!.at(-1)!;
     if (top && (was.id !== top.id || was.sha !== top.sha)) throw stackChanged();
-    const now = open.filter((x) => x.stack_id === c.stack_id && x.position > c.position).map((x) => x.id);
+    const above = open.filter((x) => x.stack_id === c.stack_id && x.position > c.position);
     await ctx.store.setAsideAbove(ctx.appId, c.stack_id, c.position);
     const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).filter((x) => x.stack_id === c.stack_id);
-    return { change: { ...view(c), github: "ok" }, stack: { id: c.stack_id, name: c.stack_name }, now, setAside: aside.map((x) => ({ ...view(x), github: "ok" as const })) };
+    // Their pull requests are closed (branches kept): reopened by restore.
+    const pullErrors = await setPulls(ctx, above, "closed");
+    return {
+      change: { ...view(c), github: "ok" }, stack: { id: c.stack_id, name: c.stack_name }, now: above.map((x) => x.id),
+      setAside: aside.map((x) => ({ ...view(x), github: "ok" as const })), ...(pullErrors.length ? { pullErrors } : {}),
+    };
   });
 }
 
@@ -217,7 +224,7 @@ export function goBack(ctx: Ctx, changeId: string, sha?: string, top?: { id: str
  * (the ones a go back set aside, to undo it). `top`: the change the caller will load, which must be the new top.
  * Resolves to it, and `below`: the top before (to go back to, to undo this).
  */
-export function restore(ctx: Ctx, stackId: string, opts: { only?: string[]; top?: { id: string; sha: string } } = {}): Promise<{ change: ChangeView; below: ChangeView; stack: { id: string; name: string }; restored: number }> {
+export function restore(ctx: Ctx, stackId: string, opts: { only?: string[]; top?: { id: string; sha: string } } = {}): Promise<{ change: ChangeView; below: ChangeView; stack: { id: string; name: string }; restored: number; pullErrors?: PullError[] }> {
   return locked(ctx.appId, async () => {
     // A stack that landed (or was forgotten) meanwhile: its changes set aside have no stack to go back on.
     const before = byStack((await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId))[0];
@@ -233,7 +240,11 @@ export function restore(ctx: Ctx, stackId: string, opts: { only?: string[]; top?
     const top = aside.at(-1)!;
     if (opts.top && (top.id !== opts.top.id || top.sha !== opts.top.sha)) throw stackChanged();
     const n = await ctx.store.restoreSetAside(ctx.appId, stackId, aside.map((c) => c.id));
-    return { change: { ...view(top), github: "ok" }, below: { ...view(before.at(-1)!), github: "ok" }, stack: { id: top.stack_id, name: top.stack_name }, restored: n };
+    const pullErrors = await setPulls(ctx, aside, "open");
+    return {
+      change: { ...view(top), github: "ok" }, below: { ...view(before.at(-1)!), github: "ok" }, stack: { id: top.stack_id, name: top.stack_name },
+      restored: n, ...(pullErrors.length ? { pullErrors } : {}),
+    };
   });
 }
 
@@ -285,4 +296,100 @@ export async function landed(ctx: Ctx, input: { branch: string; headSha: string;
     });
   }
   return { stack: top.stack_name, changes: n };
+}
+
+// ---- pull requests: one per change, each based on the branch of the change below (the bottom one on the default
+// branch), so each shows one request's diff; opened on submit (or after each change, with the app's setting on).
+
+export interface PullError { change: string; position: number; error: string }
+const why = (e: unknown) => (e instanceof HttpError ? e.message : "GitHub didn't answer as expected");
+
+/** Closes (changes set aside) or reopens (restored) changes' pull requests, best effort: what failed is returned. */
+async function setPulls(ctx: Ctx, changes: StackChange[], state: "open" | "closed"): Promise<PullError[]> {
+  const errors: PullError[] = [];
+  await pool(changes.filter((c) => c.pr_number), 4, async (c) => {
+    try {
+      const p = await ctx.provider.getPull(ctx.r, c.pr_number!);
+      if (!p.merged && p.state !== state) await ctx.provider.updatePull(ctx.r, c.pr_number!, { state });
+    } catch (e) {
+      errors.push({ change: c.id, position: c.position, error: why(e) });
+    }
+  });
+  return errors.sort((x, y) => x.position - y.position);
+}
+
+/** Text for a markdown table cell. */
+const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+
+/** A change's pull request description: its prompt, and the whole stack (newest on top), this change marked. */
+export function pullBody(c: StackChange, stack: StackChange[], numbers: Map<string, number>, defaultBranch: string) {
+  const prompt = c.prompt.trim() ? c.prompt.trim().slice(0, 2000).split(/\r?\n/).map((l) => `> ${l}`).join("\n") : `> ${c.title}`;
+  const rows = [...stack].reverse().map((x) => {
+    const n = numbers.get(x.id);
+    return `| ${x.id === c.id ? "→" : ""} | ${x.position} · ${cell(x.title)} | ${n ? `#${n}` : ""} |`;
+  });
+  return [
+    prompt,
+    "",
+    `**Stack \`${cell(c.stack_name)}\`**: one pull request per AI builder request in Cresslet, each based on the one below it, so this one shows only its own change.`,
+    "",
+    "| | Change | Pull request |",
+    "| --- | --- | --- |",
+    ...rows,
+    `| | \`${cell(defaultBranch)}\` | |`,
+  ].join("\n");
+}
+
+export interface Submitted { change: string; position: number; number?: number; url?: string; created?: boolean; error?: string }
+
+/**
+ * Submits a stack: a pull request per open change, the bottom one into the default branch, each other one into the
+ * branch of the change below. One that exists (recorded, or open from that branch) is found, reopened if closed, and
+ * pointed at the right base; the others are opened, as the user. Then every description gets the stack's table. A
+ * change GitHub refuses is said, and the others go on.
+ */
+export function submitStack(ctx: Ctx, stackId: string): Promise<{ pulls: Submitted[] }> {
+  return locked(ctx.appId, async () => {
+    const s = byStack((await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId))[0];
+    if (!s) throw new HttpError(404, "no such stack open", "not_found");
+    const { provider, r } = ctx;
+    const out: Submitted[] = [], pulls = new Map<string, Pull>();
+    for (const [i, c] of s.entries()) {
+      const base = i ? s[i - 1].branch : ctx.repo.default_branch;
+      try {
+        let p: Pull | null = c.pr_number ? await provider.getPull(r, c.pr_number).catch(() => null) : null;
+        if (p && (p.head !== c.branch || p.merged)) p = null;
+        p ??= await provider.findPull(r, c.branch);
+        let created = false;
+        if (p && p.state === "closed") p = await provider.updatePull(r, p.number, { state: "open" });
+        if (p && p.base !== base) p = await provider.updatePull(r, p.number, { base });
+        if (!p) {
+          p = await provider.createPull(r, { head: c.branch, base, title: c.title, body: pullBody(c, s, new Map(), ctx.repo.default_branch) });
+          created = true;
+        }
+        if (c.pr_number !== p.number) await ctx.store.setStackChangePull(c.id, p.number);
+        pulls.set(c.id, p);
+        out.push({ change: c.id, position: c.position, number: p.number, url: p.url, created });
+      } catch (e) {
+        out.push({ change: c.id, position: c.position, error: why(e) });
+      }
+    }
+    const numbers = new Map([...pulls].map(([id, p]) => [id, p.number]));
+    await pool(s.filter((c) => pulls.has(c.id)), 4, async (c) => {
+      try {
+        await provider.updatePull(r, pulls.get(c.id)!.number, { body: pullBody(c, s, numbers, ctx.repo.default_branch) });
+      } catch (e) {
+        const x = out.find((o) => o.change === c.id)!;
+        x.error = `its description wasn't updated: ${why(e)}`;
+      }
+    });
+    return { pulls: out };
+  });
+}
+
+/** The review and checks of a stack's pull requests, by change id. */
+export async function stackPulls(ctx: Ctx, stackId: string): Promise<Record<string, PullInfo>> {
+  const s = (await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId && c.pr_number);
+  const info = await pool(s, 4, (c) => ctx.provider.pullStatus(ctx.r, c.pr_number!).catch(() => null));
+  return Object.fromEntries(s.flatMap((c, i) => (info[i] ? [[c.id, info[i]!]] : [])));
 }
