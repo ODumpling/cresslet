@@ -99,11 +99,14 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
   useEffect(() => void refreshCredits(), [source, token]);
   // Leaving the project: the conversation stops with it (no more requests, tools or credits spent), and a deploy
   // waiting for approval is declined.
-  useEffect(() => () => {
-    r.gone = true;
-    r.stopped = true;
-    r.agent?.stop();
-    for (const decline of r.approvals) decline();
+  useEffect(() => {
+    r.gone = false; // (mounted again: React's StrictMode does that in dev)
+    return () => {
+      r.gone = true;
+      r.stopped = true;
+      r.agent?.stop();
+      for (const decline of r.approvals) decline();
+    };
   }, [r]);
 
   // Stick to the bottom when new output arrives and the log was already there.
@@ -214,7 +217,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
       setWorking("");
       if (r.replied) setStatus(`Claude: ${r.replied}${r.failed ? ` (${r.failed})` : ""}`);
       else if (!r.failed) setStatus("Claude finished");
-      void refreshCredits();
+      if (!r.gone) void refreshCredits();
     }
   }
 
