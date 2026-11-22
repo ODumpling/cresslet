@@ -255,6 +255,45 @@ test("link a repository and push: secrets stripped, commits authored as the user
   assert.equal((await t.send("POST", `/v1/apps/${anon.body.app.name}/git/connect`, tok, { owner: "octo", repo: "shop" })).status, 403);
 }));
 
+test("link an app that's already deployed: its live deploy's source is pushed, from the server", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  await t.connect(tok, t.gh.user("octo"));
+  // Deployed before it had a repository (the CLI, another studio): built files plus the source uploaded with them.
+  const sources = [
+    { path: "src/main.ts", data: "console.log(1);\n" },
+    { path: "index.html", data: "<h1>shop</h1>" },
+    { path: ".env", data: "VITE_TITLE=Shop\nSTRIPE_KEY=sk_live_123\n" },
+    { path: ".env.local", data: "DB=secret" },
+    { path: "logo.png", data: Buffer.from([0, 255, 1]).toString("base64"), encoding: "base64" },
+  ];
+  assert.equal((await t.deploy(tok, "shop", { sources })).status, 201);
+  assert.equal((await t.send("POST", "/v1/git/github/repos", tok, { name: "shop" })).status, 201);
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "deploy" });
+  assert.equal(linked.status, 201, JSON.stringify(linked.body));
+  assert.equal(linked.body.files, undefined);
+  const remote = t.gh.files("octo/shop");
+  assert.deepEqual(Object.keys(remote).sort(), [".env", "index.html", "logo.png", "src/main.ts"]);
+  assert.equal(remote[".env"], "VITE_TITLE=Shop\n"); // secrets never stored with the deploy, nor pushed
+  assert.equal(remote["src/main.ts"], "console.log(1);\n");
+  assert.equal(t.gh.commit(linked.body.sha).by, "octo");
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.repo.lastSyncedSha, linked.body.sha);
+  // The studio then loads it like any linked app.
+  const tree = await t.send("GET", "/v1/apps/shop/git/tree", tok);
+  assert.deepEqual(tree.body.files.map((f: { path: string }) => f.path), [".env", "index.html", "logo.png", "src/main.ts"]);
+
+  // Deployed without its source: nothing to push, nothing linked (and the studio is told).
+  assert.equal((await t.deploy(tok, "bare")).status, 201);
+  t.gh.addRepo("octo", "bare", ["octo"]);
+  const bare = await t.send("POST", "/v1/apps/bare/git/connect", tok, { owner: "octo", repo: "bare", initialSync: "deploy" });
+  assert.equal(bare.status, 409);
+  assert.equal(bare.body.error, "no_source");
+  assert.equal((await t.send("GET", "/v1/apps/bare", tok)).body.deploys[0].hasSource, false);
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.deploys[0].hasSource, true);
+  assert.equal((await t.send("GET", "/v1/apps/bare", tok)).body.repo, null);
+  assert.deepEqual(Object.keys(t.gh.files("octo/bare")), ["README.md"]);
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "sideways" })).status, 400);
+}));
+
 test("sync: one commit for the workspace, refused when the branch moved; repo-only files kept", withServer(async (t) => {
   const tok = await t.account("octo@b.co");
   await t.deploy(tok, "shop");

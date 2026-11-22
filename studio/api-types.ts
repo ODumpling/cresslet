@@ -102,6 +102,8 @@ export interface DeployInfo {
   bytes: number;
   files: number;
   source: string;
+  /** The project source was uploaded with it (GET /v1/apps/:name/source). */
+  hasSource?: boolean;
   /** The commit it was built from (source control). */
   git?: { sha: string; branch: string | null; repo: string | null; url: string | null } | null;
 }

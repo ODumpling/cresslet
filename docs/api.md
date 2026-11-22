@@ -59,7 +59,7 @@ Creating apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin`
 | POST | `/v1/deploys` | see below |
 | POST | `/v1/apps` | full-access token: `{name}` → `{app}` (201): a new app with nothing deployed yet, its address reserved (the studio links a repository before the first deploy). Same name rules, limits and 409 as a deploy that creates one |
 | GET | `/v1/apps` | apps the account owns, collaborates on or reaches through an [organization](#organizations); each has `access: owner\|admin\|viewer` and `org: {name, title} \| null` |
-| GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 5 deploys (each with `git: {sha, branch, repo, url} \| null`, `url`: the commit on GitHub), runtime status, secret names, `repo` (the linked [repository](#source-control) or null) |
+| GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 5 deploys (each with `hasSource`: the project source came with it, and `git: {sha, branch, repo, url} \| null`, `url`: the commit on GitHub), runtime status, secret names, `repo` (the linked [repository](#source-control) or null) |
 | DELETE | `/v1/apps/:name?id=` | delete app + data (owner or deploy key; not an invited admin). `id` (optional): only if it's still that app, else 409 `conflict` |
 | PUT | `/v1/apps/:name/org` | owner (org app: an org admin), full-access token: `{org: "name" \| null}` → `{app, org}`. Into an organization you're a member of, or out of one (`null`: your personal app, within your app limit) |
 | GET | `/v1/apps/:name/collaborators` | **owner or admin**: `{owner: {id, email, github} \| null, org: {name, title} \| null, collaborators: [{id, email, github, role, createdAt}], invites: [{id, email, role, invitedBy, createdAt}]}` |
@@ -135,7 +135,7 @@ Apps can sync with a GitHub repository (when the server has it on: `git.github` 
 | DELETE | `/v1/me/git/github` | full-access token: forget the connection (and revoke the token on GitHub) |
 | GET | `/v1/git/github/repos` | `{repos: [{id, owner, name, fullName, private, defaultBranch, url, push}]}`: up to 100 the user can push to, recently updated first |
 | POST | `/v1/git/github/repos` | full-access token: `{name, owner?: org, private?: true}` → `{repo}` (201), created as the user with a first commit. 409 `repo_exists` |
-| POST | `/v1/apps/:name/git/connect` | **owner or admin**: `{owner, repo, subdir?, deleteBranch?: true, initialSync: push\|pull\|none, files?, message?}` → `{repo, sha, files?}` (201). `push`: commit `files` (the workspace) to the default branch; `pull`: its files back; `none`: just link. 403 `git_forbidden` if you can't push to it |
+| POST | `/v1/apps/:name/git/connect` | **owner or admin**: `{owner, repo, subdir?, deleteBranch?: true, initialSync: push\|pull\|deploy\|none, files?, message?}` → `{repo, sha, files?}` (201). `push`: commit `files` (the workspace) to the default branch; `deploy`: commit the source stored with the live deploy instead (an app deployed before it had a repository; 409 `no_source` if it was deployed without one); `pull`: its files back; `none`: just link. 403 `git_forbidden` if you can't push to it |
 | DELETE | `/v1/apps/:name/git` | **owner or admin**: unlink (the repository is left alone) |
 | GET | `/v1/apps/:name/git/status` | `{repo, defaultBranch, mainSha, branches: [{name, sha, protected}]}` |
 | POST | `/v1/apps/:name/git/branches` | `deploy`: `{name, from?: sha}` → `{branch: {name, sha}}` (201), cut from the default branch's head by default. 409 `branch_exists` |

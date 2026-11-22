@@ -51,6 +51,7 @@ import { aiRoutes } from "./credits.ts";
 import { ipKey, RateLimit } from "./limits.ts";
 import {
   beingRemoved,
+  deploySource,
   deploysLock,
   type DeployFile,
   type DeployInput,
@@ -752,6 +753,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         files: d.file_count,
         server: !!d.has_server,
         source: d.source,
+        hasSource: existsSync(join(paths(cfg, a.id).deploy(d.id), "source")), // the project source came with it
         current: d.id === a.current_deploy_id,
         git: d.git_sha ? { sha: d.git_sha, branch: d.git_branch, repo: d.git_repo, url: d.git_repo ? `${githubSync(cfg)?.webUrl ?? cfg.git.webUrl}/${d.git_repo}/commit/${d.git_sha}` : null } : null,
       })),
@@ -1032,23 +1034,16 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const deployId = c.req.query("deploy") ?? a.current_deploy_id;
     const d = deployId ? await store.deploy(deployId) : undefined;
     if (!d || d.app_id !== a.id) throw new HttpError(404, "deploy not found", "not_found");
-    const root = join(paths(cfg, a.id).deploy(d.id), "source");
-    if (!existsSync(root)) throw new HttpError(404, "this deploy has no source (deployed without it)", "no_source");
-    const files: { path: string; data: string; encoding: "utf8" | "base64" }[] = [];
-    for (const rel of (await readdir(root, { recursive: true, withFileTypes: true })).filter((e) => e.isFile())) {
-      const abs = join(rel.parentPath, rel.name);
-      const bytes = await readFile(abs);
-      const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-      let data: string, encoding: "utf8" | "base64" = "utf8";
+    const source = await deploySource(cfg, a.id, d.id);
+    if (!source) throw new HttpError(404, "this deploy has no source (deployed without it)", "no_source");
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    const files = source.map(([path, bytes]): { path: string; data: string; encoding: "utf8" | "base64" } => {
       try {
-        data = text.decode(bytes);
+        return { path, data: text.decode(bytes), encoding: "utf8" };
       } catch {
-        data = encodeBase64(bytes);
-        encoding = "base64";
+        return { path, data: encodeBase64(bytes), encoding: "base64" };
       }
-      files.push({ path: relative(root, abs).split("\\").join("/"), data, encoding });
-    }
-    files.sort((x, y) => x.path.localeCompare(y.path));
+    });
     c.header("cache-control", "no-store"); // private project source
     return c.json({ app: a.name, deployId: d.id, files });
   });
