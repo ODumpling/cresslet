@@ -490,7 +490,7 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       if (JSON.stringify(Object.keys(serverFns).sort()) === known) break;
     }
 
-    // ---- outDir: public/ files, then the bundles; then a deploy's earlier files go
+    // ---- outDir: public/ files, then the bundles; then earlier builds' files go
     const files = [];
     const copyPublic = async (dir) => {
       let entries;
@@ -515,7 +515,8 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       files.push(f);
     }
     const keep = new Set(files);
-    const prune = async (dir) => {
+    const prune = async (dir, except) => {
+      if (dir === except) return;
       let entries;
       try {
         entries = await c.fs.readdir(dir, { withFileTypes: true });
@@ -524,12 +525,12 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       }
       for (const e of entries) {
         const f = `${dir}/${e.name}`;
-        if (e.isDirectory()) await prune(f);
+        if (e.isDirectory()) await prune(f, except);
         else if (!keep.has(f)) await c.fs.rm(f, { force: true });
       }
     };
-    // (not the preview's: hashed names don't clash, and its worker serves the last build's pages until a new one is ready)
-    if (!preview) await prune(p(outDir));
+    // (the preview keeps earlier hashed assets: its worker serves the last build's pages until a new one is ready)
+    await prune(p(outDir), preview ? p(`${outDir}/assets`) : null);
     return { files, outDir, server, entry };
   }
 

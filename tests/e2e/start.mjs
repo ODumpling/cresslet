@@ -81,11 +81,15 @@ try {
     throw new Error("the preview didn't reload");
   };
   await signUpAndTodo(frame, reloadFrame, "preview");
-  // the page's own POSTs pass the template's CSRF check whatever their body type (text/plain, FormData)
-  for (const body of ['"x"', "new FormData()"]) {
-    const st = await (await previewFrame()).evaluate((b) => fetch("/api/health", { method: "POST", body: eval(b) }).then((r) => r.status), body);
+  // The page's own POSTs pass the template's CSRF check (it runs before a server function is looked up) whatever their
+  // body type; a navigation's (a form another page submits into the preview) doesn't.
+  const csrf = (init) => previewFrame().then((f) => f.evaluate((i) => fetch("/_serverFn/nope", { method: "POST", ...i, body: i.body === "form" ? new FormData() : i.body }).then((r) => r.status), init));
+  for (const body of ["x", "form"]) {
+    const st = await csrf({ body });
     if (st === 403) throw new Error(`a same-origin POST (${body}) was refused as cross-site`);
   }
+  if ((await csrf({ body: "x", headers: { accept: "text/html,application/xhtml+xml" } })) !== 403) throw new Error("a navigation-like POST passed CSRF");
+  console.log("CSRF: the page's fetches pass, navigations don't");
   await page.screenshot({ path: `${shots}/start-dashboard.png` });
 
   // A new file route (dev restarted: the route tree is regenerated), then an edit in the editor: a save rebuilds and

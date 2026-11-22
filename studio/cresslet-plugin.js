@@ -442,7 +442,8 @@ export function createCresslet(c, opts) {
 
     // The preview's cookies (an app's session): responses made in its service worker can't set them and its requests
     // don't carry them, so they're kept here for this `cresslet dev` and sent with each request. One jar per preview:
-    // name → value (Path/Domain don't matter on one origin; Max-Age=0 or a past Expires removes one).
+    // name → { value, none: SameSite=None } (Path/Domain don't matter on one origin; Max-Age=0 or a past Expires
+    // removes one).
     const jar = new Map();
     function keepCookies(headers) {
       for (const [k, v] of headers) {
@@ -456,7 +457,7 @@ export function createCresslet(c, opts) {
           return (/^max-age$/i.test(ak) && /^-?\d+$/.test(av) && Number(av) <= 0) || (/^expires$/i.test(ak) && Date.parse(av) <= Date.now());
         });
         if (gone) jar.delete(name);
-        else jar.set(name, pair.slice(i + 1).trim());
+        else jar.set(name, { value: pair.slice(i + 1).trim(), none: attrs.some((a) => /^\s*samesite\s*=\s*none\s*$/i.test(a)) });
       }
       return headers.filter(([k]) => k.toLowerCase() !== "set-cookie");
     }
@@ -486,12 +487,17 @@ export function createCresslet(c, opts) {
       const page = c.previewOrigin ?? location.origin; // where preview pages run
       const headers = [...req.headers].map(([k, v]) => (k.toLowerCase() === "origin" && v === page ? [k, appUrl.origin] : [k, v]));
       // Other requests reach this handler as a `Request` cresslet-container made on this page, which drops the
-      // browser's Origin (and Sec-Fetch-Site, Referer). They come from this preview's pages: its service worker only
-      // takes requests from them and navigations to /__cresslet__/<instanceId>/<port>/… (a random id per boot, which
-      // another site would have to know). So a state-changing one gets the app's Origin, as it has deployed, and CSRF
-      // checks (TanStack Start's createCsrfMiddleware, `Origin === new URL(req.url).origin`) pass here too.
-      if (req.method !== "GET" && req.method !== "HEAD" && !req.headers.has("origin")) headers.push(["origin", appUrl.origin]);
-      if (jar.size && !req.headers.has("cookie")) headers.push(["cookie", [...jar].map(([k, v]) => `${k}=${v}`).join("; ")]);
+      // browser's Origin (and Sec-Fetch-Site, Referer). The preview's service worker takes fetches only from preview
+      // pages, but also navigations: a page elsewhere (another app on this site, framing the preview's URL) can submit
+      // a form here. So the page's own fetches get the app's Origin, as they have deployed, and CSRF checks (TanStack
+      // Start's createCsrfMiddleware, `Origin === new URL(req.url).origin`) pass; navigations (Accept: text/html, as
+      // browsers send them) that change state get no Origin and only SameSite=None cookies, as a cross-site one would.
+      // (The preview's own HTML forms then fail such checks here: use fetch, as server functions do.)
+      const unsafe = req.method !== "GET" && req.method !== "HEAD";
+      const navigation = unsafe && /^\s*text\/html/i.test(req.headers.get("accept") ?? "");
+      if (unsafe && !navigation && !req.headers.has("origin")) headers.push(["origin", appUrl.origin]);
+      const cookies = [...jar].filter(([, c]) => !navigation || c.none);
+      if (cookies.length && !req.headers.has("cookie")) headers.push(["cookie", cookies.map(([k, c]) => `${k}=${c.value}`).join("; ")]);
       const res = await new Promise((resolve) => {
         waiting.set(id, { w, done: resolve });
         w.postMessage(
@@ -562,7 +568,8 @@ export function createCresslet(c, opts) {
       ? c.servePort(port, async (req) => (await middleware(req)) ?? staticFile(req))
       : await c.createDevServer({ root: wd, port, middleware });
     out(`\x1b[32m✔\x1b[0m dev server on port ${port}`);
-    await new Promise((resolve) => ctx.signal.addEventListener("abort", resolve, { once: true }));
+    // (stopped while it started: the signal has fired already)
+    await new Promise((resolve) => (ctx.signal.aborted ? resolve() : ctx.signal.addEventListener("abort", resolve, { once: true })));
     stopped = true;
     clearTimeout(timer);
     for (const w of watchers) w.close();
