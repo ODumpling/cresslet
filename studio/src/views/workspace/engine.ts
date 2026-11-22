@@ -6,7 +6,7 @@ import { Container } from "../../../vendor/cresslet-container/cresslet-container
 import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWithTab, javascript, json, keymap, oneDark } from "../../../vendor/editor.js";
 import { FitAddon, Terminal } from "../../../vendor/terminal.js";
 import { fromTree, ignored, migrateDeployKeys, projects, toTree, type Deploy, type StoredProject } from "../../../store.ts";
-import { createCresslet, localOnly, projectSources, type CressletConfig } from "../../../cresslet-plugin.ts";
+import { createCresslet, localOnly, projectSources, publicDotenv, type CressletConfig } from "../../../cresslet-plugin.ts";
 import { createGitWorkspace, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
 import { session } from "../../lib/session.ts";
@@ -87,8 +87,12 @@ export class Engine {
   private cb: Callbacks;
   /** Source control (studio/git.ts): its app's repository, when linked. */
   readonly git: GitWorkspace;
-  /** Writing a pulled or merged tree: those changes aren't the user's. */
-  private hydrating = 0;
+  /** Paths a pull or merge just wrote (until when): the watcher's reports of those aren't the user's changes. */
+  private quiet = new Map<string, number>();
+  /** Counts the workspace's changes (studio/git.ts: a sync is clean only if none came in meanwhile). */
+  private rev = 0;
+  /** A branch being started for a hand edit, or when the last try failed (one try per burst, not per keystroke). */
+  private branching: { busy: boolean; failedAt: number; on: string } = { busy: false, failedAt: 0, on: "" };
 
   constructor(project: StoredProject, cb: Callbacks, editorEl: HTMLElement) {
     this.project = project;
@@ -105,6 +109,7 @@ export class Engine {
       },
       files: () => projectSources(this.c!), // booted: the workspace's tools run after
       hydrate: (files) => this.hydrate(files),
+      revision: () => this.rev,
       log: (line) => this.term.writeln(`\x1b[36m${line}\x1b[0m`),
     });
     this.term = new Terminal({
@@ -145,15 +150,8 @@ export class Engine {
             if (!u.docChanged || this.suppress || !this.current || !this.c) return;
             void this.c.fs.writeFile(`${this.c.workdir}/${this.current}`, u.state.doc.toString());
             this.save();
-            // A hand edit on the default branch of a linked app goes on a branch of its own: the default branch stays
-            // what's deployed until Deploy merges it.
-            if (this.git.connected && this.git.onDefault) {
-              const file = this.current;
-              void this.git.ensureBranch("edit", file.replace(/\.[^./]+$/, "")).then(
-                (b) => b && this.cb.notice(`Editing on a new branch, ${b}: ${this.project.git?.defaultBranch ?? "main"} stays as deployed until you deploy.`),
-                (e) => this.cb.notice(`Couldn't start a branch for this edit: ${errorMessage(e)}. It's kept here, on ${this.project.git?.activeBranch}.`),
-              );
-            }
+            this.changed();
+            this.editBranch(this.current);
           }),
         ],
       }),
@@ -261,14 +259,24 @@ export class Engine {
           : `Claude wants to deploy ${target ? `to ${target}` : "this project as a new app"}${g ? ` from ${g.defaultBranch}` : ""}. It goes live at once.`, signal);
       },
       // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
-      beforeDeploy: (log) => (this.git.connected ? this.git.prepareDeploy(log) : Promise.resolve(null)),
+      beforeDeploy: async (log, signal) => {
+        if (this.git.connected) return this.git.prepareDeploy(log, signal);
+        // Linked to a repository elsewhere (another browser, the CLI), not here: deploying this workspace would skip it.
+        const name = project.deploy?.name;
+        const linked = name && session().token
+          ? await api<{ repo?: { fullName: string } | null }>(`/v1/apps/${encodeURIComponent(name)}`).then((d) => d.repo, () => null)
+          : null;
+        if (linked) throw new Error(`${name} is linked to ${linked.fullName}, but this workspace isn't: open Source control (the branch button) to load it first`);
+        return null;
+      },
     });
 
     // keep the tree in sync with terminal changes
     const watcher = c.fs.watch(wd, { recursive: true }, (_e, filename) => {
       if (filename && ignored(filename.replace(`${wd}/`, ""))) return;
       this.dirty = true; // saved below, or when the view goes before that
-      if (!this.hydrating && !(filename && localOnly(filename.replace(`${wd}/`, "")))) this.git.markDirty();
+      const rel = filename?.replace(`${wd}/`, "");
+      if (!(rel && ((this.quiet.get(rel) ?? 0) > Date.now() || localOnly(rel)))) this.changed();
       clearTimeout(this.treeTimer);
       this.treeTimer = setTimeout(() => {
         void this.renderTree();
@@ -381,9 +389,33 @@ export class Engine {
     this.cb.openFile(path);
   }
 
+  /** The user changed the workspace. */
+  private changed() {
+    this.rev++;
+    this.git.markDirty();
+  }
+
+  /**
+   * A hand change on the default branch of a linked app goes on a branch of its own (`edit/<file>`): the default
+   * branch stays what's deployed until Deploy merges it. One try at a time; after a failure, none for a while.
+   */
+  private editBranch(file: string) {
+    const g = this.git, b = this.branching, on = this.project.git?.activeBranch ?? "";
+    if (!g.connected || !g.onDefault || b.busy || (b.on === on && Date.now() - b.failedAt < 30_000)) return;
+    b.busy = true;
+    void g.ensureBranch("edit", file.replace(/\.[^./]+$/, "")).then(
+      (name) => name && this.cb.notice(`Editing on a new branch, ${name}: ${this.project.git?.defaultBranch ?? "main"} stays as deployed until you deploy.`),
+      (e) => {
+        Object.assign(b, { failedAt: Date.now(), on });
+        this.cb.notice(`Couldn't start a branch for this edit: ${errorMessage(e)}. It's kept here (not pushed), on ${on}.`);
+      },
+    ).finally(() => (b.busy = false));
+  }
+
   async newFile(path: string) {
     const c = this.c;
     if (!c) return;
+    this.editBranch(path);
     await c.fs.writeFile(`${c.workdir}/${path}`, "");
     this.save();
     await this.renderTree();
@@ -399,8 +431,9 @@ export class Engine {
   /**
    * Makes the workspace hold `files` (a branch pulled, or a merge that brought the default branch's commits): changed
    * ones written, ones it no longer has removed, dependencies installed again if package.json or its lockfile
-   * changed. Local-only files (.env.local, .dev.vars…) stay, and so does an existing dotenv file (the repository's
-   * copy only has its public entries).
+   * changed. Local-only files (.env.local, .dev.vars…) stay. A dotenv file takes the repository's public entries and
+   * keeps its own private ones (the repository never has those). If only installing fails, the error says
+   * `filesWritten`.
    */
   async hydrate(files: GitFile[]) {
     const c = this.c;
@@ -408,42 +441,49 @@ export class Engine {
     const wd = c.workdir;
     const dotenv = /(?:^|\/)\.env[^/]*$/i;
     const want = new Map(files.map((f) => [f.path, f]));
+    const quiet = (rel: string) => this.quiet.set(rel, Date.now() + 2000);
+    const isDir = (path: string) => c.fs.stat(path).then((st) => st.isDirectory(), () => false);
     let deps = false;
-    this.hydrating++;
-    try {
-      for (const f of await projectSources(c)) {
-        if (want.has(f.path) || dotenv.test(f.path)) continue;
-        await c.fs.rm(`${wd}/${f.path}`).catch(() => {});
-        deps ||= /^package(?:-lock)?\.json$/.test(f.path);
+    for (const f of await projectSources(c)) {
+      if (want.has(f.path) || dotenv.test(f.path)) continue;
+      quiet(f.path);
+      await c.fs.rm(`${wd}/${f.path}`).catch(() => {});
+      deps ||= /^package(?:-lock)?\.json$/.test(f.path);
+    }
+    for (const f of files) {
+      if (localOnly(f.path)) continue;
+      const path = `${wd}/${f.path}`;
+      let data: string | Uint8Array = f.encoding === "base64" ? Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)) : f.data;
+      // A directory where a file now goes (foo/index.ts → foo): it's emptied of source above; local files keep it.
+      if (await isDir(path)) {
+        if ((await c.fs.readdir(path)).length) throw new Error(`${f.path} is a file now, but this workspace has local files in a folder of that name`);
+        await c.fs.rm(path, { recursive: true });
       }
-      for (const f of files) {
-        if (localOnly(f.path)) continue;
-        const path = `${wd}/${f.path}`;
-        const exists = await c.fs.exists(path).catch(() => false);
-        if (dotenv.test(f.path) && exists) continue;
-        const data = f.encoding === "base64" ? Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)) : f.data;
-        if (exists) {
-          const now = await c.fs.readFile(path, typeof data === "string" ? "utf8" : undefined).catch(() => null);
-          if (typeof data === "string" ? now === data : now instanceof Uint8Array && now.length === data.length && now.every((b, i) => b === data[i])) continue;
+      const exists = await c.fs.exists(path).catch(() => false);
+      if (exists) {
+        const now = await c.fs.readFile(path, typeof data === "string" ? "utf8" : undefined).catch(() => null);
+        if (dotenv.test(f.path) && typeof now === "string" && typeof data === "string") {
+          const pub = new Set(publicDotenv(now).split("\n"));
+          const own = now.split(/\r?\n/).filter((l) => l.trim() && !pub.has(l));
+          data = [data.replace(/\n*$/, ""), ...own].filter(Boolean).join("\n") + "\n";
         }
-        const i = f.path.lastIndexOf("/");
-        if (i > 0) await c.fs.mkdir(`${wd}/${f.path.slice(0, i)}`, { recursive: true });
-        await c.fs.writeFile(path, data);
-        deps ||= /^package(?:-lock)?\.json$/.test(f.path);
+        if (typeof data === "string" ? now === data : now instanceof Uint8Array && now.length === data.length && now.every((b, i) => b === (data as Uint8Array)[i])) continue;
       }
-      if (deps) {
-        this.term.writeln("\x1b[36mdependencies changed: npm install\x1b[0m");
-        const p = await c.spawn("jsh", ["-c", "npm install"], { cwd: wd });
-        void p.output.pipeTo(new WritableStream({ write: (d) => this.term.write(d) })).catch(() => {});
-        await p.input.close().catch(() => {});
-        if (await p.exit !== 0) throw new Error("npm install failed (see the terminal)");
-      }
-    } finally {
-      // The watcher reports these writes a moment later: still not the user's.
-      setTimeout(() => this.hydrating--, 1000);
+      const i = f.path.lastIndexOf("/");
+      if (i > 0) await c.fs.mkdir(`${wd}/${f.path.slice(0, i)}`, { recursive: true });
+      quiet(f.path);
+      await c.fs.writeFile(path, data);
+      deps ||= /^package(?:-lock)?\.json$/.test(f.path);
     }
     await this.saveNow();
     if (this.current) await this.openFile(this.current);
+    if (deps) {
+      this.term.writeln("\x1b[36mdependencies changed: npm install\x1b[0m");
+      const p = await c.spawn("jsh", ["-c", "npm install"], { cwd: wd });
+      void p.output.pipeTo(new WritableStream({ write: (d) => this.term.write(d) })).catch(() => {});
+      await p.input.close().catch(() => {});
+      if (await p.exit !== 0) throw Object.assign(new Error("npm install failed (see the terminal)"), { filesWritten: true });
+    }
   }
 
   writeln(text: string) {

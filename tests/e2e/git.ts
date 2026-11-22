@@ -126,6 +126,24 @@ try {
   await page.screenshot({ path: `${out}/git-conflict.png` });
   console.log("conflict stopped the deploy");
 
+  // A project never deployed: its address reserved (nothing live), then a repository linked.
+  await page.goto(base + "/");
+  await page.getByRole("button", { name: /vanilla/ }).click();
+  await page.waitForURL(/\/p\//);
+  await page.locator("#git-btn", { hasText: "Connect Git" }).click({ timeout: 180000 });
+  await page.locator("#git-reserve").click();
+  await page.locator("#deploy-dialog-title", { hasText: "Choose the app's address" }).waitFor();
+  await page.locator("#deploy-confirm").click();
+  await page.locator("#git-link").waitFor({ timeout: 30000 });
+  const reserved = await page.locator("#git-repo-name").inputValue();
+  const fresh = await call(`/v1/apps/${reserved}`, token);
+  if (fresh.app.currentDeployId !== null || fresh.deploys.length) fail("reserving deployed something");
+  await page.locator("#git-link").click();
+  await page.locator("#git-btn-branch", { hasText: "main" }).waitFor({ timeout: 60000 });
+  if (!gh.files(`octo/${reserved}`)["index.html"]) fail("reserved app's repository wasn't pushed");
+  await page.screenshot({ path: `${out}/git-reserved.png` });
+  console.log("reserved", reserved, "and linked before any deploy");
+
   // The app's Overview: the repository and the deploy's branch @ commit.
   await page.goto(`${base}/apps/${app}`);
   await page.locator("#app-repo", { hasText: full }).waitFor({ timeout: 30000 });

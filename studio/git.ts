@@ -60,8 +60,13 @@ export interface GitWorkspaceOptions {
   save: (s: ProjectGitState | undefined) => Promise<void> | void;
   /** The workspace's project source, filtered as for a deploy (no local secrets). */
   files: () => Promise<GitFile[]>;
-  /** Make the workspace hold these files (a pull, or a merge that brought the default branch's commits). */
+  /**
+   * Make the workspace hold these files (a pull, or a merge that brought the default branch's commits). An error with
+   * `filesWritten: true` means the files are in place and only a later step (npm install) failed.
+   */
   hydrate: (files: GitFile[]) => Promise<void>;
+  /** Counts the workspace's changes (each file change bumps it): a sync is clean only if none came in meanwhile. */
+  revision?: () => number;
   log?: (line: string) => void;
 }
 
@@ -91,11 +96,22 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     if (s) await o.save({ ...s, ...patch });
   };
 
+  const revision = () => o.revision?.() ?? 0;
+
   async function syncNow(message: string): Promise<{ sha: string; changed: boolean }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
-    const r = await post<{ sha: string; changed: boolean }>("/sync", { branch: s.activeBranch, baseSha: s.headSha, files: await o.files(), message });
-    await set({ headSha: r.sha, dirty: false, ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : {}) });
+    const rev = revision(); // before the snapshot: a change after it keeps the workspace dirty
+    let r: { sha: string; changed: boolean };
+    try {
+      r = await post<{ sha: string; changed: boolean }>("/sync", { branch: s.activeBranch, baseSha: s.headSha, files: await o.files(), message });
+    } catch (e) {
+      if (gitCode(e) === "branch_not_found") {
+        throw Object.assign(new Error(`${s.activeBranch} is gone on GitHub (merged and deleted?). Switch to ${s.defaultBranch} in Source control, or push these changes to a new branch.`), { code: "branch_not_found" });
+      }
+      throw e;
+    }
+    await set({ headSha: r.sha, dirty: revision() !== rev, ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : {}) });
     return r;
   }
 
@@ -153,6 +169,26 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     },
     /** Linked (the repository's state as the connect call answered), or unlinked (undefined). */
     attach: (st: ProjectGitState | undefined) => serial(async () => o.save(st)),
+    /**
+     * The app is linked (elsewhere: another browser, the CLI) but this workspace isn't: links it and loads the default
+     * branch, replacing the files here.
+     */
+    adopt: (repo: { provider: "github"; owner: string; name: string; url: string; defaultBranch: string }) => serial(async () => {
+      await o.save({
+        provider: repo.provider, owner: repo.owner, repo: repo.name, url: repo.url, defaultBranch: repo.defaultBranch,
+        activeBranch: repo.defaultBranch, baseSha: "", headSha: "", dirty: false,
+      });
+      try {
+        return await pullNow(repo.defaultBranch);
+      } catch (e) {
+        await o.save(undefined); // not loaded: not linked here either
+        throw e;
+      }
+    }),
+    /** The workspace's change count (studio/src/views/workspace/engine.ts bumps it). */
+    get revision() {
+      return revision();
+    },
     /** A new branch from the workspace's commit, whatever branch it's on (e.g. to keep changes GitHub moved past). */
     newBranch: (prefix: string, hint: string) => serial(() => branchNow(prefix, hint)),
     /** Commits the workspace to the active branch. 409 `conflict`: it moved on GitHub (pull first). */
@@ -170,16 +206,19 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * of its own, and resolves to the commit to build and record. Throws, before anything is built, on a conflict
      * or a protected branch.
      */
-    prepareDeploy: (log: (line: string) => void = () => {}) => serial(async (): Promise<Provenance> => {
+    prepareDeploy: (log: (line: string) => void = () => {}, signal?: AbortSignal) => serial(async (): Promise<Provenance> => {
       const s = o.state()!;
       const repo = `${s.owner}/${s.repo}`;
+      signal?.throwIfAborted();
       log(`syncing ${s.activeBranch} with ${repo}…`);
       const synced = await syncNow(`Deploy from ${s.activeBranch}`);
       if (s.activeBranch === s.defaultBranch) return { sha: synced.sha, branch: s.defaultBranch, repo };
+      signal?.throwIfAborted(); // stopped: nothing merged
       log(`merging ${s.activeBranch} into ${s.defaultBranch}…`);
       let m: { mergedSha: string; fastForward: boolean; treeChanged: boolean; files?: GitFile[]; filesError?: string };
       try {
-        m = await post("/merge", { branch: s.activeBranch });
+        // Exactly what was synced: a push to the branch since then is a conflict, not merged unseen.
+        m = await post("/merge", { branch: s.activeBranch, headSha: synced.sha });
       } catch (e) {
         const code = gitCode(e);
         const compare = `${s.url}/compare/${encodeURIComponent(s.defaultBranch)}...${encodeURIComponent(s.activeBranch)}?expand=1`;
@@ -197,7 +236,13 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         // pushed over the default branch). It stays on the branch, which GitHub kept.
         if (!m.files) throw new Error(`Merged ${s.activeBranch} into ${s.defaultBranch}, but couldn't load the result (${m.filesError ?? "no files"}). Nothing was deployed.`);
         log(`${s.defaultBranch} had commits of its own: loading the merged files…`);
-        await o.hydrate(m.files);
+        try {
+          await o.hydrate(m.files);
+        } catch (e) {
+          // The files are main's now (only installing failed): the workspace is on main, at the merge.
+          if ((e as { filesWritten?: boolean }).filesWritten) await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: false });
+          throw e;
+        }
       }
       await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: false });
       log(`merged into ${s.defaultBranch} @ ${m.mergedSha.slice(0, 7)}${m.fastForward ? " (fast-forward)" : ""}`);

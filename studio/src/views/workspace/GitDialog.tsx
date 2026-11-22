@@ -1,7 +1,7 @@
 // Source control for the open project (studio/git.ts): connect GitHub, link the app to a repository (a new one, or
 // one the user has), and once linked: the branch, switching branches, pull and push. GitHub is reached only through
 // this server, as the signed-in user.
-import { type Ref, useImperativeHandle, useRef, useState } from "react";
+import { type Ref, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type * as API from "../../../api-types.ts";
 import { gitCode, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
 import { api, errorMessage, json } from "../../lib/api.ts";
@@ -18,16 +18,17 @@ export async function connectGithub(returnTo = location.pathname) {
   location.assign(url);
 }
 
-type Load = { me: API.MeGit; status: API.GitStatus | null; repos: API.GitRepo[] | null; error?: string };
+type Load = { me: API.MeGit; status: API.GitStatus | null; repos: API.GitRepo[] | null; linked: API.AppRepo | null; error?: string };
 
-export function GitDialog({ ref, git, app, files, hydrate, deployFirst }: {
+export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
   ref: Ref<GitDialogHandle>;
   git: GitWorkspace | null;
   /** The project's app, once deployed (a repository links to an app). */
   app: string | undefined;
   files: () => Promise<GitFile[]>;
   hydrate: (files: GitFile[]) => Promise<void>;
-  deployFirst: () => void;
+  /** Picks and reserves the app's address (nothing deployed); resolves to its name, or null if cancelled. */
+  reserve: () => Promise<string | null>;
 }) {
   const dlg = useRef<HTMLDialogElement>(null);
   const [load, setLoad] = useState<Load | null>(null);
@@ -37,28 +38,43 @@ export function GitDialog({ ref, git, app, files, hydrate, deployFirst }: {
   const [repoName, setRepoName] = useState("");
   const [priv, setPriv] = useState(true);
   const [picked, setPicked] = useState("");
-  const [initial, setInitial] = useState<"push" | "pull">("push");
+  const [initial, setInitial] = useState<"push" | "pull" | null>(null);
   const [branch, setBranch] = useState("");
   const [message, setMessage] = useState("");
+
+  // A new repository is named after the app (also once one was just reserved).
+  useEffect(() => setRepoName((n) => n || (app ?? "")), [app]);
 
   async function refresh() {
     setError(null);
     const me = await api<API.MeGit>("/v1/me/git").catch(() => null);
-    if (!me) return setLoad({ me: { provider: "github", available: false, kind: null, connected: false, login: null, status: null, installUrl: null }, status: null, repos: null });
-    let status: API.GitStatus | null = null, repos: API.GitRepo[] | null = null, err: string | undefined;
+    if (!me) return setLoad({ me: { provider: "github", available: false, kind: null, connected: false, login: null, status: null, installUrl: null }, status: null, repos: null, linked: null });
+    let status: API.GitStatus | null = null, repos: API.GitRepo[] | null = null, linked: API.AppRepo | null = null, err: string | undefined;
     try {
       if (me.connected && me.status === "active" && git?.state && app) {
-        status = await api<API.GitStatus>(`/v1/apps/${encodeURIComponent(app)}/git/status`);
-        setBranch(git.state.activeBranch);
-      } else if (me.connected && me.status === "active" && app) {
-        repos = (await api<{ repos: API.GitRepo[] }>("/v1/git/github/repos")).repos;
-        setPicked((p) => p || repos![0]?.fullName || "");
+        try {
+          status = await api<API.GitStatus>(`/v1/apps/${encodeURIComponent(app)}/git/status`);
+          const st = git.state;
+          setBranch(status.branches.some((b) => b.name === st.activeBranch) ? st.activeBranch : status.defaultBranch);
+        } catch (e) {
+          // Unlinked elsewhere (another browser, the CLI): so is this workspace.
+          if (gitCode(e) !== "git_not_linked") throw e;
+          await git.attach(undefined);
+        }
+      }
+      if (me.connected && me.status === "active" && app && !git?.state) {
+        // Linked elsewhere, not here: offered to load, never pushed over.
+        linked = (await api<API.AppDetail>(`/v1/apps/${encodeURIComponent(app)}`)).repo ?? null;
+        if (!linked) {
+          repos = (await api<{ repos: API.GitRepo[] }>("/v1/git/github/repos")).repos;
+          setPicked((p) => p || repos![0]?.fullName || "");
+        }
       }
     } catch (e) {
       err = errorMessage(e);
       if (gitCode(e) === "git_reauth_required") me.status = "expired";
     }
-    setLoad({ me, status, repos, error: err });
+    setLoad({ me, status, repos, linked, error: err });
   }
 
   useImperativeHandle(ref, () => ({
@@ -95,6 +111,7 @@ export function GitDialog({ ref, git, app, files, hydrate, deployFirst }: {
       [owner, repo] = picked.split("/") as [string, string];
     }
     const sync = mode === "create" ? "push" : initial;
+    if (!sync) throw new Error("choose whether this workspace or the repository's files come first");
     const r = await api<{ repo: API.AppRepo; sha: string; files?: GitFile[] }>(`/v1/apps/${encodeURIComponent(app!)}/git/connect`, json("POST", {
       owner, repo, initialSync: sync, ...(sync === "push" ? { files: await files(), message: `Add ${app} from Cresslet` } : {}),
     }));
@@ -129,8 +146,22 @@ export function GitDialog({ ref, git, app, files, hydrate, deployFirst }: {
         )
         : !app ? (
           <>
-            <p className="muted">Deploy this project once to give it an app address; then link that app to a repository.</p>
-            <div className="row start"><button className="btn primary" type="button" onClick={() => { dlg.current?.close(); deployFirst(); }}><Icon name="rocket" />Deploy</button></div>
+            <p className="muted">A repository links to an app: pick this project's app address first. Nothing goes live until you deploy.</p>
+            <div className="row start"><button className="btn primary" type="button" id="git-reserve" disabled={!!busy} onClick={() => void run("Reserving the address…", async () => {
+              const name = await reserve();
+              return name ? `Reserved ${name}` : undefined;
+            })}><Icon name="globe" />Choose an address</button></div>
+          </>
+        )
+        : !s && load.linked ? (
+          <>
+            <p className="muted">{`${app} is linked to `}<ExtLink href={load.linked.url}>{load.linked.fullName}</ExtLink>{`, but this workspace isn't. Load its ${load.linked.defaultBranch} branch here to work on it (this workspace's files are replaced).`}</p>
+            <div className="row start">
+              <button className="btn primary" type="button" id="git-adopt" disabled={!!busy} onClick={() => {
+                if (!confirm(`Replace this workspace's files with ${load.linked!.fullName} (${load.linked!.defaultBranch})?`)) return;
+                void run("Loading…", async () => (await git!.adopt(load.linked!), `Loaded ${load.linked!.fullName}`));
+              }}>Load {load.linked.defaultBranch}</button>
+            </div>
           </>
         )
         : s ? (
@@ -146,10 +177,12 @@ export function GitDialog({ ref, git, app, files, hydrate, deployFirst }: {
             </div>
             <div className="row start">
               <button className="btn primary" type="button" id="git-push" disabled={!!busy} onClick={() => void run("Pushing…", async () => {
+                // Changes go on a branch: the default branch takes them only through Deploy's merge.
+                const b = s.activeBranch === s.defaultBranch && s.dirty ? await git!.newBranch("edit", message.trim() || "changes") : s.activeBranch;
                 const r = await git!.sync(message.trim() || `Update ${app}`);
                 setMessage("");
-                return r.changed ? `Pushed to ${s.activeBranch}` : "Nothing to push";
-              })}>Push</button>
+                return r.changed ? `Pushed to ${b}` : "Nothing to push";
+              })}>{s.activeBranch === s.defaultBranch && s.dirty ? "Push to a new branch" : "Push"}</button>
               <button className="btn" type="button" id="git-pull" disabled={!!busy} onClick={() => {
                 if (s.dirty && !confirm(`Replace this workspace's changes with ${s.activeBranch} from GitHub?`)) return;
                 void run("Pulling…", async () => (await git!.pull(), `Pulled ${s.activeBranch}`));
@@ -172,7 +205,9 @@ export function GitDialog({ ref, git, app, files, hydrate, deployFirst }: {
               <button className="btn danger sm" type="button" id="git-unlink" disabled={!!busy} onClick={() => {
                 if (!confirm(`Unlink ${app} from ${s.owner}/${s.repo}? The repository is left as it is.`)) return;
                 void run("Unlinking…", async () => {
-                  await api(`/v1/apps/${encodeURIComponent(app)}/git`, { method: "DELETE" });
+                  await api(`/v1/apps/${encodeURIComponent(app)}/git`, { method: "DELETE" }).catch((e) => {
+                    if (gitCode(e) !== "git_not_linked") throw e; // already unlinked elsewhere
+                  });
                   await git!.attach(undefined);
                   return "Unlinked";
                 });
@@ -205,14 +240,14 @@ export function GitDialog({ ref, git, app, files, hydrate, deployFirst }: {
                 </div>
                 <fieldset className="field">
                   <legend>First sync</legend>
-                  <label className="check"><input type="radio" name="git-initial" checked={initial === "push"} onChange={() => setInitial("push")} /> Push this workspace to it</label>
-                  <label className="check"><input type="radio" name="git-initial" checked={initial === "pull"} onChange={() => setInitial("pull")} /> Pull its files into this workspace (replaces them)</label>
+                  <label className="check"><input type="radio" name="git-initial" checked={initial === "push"} onChange={() => setInitial("push")} /> Push this workspace to it: its default branch then holds exactly these files (others there are deleted)</label>
+                  <label className="check"><input type="radio" name="git-initial" checked={initial === "pull"} onChange={() => setInitial("pull")} /> Pull its files into this workspace (replaces the files here)</label>
                 </fieldset>
               </>
             )}
             {me!.installUrl ? <p className="muted small">Missing a repository? <ExtLink href={me!.installUrl}>Choose which repositories Cresslet can reach</ExtLink>.</p> : null}
             <div className="row">
-              <button className="btn primary" type="submit" id="git-link" disabled={!!busy}>{mode === "create" ? "Create and push" : "Link"}</button>
+              <button className="btn primary" type="submit" id="git-link" disabled={!!busy || (mode === "link" && !initial)}>{mode === "create" ? "Create and push" : "Link"}</button>
             </div>
           </form>
         )}

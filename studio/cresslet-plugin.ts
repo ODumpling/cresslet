@@ -262,6 +262,8 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     target ??= targetOf(cfg);
     const git = await opts.beforeDeploy?.(log, signal) ?? null;
     signal?.throwIfAborted();
+    // The merge may have brought another cresslet.json: its routes and crons are what's built (the target stays).
+    if (git) cfg = { ...(await config()), name: cfg.name };
     const { files: built, outDir, server } = await build(log);
     signal?.throwIfAborted();
     const files: { path: string; data: string; encoding?: "base64" }[] = [];

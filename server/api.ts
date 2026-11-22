@@ -735,6 +735,22 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   });
 
   // ---- apps
+  // A new app with nothing deployed yet: its address reserved (the studio links a repository before the first deploy).
+  app.post("/apps", async (c) => {
+    const acct = accountWide(c, "admin");
+    const { name } = await body<{ name?: unknown } | null>(c) ?? {};
+    if (typeof name !== "string") throw new HttpError(400, "name required");
+    if (await store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict");
+    if (!validName(name, cfg)) throw new HttpError(400, `app name must be ${NAME_RULES}`, "invalid_name");
+    await checkAppQuota(acct);
+    const created = await store.createApp(name, null, acct.id, async () => {
+      if (await store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict");
+      await checkAppQuota(acct);
+      await takeCreate(acct);
+    });
+    return c.json({ app: view(created.app) }, 201);
+  });
+
   app.get("/apps", async (c) => {
     const a = c.get("account"), t = c.get("token");
     if (!a || !t) throw new HttpError(401, "login required", "unauthorized");

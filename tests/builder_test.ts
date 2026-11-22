@@ -433,7 +433,7 @@ const gitMod = "../studio/git.ts"; // browser module: typed by studio/tsconfig.j
 const { createGitWorkspace, branchSlug, commitMessage } = await import(gitMod);
 
 /** A linked project over a scripted /v1/apps/:name/git API: the calls it made, its state, what was loaded. */
-function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true } = {}) {
+function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true, hydrate = null as null | ((f: Json) => Promise<void>), duringSync = () => {} } = {}) {
   const calls: { path: string; body?: Json }[] = [];
   const hydrated: Json[] = [];
   let state: Json = {
@@ -448,7 +448,11 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       if (taken.includes(body.name)) throw Object.assign(new Error("exists"), { status: 409, code: "branch_exists" });
       return { branch: { name: body.name, sha: body.from } };
     }
-    if (path.endsWith("/git/sync")) return { branch: body.branch, sha: String(++n).padStart(40, "b"), changed: true };
+    if (path.endsWith("/git/sync")) {
+      duringSync();
+      if (body.branch === "gone") throw Object.assign(new Error("no branch"), { status: 404, code: "branch_not_found" });
+      return { branch: body.branch, sha: String(++n).padStart(40, "b"), changed: true };
+    }
     if (path.endsWith("/git/merge")) {
       if (merge?.error) throw Object.assign(new Error(merge.error), { status: merge.status, code: merge.error, body: merge.body ?? {} });
       return merge ?? { mergedSha: "c".repeat(40), fastForward: true, treeChanged: false, branch: "main", deletedBranch: true };
@@ -456,12 +460,14 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     if (path.includes("/git/tree")) return { sha: "d".repeat(40), files: [{ path: "a.txt", data: "pulled" }] };
     throw new Error(`unexpected ${path}`);
   };
+  const rev = { n: 0 };
   const git = createGitWorkspace({
     app: () => "shop", api, state: () => state, save: (s: Json) => void (state = s),
     files: async () => [{ path: "index.html", data: "<h1>hi</h1>" }],
-    hydrate: async (f: Json) => void hydrated.push(f),
+    hydrate: hydrate ?? (async (f: Json) => void hydrated.push(f)),
+    revision: () => rev.n,
   });
-  return { git, calls, hydrated, get state() { return state; } };
+  return { git, calls, hydrated, rev, get state() { return state; }, set state(s: Json) { state = s; } };
 }
 
 test("git: branch names and commit messages come from the prompt", () => {
@@ -565,4 +571,49 @@ test("git: steps run one at a time; switching branches pushes changes first; New
   assert.equal(g.state.activeBranch, "main");
   assert.equal(g.state.baseSha, "d".repeat(40));
   assert.deepEqual(g.hydrated, [[{ path: "a.txt", data: "pulled" }]]);
+});
+
+test("git: an edit made while a sync is on its way keeps the workspace dirty (a branch switch then pushes it)", async () => {
+  let g: Json;
+  g = fakeGit({ onDefault: false, duringSync: () => void g.rev.n++ });
+  g.state.dirty = true;
+  await g.git.sync("x");
+  assert.equal(g.state.dirty, true);
+  const quiet = fakeGit({ onDefault: false });
+  quiet.state.dirty = true;
+  await quiet.git.sync("x");
+  assert.equal(quiet.state.dirty, false);
+});
+
+test("deploy on a linked app: merges exactly the commit it synced; stopped before the merge, nothing merges", async () => {
+  const g = fakeGit({ onDefault: false });
+  await g.git.prepareDeploy();
+  assert.equal(g.calls[1].body.headSha, "1".padStart(40, "b")); // the sync's commit
+  const stopped = fakeGit({ onDefault: false });
+  const ctl = new AbortController();
+  ctl.abort();
+  await assert.rejects(stopped.git.prepareDeploy(() => {}, ctl.signal));
+  assert.deepEqual(stopped.calls, []);
+});
+
+test("deploy on a linked app: npm install failing after the merged files are in leaves the workspace on main", async () => {
+  const g = fakeGit({
+    onDefault: false,
+    merge: { mergedSha: "e".repeat(40), fastForward: false, treeChanged: true, files: [{ path: "a", data: "1" }] },
+    hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); },
+  });
+  await assert.rejects(g.git.prepareDeploy(), /npm install failed/);
+  assert.deepEqual([g.state.activeBranch, g.state.headSha], ["main", "e".repeat(40)]);
+  // A branch merged and deleted on GitHub meanwhile: said plainly.
+  const gone = fakeGit({ onDefault: false });
+  gone.state = { ...gone.state, activeBranch: "gone" };
+  await assert.rejects(gone.git.prepareDeploy(), /gone is gone on GitHub .*Switch to main/);
+});
+
+test("git: an app linked elsewhere is adopted by loading its default branch", async () => {
+  const g = fakeGit();
+  g.state = undefined;
+  await g.git.adopt({ provider: "github", owner: "octo", name: "shop", url: "https://github.example/octo/shop", defaultBranch: "main" });
+  assert.deepEqual(g.hydrated, [[{ path: "a.txt", data: "pulled" }]]);
+  assert.deepEqual([g.state.activeBranch, g.state.headSha, g.state.baseSha], ["main", "d".repeat(40), "d".repeat(40)]);
 });

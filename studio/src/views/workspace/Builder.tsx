@@ -74,6 +74,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
     bubble: null as number | null, step: null as number | null,
     replied: "", failed: "", id: 0, stick: false,
     prompt: "", git, // the message being worked on (a new branch is named after it); the project's repository
+    rev: 0, branchFailed: false, // the workspace's change count when it was sent; branching failed this turn
     gone: false, // unmounted (the user left the project): no more UI updates
   }).current;
   r.locked = locked;
@@ -84,10 +85,16 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
       r.git?.markDirty();
       return onChange(path);
     },
-    // Branch first: on the default branch of a linked repository, a new branch before the first change.
+    // Branch first: on the default branch of a linked repository, a new branch before the first change. If GitHub
+    // can't be reached the change still happens here (nothing reaches GitHub unpushed); the turn's commit tries again.
     beforeChange: async () => {
-      const b = await r.git?.ensureBranch("feat", r.prompt);
-      if (b) on({ type: "notice", text: `Working on a new branch, ${b}. ${r.git!.state!.defaultBranch} stays as deployed until you deploy.` });
+      try {
+        const b = await r.git?.ensureBranch("feat", r.prompt);
+        if (b) on({ type: "notice", text: `Working on a new branch, ${b}. ${r.git!.state!.defaultBranch} stays as deployed until you deploy.` });
+      } catch (e) {
+        if (!r.branchFailed) on({ type: "notice", text: `Couldn't start a branch on GitHub (${errorMessage(e)}): changing files here only.`, error: true });
+        r.branchFailed = true;
+      }
     },
     paused: () => r.approvals.size > 0,
   }));
@@ -228,6 +235,8 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
     setWorking("Thinking…");
     setStatus("Sent. Claude is working on it.");
     r.prompt = text;
+    r.rev = git?.revision ?? 0;
+    r.branchFailed = false;
     try {
       await r.agent.send(text);
       await commitTurn(text);
@@ -252,7 +261,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
     const g = r.git;
     if (!g?.connected || r.gone) return;
     await new Promise((res) => setTimeout(res, 500)); // the file watcher reports a command's changes a moment later
-    if (!g.state?.dirty) return;
+    if (!g.state?.dirty || g.revision === r.rev) return; // this turn changed nothing (earlier changes aren't its own)
     try {
       await g.ensureBranch("feat", text);
       const out = await g.sync(commitMessage(text));
@@ -305,10 +314,18 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
           const g = r.git, s = g?.connected ? g.state : undefined;
           if (s && s.activeBranch !== s.defaultBranch &&
               confirm(`Go back to ${s.defaultBranch} for the next change? ${s.activeBranch} stays on GitHub${s.dirty ? " (its changes here are pushed to it first)" : ""}.`)) {
+            // Nothing is sent until the workspace holds the default branch.
+            r.busy = true;
+            setBusy(true);
+            setWorking(`Switching to ${s.defaultBranch}…`);
             void g!.switchTo(s.defaultBranch).then(
               () => setStatus(`On ${s.defaultBranch}`),
               (e) => add({ kind: "notice", text: `Couldn't switch to ${s.defaultBranch}: ${errorMessage(e)}`, error: true }),
-            );
+            ).finally(() => {
+              r.busy = false;
+              setBusy(false);
+              setWorking("");
+            });
           }
           for (const decline of r.approvals) decline(); // e.g. from a process the builder left running
           setWorking("");

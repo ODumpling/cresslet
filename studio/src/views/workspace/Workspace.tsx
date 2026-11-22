@@ -244,6 +244,17 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (focus) document.getElementById(`tab-${t}`)?.focus();
   }
 
+  /** A new app's address, reserved with nothing deployed (to link a repository first). */
+  async function reserveApp(): Promise<string | null> {
+    const name = await dialog.current!.ask({ reserve: true }); // mounted
+    if (!name) return null;
+    const r = await api<{ app: { name: string; url: string } }>("/v1/apps", { method: "POST", body: JSON.stringify({ name }) });
+    project.deploy = { name: r.app.name, url: r.app.url };
+    await projects.put(project);
+    setDeploy(project.deploy);
+    return r.app.name;
+  }
+
   async function onDeploy() {
     const btn = deployBtn.current!, e = engine.current;
     if (!e?.cresslet) return;
@@ -414,7 +425,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       </main>
       <DeployDialog ref={dialog} />
       <GitDialog ref={gitDialog} git={engine.current?.git ?? null} app={deploy?.name}
-        files={() => engine.current!.sources()} hydrate={(f) => engine.current!.hydrate(f)} deployFirst={() => void onDeploy()} />
+        files={() => engine.current!.sources()} hydrate={(f) => engine.current!.hydrate(f)} reserve={reserveApp} />
     </>
   );
 }
