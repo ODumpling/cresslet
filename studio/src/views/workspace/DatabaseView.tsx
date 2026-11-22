@@ -14,15 +14,21 @@ const quoteText = (s: string) => `'${s.replace(/'/g, "''")}'`;
 type Table = { name: string; view: boolean; count: number | null };
 type Out = { running: true } | { result: SqlResult; ms: number } | { error: string } | null;
 
-/** The tables and views, each table with its row count (one script: the server worker runs it at once). */
+/** A table of the main database (not a temp one of the same name). */
+const tableRef = (name: string) => `main.${quoteIdent(name)}`;
+
+/** The tables and views, each table with its row count when it can be read. */
 async function listTables(run: RunSql): Promise<Table[]> {
-  const r = await run("SELECT name, type FROM sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name");
+  const r = await run("SELECT name, type FROM main.sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name");
   const all = r.rows.map(([name, type]) => ({ name: String(name), view: type === "view", count: null as number | null }));
   const tables = all.filter((t) => !t.view);
-  if (tables.length) {
-    const counts = await run(tables.map((t) => `SELECT ${quoteText(t.name)}, count(*) FROM ${quoteIdent(t.name)}`).join(" UNION ALL "));
-    const by = new Map(counts.rows.map(([n, c]) => [String(n), Number(c)]));
-    for (const t of tables) t.count = by.get(t.name) ?? null;
+  // A few hundred per query (SQLite takes at most 500 terms in a compound SELECT); a chunk that fails (a virtual
+  // table sql.js has no module for) just has no counts.
+  for (let i = 0; i < tables.length; i += 200) {
+    const chunk = tables.slice(i, i + 200);
+    const counts = await run(chunk.map((t) => `SELECT ${quoteText(t.name)}, count(*) FROM ${tableRef(t.name)}`).join(" UNION ALL ")).catch(() => null);
+    const by = new Map(counts?.rows.map(([n, c]) => [String(n), Number(c)]));
+    for (const t of chunk) t.count = by.get(t.name) ?? null;
   }
   return all;
 }
@@ -49,6 +55,13 @@ export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolea
   useEffect(() => {
     if (shown) void refresh();
   }, [shown, refresh]);
+  // Not readable yet (the dev server is still installing or starting): try again while the view is shown.
+  const failed = !!tables && "error" in tables;
+  useEffect(() => {
+    if (!shown || !failed) return;
+    const t = setTimeout(() => void refresh(), 2000);
+    return () => clearTimeout(t);
+  }, [shown, failed, tables, refresh]);
 
   async function exec(script: string) {
     if (!run || !script.trim() || running) return;
@@ -60,14 +73,15 @@ export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolea
     } catch (e) {
       if (alive.current) setOut({ error: errorMessage(e) });
     }
-    void refresh(); // tables made, dropped, filled or emptied
+    if (alive.current) void refresh(); // tables made, dropped, filled or emptied
   }
   function submit(e: FormEvent) {
     e.preventDefault();
     void exec(sql);
   }
   function browse(name: string) {
-    const q = `SELECT * FROM ${quoteIdent(name)} LIMIT 100;`;
+    if (running) return;
+    const q = `SELECT * FROM ${tableRef(name)} LIMIT 100;`;
     setSelected(name);
     setSql(q);
     void exec(q);
@@ -94,7 +108,7 @@ export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolea
                   <li key={t.name}>
                     <button type="button" data-table={t.name} aria-current={t.name === selected ? "true" : undefined} onClick={() => browse(t.name)}>
                       <Icon name={t.view ? "search" : "database"} /><span className="mono db-name">{t.name}</span>
-                      <span className="muted db-count">{t.view ? "view" : t.count === null ? "" : t.count.toLocaleString()}</span>
+                      <span className="muted db-count" aria-hidden={t.view ? undefined : "true"}>{t.view ? "view" : t.count === null ? "" : t.count.toLocaleString()}</span>
                       <SrRows t={t} />
                     </button>
                   </li>
@@ -110,7 +124,7 @@ export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolea
         </div>
         <form className="db-query" ref={form} onSubmit={submit}>
           <textarea className="input mono sql" id="db-sql" rows={5} spellCheck={false} aria-label="SQL" aria-describedby="db-help"
-            placeholder={list?.length ? `SELECT * FROM ${quoteIdent(list[0]!.name)} LIMIT 100;` : "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);"} // non-empty
+            placeholder={list?.length ? `SELECT * FROM ${tableRef(list[0]!.name)} LIMIT 100;` : "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);"} // non-empty
             value={sql} onChange={(e) => setSql(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -130,7 +144,7 @@ export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolea
             : <Summary result={out.result} ms={out.ms} />}
         </div>
         {out && "result" in out && out.result.columns.length ? <Grid result={out.result} /> : null}
-        <p className="pane-foot">The preview's own database (<code>.cresslet/dev/db.sqlite</code>), not the deployed app's.</p>
+        <p className="pane-foot">The preview's own database (<code>.cresslet/dev/db.sqlite</code>, kept until the page reloads), not the deployed app's.</p>
       </section>
     </>
   );
@@ -146,7 +160,12 @@ function Summary({ result: r, ms }: { result: SqlResult; ms: number }) {
   if (r.columns.length) parts.push(`${plural(r.rows.length, "row")}${r.truncated ? " (the first 1,000)" : ""}`);
   if (r.changes || !r.columns.length) parts.push(`${plural(r.changes, "row")} changed`);
   if (r.statements > 1) parts.push(`${r.statements} statements`);
-  return <p className="muted small" id="db-summary">{`${parts.join(" · ")} in ${ms} ms`}</p>;
+  return (
+    <>
+      <p className="muted small" id="db-summary">{`${parts.join(" · ")} in ${ms} ms`}</p>
+      {r.transaction ? <p className="error small" id="db-transaction">A transaction is open: nothing is saved (and the app's writes wait in it) until you run COMMIT or ROLLBACK.</p> : null}
+    </>
+  );
 }
 
 function Cell({ v }: { v: SqlCell }) {

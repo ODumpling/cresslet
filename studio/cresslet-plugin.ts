@@ -361,12 +361,15 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     return body;
   }
 
-  /** The running `cresslet dev`'s database runner (the workspace's Database view), while one runs. */
-  let devSql: ((sql: string) => Promise<SqlResult>) | null = null;
-  /** Runs a script on the preview's database: the one its server worker has open (studio/server-worker.ts). */
+  /** Each running `cresslet dev`'s database runner (the workspace's Database view), first started first. */
+  const devSql: ((sql: string) => Promise<SqlResult>)[] = [];
+  /**
+   * Runs a script on the preview's database: the one its server worker has open (studio/server-worker.ts). The first
+   * `cresslet dev` serves it (the preview's: the workspace starts it).
+   */
   async function sql(script: string): Promise<SqlResult> {
-    if (!devSql) throw new Error("the dev server isn't running: start it in the terminal with `cresslet dev`");
-    return devSql(script);
+    if (!devSql[0]) throw new Error("the dev server isn't running (it starts with the project; or run `cresslet dev` in the terminal)");
+    return devSql[0](script);
   }
 
   // ---- dev: container dev server for the client, a project Worker (on the preview origin) for the server handler.
@@ -420,7 +423,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         w.postMessage({ type: "sql", id, sql: script } satisfies ToWorker);
       });
     };
-    devSql = runSql; // the latest `cresslet dev` (one per project, normally)
+    devSql.push(runSql);
 
     async function fileOp(m: FileOp & { key?: unknown }): Promise<FileResult> {
       const indexPath = `${filesDir}/index.json`;
@@ -528,6 +531,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         out(`\x1b[31m${workerError}\x1b[0m`);
         return;
       }
+      let saved: Promise<unknown> = Promise.resolve(); // its database snapshots, written in order
       const ready = new Promise<void>((resolve, reject) => {
         // The worker catches and logs its own errors (server-worker.ts): one that gets here means it's gone (e.g.
         // the preview relay restarted). Fail its requests and the next ones until a server file is saved or
@@ -544,15 +548,15 @@ export function createCresslet(c: Container, opts: CressletOptions) {
           if (m.type === "ready") resolve();
           else if (m.type === "fatal") reject(new Error(m.message));
           else if (m.type === "log") out(`${m.level === "error" ? "\x1b[31m" : "\x1b[2m"}[server] ${m.msg}\x1b[0m`);
-          else if (m.type === "db") c.fs.writeFile(dbPath, m.bytes);
+          else if (m.type === "db") saved = saved.then(() => c.fs.writeFile(dbPath, m.bytes)).catch(() => {});
           else if (m.type === "response") {
             waiting.get(m.id)?.done(m);
             waiting.delete(m.id);
           } else if (m.type === "sql-result") {
             const r = scripts.get(m.id);
             scripts.delete(m.id);
-            if ("error" in m) r?.reject(new Error(m.error));
-            else r?.resolve(m.result);
+            // after its writes are saved (they're posted before the result), so a restart or stop now keeps them
+            void saved.then(() => ("error" in m ? r?.reject(new Error(m.error)) : r?.resolve(m.result)));
           } else if (m.type === "files") {
             try {
               const r = await fileOp(m);
@@ -724,7 +728,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     }
     await aborted;
     stopped = true;
-    if (devSql === runSql) devSql = null;
+    devSql.splice(devSql.indexOf(runSql), 1);
     clearTimeout(timer);
     for (const w of watchers) w.close();
     for (const w of initializing) w.terminate();

@@ -239,25 +239,40 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let savedRowid = 0;
   let reopened = false;
+  const inTransaction = () => {
+    try {
+      db.exec("BEGIN; COMMIT;");
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  // Posts a snapshot; false (nothing saved) while a transaction is open.
+  const save = () => {
+    // export() closes and reopens the database: not while the app holds a transaction open (exec("BEGIN") across
+    // awaits) or its writes would be lost; and connection settings (foreign_keys) need setting again after.
+    if (inTransaction()) return false;
+    savedRowid = rowid(); // the live value, or the one kept from before an earlier save
+    const foreignKeys = one("PRAGMA foreign_keys");
+    const out = db.export();
+    reopened = true; // last_insert_rowid() is 0 on the new connection until its next insert
+    db.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"};`); // as the app left it
+    postMessage({ type: "db", bytes: out }, [out.buffer]);
+    return true;
+  };
   // One save at a time, 300 ms after the first change that asked for it: later changes don't push it back (steady
-  // traffic would otherwise keep a write from ever being saved).
-  const persist = (): void => {
+  // traffic would otherwise keep a write from ever being saved). `now`: save at once (the Database view's writes,
+  // saved before it hears they're done), or later as usual while a transaction is open.
+  const persist = (now = false): void => {
+    if (now && save()) {
+      clearTimeout(timer);
+      timer = undefined;
+      return;
+    }
     if (timer) return;
     timer = setTimeout(() => {
       timer = undefined;
-      // export() closes and reopens the database: not while the app holds a transaction open (exec("BEGIN") across
-      // awaits) or its writes would be lost; and connection settings (foreign_keys) need setting again after.
-      try {
-        db.exec("BEGIN; COMMIT;");
-      } catch {
-        return persist(); // in a transaction: try again later
-      }
-      savedRowid = rowid(); // the live value, or the one kept from before an earlier save
-      const foreignKeys = one("PRAGMA foreign_keys");
-      const out = db.export();
-      reopened = true; // last_insert_rowid() is 0 on the new connection until its next insert
-      db.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"};`); // as the app left it
-      postMessage({ type: "db", bytes: out }, [out.buffer]);
+      if (!save()) persist(); // in a transaction: try again later
     }, 300);
   };
   // sql.js binds numbers as doubles: a bigint it can't hold exactly is refused, not rounded.
@@ -372,38 +387,51 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
     }
   };
   // The studio's Database view: each statement of a script in turn, on this same connection (so the app sees the
-  // change at once and it's saved as the app's own writes are). Its result: the last statement with columns, its
-  // first SQL_MAX_ROWS rows. A statement that fails stops the script (those before it stay done, as in sqlite3).
+  // change at once), saved before the result goes back. Its result: the last statement with columns, its first
+  // SQL_MAX_ROWS rows (each statement still runs to its end, so a write's error isn't cut off with its rows). A
+  // statement that fails stops the script: those before it stay done, as in sqlite3, unless they opened a transaction
+  // (rolled back then: one left open would hold every later save).
   const studio = (sql: string): SqlResult => {
     const changesBefore = one("SELECT total_changes()");
+    const openBefore = inTransaction(); // the app's own (exec("BEGIN") across awaits): left alone
     let out: Pick<SqlResult, "columns" | "rows" | "truncated"> = { columns: [], rows: [], truncated: false };
-    let statements = 0, written = false;
+    let statements = 0, written = false, failed = true, transaction = false, changes = 0;
     const cell = (v: SqlValue): SqlCell =>
       v instanceof Uint8Array ? { blob: v.byteLength }
         : typeof v === "bigint" ? (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(Number.MIN_SAFE_INTEGER) ? String(v) : Number(v))
         : v;
     try {
-      // (A failing statement leaves the iterator's copy of the script in the wasm heap: sql.js's finalize() isn't
-      // exported. Bytes per failed run, and the worker is replaced on every server change.)
+      // (A statement that fails as it runs leaves the iterator's copy of the script in the wasm heap: sql.js's
+      // finalize() isn't exported. Bytes per failed run, and the worker is replaced on every server change.)
       for (const stmt of db.iterateStatements(sql)) {
-        statements++;
-        written ||= mayWrite(stmt.getSQL());
-        const columns = stmt.getColumnNames();
-        const rows: SqlCell[][] = [];
-        let truncated = false;
-        while (stmt.step()) {
-          if (rows.length === SQL_MAX_ROWS) {
-            truncated = true;
-            break;
+        try {
+          statements++;
+          written ||= mayWrite(stmt.getSQL());
+          const columns = stmt.getColumnNames();
+          const rows: SqlCell[][] = [];
+          let truncated = false;
+          while (stmt.step()) {
+            if (rows.length < SQL_MAX_ROWS) rows.push(stmt.get(null, { useBigInt: true }).map(cell));
+            else truncated = true;
           }
-          rows.push(stmt.get(null, { useBigInt: true }).map(cell));
+          if (columns.length) out = { columns, rows, truncated };
+        } finally {
+          stmt.free(); // (the iterator frees it too, on to the next: a no-op then)
         }
-        if (columns.length) out = { columns, rows, truncated };
       }
+      failed = false;
+    } catch (e) {
+      if (!openBefore && inTransaction()) {
+        db.exec("ROLLBACK");
+        throw new Error(`${(e as { message?: string } | null)?.message ?? e} (the transaction the script began was rolled back)`);
+      }
+      throw e;
     } finally {
-      if (one("SELECT total_changes()") !== changesBefore || written) persist();
+      transaction = !failed && !openBefore && inTransaction();
+      changes = Number(one("SELECT total_changes()")) - Number(changesBefore); // before a save (it reopens: total 0)
+      if (changes || written) persist(true);
     }
-    return { ...out, changes: Number(one("SELECT total_changes()")) - Number(changesBefore), statements };
+    return { ...out, changes, statements, transaction };
   };
   const binding = {
     batch: async (statements: { sql: string; params?: Param[] }[]) => batch(statements),

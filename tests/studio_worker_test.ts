@@ -298,12 +298,13 @@ test("studio preview worker: Database view scripts read and write the app's data
 export default { async fetch() { return Response.json(await db.query("SELECT v FROM t ORDER BY v")); } };`));
   try {
     const made = await w.sql("CREATE TABLE t (v, b); INSERT INTO t VALUES (1, x'0102'), (2, NULL) RETURNING v; -- done");
-    assert.deepEqual(made, { columns: ["v"], rows: [[1], [2]], truncated: false, changes: 2, statements: 2 });
+    assert.deepEqual(made, { columns: ["v"], rows: [[1], [2]], truncated: false, changes: 2, statements: 2, transaction: false });
+    assert.equal(w.saving(), true, "saved before the result came back (no 300 ms wait)");
     assert.deepEqual((await w.get("/")).json, [{ v: 1 }, { v: 2 }], "the app sees the view's writes");
     assert.deepEqual((await w.saved()).exec("SELECT count(*) FROM t")[0].values, [[2]], "and they're saved");
     // blobs as their size, unsafe integers as digits, an empty result keeps its columns
     assert.deepEqual(await w.sql("SELECT b, 9007199254740993 AS big FROM t WHERE v = 1"), {
-      columns: ["b", "big"], rows: [[{ blob: 2 }, "9007199254740993"]], truncated: false, changes: 0, statements: 1,
+      columns: ["b", "big"], rows: [[{ blob: 2 }, "9007199254740993"]], truncated: false, changes: 0, statements: 1, transaction: false,
     });
     assert.deepEqual((await w.sql("SELECT v FROM t WHERE 0")).columns, ["v"]);
     assert.equal(w.saving(), false, "reads don't ask for a save");
@@ -316,6 +317,22 @@ export default { async fetch() { return Response.json(await db.query("SELECT v F
     assert.match(bad.error, /no such column: nope/);
     assert.deepEqual((await w.get("/")).json, [{ v: 1 }]);
     assert.deepEqual((await w.saved()).exec("SELECT v FROM t")[0].values, [[1]]);
+    // a write past the row cap still runs to its end: its error isn't cut off with its rows
+    const fk = await w.sql(`CREATE TABLE p (id INTEGER PRIMARY KEY);
+      CREATE TABLE c (p REFERENCES p DEFERRABLE INITIALLY DEFERRED);
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1001) INSERT INTO c SELECT i FROM n RETURNING p`);
+    assert.match(fk.error, /FOREIGN KEY constraint failed/);
+    assert.deepEqual((await w.sql("SELECT count(*) AS n FROM c")).rows, [[0]]);
+    await w.saved();
+    // a transaction left open is reported (saves wait for it); one a failing script began is rolled back
+    const open = await w.sql("BEGIN; INSERT INTO t VALUES (5, NULL)");
+    assert.equal(open.transaction, true);
+    assert.equal((await w.sql("COMMIT")).transaction, false);
+    assert.deepEqual((await w.saved()).exec("SELECT v FROM t ORDER BY v")[0].values, [[1], [5]]);
+    const rolled = await w.sql("BEGIN; INSERT INTO t VALUES (6, NULL); SELECT nope");
+    assert.match(rolled.error, /no such column: nope.*rolled back/);
+    assert.deepEqual((await w.sql("SELECT v FROM t ORDER BY v")).rows, [[1], [5]]);
+    assert.equal((await w.sql("INSERT INTO t VALUES (7, NULL)")).transaction, false, "no transaction left open");
   } finally {
     await w.close();
   }

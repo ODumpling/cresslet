@@ -420,7 +420,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       </header>
 
       <main id="workspace" className="workspace" aria-labelledby="workspace-title" data-view={view} data-drawer={drawer ? "open" : ""} data-builder={container && chat ? "open" : ""}>
-        <h1 className="sr-only" id="workspace-title" tabIndex={-1}>{`${name}: AI builder, preview and code`}</h1>
+        <h1 className="sr-only" id="workspace-title" tabIndex={-1}>{`${name}: AI builder, preview, code and database`}</h1>
         {container ? (
           <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
             devLog={() => engine.current?.termOut ?? ""}

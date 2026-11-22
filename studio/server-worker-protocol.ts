@@ -79,6 +79,8 @@ export interface SqlResult {
   /** Rows inserted, updated or deleted by the script (total_changes(), triggers and cascades too). */
   changes: number;
   statements: number;
+  /** The script left a transaction open: nothing is saved until a COMMIT or ROLLBACK. */
+  transaction: boolean;
 }
 
 export type FromWorker =
