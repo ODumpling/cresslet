@@ -37,6 +37,29 @@ export interface PullRequest {
   checks: "success" | "failure" | "pending" | "none" | "unknown";
 }
 
+/** A change of the app's stack (GET /v1/apps/:name/git/stack, server/stack.ts). */
+export interface StackChange {
+  id: string;
+  position: number;
+  branch: string;
+  sha: string;
+  baseSha: string;
+  title: string;
+  prompt: string;
+  author: string | null;
+  createdAt: string;
+  /** Where its branch is on GitHub: at `sha`, somewhere else (`headSha`), or gone. */
+  github: "ok" | "moved" | "gone";
+  headSha?: string;
+}
+export interface Stack {
+  id: string;
+  name: string;
+  baseSha: string;
+  /** Bottom first. */
+  changes: StackChange[];
+}
+
 /** A file as the API takes and returns them (POST /v1/deploys's shape). */
 export interface GitFile {
   path: string;
@@ -94,8 +117,8 @@ export interface Provenance {
 }
 
 /**
- * One project's source control: branch first (a change on the default branch moves to a new branch), sync (one commit
- * of the workspace), pull, and merge-then-deploy. Steps run one at a time.
+ * One project's source control: changes (each builder turn's commit on a branch of its own, stacked: server/stack.ts),
+ * sync (one commit of the workspace), pull, and merge-then-deploy. Steps run one at a time.
  */
 export function createGitWorkspace(o: GitWorkspaceOptions) {
   let queue: Promise<unknown> = Promise.resolve();
@@ -139,6 +162,37 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : s.mergeParent ? { baseSha: s.mergeParent } : {}),
     });
     return { ...r, files };
+  }
+
+  /**
+   * The workspace committed as a new change (server/stack.ts): a branch of its own, cut from the commit it's on. On
+   * the default branch that starts a stack, on a stack's top change it goes on top. Anywhere else (a branch of
+   * its own, a change below the top), or finishing a merge, it's committed to the active branch as before.
+   */
+  async function changeNow(title: string, prompt: string): Promise<{ sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string } }> {
+    const s = o.state();
+    if (!s) throw new Error("not connected to a repository");
+    if (s.mergeParent) return syncNow(title);
+    const rev = revision();
+    const files = await o.files();
+    let r: { changed: boolean; sha: string; branch?: string; change?: StackChange; stack?: { id: string; name: string } };
+    try {
+      r = await post("/stack", { from: s.activeBranch, baseSha: s.headSha, files, title, prompt });
+    } catch (e) {
+      if (gitCode(e) !== "not_on_stack") throw e;
+      if (s.activeBranch === s.defaultBranch) await branchNow("feat", prompt || title);
+      return syncNow(title);
+    }
+    if (!r.changed || !r.branch) {
+      await set({ dirty: revision() !== rev });
+      return { sha: r.sha, changed: false, files };
+    }
+    await set({
+      activeBranch: r.branch, headSha: r.sha, dirty: revision() !== rev,
+      ...(s.activeBranch === s.defaultBranch ? { baseSha: s.headSha } : {}),
+    });
+    o.log?.(`committed change ${r.change?.position ?? "?"} of ${r.stack?.name ?? "the stack"}: ${r.branch} @ ${r.sha.slice(0, 7)}`);
+    return { sha: r.sha, changed: true, files, change: r.change, stack: r.stack };
   }
 
   /** Changes made since `rev` would be overwritten: stop instead. */
@@ -266,10 +320,20 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     newBranch: (prefix: string, hint: string) => serial(() => branchNow(prefix, hint)),
     /** Commits the workspace to the active branch. 409 `conflict`: it moved on GitHub (pull first). */
     sync: (message: string) => serial(() => syncNow(message)),
+    /** Commits the workspace as a new change of the app's stack (see changeNow). */
+    commitChange: (title: string, prompt = "") => serial(() => changeNow(title, prompt)),
+    /** The app's open stacks, newest first, and the one the workspace is on (its active branch is one of its changes). */
+    stacks: async () => {
+      const r = await o.api<{ defaultBranch: string; stacks: Stack[] }>(path("/stack"));
+      const b = o.state()?.activeBranch;
+      return { ...r, current: r.stacks.find((x) => x.changes.some((c) => c.branch === b)) ?? null };
+    },
     /** Loads a branch (default: the active one) into the workspace. Changes here are lost: sync first. */
     pull: (branch?: string) => serial(() => pullNow(branch ?? o.state()!.activeBranch)),
     /** Changes committed to the active branch (if any), then another branch loaded. */
     switchTo: (branch: string) => serial(async () => {
+      // Edits on the default branch go on a branch of their own (it takes changes only through Deploy's merge).
+      if (o.state()!.dirty && o.state()!.activeBranch === o.state()!.defaultBranch) await branchNow("edit", "changes");
       if (o.state()!.dirty) await syncNow(`Work in progress on ${o.state()!.activeBranch}`);
       if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: switch again"), { code: "changed" });
       return pullNow(branch);
@@ -283,9 +347,16 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * or a protected branch.
      */
     prepareDeploy: (log: (line: string) => void = () => {}, signal?: AbortSignal) => serial(async (): Promise<Provenance> => {
+      signal?.throwIfAborted();
+      // Edits on the default branch (by hand): a change of their own first, so they merge like any other.
+      const was = o.state()!;
+      if (was.activeBranch === was.defaultBranch && was.dirty && !was.mergeParent) {
+        log(`committing the changes here as a change…`);
+        await changeNow("Edits made in the studio", "");
+        signal?.throwIfAborted();
+      }
       const s = o.state()!;
       const repo = `${s.owner}/${s.repo}`;
-      signal?.throwIfAborted();
       log(`syncing ${s.activeBranch} with ${repo}…`);
       const rev = revision();
       const synced = await syncNow(`Deploy from ${s.activeBranch}`);

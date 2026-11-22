@@ -794,3 +794,55 @@ test("conflict resolution: a .env deleted in the workspace while merging is refu
   const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/h", baseSha: mine.body.sha, files, mergeParent: theirs });
   assert.equal(s.body.error, "merge_dotenv_changed");
 }));
+
+// ---- stacked changes (#118)
+
+test("stack: each change on its own branch, read by a collaborator too; a push onto the top follows it; merging the top lands the stack", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];
+  const c1 = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: "main", baseSha: linked.sha, files: files("1"), title: "Add due dates", prompt: "Add due dates to tasks" });
+  assert.equal(c1.status, 201, JSON.stringify(c1.body));
+  assert.equal(c1.body.branch, "feat/add-due-dates/1-add-due-dates");
+  const c2 = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c1.body.branch, baseSha: c1.body.sha, files: files("2"), title: "Dark mode" });
+  assert.equal(c2.body.branch, "feat/add-due-dates/2-dark-mode");
+  assert.deepEqual(t.gh.commit(c2.body.sha).parents, [c1.body.sha]);
+  assert.equal(t.gh.commit(c2.body.sha).author?.name, "octo");
+  // Nothing changed: no branch.
+  const none = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c2.body.branch, baseSha: c2.body.sha, files: files("2"), title: "Explain" });
+  assert.deepEqual([none.status, none.body], [200, { changed: false, sha: c2.body.sha }]);
+  assert.equal([...t.gh.repo("octo/shop").refs.keys()].filter((b) => b.startsWith("feat/")).length, 2);
+  // Not from a stack's top: said, nothing written.
+  const below = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c1.body.branch, baseSha: c1.body.sha, files: files("3"), title: "Three" });
+  assert.deepEqual([below.status, below.body.error], [409, "not_on_stack"]);
+
+  // A collaborator (their own GitHub) sees the same stack.
+  const bob = await t.account("bob@b.co");
+  const inv = await t.send("POST", "/v1/apps/shop/collaborators", tok, { email: "bob@b.co", role: "viewer" });
+  assert.equal((await t.send("POST", `/v1/me/invites/${inv.body.invite.id}/accept`, bob)).status, 200);
+  await t.connect(bob, t.gh.user("bob"));
+  t.gh.repo("octo/shop").push.add("bob");
+  const read = await t.send("GET", "/v1/apps/shop/git/stack", bob);
+  assert.equal(read.status, 200, JSON.stringify(read.body));
+  assert.equal(read.body.stacks.length, 1);
+  assert.deepEqual(read.body.stacks[0].changes.map((c: { branch: string; github: string; title: string }) => [c.branch, c.title, c.github]), [
+    ["feat/add-due-dates/1-add-due-dates", "Add due dates", "ok"], ["feat/add-due-dates/2-dark-mode", "Dark mode", "ok"],
+  ]);
+  assert.equal(read.body.stacks[0].changes[0].prompt, "Add due dates to tasks");
+
+  // A hand edit pushed onto the top change: it follows.
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c2.body.branch, baseSha: c2.body.sha, files: files("2b") });
+  const top = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0].changes[1];
+  assert.deepEqual([top.sha, top.github], [s.body.sha, "ok"]);
+  // Pushed to on GitHub: moved.
+  t.gh.write(t.gh.repo("octo/shop"), c1.body.branch, { "other.txt": "x" });
+  assert.equal((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0].changes[0].github, "moved");
+
+  // Deploy's merge of the top change: the stack is landed and its branches go (the moved one stays).
+  const m = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: c2.body.branch, headSha: s.body.sha });
+  assert.equal(m.status, 200, JSON.stringify(m.body));
+  assert.deepEqual(m.body.landed, { stack: "add-due-dates", changes: 2 });
+  assert.equal(t.gh.files("octo/shop")["app.txt"], "2b");
+  assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks, []);
+  assert.equal(t.gh.repo("octo/shop").refs.has(c2.body.branch), false);
+  assert.equal(t.gh.repo("octo/shop").refs.has(c1.body.branch), true);
+}));

@@ -97,8 +97,6 @@ export class Engine {
   private installFailed = false;
   /** Counts the workspace's changes (studio/git.ts: a sync is clean only if none came in meanwhile). */
   private rev = 0;
-  /** A branch being started for a hand edit, or when the last try failed (one try per burst, not per keystroke). */
-  private branching: { busy: boolean; failedAt: number; on: string } = { busy: false, failedAt: 0, on: "" };
 
   constructor(project: StoredProject, cb: Callbacks, editorEl: HTMLElement) {
     this.project = project;
@@ -158,7 +156,6 @@ export class Engine {
             void this.c.fs.writeFile(`${this.c.workdir}/${this.current}`, u.state.doc.toString());
             this.save();
             this.changed();
-            this.editBranch(this.current);
           }),
         ],
       }),
@@ -412,27 +409,9 @@ export class Engine {
     this.git.markDirty();
   }
 
-  /**
-   * A hand change on the default branch of a linked app goes on a branch of its own (`edit/<file>`): the default
-   * branch stays what's deployed until Deploy merges it. One try at a time; after a failure, none for a while.
-   */
-  private editBranch(file: string) {
-    const g = this.git, b = this.branching, on = this.project.git?.activeBranch ?? "";
-    if (!g.connected || !g.onDefault || b.busy || (b.on === on && Date.now() - b.failedAt < 30_000)) return;
-    b.busy = true;
-    void g.ensureBranch("edit", file.replace(/\.[^./]+$/, "")).then(
-      (name) => name && this.cb.notice(`Editing on a new branch, ${name}: ${this.project.git?.defaultBranch ?? "main"} stays as deployed until you deploy.`),
-      (e) => {
-        Object.assign(b, { failedAt: Date.now(), on });
-        this.cb.notice(`Couldn't start a branch for this edit: ${errorMessage(e)}. It's kept here (not pushed), on ${on}.`);
-      },
-    ).finally(() => (b.busy = false));
-  }
-
   async newFile(path: string) {
     const c = this.c;
     if (!c) return;
-    this.editBranch(path);
     await c.fs.writeFile(`${c.workdir}/${path}`, "");
     this.save();
     await this.renderTree();

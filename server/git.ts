@@ -10,6 +10,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
+import { commitChange, landed, readStacks } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -46,7 +47,10 @@ export interface MergeResult {
   treeChanged: boolean;
 }
 export type Author = { name: string; email: string };
-type Repo = { owner: string; name: string };
+export type Repo = { owner: string; name: string };
+export type CommitInput = {
+  branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author; mergeParent?: string; create?: boolean;
+};
 
 /**
  * What Cresslet needs from a source control host, as one user. GitHub's is below; another provider is another
@@ -65,7 +69,11 @@ export interface SourceControlProvider {
   readTree(r: Repo, sha: string, subdir: string): Promise<DeployFile[]>;
   /** One commit on `branch` (whose head must still be `baseSha`) making `subdir` hold exactly `files`. */
   /** `mergeParent`: a second parent (a merge of that commit, its conflicts resolved in `files`). */
-  commitTree(r: Repo, input: { branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author; mergeParent?: string }): Promise<{ sha: string; changed: boolean }>;
+  /**
+   * `create`: `branch` is a new branch, made pointing at the commit (none when nothing changed). Taken: 409
+   * `branch_exists` with the commit as `extra.sha`, for createBranch under another name.
+   */
+  commitTree(r: Repo, input: CommitInput): Promise<{ sha: string; changed: boolean }>;
   /** `expect`: the head commit the caller built from; if the branch moved past it, 409 and nothing merged. */
   merge(r: Repo, input: { into: string; head: string; message: string; expect?: string }): Promise<MergeResult>;
 }
@@ -177,7 +185,8 @@ export class GitHub implements SourceControlProvider {
 
   async createBranch(r: Repo, branch: string, sha: string) {
     const res = await this.req<{ message?: string }>("POST", this.#path(r, "/git/refs"), { ref: `refs/heads/${branch}`, sha });
-    if (res.status === 422 && /already exists/i.test(res.body?.message ?? "")) {
+    // Taken: by a branch of that name, or one whose name is in the way (`feat/x` for `feat/x/1-y`, or the other way).
+    if (res.status === 422 && /already exists|cannot be created|conflict/i.test(res.body?.message ?? "")) {
       throw new HttpError(409, `branch ${branch} already exists`, "branch_exists");
     }
     if (res.status !== 201) throw ghError(res.status, res.body?.message);
@@ -249,7 +258,7 @@ export class GitHub implements SourceControlProvider {
     return out.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
   }
 
-  async commitTree(r: Repo, input: { branch: string; baseSha: string; subdir: string; files: [string, Uint8Array][]; message: string; author: Author; mergeParent?: string }) {
+  async commitTree(r: Repo, input: CommitInput) {
     const { treeSha, entries } = await this.#tree(r, input.baseSha);
     const prefix = input.subdir ? input.subdir + "/" : "";
     const base = new Map(entries.filter((e) => e.type === "blob").map((e) => [e.path, e]));
@@ -328,6 +337,15 @@ export class GitHub implements SourceControlProvider {
       message: input.message, tree: tree.sha, parents: input.mergeParent ? [input.baseSha, input.mergeParent] : [input.baseSha],
       author: who, committer: who,
     });
+    if (input.create) {
+      try {
+        await this.createBranch(r, input.branch, commit.sha);
+      } catch (e) {
+        if (e instanceof HttpError && e.code === "branch_exists") throw Object.assign(e, { extra: { sha: commit.sha } });
+        throw e;
+      }
+      return { sha: commit.sha, changed: true };
+    }
     // Never forced: if the branch moved since baseSha, this fails and nothing changed.
     const res = await this.req<{ message?: string }>("PATCH", this.#path(r, `/git/refs/heads/${this.#ref(input.branch)}`), { sha: commit.sha, force: false });
     if (res.status !== 200) {
@@ -547,7 +565,7 @@ function sourceEntries(entries: GhEntry[], subdir: string) {
 export const blobSha = (data: Uint8Array) =>
   createHash("sha1").update(`blob ${data.byteLength}\0`).update(data).digest("hex");
 
-async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+export async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
@@ -998,20 +1016,49 @@ export function gitRoutes(
     }
     const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
     if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
+    // Onto a stack's top change from where it's recorded (a hand edit pushed, a merge resolved): the change follows.
+    else if (out.changed) await store.followStackTop(a.id, branch, baseSha, out.sha).catch((e) => console.error(e));
     return c.json({ branch, ...out });
+  });
+
+  // Stacked changes (server/stack.ts): the app's open stacks, checked against GitHub.
+  app.get("/apps/:name/git/stack", async (c) => {
+    const { a, r, repo, client } = await linked(c, "read");
+    const stacks = await readStacks({ provider: client, store, appId: a.id, repo, r });
+    c.header("cache-control", "no-store");
+    return c.json({ defaultBranch: repo.default_branch, stacks });
+  });
+  // The workspace committed as a new change: on the default branch a new stack, on a stack's top change the next one.
+  app.post("/apps/:name/git/stack", async (c) => {
+    await linked(c, "deploy"); // before reading what may be a large body
+    const input = await body<{ from?: unknown; baseSha?: unknown; files?: unknown; title?: unknown; prompt?: unknown } | null>(c, deployBodyLimit) ?? {};
+    const { a, r, repo, client, author } = await linked(c, "deploy");
+    const from = branchName(input.from, "from");
+    const baseSha = shaOf(input.baseSha, "baseSha");
+    const files = sourceFiles(cfg, input.files as DeployFile[]);
+    const out = await commitChange({ provider: client, store, appId: a.id, repo, r }, {
+      from, baseSha, files, author, by: c.get("account")!.id,
+      title: message(input.title, `Update ${a.name}`).split("\n")[0].slice(0, 200),
+      prompt: typeof input.prompt === "string" ? input.prompt.slice(0, 5000) : "",
+    });
+    return c.json(out, out.changed ? 201 : 200);
   });
 
   // Merge `branch` into the default branch (or `into`), as the user: a fast-forward when it can, else a merge
   // commit. `treeChanged`: the result isn't `branch`'s tree (the default branch had commits of its own), so its
   // files come back for the workspace to build from.
   app.post("/apps/:name/git/merge", async (c) => {
-    const { r, repo, client } = await linked(c, "deploy");
+    const { a, r, repo, client } = await linked(c, "deploy");
     const input = await body<{ branch?: unknown; into?: unknown; message?: unknown; headSha?: unknown } | null>(c) ?? {};
     const branch = branchName(input.branch);
     const into = input.into != null ? branchName(input.into, "into") : repo.default_branch;
     const expect = input.headSha != null ? shaOf(input.headSha, "headSha") : undefined;
     const m = await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
     if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha, upstream: m.mergedSha }).catch((e) => console.error(e));
+    // A stack's top change merged: the stack is in (its lower branches go with the top's, below).
+    const stack = into === repo.default_branch
+      ? await landed({ provider: client, store, appId: a.id, repo, r }, { branch, headSha: m.headSha, mergedSha: m.mergedSha }).catch((e) => (console.error(e), null))
+      : null;
     // The merge happened: from here on it's reported, whatever else fails. Its files (when they differ from the
     // branch's) before the branch goes, so a failure to load them leaves the branch to retry from.
     let files: DeployFile[] | undefined, filesError: string | undefined;
@@ -1029,7 +1076,7 @@ export function gitRoutes(
       deletedBranch = await client.deleteBranch(r, branch).catch(() => false);
     }
     const { headSha: _, ...out } = m;
-    return c.json({ ...out, branch: into, deletedBranch, ...(files ? { files } : {}), ...(filesError ? { filesError } : {}) });
+    return c.json({ ...out, branch: into, deletedBranch, ...(stack ? { landed: stack } : {}), ...(files ? { files } : {}), ...(filesError ? { filesError } : {}) });
   });
 
   // The default branch merged into `branch`, conflicts marked, for the workspace to resolve (then sync with

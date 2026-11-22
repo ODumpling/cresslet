@@ -1,0 +1,227 @@
+// Stacked changes (server/stack.ts) over a fake source control provider: no network, no GitHub.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { HttpError } from "../server/deploys.ts";
+import type { CommitInput, Repo, SourceControlProvider } from "../server/git.ts";
+import { commitChange, type Ctx, landed, readStacks, slug } from "../server/stack.ts";
+import { type AppRepo, Store } from "../server/store.ts";
+
+/** Branches and commits in memory: a commit is its files and its parent. */
+function fakeProvider() {
+  const commits = new Map<string, { files: Map<string, string>; parent: string | null }>();
+  const refs = new Map<string, string>();
+  let n = 0;
+  const make = (files: Map<string, string>, parent: string | null) => {
+    const sha = String(++n).padStart(40, "0");
+    commits.set(sha, { files, parent });
+    return sha;
+  };
+  refs.set("main", make(new Map([["index.html", "<h1>hi</h1>"]]), null));
+  const no = () => { throw new Error("not used here"); };
+  // A name in the way: an existing branch, or one that's a folder of it (or the other way), as git refuses.
+  const taken = (b: string) => [...refs.keys()].some((x) => x === b || b.startsWith(x + "/") || x.startsWith(b + "/"));
+  const p: SourceControlProvider & { refs: Map<string, string>; commits: typeof commits; push(branch: string, files: Record<string, string>): string } = {
+    refs, commits,
+    push(branch, files) {
+      const head = refs.get(branch)!;
+      const sha = make(new Map([...commits.get(head)!.files, ...Object.entries(files)]), head);
+      refs.set(branch, sha);
+      return sha;
+    },
+    listRepos: no, createRepo: no, repo: no, listBranches: no, readTree: no, merge: no,
+    async branchHead(_r: Repo, branch: string) {
+      return refs.get(branch) ?? null;
+    },
+    async createBranch(_r: Repo, branch: string, sha: string) {
+      if (taken(branch)) throw new HttpError(409, `branch ${branch} already exists`, "branch_exists");
+      refs.set(branch, sha);
+    },
+    async deleteBranch(_r: Repo, branch: string) {
+      return refs.delete(branch);
+    },
+    async commitTree(_r: Repo, input: CommitInput) {
+      const base = commits.get(input.baseSha)!;
+      const files = new Map(input.files.map(([path, d]) => [path, new TextDecoder().decode(d)]));
+      const same = files.size === base.files.size && [...files].every(([k, v]) => base.files.get(k) === v);
+      if (same) return { sha: input.baseSha, changed: false };
+      const sha = make(files, input.baseSha);
+      if (input.create) {
+        if (taken(input.branch)) throw Object.assign(new HttpError(409, "taken", "branch_exists"), { extra: { sha } });
+        refs.set(input.branch, sha);
+      } else {
+        if (refs.get(input.branch) !== input.baseSha) throw new HttpError(409, "moved", "conflict");
+        refs.set(input.branch, sha);
+      }
+      return { sha, changed: true };
+    },
+  };
+  return p;
+}
+
+async function setup() {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-stack-test-"));
+  const store = await Store.open(dir);
+  const acct = await store.createAccount("octo@b.co");
+  const { app } = await store.createApp("shop", acct.id);
+  await store.setAppRepo({
+    app_id: app.id, provider: "github", repo_id: "1", owner: "octo", name: "shop", default_branch: "main", subdir: "",
+    delete_branch: 1, connected_by: acct.id, last_synced_sha: null,
+  });
+  const provider = fakeProvider();
+  const repo = (await store.getAppRepo(app.id))!;
+  const ctx: Ctx = { provider, store, appId: app.id, repo, r: { owner: "octo", name: "shop" } };
+  const file = (data: string): [string, Uint8Array][] => [["index.html", new TextEncoder().encode(data)]];
+  const author = { name: "octo", email: "octo@users.example" };
+  const change = (from: string, baseSha: string, title: string, data: string) =>
+    commitChange(ctx, { from, baseSha, files: file(data), title, prompt: `${title}, please`, author, by: acct.id });
+  return {
+    store, provider, ctx, change, acct, app, repo: repo as AppRepo,
+    async [Symbol.asyncDispose]() {
+      await store.close();
+      await rm(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+const ok = <T extends { changed: boolean }>(x: T) => {
+  assert.equal(x.changed, true);
+  return x as Extract<T, { changed: true }>;
+};
+
+test("stack: three turns give three branches, each one commit on the one below, under one stack name", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "Add due dates to tasks", "1"));
+  assert.equal(c1.branch, "feat/add-due-dates-to-tasks/1-add-due-dates-to-tasks");
+  assert.equal(c1.change.position, 1);
+  assert.equal(c1.change.baseSha, main);
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Dark mode", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Add CSV export", "3"));
+  assert.equal(c2.branch, "feat/add-due-dates-to-tasks/2-dark-mode");
+  assert.equal(c3.branch, "feat/add-due-dates-to-tasks/3-add-csv-export");
+  assert.equal(c3.stack.id, c1.stack.id);
+  // A straight chain: each commit's parent is the change below's.
+  assert.equal(t.provider.commits.get(c1.sha)!.parent, main);
+  assert.equal(t.provider.commits.get(c2.sha)!.parent, c1.sha);
+  assert.equal(t.provider.commits.get(c3.sha)!.parent, c2.sha);
+  assert.equal(t.provider.refs.get(c2.branch), c2.sha);
+  assert.equal(t.provider.refs.get("main"), main); // the default branch doesn't move
+
+  const [s] = await readStacks(t.ctx);
+  assert.equal(s.name, "add-due-dates-to-tasks");
+  assert.equal(s.baseSha, main);
+  assert.deepEqual(s.changes.map((c) => [c.position, c.title, c.github]), [[1, "Add due dates to tasks", "ok"], [2, "Dark mode", "ok"], [3, "Add CSV export", "ok"]]);
+  assert.equal(s.changes[0].prompt, "Add due dates to tasks, please");
+  assert.equal(s.changes[0].author, "octo");
+});
+
+test("stack: a turn that changes nothing leaves no branch and no change", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const before = [...t.provider.refs.keys()];
+  assert.deepEqual(await t.change("main", main, "Explain the code", "<h1>hi</h1>"), { changed: false, sha: main });
+  assert.deepEqual([...t.provider.refs.keys()], before);
+  assert.deepEqual(await readStacks(t.ctx), []);
+});
+
+test("stack: only the default branch or a stack's top change takes a new change", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  t.provider.refs.set("edit/x", main);
+  const code = (e: unknown) => (e as HttpError).code;
+  await assert.rejects(t.change("edit/x", main, "Three", "3"), (e) => code(e) === "not_on_stack"); // a branch of its own
+  await assert.rejects(t.change(c1.branch, c1.sha, "Three", "3"), (e) => code(e) === "not_on_stack" && /isn't the top/.test((e as Error).message));
+  await assert.rejects(t.change(c2.branch, c1.sha, "Three", "3"), (e) => code(e) === "not_on_stack"); // not where it's recorded
+  // From the default branch again: a second stack, the first left as it is.
+  const other = ok(await t.change("main", main, "Another thing", "x"));
+  assert.notEqual(other.stack.id, c1.stack.id);
+  const stacks = await readStacks(t.ctx);
+  assert.deepEqual(stacks.map((s) => [s.name, s.changes.length]), [["another-thing", 1], ["one", 2]]); // newest first
+});
+
+test("stack: a name in the way picks the next one, and the commit isn't made twice", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  t.provider.refs.set("feat/dark-mode", main); // the single-branch flow's name: a folder can't be made under it
+  const c1 = ok(await t.change("main", main, "Dark mode", "1"));
+  assert.equal(c1.branch, "feat/dark-mode-2/1-dark-mode");
+  assert.equal(c1.stack.name, "dark-mode-2");
+  t.provider.refs.set("feat/dark-mode-2/2-bluer", main);
+  const made = t.provider.commits.size;
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Bluer", "2"));
+  assert.equal(c2.branch, "feat/dark-mode-2/2-bluer-2");
+  assert.equal(t.provider.commits.size, made + 1);
+  // An open stack's name isn't reused even when its branches are free.
+  const c3 = ok(await t.change("main", main, "Dark mode", "3"));
+  assert.equal(c3.stack.name, "dark-mode-3");
+});
+
+test("stack: reading it says which branches moved or are gone on GitHub", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const pushed = t.provider.push(c1.branch, { "x.txt": "outside" });
+  t.provider.refs.delete(c2.branch);
+  const [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((c) => [c.github, c.headSha]), [["moved", pushed], ["gone", undefined]]);
+});
+
+test("stack: a commit onto the top change follows it; one onto a change below doesn't", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const x = "f".repeat(40);
+  assert.equal(await t.store.followStackTop(t.app.id, c1.branch, c1.sha, x), false);
+  assert.equal(await t.store.followStackTop(t.app.id, c2.branch, "e".repeat(40), x), false); // not from where it's recorded
+  assert.equal(await t.store.followStackTop(t.app.id, c2.branch, c2.sha, x), true);
+  const [s] = await t.store.openStackChanges(t.app.id).then((cs) => [cs.find((c) => c.position === 2)!]);
+  assert.equal(s.sha, x);
+});
+
+test("stack: merging the top change lands the stack, and the branches below go while they're at their change", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  const moved = t.provider.push(c2.branch, { "y.txt": "a push from outside" });
+  // Not the top: nothing lands.
+  assert.equal(await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: c1.sha }), null);
+  assert.equal(await landed(t.ctx, { branch: c3.branch, headSha: "e".repeat(40), mergedSha: c3.sha }), null);
+  assert.deepEqual(await landed(t.ctx, { branch: c3.branch, headSha: c3.sha, mergedSha: c3.sha }), { stack: "one", changes: 3 });
+  assert.deepEqual(await readStacks(t.ctx), []);
+  assert.equal(t.provider.refs.has(c1.branch), false);
+  assert.equal(t.provider.refs.get(c2.branch), moved); // pushed to since: kept
+  assert.equal(t.provider.refs.has(c3.branch), true); // the merge route deletes the merged branch itself
+  const rows = await t.store.db.all<{ state: string; landed_sha: string }>("SELECT state, landed_sha FROM stack_changes ORDER BY position");
+  assert.deepEqual(rows.map((r) => [r.state, r.landed_sha]), [["landed", c3.sha], ["landed", c3.sha], ["landed", c3.sha]]);
+
+  // With the app's delete-branch setting off, every branch stays.
+  const d1 = ok(await t.change("main", main, "Four", "4"));
+  const d2 = ok(await t.change(d1.branch, d1.sha, "Five", "5"));
+  await landed({ ...t.ctx, repo: { ...t.repo, delete_branch: 0 } }, { branch: d2.branch, headSha: d2.sha, mergedSha: d2.sha });
+  assert.equal(t.provider.refs.get(d1.branch), d1.sha);
+});
+
+test("stack: unlinking or relinking the app forgets its stacks", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  ok(await t.change("main", main, "One", "1"));
+  await t.store.setAppRepo({ ...t.repo, repo_id: "2" });
+  assert.deepEqual(await t.store.openStackChanges(t.app.id), []);
+  ok(await t.change("main", main, "Two", "2"));
+  await t.store.deleteAppRepo(t.app.id);
+  assert.deepEqual(await t.store.openStackChanges(t.app.id), []);
+});
+
+test("stack: branch name parts", () => {
+  assert.equal(slug("Add a dark-mode toggle to the header, please!"), "add-a-dark-mode-toggle-to-the");
+  assert.equal(slug("!!!"), "change");
+});
