@@ -901,7 +901,7 @@ export function gitRoutes(
     if (initialSync === "deploy") {
       // The live deploy's own source (an app deployed before it had a repository, from the CLI or another studio).
       const source = a.current_deploy_id ? await deploySource(cfg, a.id, a.current_deploy_id) : null;
-      if (!source) throw new HttpError(409, `${a.name}'s live deploy has no source to push (deployed without it)`, "no_source");
+      if (!source?.length) throw new HttpError(409, `${a.name}'s live deploy has no source to push (deployed without it)`, "no_source");
       files = sourceFiles(cfg, source.map(([path, b]) => ({ path, data: Buffer.from(b).toString("base64"), encoding: "base64" })));
     }
     const { client, author } = await as(c.get("account")!);

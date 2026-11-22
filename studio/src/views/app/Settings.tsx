@@ -11,6 +11,7 @@ import { useAlive, useLoad } from "../../lib/hooks.ts";
 import { toast } from "../../lib/toast.tsx";
 import { DataTable, FormError } from "../../ui/bits.tsx";
 import { ExtLink, Icon } from "../../ui/icons.tsx";
+import { gitCode } from "../../../git.ts";
 import { connectGithub } from "../workspace/GitDialog.tsx";
 import { appPath, TabError, useApp, useTabReload } from "./AppLayout.tsx";
 
@@ -243,7 +244,8 @@ function Repository() {
   const me = useLoad(() => api<API.MeGit>("/v1/me/git"), []);
   const g = me.data, active = !!g?.connected && g.status === "active", linked = d.repo ?? null;
   const repos = useLoad(() => active && !linked ? api<{ repos: API.GitRepo[] }>("/v1/git/github/repos").then((r) => r.repos) : Promise.resolve(null), [active, !!linked]);
-  const deployed = !!d.app.currentDeployId;
+  // The live deploy's source, to push (a deploy without it, or nothing deployed: only a repository the user has).
+  const deployed = !!d.deploys.find((x) => x.current)?.hasSource;
   const [mode, setMode] = useState<"create" | "link">(deployed ? "create" : "link");
   const [repoName, setRepoName] = useState(name);
   const [priv, setPriv] = useState(true);
@@ -252,6 +254,18 @@ function Repository() {
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
   const pick = picked || repos.data?.[0]?.fullName || "";
+  // Back from choosing which repositories Cresslet reaches (another tab): the list may have changed.
+  const reloadRepos = repos.reload;
+  useEffect(() => {
+    if (!active || linked) return;
+    const f = () => void reloadRepos();
+    addEventListener("focus", f);
+    return () => removeEventListener("focus", f);
+  }, [active, linked, reloadRepos]);
+  // GitHub access revoked since /v1/me/git said active: show Reconnect.
+  const reloadMe = me.reload;
+  const reauth = (e: unknown) => void (gitCode(e) === "git_reauth_required" && reloadMe());
+  useEffect(() => reauth(repos.error), [repos.error]);
 
   // Back from connecting GitHub (server/git.ts puts the outcome in the hash).
   useEffect(() => {
@@ -271,6 +285,7 @@ function Repository() {
       if (alive.current) await refresh();
     } catch (e) {
       if (alive.current) setErr(errorMessage(e));
+      reauth(e);
     }
     if (alive.current) setBusy("");
   }
@@ -281,17 +296,29 @@ function Repository() {
     if (!sync) return setErr("Choose what the repository starts with.");
     if (mode === "link" && sync === "deploy" && !confirm(`Push ${name}'s live source to ${pick}? Its default branch then holds exactly these files: others there are deleted.`)) return;
     void run(mode === "create" ? "Creating the repository…" : "Linking…", async () => {
-      let owner: string, repo: string;
+      let owner: string, repo: string, created: string | null = null;
       if (mode === "create") {
         const r = await api<{ repo: API.GitRepo }>("/v1/git/github/repos", json("POST", { name: repoName.trim(), private: priv }));
-        [owner, repo] = [r.repo.owner, r.repo.name];
+        [owner, repo, created] = [r.repo.owner, r.repo.name, r.repo.fullName];
       } else {
         [owner, repo] = pick.split("/") as [string, string];
       }
-      const r = await api<{ repo: API.AppRepo }>(appPath(name, "/git/connect"), json("POST", {
-        owner, repo, initialSync: sync, ...(sync === "deploy" ? { message: `Add ${name} from Cresslet` } : {}),
-      }));
-      return `Linked to ${r.repo.fullName}`;
+      try {
+        const r = await api<{ repo: API.AppRepo }>(appPath(name, "/git/connect"), json("POST", {
+          owner, repo, initialSync: sync, ...(sync === "deploy" ? { message: `Add ${name} from Cresslet` } : {}),
+        }));
+        return `Linked to ${r.repo.fullName}`;
+      } catch (e) {
+        if (!created) throw e;
+        // The repository is there now: offered as one the user has, not created again.
+        await reloadRepos();
+        if (alive.current) {
+          setMode("link");
+          setPicked(created);
+          setInitial("deploy");
+        }
+        throw Object.assign(new Error(`Created ${created}, but couldn't link it: ${errorMessage(e)}. Link it below to try again.`), { code: gitCode(e) });
+      }
     });
   };
 
@@ -301,7 +328,7 @@ function Repository() {
       <h2 id="repo-title">Source control</h2>
       {linked ? (
         <>
-          <p id="repo-linked">{"Linked to "}<ExtLink href={linked.url}>{linked.fullName}</ExtLink>{` (${linked.defaultBranch}). To work on it in the studio: Open source, then Source control → Load ${linked.defaultBranch}.`}</p>
+          <p id="repo-linked">{"Linked to "}<ExtLink href={linked.url}>{linked.fullName}</ExtLink>{` (${linked.defaultBranch}).${deployed ? ` To work on it in the studio: Open source, then Source control → Load ${linked.defaultBranch}.` : ""}`}</p>
           <div className="row start">
             <button className="btn danger sm" type="button" id="repo-unlink" disabled={!!busy} onClick={() => {
               if (!confirm(`Unlink ${name} from ${linked.fullName}? The repository is left as it is.`)) return;
@@ -326,8 +353,8 @@ function Repository() {
       ) : (
         <form className="form" id="repo-form" onSubmit={link}>
           <p className="muted small">{deployed
-            ? `Starts from the source uploaded with ${name}'s live deploy (never local secrets: .env.local, .dev.vars and the like).`
-            : `Nothing is deployed yet: link a repository you have, or deploy ${name} first.`}</p>
+            ? `Starts from the source uploaded with ${name}'s live deploy. Left out: .env.local, .dev.vars and the like; .env files keep only their public entries.`
+            : `${name}'s live deploy has no source uploaded with it: link a repository you have, or deploy ${name} with its source first.`}</p>
           <fieldset className="field">
             <legend>Repository</legend>
             <label className="check"><input type="radio" name="repo-mode" checked={mode === "create"} disabled={!deployed} onChange={() => setMode("create")} /><span>Create a new repository</span></label>

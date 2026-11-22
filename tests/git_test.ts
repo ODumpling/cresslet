@@ -279,12 +279,14 @@ test("link an app that's already deployed: its live deploy's source is pushed, f
   const tree = await t.send("GET", "/v1/apps/shop/git/tree", tok);
   assert.deepEqual(tree.body.files.map((f: { path: string }) => f.path), [".env", "index.html", "logo.png", "src/main.ts"]);
 
-  // Deployed without its source (or nothing deployed): nothing to push, nothing linked.
+  // Deployed without its source: nothing to push, nothing linked (and the studio is told).
   assert.equal((await t.deploy(tok, "bare")).status, 201);
   t.gh.addRepo("octo", "bare", ["octo"]);
   const bare = await t.send("POST", "/v1/apps/bare/git/connect", tok, { owner: "octo", repo: "bare", initialSync: "deploy" });
   assert.equal(bare.status, 409);
   assert.equal(bare.body.error, "no_source");
+  assert.equal((await t.send("GET", "/v1/apps/bare", tok)).body.deploys[0].hasSource, false);
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.deploys[0].hasSource, true);
   assert.equal((await t.send("GET", "/v1/apps/bare", tok)).body.repo, null);
   assert.deepEqual(Object.keys(t.gh.files("octo/bare")), ["README.md"]);
   assert.equal((await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "sideways" })).status, 400);

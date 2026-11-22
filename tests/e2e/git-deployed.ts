@@ -43,6 +43,8 @@ const dep = await call("/v1/deploys", token, {
   ],
 });
 if (!dep.deploy) fail(`deploy: ${JSON.stringify(dep)}`);
+// One deployed without its source (an older CLI): there's nothing to push, so only a repository the user has.
+await call("/v1/deploys", token, { app: "bare", source: "cli", files: [{ path: "index.html", data: "bare" }] });
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
@@ -79,6 +81,12 @@ try {
   // The Overview shows it.
   await page.getByRole("link", { name: "Overview" }).click();
   await page.locator("#app-repo", { hasText: "octo/shop" }).waitFor();
+  // Deployed without its source: Create is off (no empty repository made for nothing), and it says why.
+  await page.goto(`${base}/apps/bare/settings`);
+  await page.locator("#repo-form", { hasText: "no source uploaded with it" }).waitFor();
+  if (!await page.getByRole("radio", { name: "Create a new repository" }).isDisabled()) fail("Create offered without source");
+  if (!await page.locator("#repo-link").isDisabled()) fail("Link enabled without a choice");
+  await page.screenshot({ path: `${out}/git-deployed-nosource.png`, fullPage: true });
   console.log("linked an already-deployed app from its Settings tab:", paths);
 } catch (e) {
   await page.screenshot({ path: `${out}/git-deployed-fail.png`, fullPage: true }).catch(() => {});

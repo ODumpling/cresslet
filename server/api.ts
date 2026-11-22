@@ -774,6 +774,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         files: d.file_count,
         server: !!d.has_server,
         source: d.source,
+        hasSource: existsSync(join(paths(cfg, a.id).deploy(d.id), "source")), // the project source came with it
         current: d.id === a.current_deploy_id,
         git: d.git_sha ? { sha: d.git_sha, branch: d.git_branch, repo: d.git_repo, url: d.git_repo ? `${githubSync(cfg)?.webUrl ?? cfg.git.webUrl}/${d.git_repo}/commit/${d.git_sha}` : null } : null,
       })),
