@@ -8,7 +8,7 @@ import { api, errorMessage } from "../lib/api.ts";
 import { refocus } from "../lib/focus.ts";
 import { bareUrl, keepOptions, keepParse, keepText, keepValue, pageName, untilText, VIS_LABEL } from "../lib/format.ts";
 import { useAlive, useLoad, useView } from "../lib/hooks.ts";
-import { logIn, useSession } from "../lib/session.ts";
+import { logIn, session, useSession } from "../lib/session.ts";
 import { toast } from "../lib/toast.tsx";
 import { SlugField, useSlug } from "../ui/SlugField.tsx";
 import { ExtLink, Icon, SrOnly } from "../ui/icons.tsx";
@@ -191,6 +191,7 @@ function PageRow({ p, reload }: { p: API.Page; reload: () => Promise<boolean> })
   /** New files at the same link: one HTML file, or a folder (all of the page's files are replaced). */
   async function replace(input: HTMLInputElement, folder: boolean) {
     if (!input.files?.length) return;
+    const account = session().token;
     try {
       let content;
       if (folder) {
@@ -198,6 +199,7 @@ function PageRow({ p, reload }: { p: API.Page; reload: () => Promise<boolean> })
         if (!files.some((x) => x.path === "index.html")) throw new Error("that folder has no index.html at its top level");
         content = await folderBody(files);
       } else content = { html: await input.files[0]!.text() }; // at least one (above)
+      if (session().token !== account) throw new Error("another account logged in meanwhile");
       await api(`/v1/pages/${encodeURIComponent(page.name)}`, { method: "PUT", body: JSON.stringify({ ...content, source: "studio" }) });
       toast(`Replaced ${pageName(page)} (same link)`);
     } catch (e) {
@@ -367,6 +369,7 @@ function NewArtifactDialog({ ref, reload }: { ref: Ref<DialogHandle>; reload: ()
     const dlg = dlgRef.current!; // mounted
     const mine = ++upload.gen;
     const chosen = pick; // what was chosen when Deploy was pressed (the file inputs are disabled meanwhile)
+    const account = session().token;
     upload.active = true;
     flushSync(() => setBusy(true));
     try {
@@ -376,6 +379,8 @@ function NewArtifactDialog({ ref, reload }: { ref: Ref<DialogHandle>; reload: ()
         return;
       }
       const content = chosen.html ? { html: await chosen.html.text() } : await folderBody(chosen.files);
+      // Left the page (or another account logged in) before it was sent: don't act on it. (Once sent, it finishes.)
+      if (!alive.current || !dlg.open || session().token !== account) throw new Error("you left the page before it was sent, so it wasn't deployed");
       const { page } = await api<{ page: API.Page }>("/v1/pages", {
         method: "POST",
         body: JSON.stringify({ ...content, name, title: chosen.title, visibility, retentionDays: keepParse(retention), source: "studio" }),

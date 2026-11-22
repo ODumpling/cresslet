@@ -19,10 +19,10 @@ export async function api<T = unknown>(path: string, init: Init = {}): Promise<T
   const sent = auth.token;
   if (sent) headers.authorization = `Bearer ${sent}`;
   const res = await fetch(path, { ...init, headers });
-  if (res.status === 401 && sent) {
-    // Token revoked (e.g. regenerated elsewhere): drop it and retry logged out. If the session changed meanwhile
-    // (another account logged in), the refusal was for the old token: just retry with the current one.
-    if (auth.token === sent) onExpired();
+  if (res.status === 401 && sent && auth.token === sent) {
+    // Token revoked (e.g. regenerated elsewhere): drop it and retry logged out. (If the session changed meanwhile,
+    // the refusal was for the old account: it's reported below, never sent again as the new one.)
+    onExpired();
     return api<T>(path, init);
   }
   const body = await res.json().catch(() => ({}));

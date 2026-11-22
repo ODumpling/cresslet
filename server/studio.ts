@@ -48,9 +48,9 @@ export interface Studio {
   close(): Promise<void>;
 }
 
-/** `dev`: serve through Vite (needs the devDependencies); else the build in `dist`. */
-export async function studio({ dev = false, dist = STUDIO_DIST } = {}): Promise<Studio> {
-  return dev ? devStudio() : builtStudio(dist);
+/** `dev`: serve through Vite (needs the devDependencies; `host`: the studio's hostname); else the build in `dist`. */
+export async function studio({ dev = false, dist = STUDIO_DIST, host = "localhost" } = {}): Promise<Studio> {
+  return dev ? devStudio(host) : builtStudio(dist);
 }
 
 function builtStudio(dist: string): Studio {
@@ -107,7 +107,7 @@ function reload(req: Request, release: string): Response {
   });
 }
 
-async function devStudio(): Promise<Studio> {
+async function devStudio(host: string): Promise<Studio> {
   // A devDependency: only loaded here.
   const { createServer } = await import("vite");
   const hmrPort = Number(process.env.CRESSLET_HMR_PORT) || 24678;
@@ -117,8 +117,8 @@ async function devStudio(): Promise<Studio> {
     // HMR on Vite's own WebSocket port (CRESSLET_HMR_PORT, default 24678), not this server's; a cache per port, so
     // two dev servers (say, two checkouts' e2e runs) don't share one.
     // Files Vite may serve (/@fs/…): the studio's own and its dependencies, never the data dir or the server.
-    // Any Host: the server only lets the configured studio host get this far (others redirect to it).
-    server: { middlewareMode: true, allowedHosts: true, hmr: { port: hmrPort }, fs: { strict: true, allow: [STUDIO_SRC, join(STUDIO_SRC, "../node_modules")] } },
+    // The studio's own host (the server redirects others to it before they get here; this covers the HMR socket too).
+    server: { middlewareMode: true, allowedHosts: [host], hmr: { port: hmrPort }, fs: { strict: true, allow: [STUDIO_SRC, join(STUDIO_SRC, "../node_modules")] } },
     cacheDir: join(STUDIO_SRC, `../node_modules/.vite/studio-${hmrPort}`),
     appType: "custom",
   });

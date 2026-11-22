@@ -9,7 +9,7 @@ import { api, errorMessage, json, meta } from "../lib/api.ts";
 import { refocus } from "../lib/focus.ts";
 import { keepOptions, keepParse, keepText, keepValue, VIS_LABEL, when } from "../lib/format.ts";
 import { useAlive, useLoad, useView } from "../lib/hooks.ts";
-import { logOut, session, sessionExpired, setAccount, useSession } from "../lib/session.ts";
+import { logOut, rememberAfterLogin, session, sessionExpired, setAccount, useSession } from "../lib/session.ts";
 import { toast } from "../lib/toast.tsx";
 import { FormError } from "../ui/bits.tsx";
 import { Icon } from "../ui/icons.tsx";
@@ -22,7 +22,9 @@ export function Settings() {
   // loaded): the page reloads for no account, and goes there if the account doesn't load (below).
   const [entered] = useState(() => !!token || sessionExpired());
   useEffect(() => {
-    if (!entered) void navigate({ to: "/", replace: true });
+    if (entered) return;
+    rememberAfterLogin("#/settings"); // back here once logged in (#82)
+    void navigate({ to: "/", replace: true });
   }, [entered, navigate]);
   if (!entered) return null;
   return <SettingsPage key={token ?? ""} />;

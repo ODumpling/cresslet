@@ -49,7 +49,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
   }
   // The studio's pages: its build, or Vite in dev (CRESSLET_STUDIO_DEV=1, npm run dev).
   const studioDev = process.env.CRESSLET_STUDIO_DEV === "1";
-  const ui = await studio({ dev: studioDev });
+  const ui = await studio({ dev: studioDev, host: new URL(rootUrl(cfg)).hostname });
   // Each app's crons fire on the node that owns it (checked again at dispatch: runs queue).
   const run = scheduled(cfg, store, runtime);
   const scheduler = new Scheduler(
