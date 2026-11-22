@@ -1109,3 +1109,25 @@ test("stack: undo a change below the top (the real three-way merge): clean, conf
   const w = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${d1.change.id}`, tok);
   assert.deepEqual([w.status, w.body.error, w.body.paths], [409, "merge_unresolvable", ["logo.bin"]]);
 }));
+
+test("stack: undo refuses a change with a merge in it, and a result holding a file where a folder is", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  // Change 1 took in main (a merge): undoing it would undo main's work too.
+  const c1 = await add("main", linked.sha, "Add a", { "a.txt": "a\n" });
+  const theirs = t.gh.write(t.gh.repo("octo/shop"), "main", { "m.txt": "m\n" });
+  const m = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c1.branch, baseSha: c1.sha, files: with_({ "a.txt": "a\n", "m.txt": "m\n" }), mergeParent: theirs });
+  assert.equal(m.status, 200, JSON.stringify(m.body));
+  const c2 = await add(c1.branch, m.body.sha, "Add b", { "a.txt": "a\n", "m.txt": "m\n", "b.txt": "b\n" });
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.deepEqual([u.status, u.body.error], [409, "undo_merge"]);
+
+  // Change 3 deleted the file `dir`, change 4 added `dir/x`: undoing 3 would hold both.
+  const c3 = await add(c2.branch, c2.sha, "Add dir", { "a.txt": "a\n", "m.txt": "m\n", "b.txt": "b\n", dir: "d\n" });
+  const c4 = await add(c3.branch, c3.sha, "Drop dir", { "a.txt": "a\n", "m.txt": "m\n", "b.txt": "b\n" });
+  await add(c4.branch, c4.sha, "Add dir/x", { "a.txt": "a\n", "m.txt": "m\n", "b.txt": "b\n", "dir/x": "x\n" });
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}`, tok);
+  assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["dir"]]);
+}));

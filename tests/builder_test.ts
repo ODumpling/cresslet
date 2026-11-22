@@ -468,7 +468,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     if (path.endsWith("/git/stack") && init.method === "POST") {
       duringStack();
       if (opts.stackError) throw Object.assign(new Error(opts.stackError), { status: 409, code: opts.stackError });
-      if (body.from !== "main" && body.from !== "feat/s/1-one") throw Object.assign(new Error("not a change of a stack"), { status: 409, code: "not_on_stack" });
+      if (!["main", "feat/s/1-one", "feat/s/2-two"].includes(body.from)) throw Object.assign(new Error("not a change of a stack"), { status: 409, code: "not_on_stack" });
       if (body.files.some((f: Json) => f.data === "same")) return { changed: false, sha: body.baseSha };
       return { changed: true, sha: String(++n).padStart(40, "c"), branch: "feat/s/2-two", change: { position: 2 }, stack: { id: "stk_1", name: "s" } };
     }
@@ -664,10 +664,25 @@ test("git: undoing a change loads the result; clean, it's committed at once as \
   assert.deepEqual(c.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/stack/undo"]); // nothing committed
   c.files.list = [{ path: "a.txt", data: "<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n" }];
   await assert.rejects(c.git.commitChange("Fix it", "resolve"), (e: Json) => e.code === "conflicts_left");
+  // Pushing it (or opening a pull request, switching branch): a change of its own too, never a commit onto the top.
+  await assert.rejects(c.git.sync("Update"), (e: Json) => e.code === "conflicts_left");
   c.files.list = [{ path: "a.txt", data: "x" }];
-  await c.git.commitChange("Fix it", "resolve"); // a request's commit: the undo's title
-  assert.equal(c.calls.at(-1)!.body.title, "Undo: Add a");
+  await c.git.sync("Update");
+  assert.deepEqual([c.calls.at(-1)!.path.split("/git")[1], c.calls.at(-1)!.body.title], ["/stack", "Undo: Add a"]);
   assert.equal(c.state.undo, undefined);
+
+  // Edits here: committed first as a change of their own; the undo goes on that (the server's top is the new one).
+  const d = fakeGit({ onDefault: false });
+  d.state.activeBranch = "feat/s/1-one";
+  d.state.dirty = true;
+  const u = await d.git.undo({ id: "chg_1" }, top);
+  assert.deepEqual(d.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/stack", "/stack/undo", "/stack"]);
+  assert.deepEqual([d.calls[0].body.title, d.calls[2].body.title, u.committed], ["Edits made in the studio", "Undo: Add a", true]);
+  // The stack not as the caller saw it: nothing done.
+  const e = fakeGit({ onDefault: false });
+  e.state.activeBranch = "feat/s/1-one";
+  await assert.rejects(e.git.undo({ id: "chg_1" }, { ...top, sha: "f".repeat(40) }), (x: Json) => x.code === "changed");
+  assert.deepEqual(e.calls, []);
 });
 
 test("git: switching away from the default branch with edits puts them on a branch of their own first", async () => {

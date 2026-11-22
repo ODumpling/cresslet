@@ -853,6 +853,8 @@ export function undoPlan(ctx: Ctx, changeId: string): Promise<{ change: string; 
     const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
     const top = s.at(-1)!;
     if (top.id === c.id) throw new HttpError(409, `${c.branch} is the stack's top: undo it by going back to the change below`, "top");
+    // At the limit the next commit joins the top change: the undo would too, under the top's title.
+    if (s.length >= MAX_STACK) throw new HttpError(409, `the stack has ${MAX_STACK} changes, the most it can: land or fold some first`, "stack_full");
     const heads = await Promise.all([c, top].map((x) => provider.branchHead(r, x.branch)));
     const off = [c, top].find((x, i) => heads[i] && heads[i] !== x.sha);
     if (off) throw new HttpError(409, `${off.branch} was pushed to on GitHub: pull it in, or carry on from it, first`, "moved");

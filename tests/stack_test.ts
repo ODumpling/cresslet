@@ -628,6 +628,8 @@ test("stack: at its most changes, a turn joins the top change and says so", asyn
   const j2 = k;
   const [s] = await readStacks(t.ctx);
   assert.deepEqual([s.id, s.changes.length, s.changes.at(-1)!.sha], [id, MAX_STACK, j2.sha]);
+  // An undo would join it too (under the top's title): refused.
+  await assert.rejects(undoPlan(t.ctx, s.changes[0].id), (e) => (e as HttpError).code === "stack_full");
 });
 
 test("stack: landing up to a change moves the default branch to it change by change; each pull request merged with its own turn", async () => {

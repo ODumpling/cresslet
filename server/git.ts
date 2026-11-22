@@ -470,15 +470,24 @@ export class GitHub implements SourceControlProvider {
   /**
    * Change `change` (cut from `parent`) undone on `top`, for the workspace: a three-way merge of `top` with `parent`,
    * `change` as the base. Every file of the result under `subdir`, as the workspace holds them; one later changes also
-   * touched where the change did is a conflict, both versions between markers (`top` / `undo`). Binary files both
-   * sides changed, and anything the change touched that the studio doesn't hold (outside `subdir`, dotenv files),
-   * can't be undone here (409 merge_unresolvable).
+   * touched where the change did is a conflict, both versions between markers (`now` / `undo <label>`). Binary files
+   * both sides changed, and anything the change touched that the studio doesn't hold (outside `subdir`, dotenv files),
+   * can't be undone here (409 merge_unresolvable). A change with a merge in it (the default branch merged in, a push
+   * pulled in) isn't undone either: that would undo the merged work too (409 undo_merge).
    */
   async revert(r: Repo, input: { change: string; parent: string; top: string; subdir: string; label: string }) {
+    const cmp = await this.ok<{ status: string; total_commits?: number; commits?: { parents: unknown[] }[] }>("GET", this.#path(r, `/compare/${input.parent}...${input.change}`));
+    const commits = cmp.commits ?? [];
+    if (cmp.status !== "ahead" || (cmp.total_commits ?? commits.length) > commits.length || commits.some((c) => c.parents.length !== 1)) {
+      throw new HttpError(409, `${input.label} has a merge in it (from the default branch, or pulled in from GitHub): undoing it would undo that too, so it isn't done in the studio`, "undo_merge");
+    }
     const full = await Promise.all([input.change, input.top, input.parent].map((sha) => this.#entries(r, sha))) as [Entries, Entries, Entries];
     const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
     // (Taking those from the parent would need a commit the workspace can't make.)
-    if (outside.both.length || outside.take.length) throw unresolvable([...outside.both, ...outside.take.map((x) => x.path)].sort());
+    const refused = [...outside.both, ...outside.take.map((x) => x.path)].sort();
+    if (refused.length) {
+      throw Object.assign(new HttpError(409, `${refused.join(", ")} can't be undone in the studio (outside what it holds, or binary): undo it on GitHub`, "merge_unresolvable"), { extra: { paths: refused } });
+    }
     return this.#mergeHeld(r, full, input.subdir, outside, ["now", `undo ${input.label}`]);
   }
 
@@ -533,6 +542,9 @@ export class GitHub implements SourceControlProvider {
       out.set(p, new TextEncoder().encode(`<<<<<<< ${input.head}\n${nl(ot)}=======\n${nl(tt)}>>>>>>> ${input.into}\n`));
     });
     if (binary.length) throw unresolvable(binary.map((p) => prefix + p));
+    // A file where the result has a folder (a file deleted, then one added under its name): can't be held.
+    const clash = [...out.keys()].filter((p) => [...out.keys()].some((q) => q.startsWith(p + "/"))).sort();
+    if (clash.length) throw unresolvable(clash.map((p) => prefix + p));
     // Dotenv files (merged outside the studio's part): the result's public entries, as the workspace holds them.
     for (const x of envs) {
       const d = await this.#blob(r, x.sha!);

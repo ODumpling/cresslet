@@ -156,6 +156,11 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
   async function syncNow(message: string, snap?: { files: GitFile[]; rev: number }): Promise<{ sha: string; changed: boolean; files: GitFile[] }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
+    // An undo being finished is a change of its own (its title, its markers checked), never a commit onto the top.
+    if (s.undo && !s.mergeParent) {
+      if (snap) throw Object.assign(new Error("the stack changed meanwhile: undo again from it"), { code: "changed" });
+      return changeNow(message, "", false);
+    }
     const rev = snap?.rev ?? revision(); // before the snapshot: a change after it keeps the workspace dirty
     const files = snap?.files ?? await o.files();
     // A merge being resolved: not committed while a conflicted file still has its markers.
@@ -222,6 +227,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     return { sha: r.sha, changed: true, files, change: r.change, stack: r.stack, submitted: r.submitted, joined: r.joined };
   }
 
+  /** The stack isn't as the caller saw it. */
+  const stackChanged = () => Object.assign(new Error("the stack changed meanwhile: look at it again"), { code: "changed" });
   /** Changes made since `rev` would be overwritten: stop instead. */
   const unchangedSince = (rev: number, what: string) => {
     if (revision() !== rev) throw Object.assign(new Error(`the workspace changed while ${what}: nothing was overwritten, try again`), { code: "changed" });
@@ -348,8 +355,15 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * Goes back to a change of the stack: changes here are committed first (as a change, set aside with the later
      * ones), the changes above it are set aside (server/stack.ts), and its files are loaded. The next change goes on it.
      */
-    goBack: (change: StackChange) => serial(async () => {
-      if (o.state()!.dirty) await changeNow("Edits made in the studio", "", false);
+    goBack: (change: StackChange, top?: StackChange) => serial(async () => {
+      // `top`: the stack's top the caller saw (undoing it: nothing added on it since).
+      const was = o.state()!;
+      if (top && (was.activeBranch !== top.branch || was.headSha !== top.sha)) throw stackChanged();
+      let expect = top && { top: top.id, topSha: top.sha };
+      if (was.dirty) {
+        const made = await changeNow("Edits made in the studio", "", false);
+        if (expect && made.changed && made.change) expect = { top: made.change.id, topSha: made.sha };
+      }
       if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: go back again"), { code: "changed" });
       // Its files first: the server sets the later changes aside only once they're in hand and nothing changed here.
       let r!: { change: StackChange; stack: { id: string }; now: string[]; setAside: StackChange[]; pullErrors?: PullError[] };
@@ -357,7 +371,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       await pullNow(change.branch, change.sha, {
         rev,
         before: async () => {
-          r = await post("/stack/back", { change: change.id, sha: change.sha });
+          r = await post("/stack/back", { change: change.id, sha: change.sha, ...expect });
           // Edited while the server set them aside: put back the ones it did (nothing was built there), keep the edit.
           if (revision() !== rev && r.now.length) {
             await post("/stack/restore", { stack: r.stack.id, only: r.now }).catch(() => {
@@ -428,12 +442,14 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * (the next commit: a request's, Push or Deploy). Resolves to the conflicts (none: committed).
      */
     undo: (change: StackChange, top: StackChange) => serial(async () => {
+      if (o.state()!.activeBranch !== top.branch || o.state()!.headSha !== top.sha) throw stackChanged();
+      // Edits here: committed first, as a change of their own (the new top).
       if (o.state()!.dirty) await changeNow("Edits made in the studio", "", false);
+      if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: undo again"), { code: "changed" });
       const s = o.state()!;
-      if (s.activeBranch !== top.branch || s.headSha !== top.sha) throw Object.assign(new Error("the stack changed meanwhile: look at it again"), { code: "changed" });
       const rev = revision();
       const r = await o.api<{ title: string; top: { branch: string; sha: string }; conflicts: string[]; files: GitFile[] }>(path(`/stack/undo?change=${encodeURIComponent(change.id)}`));
-      if (r.top.sha !== s.headSha) throw Object.assign(new Error("the stack changed meanwhile: look at it again"), { code: "changed" });
+      if (r.top.branch !== s.activeBranch || r.top.sha !== s.headSha) throw stackChanged();
       unchangedSince(rev, "loading the undo");
       const holding = () => set({ dirty: true, undo: { title: r.title, conflicts: r.conflicts } });
       try {
@@ -442,11 +458,12 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         if (!(e as { filesWritten?: boolean }).filesWritten) throw e;
         await holding(); // its files are in: the undo is loaded either way
         if (!r.conflicts.some((p) => /(?:^|\/)package(?:-lock)?\.json$/.test(p))) throw e;
-        return { conflicts: r.conflicts, title: r.title };
+        return { conflicts: r.conflicts, title: r.title, committed: false };
       }
       await holding();
-      if (!r.conflicts.length) await changeNow(r.title, "");
-      return { conflicts: r.conflicts, title: r.title };
+      // No conflicts: committed now (nothing to commit: later changes had undone it already).
+      if (!r.conflicts.length) return { conflicts: [], title: r.title, committed: (await changeNow(r.title, "")).changed };
+      return { conflicts: r.conflicts, title: r.title, committed: false };
     }),
     /** Folds a change into the one below it (server/stack.ts fold). The workspace on it stays on it: same commit. */
     fold: (change: StackChange, into: StackChange) => post<{ change: StackChange; dropped: string; pullErrors?: PullError[] }>("/stack/fold", { change: change.id, into: into.id }),

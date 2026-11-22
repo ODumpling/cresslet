@@ -483,14 +483,15 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                   const below = stack.changes[stack.changes.indexOf(change) - 1];
                   if (!below || !confirm(`Undo the top change, "${change.title}"? That's going back to change ${below.position}: "${change.title}" is set aside (restorable until something is committed on change ${below.position}).`)) return;
                   setStackBusy(true);
-                  void g.goBack(below).then(() => toast(`Back on change ${below.position}`, 8000), (e) => toast(`Couldn't go back: ${errorMessage(e)}`, 10000))
+                  void g.goBack(below, top).then(() => toast(`Back on change ${below.position}`, 8000), (e) => toast(`Couldn't go back: ${errorMessage(e)}`, 10000))
                     .finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
                   return;
                 }
-                if (!confirm(`Undo change ${change.position}, "${change.title}"? A new change on top reverses it, keeping the ${stack.changes.length - change.position} after it.${gitState.dirty ? " Changes not pushed yet are committed first." : ""}`)) return;
+                const later = stack.changes.length - 1 - stack.changes.indexOf(change);
+                if (!confirm(`Undo change ${change.position}, "${change.title}"? A new change on top reverses it, keeping the ${later} after it.${gitState.dirty ? " Changes not pushed yet are committed first." : ""}`)) return;
                 setStackBusy(true);
                 void g.undo(change, top).then((r) => {
-                  if (!r.conflicts.length) return void toast(`Committed "${r.title}" as a new change`, 8000);
+                  if (!r.conflicts.length) return void toast(r.committed ? `Committed "${r.title}" as a new change` : `Nothing to undo: the later changes already undid "${change.title}"`, 8000);
                   // Conflicts: the workspace holds them with markers; the AI builder is offered to resolve them.
                   toast(`"${r.title}" has conflicts in ${r.conflicts.join(", ")}: resolve them (the AI builder can), then it's committed with the next request or Push.`, 15000);
                   builder.current?.prefill(`Resolve the conflict markers in ${r.conflicts.join(", ")}: this undoes "${change.title}" while keeping the later changes.`);
