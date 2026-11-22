@@ -6,7 +6,7 @@ import { Container } from "../../../vendor/cresslet-container/cresslet-container
 import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWithTab, javascript, json, keymap, oneDark } from "../../../vendor/editor.js";
 import { FitAddon, Terminal } from "../../../vendor/terminal.js";
 import { fromTree, ignored, migrateDeployKeys, projects, toTree, type Deploy, type StoredProject } from "../../../store.ts";
-import { createCresslet, localOnly, privateDotenvLines, projectSources, sourceDigest, type CressletConfig } from "../../../cresslet-plugin.ts";
+import { createCresslet, localOnly, mergeDotenv, privateDotenvLines, projectSources, sourceDigest, type CressletConfig } from "../../../cresslet-plugin.ts";
 import { createGitWorkspace, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
 import { session } from "../../lib/session.ts";
@@ -497,8 +497,9 @@ export class Engine {
       if (exists) {
         const now = await c.fs.readFile(path, typeof data === "string" ? "utf8" : undefined).catch(() => null);
         if (dotenv.test(f.path) && typeof now === "string" && typeof data === "string") {
-          // Its own lines first: incoming public entries come last, so they win over any stale one among them.
-          data = [...privateLines(now), data.replace(/\n*$/, "")].filter(Boolean).join("\n") + "\n";
+          // The repository's public entries, exactly, and this file's own private lines; if they can't both be kept,
+          // the file is left as it is (its secrets aren't dropped).
+          data = mergeDotenv(now, data) ?? now;
         }
         if (typeof data === "string" ? now === data : now instanceof Uint8Array && now.length === data.length && now.every((b, i) => b === (data as Uint8Array)[i])) continue;
       }
@@ -512,11 +513,14 @@ export class Engine {
     if (this.current) await this.openFile(this.current);
     if (deps || this.installFailed) {
       this.term.writeln("\x1b[36mdependencies changed: npm install\x1b[0m");
-      // A lockfile it rewrites is a change to commit (it differs from the commit loaded).
+      // A lockfile it rewrites is a change to commit (it differs from the commit loaded), even inside the quiet window.
+      const lock = () => c.fs.readFile(`${wd}/package-lock.json`, "utf8").catch(() => null);
+      const before = await lock();
       const p = await c.spawn("jsh", ["-c", "npm install"], { cwd: wd });
       void p.output.pipeTo(new WritableStream({ write: (d) => this.term.write(d) })).catch(() => {});
       await p.input.close().catch(() => {});
       this.installFailed = await p.exit !== 0; // tried again on the next pull, even if nothing changes then
+      if (await lock() !== before) this.changed();
       if (this.installFailed) throw Object.assign(new Error("npm install failed (see the terminal)"), { filesWritten: true });
     }
   }

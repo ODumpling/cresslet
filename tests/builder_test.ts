@@ -685,3 +685,21 @@ test("source digests compare bytes, whichever way a file was sent", async () => 
   assert.equal(sourceDigest([{ path: "a", data: "héllo" }]), sourceDigest([{ path: "a", data: Buffer.from("héllo").toString("base64"), encoding: "base64" }]));
   assert.notEqual(sourceDigest([{ path: "a", data: "x" }]), sourceDigest([{ path: "a", data: "y" }]));
 });
+
+test("dotenv hydration: the repository's public entries exactly, the file's own private lines kept", async () => {
+  const { mergeDotenv, publicDotenv } = await import("../studio/cresslet-plugin.ts" as string);
+  // Plain: private kept, public replaced (a stale one among the private lines dropped).
+  const out = mergeDotenv("VITE_API=old\nSECRET=s\nVITE_MODE=stale\n", "VITE_API=new\nVITE_MODE=new\n");
+  assert.equal(publicDotenv(out), "VITE_API=new\nVITE_MODE=new\n");
+  assert.match(out, /SECRET=s/);
+  assert.doesNotMatch(out, /stale|old/);
+  // A multi-line private value: kept intact, after the public entries, and the export is still exactly the incoming.
+  const pem = "KEY=\"-----BEGIN\nabc\n-----END\"\n";
+  const merged = mergeDotenv(pem, "VITE_API=new\n");
+  assert.equal(publicDotenv(merged), "VITE_API=new\n");
+  assert.ok(merged.includes(pem.trimEnd()));
+  // No final newline upstream: still exact.
+  assert.equal(publicDotenv(mergeDotenv("SECRET=s\n", "VITE_A=1")), "VITE_A=1");
+  // Nothing private: the incoming file as is.
+  assert.equal(mergeDotenv("VITE_A=0\n", "VITE_A=1\n"), "VITE_A=1\n");
+});

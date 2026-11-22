@@ -80,6 +80,30 @@ export function privateDotenvLines(text: string): string[] {
 }
 
 /**
+ * A local dotenv file updated to the repository's public entries (`incoming`, as `publicDotenv` gives them), keeping
+ * its own private lines. The result's public export is exactly `incoming` (or `null`: no layout keeps both, so the
+ * caller leaves the file alone). A stale standalone public line among the private ones, for a key `incoming` sets,
+ * is dropped (it would override the new value).
+ */
+export function mergeDotenv(local: string, incoming: string): string | null {
+  const keys = new Set([...incoming.matchAll(/^[ \t]*(?:export[ \t]+)?([A-Za-z_][\w.-]*)[ \t]*=/gm)].map((m) => m[1]));
+  const own = privateDotenvLines(local).filter((l) => {
+    const m = SAFE_ENTRY.exec(l);
+    return !(m && /^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[2]!) && keys.has(m[2]!));
+  });
+  if (!own.length) return incoming;
+  const head = incoming.replace(/\n*$/, "\n");
+  // A blank line between them, or a final newline, decides how the export ends: whichever keeps it exact.
+  for (const sep of ["", "\n"]) {
+    for (const tail of ["", "\n"]) {
+      const out = head + sep + own.join("\n") + tail;
+      if (publicDotenv(out) === incoming) return out;
+    }
+  }
+  return null;
+}
+
+/**
  * `import ... from "cresslet"` in server code: the SDK the studio ships (vendor/cresslet-sdk.js, `npm run vendor:sdk`),
  * as a virtual module, not the project's node_modules/cresslet (the CLI package: esbuild & co., maybe not installed
  * yet, maybe another version than this studio's preview and platform).
