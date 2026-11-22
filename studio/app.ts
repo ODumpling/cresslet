@@ -12,7 +12,7 @@ import type * as API from "./api-types.ts";
 
 /** An element of index.html by id; `T`: its element type, when more than HTMLElement's members are used. */
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-type Child = Node | string | null | undefined | false;
+type Child = Node | string | null | undefined;
 /** Properties `el` sets (Object.assign): any of the element's own, `dataset` merged in. */
 type Props<K extends keyof HTMLElementTagNameMap> = Partial<Omit<HTMLElementTagNameMap[K], "dataset" | "style">> & { dataset?: Record<string, string> };
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, { dataset, ...props }: Props<K> = {}, ...children: Child[]): HTMLElementTagNameMap[K] => {

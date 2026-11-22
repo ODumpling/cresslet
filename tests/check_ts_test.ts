@@ -8,13 +8,16 @@ test("check-ts: flags JavaScript outside the allowlist and opt-out comments, not
   const text: Record<string, string> = {
     "server/x.ts": `// fine\nconst a = 1;\n// ${opt}\n`,
     "studio/y.ts": "// @ts-expect-error: a reason\n",
+    "studio/w.ts": `x;\n/* @ts-${"expect-error"} */\n`,
     "templates/react/src/z.ts": `// ${opt}\n`,
   };
-  const files = ["studio/new.js", "tests/e2e/x.mjs", "studio/vendor/editor.js", "tests/fixtures/sdk-contract.js",
+  const files = ["studio/new.js", "studio/vendor/hand-written.js", "tests/e2e/x.mjs", "studio/vendor/editor.js", "tests/fixtures/sdk-contract.js",
     "templates/vanilla/main.js", "scripts/vendor/node_modules/esbuild/lib/main.js", ...Object.keys(text)];
   assert.deepEqual(check(files, (f) => text[f] ?? ""), [
     "studio/new.js: JavaScript; write it in TypeScript (or allow it in scripts/check-ts.ts, with why)",
+    "studio/vendor/hand-written.js: JavaScript; write it in TypeScript (or allow it in scripts/check-ts.ts, with why)",
     "tests/e2e/x.mjs: JavaScript; write it in TypeScript (or allow it in scripts/check-ts.ts, with why)",
     `server/x.ts:3: ${opt}; fix the type error, or use @ts-expect-error with a reason`,
+    "studio/w.ts:2: @ts-expect-error needs a reason after it",
   ]);
 });

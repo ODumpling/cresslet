@@ -6,7 +6,9 @@ import { join } from "node:path";
 
 /** JavaScript that stays JavaScript, and why. */
 export const ALLOW_JS: [RegExp, string][] = [
-  [/^studio\/vendor\//, "vendored bundles: scripts/vendor (editor, terminal, anthropic), npm run vendor (cresslet-container), npm run vendor:sdk"],
+  [/^studio\/vendor\/(?:editor|terminal|anthropic)\.js$/, "vendored bundles built by scripts/vendor"],
+  [/^studio\/vendor\/cresslet-container\//, "cresslet-container's dist, vendored by npm run vendor"],
+  [/^studio\/vendor\/cresslet-sdk\.js$/, "the cresslet SDK, vendored from cresslet-cli by npm run vendor:sdk"],
   [/^tests\/fixtures\/sdk-contract\.js$/, "the SDK's shared contract cases, vendored from cresslet-cli by npm run vendor:sdk"],
   [/^templates\//, "starter apps users get (their own code, whatever they write it in)"],
 ];
@@ -18,6 +20,8 @@ const JS = /\.(?:js|mjs|cjs|jsx)$/;
 const TS = /\.(?:ts|tsx|mts|cts)$/;
 // Built from parts, so this file doesn't trip its own check.
 const OPT_OUT = new RegExp(`@ts-${"(?:ignore|nocheck)"}\\b`);
+/** `@ts-expect-error` with nothing after it (but a comment's end). */
+const BARE_EXPECT_ERROR = new RegExp(`(?://|/\\*)\\s*@ts-${"expect-error"}\\s*(?:\\*+/\\s*)?$`);
 
 /** Every problem with these repo-relative paths (`read`: a file's text). */
 export function check(files: string[], read: (path: string) => string): string[] {
@@ -27,7 +31,10 @@ export function check(files: string[], read: (path: string) => string): string[]
     if (JS.test(f) && !ALLOW_JS.some(([re]) => re.test(f))) problems.push(`${f}: JavaScript; write it in TypeScript (or allow it in scripts/check-ts.ts, with why)`);
     if (TS.test(f) && !FOREIGN_TS.some((re) => re.test(f))) {
       const lines = read(f).split("\n");
-      lines.forEach((l, i) => OPT_OUT.test(l) && problems.push(`${f}:${i + 1}: ${OPT_OUT.exec(l)![0]}; fix the type error, or use @ts-expect-error with a reason`));
+      lines.forEach((l, i) => {
+        if (OPT_OUT.test(l)) problems.push(`${f}:${i + 1}: ${OPT_OUT.exec(l)![0]}; fix the type error, or use @ts-expect-error with a reason`);
+        if (BARE_EXPECT_ERROR.test(l)) problems.push(`${f}:${i + 1}: @ts-expect-error needs a reason after it`);
+      });
     }
   }
   return problems;

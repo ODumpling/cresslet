@@ -3,7 +3,7 @@
 import { createStartBuilder, isStartApp } from "./start-build.js";
 import type { CommandContext, Container, FileSystemTree, ProjectWorker } from "./vendor/cresslet-container/cresslet-container.js";
 import type { Plugin } from "./vendor/cresslet-container/types/vendor/esbuild-wasm.js";
-import type { FileItem, FileOp, FileResult, FromWorker, HeaderList, ResponseMessage, ToWorker } from "./server-worker-protocol.ts";
+import type { FileItem, FileOp, FileResult, FileResults, FromWorker, HeaderList, ResponseMessage, ToWorker } from "./server-worker-protocol.ts";
 import type { Project } from "./store.js";
 
 const enc = new TextEncoder();
@@ -336,26 +336,27 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         await c.fs.writeFile(`${filesDir}/blobs/${key}`, m.bytes);
         index[key] = { size: m.bytes.byteLength, contentType: m.contentType, updatedAt: Date.now() };
         await c.fs.writeFile(indexPath, JSON.stringify(index));
-        return {};
+        return {} satisfies FileResults["put"];
       }
       if (m.op === "get") {
-        if (!index[key]) return { found: false };
+        if (!index[key]) return { found: false } satisfies FileResults["get"];
         // VFS bytes: on an ArrayBuffer (structured-cloned to the worker)
         const bytes = await c.fs.readFile(`${filesDir}/blobs/${key}`) as Uint8Array<ArrayBuffer>;
-        return { found: true, bytes, contentType: index[key].contentType };
+        // `||`: entries written before put() defaulted it stored `false`
+        return { found: true, bytes, contentType: index[key].contentType || "application/octet-stream" } satisfies FileResults["get"];
       }
       if (m.op === "delete") {
         delete index[key];
         await c.fs.rm(`${filesDir}/blobs/${key}`, { force: true });
         await c.fs.writeFile(indexPath, JSON.stringify(index));
-        return {};
+        return {} satisfies FileResults["delete"];
       }
       if (m.op === "list") {
         const prefix = m.prefix ?? "";
         return {
           items: Object.entries(index).filter(([k]) => k.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b))
-            .map(([k, v]) => ({ key: k, ...v })),
-        };
+            .map(([k, v]) => ({ key: k, ...v, contentType: v.contentType || "application/octet-stream" })),
+        } satisfies FileResults["list"];
       }
       throw new Error(`unknown op ${(m as { op: unknown }).op}`);
     }
