@@ -1605,7 +1605,7 @@ function drawOrg(d) {
           if (!confirm(me ? `Leave ${name}? You lose access to its apps.` : `Remove ${personText(m)} from ${name}? They lose access to its apps.`)) throw CANCELLED;
           await api(memberUrl(m.id), { method: "DELETE" });
         }, me ? `You left ${name}` : `Removed ${personText(m)}`, () => {
-          if (me && !d.canManage) {
+          if (me && d.role) { // you left (as a site admin you still manage it, but its page is the admin's)
             loadMyOrgs();
             location.hash = "#/orgs";
           } else again(() => $("org-members-title"));

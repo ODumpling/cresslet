@@ -307,7 +307,7 @@ export class Store implements RateHits {
     return this.db.all(
       `SELECT ac.*, (SELECT MAX(last_used_at) FROM tokens t WHERE t.account_id = ac.id) AS last_used_at,
          (SELECT count(*) FROM tokens t WHERE t.account_id = ac.id) AS tokens,
-         (SELECT count(*) FROM apps a WHERE a.account_id = ac.id AND a.deleted_at IS NULL) AS apps
+         (SELECT count(*) FROM apps a WHERE a.account_id = ac.id AND a.org_id IS NULL AND a.deleted_at IS NULL) AS apps
        FROM accounts ac ORDER BY ac.created_at, ac.id`,
     );
   }
@@ -345,11 +345,16 @@ export class Store implements RateHits {
         accountId, email, a.disabled_github_id, a.disabled_github_id,
       );
       if (other) return "taken";
-      await this.db.run(
-        `UPDATE accounts SET disabled_at = NULL, email = ?, github_id = ?, disabled_email = NULL, disabled_github_id = NULL
-         WHERE id = ?`,
-        email, a.disabled_github_id, accountId,
-      );
+      try {
+        await this.db.run(
+          `UPDATE accounts SET disabled_at = NULL, email = ?, github_id = ?, disabled_email = NULL, disabled_github_id = NULL
+           WHERE id = ?`,
+          email, a.disabled_github_id, accountId,
+        );
+      } catch (e) {
+        if (isUniqueViolation(e)) return "taken"; // taken meanwhile (a signup doesn't take this lock)
+        throw e;
+      }
       return "ok";
     });
   }
@@ -711,7 +716,7 @@ export class Store implements RateHits {
   }
   collaborators(appId: string): Promise<(Collaborator & { email: string; github_login: string | null })[]> {
     return this.db.all<Collaborator & { email: string; github_login: string | null }>(
-      `SELECT c.app_id, c.account_id, c.role, c.created_at, ac.email, ac.github_login
+      `SELECT c.app_id, c.account_id, c.role, c.created_at, COALESCE(ac.disabled_email, ac.email) AS email, ac.github_login
        FROM collaborators c JOIN accounts ac ON ac.id = c.account_id
        WHERE c.app_id = ? ORDER BY c.created_at, c.rowid`,
       appId,
@@ -825,7 +830,7 @@ export class Store implements RateHits {
   }
   orgMembers(orgId: string): Promise<{ account_id: string; role: OrgRole; created_at: number; email: string; github_login: string | null; disabled_at: number | null }[]> {
     return this.db.all(
-      `SELECT m.account_id, m.role, m.created_at, ac.email, ac.github_login, ac.disabled_at
+      `SELECT m.account_id, m.role, m.created_at, COALESCE(ac.disabled_email, ac.email) AS email, ac.github_login, ac.disabled_at
        FROM org_members m JOIN accounts ac ON ac.id = m.account_id WHERE m.org_id = ? ORDER BY m.created_at, m.rowid`,
       orgId,
     );

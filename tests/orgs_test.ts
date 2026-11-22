@@ -95,6 +95,12 @@ test("site admins: list accounts, invite, withdraw, disable and enable, roles", 
     assert.equal(list.body.totals.disabled, 1);
 
     // Enable: same account, signs in again.
+    // Enabling is refused while another account has its email; nothing else changes then.
+    await t.srv.store.db.run("UPDATE accounts SET email = 'dev@b.co' WHERE id = ?", boss.id);
+    const clash = await t.send("PATCH", `/v1/admin/accounts/${dev.id}`, "adm", { disabled: false, siteAdmin: true });
+    assert.equal(clash.status, 409);
+    assert.equal((await t.srv.store.accountById(dev.id))!.role, null);
+    await t.srv.store.db.run("UPDATE accounts SET email = 'boss@b.co' WHERE id = ?", boss.id);
     const en = await t.send("PATCH", `/v1/admin/accounts/${dev.id}`, boss.token, { disabled: false });
     assert.equal(en.body.account.status, "active");
     const again = await t.account("dev@b.co");
@@ -157,7 +163,14 @@ test("organizations: site admins create them; admins manage members; org apps be
     assert.equal((await t.deploy(bob.token, "bobapp")).status, 201, "members deploy");
     // Outsiders can't move apps in.
     assert.equal((await t.deploy(dave.token, "daveapp")).status, 201);
-    assert.equal((await move(dave.token, "daveapp", "acme")).status, 403);
+    assert.equal((await move(dave.token, "daveapp", "acme")).status, 404, "nor can they tell it exists");
+    assert.equal((await add(dave.token, "dave@b.co")).status, 404);
+    assert.equal((await t.json("/v1/orgs/acme")).status, 401);
+    assert.equal((await t.json("/v1/orgs/nope")).status, 401);
+    // Artifacts move in too; a member can open a private one.
+    const pg = (await t.send("POST", "/v1/pages", alice.token, { html: "secret", visibility: "private" })).body.page;
+    assert.equal((await move(alice.token, pg.name, "acme")).status, 200);
+    assert.equal((await t.send("POST", `/v1/pages/${pg.name}/view`, bob.token, {})).status, 200);
 
     // Removing a member: their access goes, and the apps they held go to an org admin.
     const bobId = bob.id;
@@ -179,6 +192,7 @@ test("organizations: site admins create them; admins manage members; org apps be
     // Out of the org: the caller's personal app (quota permitting); an org with apps isn't deleted.
     assert.equal((await t.send("DELETE", "/v1/admin/orgs/acme", boss.token)).body.error, "not_empty");
     assert.equal((await move(carol.token, "bobapp", null)).status, 200);
+    assert.equal((await move(carol.token, pg.name, null)).status, 200);
     assert.equal(await access(carol.token), "owner");
     assert.equal((await t.send("GET", "/v1/admin/orgs", boss.token)).body.orgs[0].apps, 0);
     assert.equal((await t.send("DELETE", "/v1/admin/orgs/acme", boss.token)).status, 200);

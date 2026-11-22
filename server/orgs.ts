@@ -59,7 +59,10 @@ export function orgRoutes(
     const sa = siteAdmin(c);
     if (sa) return { who: sa.who, id: sa.id, site: true };
     const acct = accountWide(c, "admin");
-    if (await store.orgRole(o.id, acct.id) !== "admin") throw new HttpError(403, `only admins of ${o.name} can do that`, "forbidden");
+    const role = await store.orgRole(o.id, acct.id);
+    // Outsiders can't tell an organization exists.
+    if (!role) throw new HttpError(404, `organization not found: ${o.name}`, "not_found");
+    if (role !== "admin") throw new HttpError(403, `only admins of ${o.name} can do that`, "forbidden");
     return { who: acct.github_login ?? acct.email, id: acct.id, site: false };
   };
   /**
@@ -96,9 +99,9 @@ export function orgRoutes(
 
   // Members and apps: for its members and site admins (who manage it, but only see its apps' names).
   app.get("/orgs/:org", async (c) => {
-    const o = await getOrg(c.req.param("org"));
     const sa = siteAdmin(c);
-    const acct = sa ? c.get("account") : accountWide(c, "read");
+    const acct = sa ? c.get("account") : accountWide(c, "read"); // before the lookup: outsiders can't tell it exists
+    const o = await getOrg(c.req.param("org"));
     const role = acct ? await store.orgRole(o.id, acct.id) : undefined;
     if (!role && !sa) throw new HttpError(404, `organization not found: ${o.name}`, "not_found");
     return c.json({
@@ -117,6 +120,7 @@ export function orgRoutes(
 
   // Add an existing account (by email) as admin or member. No account with that email: a site admin invites it.
   app.post("/orgs/:org/members", async (c) => {
+    if (!siteAdmin(c)) accountWide(c, "admin");
     const o = await getOrg(c.req.param("org"));
     const m = await manager(c, o);
     const input = await body<{ email?: unknown; role?: unknown } | null>(c) ?? {};
@@ -139,6 +143,7 @@ export function orgRoutes(
   });
 
   app.put("/orgs/:org/members/:account", async (c) => {
+    if (!siteAdmin(c)) accountWide(c, "admin");
     const o = await getOrg(c.req.param("org"));
     const m = await manager(c, o);
     const role = orgRole((await body<{ role?: unknown } | null>(c))?.role);
@@ -155,6 +160,7 @@ export function orgRoutes(
 
   // Remove a member (org admins, site admins), or leave (any member, full-access token).
   app.delete("/orgs/:org/members/:account", async (c) => {
+    if (!siteAdmin(c)) accountWide(c, "admin");
     const o = await getOrg(c.req.param("org"));
     const target = c.req.param("account");
     const me = c.get("account");
@@ -248,7 +254,7 @@ export function orgRoutes(
       if (to && !await store.orgById(to.id)) throw new HttpError(404, `organization not found: ${to.name}`, "not_found");
       if (!(await store.tokens(acct.id)).some((x) => x.id === c.get("token")!.id)) throw new HttpError(401, "invalid token", "unauthorized");
       if ((a.org_id ?? null) === (to?.id ?? null)) return a;
-      if (to && !await store.orgRole(to.id, acct.id)) throw new HttpError(403, `you're not a member of ${to.name}`, "forbidden");
+      if (to && !await store.orgRole(to.id, acct.id)) throw new HttpError(404, `organization not found: ${to.name}`, "not_found");
       if (!to) await checkQuota(acct, a.kind);
       await store.setAppOrg(a.id, to?.id ?? null, acct.id);
       return (await store.appById(a.id))!;
