@@ -243,7 +243,7 @@ function Repository() {
   const alive = useAlive();
   const me = useLoad(() => api<API.MeGit>("/v1/me/git"), []);
   const g = me.data, active = !!g?.connected && g.status === "active", linked = d.repo ?? null;
-  const repos = useLoad(() => active && !linked ? api<{ repos: API.GitRepo[] }>("/v1/git/github/repos").then((r) => r.repos) : Promise.resolve(null), [active, !!linked]);
+  const repos = useLoad(() => active && !linked ? api<{ repos: API.GitRepo[] }>("/v1/git/github/repos").then((r) => r.repos) : Promise.resolve(null), [active, !!linked], { keep: true });
   // The live deploy's source, to push (a deploy without it, or nothing deployed: only a repository the user has).
   const deployed = !!d.deploys.find((x) => x.current)?.hasSource;
   const [mode, setMode] = useState<"create" | "link">(deployed ? "create" : "link");
@@ -253,7 +253,8 @@ function Repository() {
   const [initial, setInitial] = useState<"deploy" | "none" | null>(null);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
-  const pick = picked || repos.data?.[0]?.fullName || "";
+  // The one the select shows (a reload may have dropped the one picked).
+  const pick = repos.data?.some((r) => r.fullName === picked) ? picked : repos.data?.[0]?.fullName ?? "";
   // Back from choosing which repositories Cresslet reaches (another tab): the list may have changed.
   const reloadRepos = repos.reload;
   useEffect(() => {
@@ -292,7 +293,7 @@ function Repository() {
 
   const link = (e: FormEvent) => {
     e.preventDefault();
-    const sync = mode === "create" ? "deploy" : initial;
+    const sync = mode === "create" || initial === "deploy" ? (deployed ? "deploy" : null) : initial;
     if (!sync) return setErr("Choose what the repository starts with.");
     if (mode === "link" && sync === "deploy" && !confirm(`Push ${name}'s live source to ${pick}? Its default branch then holds exactly these files: others there are deleted.`)) return;
     void run(mode === "create" ? "Creating the repository…" : "Linking…", async () => {
@@ -354,7 +355,8 @@ function Repository() {
         <form className="form" id="repo-form" onSubmit={link}>
           <p className="muted small">{deployed
             ? `Starts from the source uploaded with ${name}'s live deploy. Left out: .env.local, .dev.vars and the like; .env files keep only their public entries.`
-            : `${name}'s live deploy has no source uploaded with it: link a repository you have, or deploy ${name} with its source first.`}</p>
+            : d.app.currentDeployId ? `${name}'s live deploy has no source uploaded with it: link a repository you have, or deploy ${name} with its source first.`
+            : `Nothing is deployed yet: link a repository you have, or deploy ${name} first.`}</p>
           <fieldset className="field">
             <legend>Repository</legend>
             <label className="check"><input type="radio" name="repo-mode" checked={mode === "create"} disabled={!deployed} onChange={() => setMode("create")} /><span>Create a new repository</span></label>
@@ -379,14 +381,14 @@ function Repository() {
               <fieldset className="field">
                 <legend>First sync</legend>
                 <label className="check"><input type="radio" name="repo-initial" checked={initial === "deploy"} disabled={!deployed} onChange={() => setInitial("deploy")} /><span>Push the live deploy's source: its default branch then holds exactly these files (others there are deleted)</span></label>
-                <label className="check"><input type="radio" name="repo-initial" checked={initial === "none"} onChange={() => setInitial("none")} /><span>Keep the repository's files: the studio loads them when you open the app there</span></label>
+                <label className="check"><input type="radio" name="repo-initial" checked={initial === "none"} onChange={() => setInitial("none")} /><span>Keep the repository's files: link it without changing it</span></label>
               </fieldset>
             </>
           )}
           {g.installUrl ? <p className="muted small">Missing a repository? <ExtLink href={g.installUrl}>Choose which repositories Cresslet can reach</ExtLink>.</p> : null}
           {repos.error ? <p className="error small">{repos.error.message}</p> : null}
           <div className="row start">
-            <button className="btn primary" type="submit" id="repo-link" disabled={!!busy || (mode === "create" ? !deployed : !initial || !pick)}>
+            <button className="btn primary" type="submit" id="repo-link" disabled={!!busy || (mode === "create" ? !deployed : !pick || !initial || (initial === "deploy" && !deployed))}>
               <Icon name="github" />{mode === "create" ? "Create and push" : "Link"}
             </button>
           </div>

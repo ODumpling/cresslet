@@ -900,7 +900,8 @@ export function gitRoutes(
     let files = initialSync === "push" ? sourceFiles(cfg, input.files as DeployFile[]) : null;
     if (initialSync === "deploy") {
       // The live deploy's own source (an app deployed before it had a repository, from the CLI or another studio).
-      const source = a.current_deploy_id ? await deploySource(cfg, a.id, a.current_deploy_id) : null;
+      const live = (await store.appById(a.id))?.current_deploy_id; // as of now: a deploy may have landed meanwhile
+      const source = live ? await deploySource(cfg, a.id, live) : null;
       if (!source?.length) throw new HttpError(409, `${a.name}'s live deploy has no source to push (deployed without it)`, "no_source");
       files = sourceFiles(cfg, source.map(([path, b]) => ({ path, data: Buffer.from(b).toString("base64"), encoding: "base64" })));
     }
