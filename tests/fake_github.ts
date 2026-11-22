@@ -184,6 +184,11 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       const prefix = decodeURIComponent(x[1]);
       return json(200, [...r.refs].filter(([b]) => b.startsWith(prefix)).map(([b, sha]) => ({ ref: `refs/heads/${b}`, object: { sha, type: "commit" } })));
     }
+    if ((x = /^\/branches\/(.+)\/protection$/.exec(rest))) {
+      // Readable by admins (here: the owner); protection that needs status checks.
+      if (u.login !== r.owner) return json(404, { message: "Not Found" });
+      return r.protected.has(decodeURIComponent(x[1])) ? json(200, { required_status_checks: { strict: false, contexts: ["ci"] } }) : json(404, { message: "Branch not protected" });
+    }
     if ((x = /^\/branches\/(.+)$/.exec(rest))) {
       const name = decodeURIComponent(x[1]);
       return r.refs.has(name) ? json(200, { name, commit: { sha: r.refs.get(name) }, protected: r.protected.has(name) }) : json(404, { message: "Branch not found" });

@@ -401,12 +401,13 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * Lands a change and the ones below it into the default branch (server/stack.ts landUpTo). When the change the
      * workspace is on landed, the workspace is on the default branch now (same files: it's at that commit).
      */
-    land: (change: StackChange) => serial(async () => {
+    land: (change: StackChange, top: string) => serial(async () => {
       const r = await post<{ landed: StackChange[]; sha: string; pullErrors?: PullError[] }>("/stack/land", { change: change.id });
       const s = o.state();
       if (s && r.landed.some((c) => c.branch === s.activeBranch) && s.headSha === r.sha) await set({ activeBranch: s.defaultBranch, baseSha: r.sha, headSha: r.sha, back: undefined });
-      // On a change above: the default branch's commit its stack sits on is the landed one now (not "moved on GitHub").
-      else if (s && s.baseSha === r.landed[0]?.baseSha) await set({ baseSha: r.sha });
+      // On the stack's top, above what landed: the default branch's commit it sits on is the landed one now (not "moved
+      // on GitHub").
+      else if (s && s.activeBranch === top && !r.landed.some((c) => c.branch === top)) await set({ baseSha: r.sha });
       return r;
     }),
     /** Every change set aside (Source control lists them), and deleting one (with the ones set aside above it). */

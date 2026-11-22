@@ -91,7 +91,7 @@ export interface SourceControlProvider {
    * Checked by Cresslet before moving the default branch: GitHub lets an admin through when protection isn't enforced
    * for admins.
    */
-  branchProtection(r: Repo, branch: string): Promise<string | null>;
+  branchProtection(r: Repo, branch: string): Promise<{ reason: string; known: boolean } | null>;
   /** Moves `branch` from `from` to `to`, a fast-forward (never forced). Moved meanwhile: 409 `conflict`. */
   moveBranch(r: Repo, branch: string, from: string, to: string): Promise<void>;
 }
@@ -551,20 +551,30 @@ export class GitHub implements SourceControlProvider {
     return this.#pull(res.body);
   }
 
-  async branchProtection(r: Repo, branch: string): Promise<string | null> {
+  /**
+   * `known: false`: protection that this user can't read (only admins can: GitHub enforces it on them, so a merge
+   * GitHub is asked to make can't slip past it).
+   */
+  async branchProtection(r: Repo, branch: string): Promise<{ reason: string; known: boolean } | null> {
     const [b, rules] = await Promise.all([
       this.ok<{ protected?: boolean }>("GET", this.#path(r, `/branches/${this.#ref(branch)}`)),
-      // Rulesets (repository or organization): those that stand between a push and the branch.
-      // (Not readable with this token, or none: no rules. Anything else fails: never moved on a guess.)
-      this.req<{ type: string; message?: string }[]>("GET", this.#path(r, `/rules/branches/${this.#ref(branch)}`)).then((x) => {
-        if (x.status === 200 && Array.isArray(x.body)) return x.body;
-        if (x.status === 403 || x.status === 404) return [];
-        throw ghError(x.status, (x.body as unknown as { message?: string } | null)?.message);
-      }),
+      // Rulesets (repository or organization): those that stand between a push and the branch. Not read: refused.
+      this.req<{ type: string }[]>("GET", this.#path(r, `/rules/branches/${this.#ref(branch)}`)),
     ]);
-    if (b.protected) return `${branch} is protected on GitHub`;
-    const blocking = rules.map((x) => x.type).filter((t) => ["update", "pull_request", "required_status_checks", "required_deployments", "merge_queue", "required_signatures"].includes(t));
-    return blocking.length ? `${branch} has rules on GitHub (${[...new Set(blocking)].join(", ")})` : null;
+    if (rules.status !== 200 || !Array.isArray(rules.body)) return { reason: `${branch}'s rules on GitHub couldn't be read`, known: true };
+    const blocking = rules.body.map((x) => x.type).filter((t) => ["update", "pull_request", "required_status_checks", "required_deployments", "merge_queue", "required_signatures"].includes(t));
+    if (blocking.length) return { reason: `${branch} has rules on GitHub (${[...new Set(blocking)].join(", ")})`, known: true };
+    if (!b.protected) return null;
+    // Classic protection: only what stands between a fast-forward and the branch (not force pushes or deletion).
+    const p = await this.req<{
+      required_pull_request_reviews?: unknown; required_status_checks?: unknown; restrictions?: unknown; required_signatures?: { enabled?: boolean };
+    }>("GET", this.#path(r, `/branches/${this.#ref(branch)}/protection`));
+    if (p.status !== 200) return { reason: `${branch} is protected on GitHub`, known: false };
+    const needs = [
+      p.body.required_pull_request_reviews && "reviews", p.body.required_status_checks && "status checks", p.body.restrictions && "push restrictions",
+      p.body.required_signatures?.enabled && "signed commits",
+    ].filter(Boolean);
+    return needs.length ? { reason: `${branch} is protected on GitHub (${needs.join(", ")})`, known: true } : null;
   }
 
   async moveBranch(r: Repo, branch: string, from: string, to: string) {
@@ -1248,14 +1258,17 @@ export function gitRoutes(
     if (top) {
       try {
         const l = await landUpTo(ctx, top.id, expect);
-        m = { mergedSha: l.sha, headSha: top.sha, fastForward: true, treeChanged: false };
+        m = { mergedSha: l.sha, headSha: l.sha, fastForward: true, treeChanged: false };
         stackLanded = { stack: l.stack, changes: l.landed.length };
         deletedTop = l.deleted.includes(branch);
       } catch (e) {
-        // A protected default branch is refused (Cresslet checks it: GitHub lets an admin through when protection isn't
-        // enforced for admins). The rest merge as before: the default branch moved, a change pushed to or gone, a
-        // commit other than the one synced (the merge checks it against GitHub).
-        if (!(e instanceof HttpError) || !["default_moved", "moved", "branch_not_found", "not_synced"].includes(e.code)) throw e;
+        // A protected default branch is refused (Cresslet checks it first: GitHub lets an admin through when protection
+        // isn't enforced for admins), unless it's protection this user can't read (GitHub enforces it on them). A
+        // change gone on GitHub is refused too. The rest merge as before: the default branch moved, a change pushed
+        // to, a commit other than the one synced (the merge checks it against GitHub).
+        const asBefore = ["default_moved", "moved", "not_synced"].includes((e as HttpError).code) ||
+          ((e as HttpError).code === "branch_protected" && (e as HttpError).extra?.known === false);
+        if (!(e instanceof HttpError) || !asBefore) throw e;
       }
     }
     m ??= await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });

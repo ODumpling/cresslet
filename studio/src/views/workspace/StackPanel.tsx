@@ -43,8 +43,8 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
             {!aside && on ? (
               <span className="stack-actions">
                 {c !== top ? <button className="btn sm" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button> : null}
-                <button className="btn sm" type="button" disabled={busy} onClick={() => onLand(c)}
-                  aria-label={c === stack.changes[0] ? `Land change ${c.position} in ${state.defaultBranch}` : `Land changes ${stack.changes[0].position} to ${c.position} in ${state.defaultBranch}`}>Land</button>
+                {state.activeBranch === top.branch ? <button className="btn sm" type="button" disabled={busy} onClick={() => onLand(c)}
+                  aria-label={c === stack.changes[0] ? `Land change ${c.position} in ${state.defaultBranch}` : `Land changes ${stack.changes[0].position} to ${c.position} in ${state.defaultBranch}`}>Land</button> : null}
               </span>
             ) : null}
           </span>

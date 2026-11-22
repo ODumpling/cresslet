@@ -46,7 +46,7 @@ function fakeProvider() {
   } = {
     refs, commits, pulls, refuse, keep, guarded, failUpdate,
     async branchProtection(_r: Repo, branch: string) {
-      return guarded.has(branch) ? `${branch} is protected on GitHub` : null;
+      return guarded.has(branch) ? { reason: `${branch} is protected on GitHub`, known: true } : null;
     },
     async moveBranch(_r: Repo, branch: string, from: string, to: string) {
       if (refs.get(branch) !== from || !contains(to, from)) throw new HttpError(409, `${branch} moved on GitHub meanwhile: try again`, "conflict");
@@ -708,6 +708,22 @@ test("stack: a change to land whose branch is gone on GitHub isn't landed; one l
   const l = await landUpTo(t.ctx, c1.change.id);
   assert.deepEqual([l.landed.map((c) => c.title), l.sha], [["One", "Two", "Three"], c3.sha]);
   assert.deepEqual(await readStacks(t.ctx), []);
+});
+
+test("stack: the default branch moved past changes outside Cresslet with their pull requests still open: their branches are kept, and said", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await submitStack(t.ctx, c1.stack.id);
+  t.provider.refs.set("main", c3.sha); // fast-forwarded on GitHub, not through the stack: PR #1 merged, #2 and #3 open
+  Object.assign(t.provider.pulls[0], { state: "closed", merged: true });
+  const l = await landUpTo(t.ctx, c3.change.id);
+  assert.deepEqual(l.landed.map((c) => c.title), ["One", "Two", "Three"]);
+  assert.deepEqual(l.pullErrors?.map((x) => x.position).sort(), [2, 3]);
+  assert.deepEqual([t.provider.refs.has(c1.branch), t.provider.refs.has(c2.branch), t.provider.refs.has(c3.branch)], [true, true, true]); // (1 is #2's base)
+  assert.deepEqual(t.provider.pulls.map((x) => x.state), ["closed", "open", "open"]);
 });
 
 test("stack: landing a stack never submitted (no pull requests), with GitHub having deleted a landed branch already", async () => {

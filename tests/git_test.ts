@@ -1033,6 +1033,13 @@ test("stack: land up to a change (each pull request merged with its own turn); d
   assert.equal(pulls[2].merged, true);
   assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks, []);
 
+  // A change's branch gone on GitHub: Deploy doesn't merge past it either.
+  const g1 = await add("main", c3.sha, "Gone", "g1");
+  const g2 = await add(g1.branch, g1.sha, "Gone 2", "g2");
+  repo.refs.delete(g1.branch);
+  const gone = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: g2.branch, headSha: g2.sha });
+  assert.deepEqual([gone.status, gone.body.error, repo.refs.get("main")], [404, "branch_not_found", c3.sha]);
+
   // A default branch that moved: nothing landed (deploy still merges, as before).
   const d1 = await add("main", c3.sha, "Four", "4");
   t.gh.write(repo, "main", { "TEAM.md": "teammate" });

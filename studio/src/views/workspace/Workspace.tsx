@@ -481,7 +481,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 if (!confirm(`Land ${n === 1 ? `change ${change.position}` : `changes ${stack.changes[0].position}–${change.position}`} in ${gitState.defaultBranch}?\n\n` +
                   `${gitState.defaultBranch} moves to ${n === 1 ? "it" : "them"}, one at a time (their pull requests show as merged), and ${n === 1 ? "its branch goes" : "their branches go"}. Nothing is deployed: Deploy puts ${gitState.defaultBranch} live.`)) return;
                 setStackBusy(true);
-                void g.land(change).then(
+                void g.land(change, stack.changes.at(-1)!.branch).then(
                   (r) => toast(`Landed ${r.landed.length} ${r.landed.length === 1 ? "change" : "changes"} in ${gitState.defaultBranch} @ ${r.sha.slice(0, 7)}. Not deployed yet: ${gitState.defaultBranch} is ahead of what's live (Deploy puts it live).${pullsSaid(r.pullErrors, "moved onto " + gitState.defaultBranch)}`, 12000),
                   (e) => toast(`Not landed: ${errorMessage(e)}`, 12000),
                 ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
