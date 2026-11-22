@@ -6,7 +6,7 @@ import { flushSync } from "react-dom";
 import type { Container } from "../../../vendor/cresslet-container/cresslet-container.js";
 import { anthropicClient, apiKey, createAgent, createTools, creditsClient, errorText, type AgentEvent } from "../../../builder.ts";
 import type * as API from "../../../api-types.ts";
-import { commitMessage, type GitWorkspace } from "../../../git.ts";
+import { commitMessage, gitCode, type GitWorkspace } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
 import { logIn, session, useSession } from "../../lib/session.ts";
 import { Icon, SrOnly } from "../../ui/icons.tsx";
@@ -45,12 +45,14 @@ export interface BuilderHandle {
   prefill(text: string): void;
 }
 
-export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, stack = null, ref }: {
+export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, ref }: {
   c: Container;
   /** Source control: the project's repository, when linked (a finished turn is committed as a change of its stack). */
   git: GitWorkspace | null;
   /** The stack panel (StackPanel.tsx), shown above the chat. */
   stack?: React.ReactNode;
+  /** A commit was refused because the stack changed on GitHub: it's read again (its buttons say what to do). */
+  onStackStale?: () => void;
   /** Workspace changes that weren't hand edits (a command's), counted (engine.ts). */
   commandRev?: () => number;
   devLog: () => string;
@@ -283,6 +285,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
         if (failed.length) on({ type: "notice", text: `The stack's pull requests weren't all updated (${failed.join("; ")}). Submit it again from the stack.`, error: true });
       }
     } catch (e) {
+      if (gitCode(e) === "moved") onStackStale();
       on({ type: "notice", text: `Couldn't commit to GitHub: ${errorMessage(e)}. The changes are kept here (the next request's commit takes them too, or push them from the branch menu).`, error: true });
     }
   }

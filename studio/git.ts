@@ -178,8 +178,9 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
   /**
    * The workspace committed as a new change (server/stack.ts): a branch of its own, cut from the commit it's on. On a
    * stack's top change it goes on top; on any other branch (the default one, a branch of its own) it starts a stack.
-   * Finishing a merge, or on a top change GitHub moved, it's committed to the active branch as before. Below a
-   * stack's top: 409 `not_on_top`, nothing committed.
+   * Finishing a merge, or on a top recorded at another commit than the workspace's, it's committed to the active branch
+   * as before. Below a stack's top (409 `not_on_top`), or on a top pushed to on GitHub (409 `moved`): nothing committed,
+   * the edits kept.
    */
   /** `submit: false`: a change made on the way somewhere (going back, deploying): the app's auto-submit skips it. */
   async function changeNow(title: string, prompt: string, submit = true): Promise<{

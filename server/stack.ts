@@ -104,20 +104,21 @@ export function commitChange(ctx: Ctx, input: {
   const { provider, store, appId, repo, r } = ctx;
   return locked(appId, async () => {
     const stacks = byStack(await store.openStackChanges(appId));
-    let below: StackChange | undefined;
+    let below: StackChange | undefined, topHead: string | null = null;
     const aside = input.from === repo.default_branch ? undefined : (await store.setAsideStackChanges(appId)).find((c) => c.branch === input.from);
     if (aside) throw setAside(aside);
     const on = input.from === repo.default_branch ? undefined : stacks.find((s) => s.some((c) => c.branch === input.from));
     if (on) {
       const top = on.at(-1)!; // a stack listed has a change
       if (top.branch !== input.from) throw notOnTop(on.find((c) => c.branch === input.from)!, top);
-      if (top.sha !== input.baseSha) throw notOnStack(`${input.from} is recorded at another commit than the workspace's`);
-      // Pushed to on GitHub since: a change on the old commit would leave that push out. The stack says what to do.
+      // Pushed to on GitHub since (first: a workspace that pulled that push is on it too): a change on the old commit
+      // would leave it out, a commit onto the branch would leave the stack behind. The stack says what to do.
       // (Deleted there: its commit is still the one to build on.)
-      const head = await provider.branchHead(r, top.branch);
-      if (head && head !== top.sha) {
+      topHead = await provider.branchHead(r, top.branch);
+      if (topHead && topHead !== top.sha) {
         throw new HttpError(409, `${top.branch} was pushed to on GitHub: pull it in, or carry on from it, from the stack (your changes are kept here)`, "moved");
       }
+      if (top.sha !== input.baseSha) throw notOnStack(`${input.from} is recorded at another commit than the workspace's`);
       below = top;
     } else if (input.from !== repo.default_branch && (await store.stackChangesInState(appId, "outside")).some((c) => c.branch === input.from)) {
       // Carried on from as a branch of its own (pushed to on GitHub): committed to as one branch, as before stacks.
@@ -125,8 +126,9 @@ export function commitChange(ctx: Ctx, input: {
     }
     // At the limit: this turn joins the top change (its branch gets the commit), and the user is told.
     if (below && on!.length >= MAX_STACK) {
+      // (Its branch deleted on GitHub: made again, at this commit.)
       const out = await provider.commitTree(r, {
-        branch: below.branch, baseSha: input.baseSha, subdir: repo.subdir, files: input.files, message: input.title, author: input.author,
+        branch: below.branch, baseSha: input.baseSha, subdir: repo.subdir, files: input.files, message: input.title, author: input.author, create: !topHead,
       });
       if (!out.changed) return { changed: false, sha: input.baseSha };
       await followed(ctx, below.branch, input.baseSha, out.sha);
@@ -477,7 +479,7 @@ export async function stackPulls(ctx: Ctx, stackId: string): Promise<Record<stri
  * Deletes changes' branches (set aside ones), each only while it still points at its change (or is gone already):
  * those are `dropped`. One pushed to since is kept, and said.
  */
-async function dropBranches(ctx: Ctx, changes: StackChange[]): Promise<{ dropped: string[]; kept: PullError[] }> {
+async function dropBranches(ctx: Ctx, changes: StackChange[], then?: (dropped: string[]) => Promise<void>): Promise<{ dropped: string[]; kept: PullError[] }> {
   const dropped: string[] = [], kept: PullError[] = [];
   await pool(changes, 4, async (c) => {
     try {
@@ -496,11 +498,15 @@ async function dropBranches(ctx: Ctx, changes: StackChange[]): Promise<{ dropped
       kept.push({ change: c.id, position: c.position, error: why(e) });
     }
   });
-  // Out of their stack (their positions free for new changes), one new id per stack they were in.
+  // Out of their stack (their positions free for new changes), one new id per stack they were in; with `then`, in one
+  // transaction.
   const byId = new Map(changes.map((c) => [c.id, c]));
-  for (const stack of new Set(dropped.map((x) => byId.get(x)!.stack_id))) {
-    await ctx.store.moveStackChanges(ctx.appId, dropped.filter((x) => byId.get(x)!.stack_id === stack), id("stk"), "dropped");
-  }
+  await ctx.store.db.tx(async () => {
+    for (const stack of new Set(dropped.map((x) => byId.get(x)!.stack_id))) {
+      await ctx.store.moveStackChanges(ctx.appId, dropped.filter((x) => byId.get(x)!.stack_id === stack), id("stk"), "dropped");
+    }
+    await then?.(dropped);
+  });
   return { dropped, kept };
 }
 
@@ -524,11 +530,10 @@ export function deleteSetAside(ctx: Ctx, changeId: string): Promise<{ dropped: s
     const aside = await ctx.store.setAsideStackChanges(ctx.appId);
     const c = aside.find((x) => x.id === changeId);
     if (!c) throw new HttpError(404, "no such change set aside", "not_found");
-    const r = await dropBranches(ctx, aside.filter((x) => x.stack_id === c.stack_id && x.position >= c.position));
     // One kept above one deleted (pushed to since) can't come back over the gap: out of the stack, still listed.
-    const lowest = Math.min(...r.dropped.map((x) => aside.find((y) => y.id === x)!.position));
-    if (r.dropped.length) await ctx.store.detachSetAside(ctx.appId, c.stack_id, id("stk"), lowest);
-    return r;
+    return dropBranches(ctx, aside.filter((x) => x.stack_id === c.stack_id && x.position >= c.position), async (dropped) => {
+      if (dropped.length) await ctx.store.detachSetAside(ctx.appId, c.stack_id, id("stk"), Math.min(...dropped.map((x) => aside.find((y) => y.id === x)!.position)));
+    });
   });
 }
 

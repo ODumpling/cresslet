@@ -457,6 +457,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         <h1 className="sr-only" id="workspace-title" tabIndex={-1}>{`${name}: AI builder, preview, code and database`}</h1>
         {container ? (
           <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
+            onStackStale={() => setGitTick((n) => n + 1)}
             stack={stack && gitState && gitOn && token && !locked ? (
               <StackPanel stack={stack} state={gitState} busy={stackBusy || deploying} pulls={stackPulls}
               onSubmit={() => {

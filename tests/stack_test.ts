@@ -28,15 +28,16 @@ function fakeProvider() {
   const taken = (b: string) => [...refs.keys()].some((x) => x === b || b.startsWith(x + "/") || x.startsWith(b + "/"));
   const pulls: (Pull & { title: string; body: string })[] = [];
   const refuse = new Set<string>(); // branches GitHub won't open a pull request from
+  const keep = new Set<string>(); // branches GitHub won't delete (a rule)
   const pullOf = (n: number) => {
     const x = pulls[n - 1];
     if (!x) throw new HttpError(404, "not found on GitHub", "git_not_found");
     return x;
   };
   const p: SourceControlProvider & {
-    refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; push(branch: string, files: Record<string, string>): string;
+    refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; keep: Set<string>; push(branch: string, files: Record<string, string>): string;
   } = {
-    refs, commits, pulls, refuse,
+    refs, commits, pulls, refuse, keep,
     async getPull(_r: Repo, n: number) {
       return { ...pullOf(n) };
     },
@@ -73,7 +74,7 @@ function fakeProvider() {
       refs.set(branch, sha);
     },
     async deleteBranch(_r: Repo, branch: string) {
-      return refs.delete(branch);
+      return !keep.has(branch) && refs.delete(branch);
     },
     async commitTree(_r: Repo, input: CommitInput) {
       const base = commits.get(input.baseSha)!;
@@ -505,9 +506,11 @@ test("stack: a change pushed to on GitHub is pulled in as the top (the ones abov
   // Taken in already (another tab replaying it): refused, nothing above it touched.
   await assert.rejects(pullIn(t.ctx, c2.change.id, pushed), (e) => code(e) === "conflict");
   assert.equal((await readStacks(t.ctx))[0].changes.length, 3);
-  // A turn on a top pushed to since (a workspace that hasn't seen it): refused, so the push isn't left out.
-  t.provider.push(n3.branch, { "w.txt": "pushed again" });
+  // A turn on a top pushed to since: refused, so the push isn't left out (from a workspace that hasn't seen it, or one
+  // that pulled it in by hand).
+  const again = t.provider.push(n3.branch, { "w.txt": "pushed again" });
   await assert.rejects(t.change(n3.branch, n3.sha, "Four", "4"), (e) => code(e) === "moved");
+  await assert.rejects(t.change(n3.branch, again, "Four", "4"), (e) => code(e) === "moved");
 
   // Carried on from (change 2): the stack ends, all of it, the ones set aside too; its branch takes commits as one branch.
   const other = t.provider.push(c2.branch, { "y.txt": "more from outside" });
@@ -547,6 +550,10 @@ test("stack: changes set aside are listed and deleted (with the ones above them)
   assert.equal(t.provider.refs.has(c3.branch), false);
   assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => [c.title, c.restorable]).sort(), [["Four", false], ["Two", true]]);
   t.provider.refs.set(c4.branch, c4.sha);
+  t.provider.keep.add(c4.branch); // GitHub refuses the delete: kept, said
+  d = await deleteSetAside(t.ctx, c4.change.id);
+  assert.deepEqual([d.dropped, d.kept.map((k) => k.error)], [[], [`GitHub didn't delete ${c4.branch}`]]);
+  t.provider.keep.clear();
   d = await deleteSetAside(t.ctx, c4.change.id);
   assert.deepEqual(d.dropped, [c4.change.id]);
   assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => c.title), ["Two"]);
@@ -578,8 +585,13 @@ test("stack: at its most changes, a turn joins the top change and says so", asyn
   const j = ok(await t.change(from, sha, "One more", "more"));
   assert.deepEqual([j.joined, j.branch, j.change.position], [true, from, MAX_STACK]);
   assert.equal(t.provider.refs.get(from), j.sha);
+  // The top's branch deleted on GitHub: the next one joins it all the same, its branch made again.
+  t.provider.refs.delete(from);
+  const k = ok(await t.change(from, j.sha, "And another", "another"));
+  assert.deepEqual([k.joined, t.provider.refs.get(from)], [true, k.sha]);
+  const j2 = k;
   const [s] = await readStacks(t.ctx);
-  assert.deepEqual([s.id, s.changes.length, s.changes.at(-1)!.sha], [id, MAX_STACK, j.sha]);
+  assert.deepEqual([s.id, s.changes.length, s.changes.at(-1)!.sha], [id, MAX_STACK, j2.sha]);
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {
