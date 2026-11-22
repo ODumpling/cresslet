@@ -5,7 +5,7 @@ import type { Context, Hono } from "hono";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { appUrl, type Config, paths } from "./config.ts";
-import { type Account, type AiAccountRow, type App, ORG_ROLES, type OrgRole, SITE_ADMIN, type Store, type Token } from "./store.ts";
+import { type Account, type AiAccountRow, type App, ORG_ROLES, orgLock, type OrgRole, SITE_ADMIN, type Store, type Token } from "./store.ts";
 import { credits as toCredits, ledgerEntry, nextPeriod, period, periodStart } from "./credits.ts";
 import type { Runtime } from "./runtime.ts";
 import { inspect } from "./inspect.ts";
@@ -76,8 +76,8 @@ export async function usage(cfg: Config, appId: string) {
 }
 
 /**
- * Checks again (after a request body arrived, inside the write's transaction) that the caller is still a site
- * admin: its token not revoked, its account not disabled or demoted. The operator token always is.
+ * Checks again (after a request body arrived, right before the write; inside its transaction where it has one)
+ * that the caller is still a site admin: its token not revoked, its account not disabled or demoted. The operator token always is.
  */
 export async function stillSiteAdmin(cfg: Config, store: Store, c: Context<Env>) {
   const acct = c.get("account"), t = c.get("token");
@@ -306,6 +306,10 @@ export function adminRoutes(
       if (await store.accountByEmail(email) || await store.disabledAccount({ emails: [email] })) {
         throw new HttpError(409, `${email} already has an account`, "conflict");
       }
+      if (org) {
+        await store.db.lock(orgLock(org.id)); // as member changes and deleting it do
+        if (!await store.orgById(org.id)) throw new HttpError(404, `organization not found: ${org.name}`, "not_found");
+      }
       const a = await store.createAccount(email, undefined, { by: c.get("account")?.id ?? null });
       if (input.siteAdmin === true) await store.setRole(a.id, SITE_ADMIN);
       if (org) await store.setOrgMember(org.id, a.id, orgRole);
@@ -346,7 +350,10 @@ export function adminRoutes(
   app.delete("/admin/accounts/:id", async (c) => {
     const who = requireSiteAdmin(c);
     const a = await getAccount(c.req.param("id"));
-    if (!await store.deleteInvitedAccount(a.id)) {
+    await stillSiteAdmin(cfg, store, c);
+    const r = await store.deleteInvitedAccount(a.id);
+    if (r === "last_admin") throw new HttpError(409, `${a.email} is an organization's only admin: make someone else its admin first`, "last_admin");
+    if (r === "not_invited") {
       throw new HttpError(409, "only an invited account that hasn't signed in yet can be deleted: disable it instead", "not_invited");
     }
     console.log(`cresslet: invite for ${a.email} withdrawn by ${who}`);

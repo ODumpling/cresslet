@@ -371,15 +371,22 @@ export class Store implements RateHits {
       match.githubId ?? -1, ...emails,
     );
   }
-  /** Deletes an account that's still an invite (never signed in) and owns nothing. False if it isn't (any more). */
-  deleteInvitedAccount(accountId: string): Promise<boolean> {
-    return this.serialized(accountLock(accountId), async () =>
-      (await this.db.run(
+  /**
+   * Deletes an account that's still an invite (never signed in) and owns nothing: "not_invited" if it isn't (any
+   * more), "last_admin" if it's the only enabled admin of an organization (which would be left with none).
+   */
+  deleteInvitedAccount(accountId: string): Promise<"ok" | "not_invited" | "last_admin"> {
+    return this.serialized(accountLock(accountId), async () => {
+      const orgs = (await this.orgsFor(accountId)).sort((x, y) => (x.id < y.id ? -1 : 1));
+      for (const o of orgs) await this.db.lock(orgLock(o.id));
+      for (const o of orgs) if (o.role === "admin" && await this.orgAdminCount(o.id) <= 1) return "last_admin";
+      return (await this.db.run(
         `DELETE FROM accounts WHERE id = ? AND invited_at IS NOT NULL AND github_id IS NULL AND disabled_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM tokens WHERE account_id = accounts.id)
            AND NOT EXISTS (SELECT 1 FROM apps WHERE account_id = accounts.id)`,
         accountId,
-      )).changes > 0);
+      )).changes ? "ok" : "not_invited";
+    });
   }
   accountByGithub(githubId: number): Promise<Account | undefined> {
     return this.db.get<Account>("SELECT * FROM accounts WHERE github_id = ?", githubId);

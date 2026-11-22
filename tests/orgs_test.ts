@@ -65,7 +65,11 @@ test("site admins: list accounts, invite, withdraw, disable and enable, roles", 
     assert.equal((await t.send("POST", "/v1/admin/accounts", boss.token, { email: "nope" })).status, 400);
     assert.equal((await t.send("DELETE", `/v1/admin/accounts/${dev.id}`, boss.token)).status, 409, "a real account isn't withdrawn");
     assert.equal((await t.send("DELETE", `/v1/admin/accounts/${inv.body.account.id}`, boss.token)).status, 200);
-    assert.equal((await t.send("POST", "/v1/admin/accounts", boss.token, { email: "new@b.co", siteAdmin: true })).body.account.siteAdmin, true);
+    const reinvite = await t.send("POST", "/v1/admin/accounts", boss.token, { email: "new@b.co", siteAdmin: true });
+    assert.equal(reinvite.body.account.siteAdmin, true);
+    // An invited account as an organization's only admin isn't withdrawn (the org would have none).
+    assert.equal((await t.send("POST", "/v1/admin/orgs", boss.token, { name: "newco", admin: "new@b.co" })).status, 201);
+    assert.equal((await t.send("DELETE", `/v1/admin/accounts/${reinvite.body.account.id}`, boss.token)).body.error, "last_admin");
 
     // Guards: not yourself, not an admin from the server's config.
     assert.equal((await t.send("PATCH", `/v1/admin/accounts/${boss.id}`, boss.token, { disabled: true })).status, 400);

@@ -103,7 +103,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/admin/accounts` | **site admin**: `{totals: {accounts, active, invited, disabled, siteAdmins}, openSignup, accounts: [{id, email, github, status: active\|invited\|disabled, siteAdmin, siteAdminFromConfig, apps, orgs: [{name, title, role}], invitedBy, createdAt, lastActiveAt, disabledAt}]}` (`apps`: personal apps and artifacts; `lastActiveAt`: a token's last use) |
 | POST | `/v1/admin/accounts` | **site admin**: invite `{email, siteAdmin?, org?, orgRole?: member\|admin}` → `{account}` (201). 409 if the email has an account |
 | PATCH | `/v1/admin/accounts/:id` | **site admin**: `{siteAdmin?: bool, disabled?: bool}` → `{account}`. 400 for yourself, 400 `config_admin` for one in `CRESSLET_SITE_ADMINS` |
-| DELETE | `/v1/admin/accounts/:id` | **site admin**: withdraw an invite (deletes an `invited` account that owns nothing); 409 `not_invited` otherwise |
+| DELETE | `/v1/admin/accounts/:id` | **site admin**: withdraw an invite (deletes an `invited` account that owns nothing); 409 `not_invited` otherwise, 409 `last_admin` while it's an organization's only admin |
 | GET | `/v1/orgs` | token with `read` or more over the whole account: `{orgs: [{id, name, title, createdAt, role}]}` you belong to |
 | GET | `/v1/orgs/:org` | members and site admins: `{org, role, canManage, members: [{id, email, github, role, disabled, createdAt}], apps: [{name, kind, url, updatedAt}]}`; 404 to others |
 | POST | `/v1/orgs/:org/members` | org admin (full-access token) or site admin: `{email, role?: member\|admin}` → `{member}` (201). 404 `no_account` if no account has that email, 409 if already a member. At most 500 |

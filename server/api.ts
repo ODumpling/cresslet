@@ -992,10 +992,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     // An account's stream ends when it loses access (removed, left, out of the org, disabled): checked per line
     // and every 15s.
     const acct = c.get("account");
-    const collaborator = !!access;
+    const viaAccount = !!access; // not a deploy key
     // The app as it is now (it may have moved out of an organization since).
     const revoked = async () => {
-      if (!collaborator) return false;
+      if (!viaAccount) return false;
       const now = await store.appById(a.id);
       return !now || !await store.access(now, acct!.id);
     };
@@ -1023,7 +1023,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
             else if (!ended) ctrl.enqueue(line(l));
           }).catch(end);
         });
-        const timer = collaborator ? setInterval(() => void revoked().then((r) => r && end(), () => {}), 15_000) : undefined;
+        const timer = viaAccount ? setInterval(() => void revoked().then((r) => r && end(), () => {}), 15_000) : undefined;
         timer?.unref();
         unsub = () => {
           sub();
