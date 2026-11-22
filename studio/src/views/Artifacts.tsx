@@ -296,7 +296,8 @@ function NewArtifactDialog({ ref, reload }: { ref: Ref<DialogHandle>; reload: ()
   const leaving = useRef(false);
   const router = useRouter();
   useEffect(() => router.subscribe("onBeforeNavigate", (e) => {
-    if (e.toLocation.pathname !== "/artifacts") leaving.current = true; // (another view: this one unmounts)
+    // (another view: this one unmounts; `/pages` redirects back here)
+    if (!/^\/(?:artifacts|pages)\/?$/i.test(e.toLocation.pathname)) leaving.current = true;
   }), [router]);
   const dlgRef = useRef<HTMLDialogElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
