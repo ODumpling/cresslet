@@ -68,6 +68,8 @@ const replies: [Block[], string][] = [
   [[{ type: "text", text: "Made it darker." }], "end_turn"],
   [[{ type: "tool_use", id: "r1", name: "write_file", input: { path: "src/App.tsx", content: RESOLVED } }], "tool_use"],
   [[{ type: "text", text: "Resolved the conflict." }], "end_turn"],
+  [[{ type: "tool_use", id: "b1", name: "write_file", input: { path: "src/bluer.css", content: "h1 { color: navy; }\n" } }], "tool_use"],
+  [[{ type: "text", text: "Made the heading bluer." }], "end_turn"],
 ];
 const claudeAsked: string[] = [];
 const cors = { "access-control-allow-origin": base, "access-control-allow-headers": "*", "access-control-allow-methods": "POST, OPTIONS" };
@@ -307,6 +309,20 @@ try {
   if (!gh.repo(full).pulls.some((p) => p.head === EDITS && p.state === "open")) fail(`no pull request from ${EDITS}`);
   await page.screenshot({ path: `${out}/git-pull-request.png` });
   console.log("protected main: pull request opened");
+
+  // A small follow-up as a change of its own, folded into the one below: one change, one pull request.
+  await input.fill("Make the heading bluer");
+  await input.press("Enter");
+  await page.locator("#builder-log .notice", { hasText: "Committed as change 2 of the stack" }).last().waitFor({ timeout: 60000 });
+  const bluerRow = page.locator("#stack-panel .stack-row", { hasText: "2 · Make the heading bluer" });
+  await bluerRow.getByRole("button", { name: /Fold change 2/ }).click({ timeout: 30000 });
+  await toast(/Folded into one change: 1 · Edits made in the studio/, 60000);
+  await page.locator("#stack-panel .stack-row", { hasText: "2 · Make the heading bluer" }).waitFor({ state: "detached", timeout: 30000 });
+  const edPr = gh.repo(full).pulls.find((p) => p.head === EDITS)!, bluerPr = gh.repo(full).pulls.find((p) => p.head !== EDITS && p.state === "open" && p.base === "main");
+  if (edPr.state !== "closed" || !edPr.comments?.[0]?.startsWith(`Folded into #${bluerPr?.number}`)) fail(`folded pull request: ${JSON.stringify(edPr)}`);
+  if (gh.repo(full).refs.has(EDITS)) fail("the folded change's branch is still there");
+  await page.locator("#stack-panel").screenshot({ path: `${out}/git-stack-folded.png` });
+  console.log("folded change 2 into change 1: pull request", bluerPr?.number);
 
   // A webhook says main moved on GitHub: the branch pill shows it.
   const upstreamSha = gh.write(gh.repo(full), "main", { "CHANGELOG.md": "x\n" }, "Changelog", "teammate");

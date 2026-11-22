@@ -1198,6 +1198,28 @@ export class Store implements RateHits {
   async setStackChangeSha(id: string, sha: string) {
     await this.db.run("UPDATE stack_changes SET sha = ?, updated_at = ? WHERE id = ?", sha, Date.now(), id);
   }
+  /**
+   * Folds `upper` into `lower` (the change below it): the lower one leaves the stack (`dropped`, its position free),
+   * the upper one takes its place (position, base, title, both prompts), and the ones above move down one.
+   */
+  async foldStackChange(lower: StackChange, upper: StackChange, out: string, prompt: string) {
+    await this.db.tx(async () => {
+      const now = Date.now();
+      await this.db.run(
+        "UPDATE stack_changes SET state = 'dropped', origin_stack_id = COALESCE(origin_stack_id, stack_id), stack_id = ?, updated_at = ? WHERE id = ?",
+        out, now, lower.id,
+      );
+      await this.db.run(
+        "UPDATE stack_changes SET position = ?, base_sha = ?, title = ?, prompt = ?, updated_at = ? WHERE id = ?",
+        lower.position, lower.base_sha, lower.title, prompt, now, upper.id,
+      );
+      // Those above (set aside too: they come back above it), one at a time, lowest first: a position is never held twice.
+      const above = await this.db.all<{ id: string; position: number }>(
+        "SELECT id, position FROM stack_changes WHERE stack_id = ? AND state IN ('open', 'set_aside') AND position > ? ORDER BY position", upper.stack_id, upper.position,
+      );
+      for (const x of above) await this.db.run("UPDATE stack_changes SET position = ?, updated_at = ? WHERE id = ?", x.position - 1, now, x.id);
+    });
+  }
   /** A change's pull request. */
   async setStackChangePull(id: string, number: number | null) {
     await this.db.run("UPDATE stack_changes SET pr_number = ?, updated_at = ? WHERE id = ?", number, Date.now(), id);

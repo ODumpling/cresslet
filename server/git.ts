@@ -11,7 +11,7 @@ import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, followed, goBack, landed, landUpTo, locked, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, goBack, landed, landUpTo, locked, pullIn, readStacks, restore,
   setAsideBranches, stackPulls, submitStack,
 } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
@@ -86,6 +86,8 @@ export interface SourceControlProvider {
   updatePull(r: Repo, number: number, input: { base?: string; title?: string; body?: string; state?: "open" | "closed" }): Promise<Pull>;
   /** Its review decision and its head's checks. */
   pullStatus(r: Repo, number: number): Promise<PullInfo>;
+  /** A comment on a pull request, as the user. */
+  commentPull(r: Repo, number: number, body: string): Promise<void>;
   /**
    * Why `branch` takes no direct moves (branch protection, or a ruleset needing pull requests, checks…), or null.
    * Checked by Cresslet before moving the default branch: GitHub lets an admin through when protection isn't enforced
@@ -583,6 +585,10 @@ export class GitHub implements SourceControlProvider {
       throw conflict(`${branch} moved on GitHub meanwhile: try again`);
     }
     throw refError(res.status, res.body?.message, branch);
+  }
+
+  async commentPull(r: Repo, number: number, body: string) {
+    await this.ok("POST", this.#path(r, `/issues/${number}/comments`), { body });
   }
 
   async pullStatus(r: Repo, number: number) {
@@ -1187,6 +1193,14 @@ export function gitRoutes(
     const input = await body<{ change?: unknown } | null>(c) ?? {};
     if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
     return c.json(await deleteSetAside({ provider: client, store, appId: a.id, repo, r }, input.change));
+  });
+  // Folding a change into the one below it.
+  app.post("/apps/:name/git/stack/fold", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ change?: unknown; into?: unknown } | null>(c) ?? {};
+    if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
+    if (typeof input.into !== "string" || !input.into) throw new HttpError(400, "into must be the id of the change below it");
+    return c.json(await fold({ provider: client, store, appId: a.id, repo, r }, input.change, input.into));
   });
   // Landing a stack up to a change (the default branch moved to it, change by change).
   app.post("/apps/:name/git/stack/land", async (c) => {
