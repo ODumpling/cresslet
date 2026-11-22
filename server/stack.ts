@@ -722,7 +722,7 @@ async function dropLanded(ctx: Ctx, stackId: string, keep: string | undefined, e
       if (!p || p.head !== next.branch || p.state !== "open") p = await ctx.provider.findPull(ctx.r, next.branch) ?? p;
       if (p?.state === "open") {
         held.add(p.base);
-        if (p.base !== ctx.repo.default_branch) errors.push({ change: next.id, position: next.position, error: `pull request #${p.number} is still on ${p.base}, which is kept until it's on ${ctx.repo.default_branch} (land again, or submit the stack)` });
+        if (p.base !== ctx.repo.default_branch && p.base !== keep) errors.push({ change: next.id, position: next.position, error: `pull request #${p.number} is still on ${p.base}, which is kept until it's on ${ctx.repo.default_branch} (land again, or submit the stack)` });
       }
     } catch (e) {
       unknown = true;
