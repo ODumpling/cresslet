@@ -23,21 +23,34 @@ function set(next: Partial<Session>) {
   state = { ...state, ...next };
   for (const l of listeners) l();
 }
-export const session = () => state;
+/**
+ * The session, as stored: the token is localStorage's (a write there in this tab, as the old studio read it on every
+ * route, counts too: `session()` and each navigation pick it up).
+ */
+export const session = () => {
+  const token = auth.token;
+  if (token !== state.token) state = { token, email: auth.email, accountId: null, siteAdmin: false, orgs: [] };
+  return state;
+};
 const subscribe = (l: () => void) => {
   listeners.add(l);
   return () => listeners.delete(l);
 };
 export const useSession = () => useSyncExternalStore(subscribe, session, session);
 
-/** Another tab logged in or out: follow it (views keyed on the token reload, so no other account's data stays shown). */
+/**
+ * Another tab logged in or out, or this tab's storage changed before a navigation: follow it (views keyed on the token
+ * reload, so no other account's data stays shown). The layout loads the new token's account.
+ */
 if (typeof window !== "undefined") {
-  addEventListener("storage", (e) => {
-    if (e.key !== "cresslet.token" && e.key !== "cresslet.email" && e.key !== null) return;
-    if (auth.token === state.token) return set({ email: auth.email });
-    set({ token: auth.token, email: auth.email, accountId: null, siteAdmin: false, orgs: [] });
-    if (auth.token) refreshAccount();
-  });
+  const sync = () => {
+    const before = state;
+    if (session() !== before) for (const l of listeners) l();
+    else if (auth.email !== state.email && auth.token) set({ email: auth.email });
+  };
+  addEventListener("storage", (e) => (e.key === "cresslet.token" || e.key === "cresslet.email" || e.key === null) && sync());
+  addEventListener("hashchange", sync);
+  addEventListener("popstate", sync);
 }
 
 /** Stores a login (`token`) or what /v1/me said about the current one. */

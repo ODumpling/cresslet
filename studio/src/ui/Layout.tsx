@@ -32,12 +32,16 @@ export function Layout() {
 
   useEffect(() => {
     void meta().then((m) => setCredits(!!m.ai?.credits));
-    void refreshAccount();
     // Opened by the GitHub login callback: finish it, then back to what needed the login.
     void finishLogin().then((to) => {
       if (to) void navigate({ href: to.slice(1) });
     });
   }, [navigate]);
+
+  // Role can change server-side, and the token can change under the page (another tab): load its account.
+  useEffect(() => {
+    if (s.token && !s.accountId) void refreshAccount();
+  }, [s.token, s.accountId]);
 
   // Recent projects (not when projects need a login this browser doesn't have).
   const inProject = view.view === "workspace";
