@@ -428,6 +428,22 @@ test("stack: an open pull request from a change's branch is reused (on the right
   assert.deepEqual((await submitStack(t.ctx, c1.stack.id)).pulls.map((x) => x.number), [1, 3, 2]);
 });
 
+test("stack: a pull request merged by hand is said, not opened again; a reused one takes the change's title; @names don't notify", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await commitChange(t.ctx, { from: "main", baseSha: main, files: [["index.html", new TextEncoder().encode("1")]], title: "One", prompt: "ask @octo-cat about it", author: { name: "octo", email: "o@x" }, by: null }));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  await t.provider.createPull(t.ctx.r, { head: c2.branch, base: c1.branch, title: "by hand", body: "" });
+  await submitStack(t.ctx, c1.stack.id);
+  assert.deepEqual(t.provider.pulls.map((x) => [x.head, x.title]), [[c2.branch, "Two"], [c1.branch, "One"]]);
+  assert.match(t.provider.pulls[1].body, /^> ask @\u200bocto-cat about it/);
+  t.provider.pulls[1].merged = true;
+  t.provider.pulls[1].state = "closed";
+  const again = await submitStack(t.ctx, c1.stack.id);
+  assert.deepEqual(again.pulls.map((x) => [x.number, !!x.merged, x.error]), [[2, true, undefined], [1, false, undefined]]);
+  assert.equal(t.provider.pulls.length, 2);
+});
+
 test("stack: going back closes the set-aside changes' pull requests; restore reopens them", async () => {
   await using t = await setup();
   const main = t.provider.refs.get("main")!;
@@ -441,7 +457,13 @@ test("stack: going back closes the set-aside changes' pull requests; restore reo
   assert.deepEqual((await submitStack(t.ctx, c1.stack.id)).pulls.map((x) => x.number), [1]);
   await restore(t.ctx, c1.stack.id);
   assert.deepEqual(t.provider.pulls.map((x) => x.state), ["open", "open", "open"]);
-  void c3;
+  // One opened from a change's branch before its number was recorded is closed too (and reopened).
+  const c4 = ok(await t.change(c3.branch, c3.sha, "Four", "4"));
+  await t.provider.createPull(t.ctx.r, { head: c4.branch, base: c3.branch, title: "Four", body: "" });
+  await goBack(t.ctx, c3.change.id);
+  assert.equal(t.provider.pulls[3].state, "closed");
+  await restore(t.ctx, c1.stack.id);
+  assert.equal(t.provider.pulls[3].state, "open");
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {

@@ -584,7 +584,7 @@ test("git: going back to a change commits changes here first, then loads its com
   await g.git.goBack({ id: "chg_1", branch: "feat/s/1-one", sha: "1".repeat(40) });
   // Committed as a change first (never dropped); its files in hand before the server sets anything aside.
   assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack", `/tree?ref=${"1".repeat(40)}`, "/stack/back"]);
-  assert.equal(g.calls[0].body.title, "Edits made in the studio");
+  assert.deepEqual([g.calls[0].body.title, g.calls[0].body.submit], ["Edits made in the studio", false]); // not auto-submitted
   assert.deepEqual(g.calls[2].body, { change: "chg_1", sha: "1".repeat(40) });
   assert.deepEqual([g.state.activeBranch, g.state.headSha, g.state.dirty], ["feat/s/1-one", "d".repeat(40), false]);
   assert.deepEqual(g.state.back, { position: 1, title: "One", setAside: ["Two", "Three"] });
@@ -677,7 +677,7 @@ test("deploy on a linked app: commit the branch, merge it into main, build main 
   turn.state.dirty = true;
   const p3 = await turn.git.prepareDeploy(() => {}, undefined, { turn: () => ({ title: "Dark mode", prompt: "Dark mode please" }), running: () => true });
   assert.deepEqual(turn.calls.map((x) => x.path.split("/git")[1]), ["/stack", "/merge"]);
-  assert.deepEqual([turn.calls[0].body.title, turn.calls[0].body.prompt, turn.calls[1].body.branch], ["Dark mode", "Dark mode please", "feat/s/2-two"]);
+  assert.deepEqual([turn.calls[0].body.title, turn.calls[0].body.prompt, turn.calls[0].body.submit, turn.calls[1].body.branch], ["Dark mode", "Dark mode please", false, "feat/s/2-two"]);
   assert.equal(turn.calls[1].body.headSha, "1".padStart(40, "c"));
   assert.equal(p3.branch, "main");
   // Deployed by hand while the builder works on a request (checked when the step runs, after any queued before it):

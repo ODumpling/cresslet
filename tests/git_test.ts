@@ -951,4 +951,15 @@ test("stack: submitted as a chain of pull requests (as the user), their review a
   const c3 = await add(c2.branch, c2.sha, "Three", "3");
   assert.deepEqual(c3.submitted.pulls.map((p: { number: number }) => p.number), [1, 2, 3]);
   assert.equal(pulls[2].base, c2.branch);
+  // A change the studio makes on its way somewhere (submit: false) isn't submitted.
+  const c4 = (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c3.branch, baseSha: c3.sha, files: files("4"), title: "Four", submit: false })).body;
+  assert.equal(c4.submitted, undefined);
+  assert.equal(pulls.length, 3);
+
+  // Source control's pull request on a change: the stack's, never a second one into the default branch.
+  assert.equal((await t.send("GET", `/v1/apps/shop/git/pulls?branch=${encodeURIComponent(c2.branch)}`, tok)).body.pull.number, 2);
+  assert.equal((await t.send("GET", `/v1/apps/shop/git/pulls?branch=${encodeURIComponent(c4.branch)}`, tok)).body.pull, null);
+  const opened = await t.send("POST", "/v1/apps/shop/git/pulls", tok, { branch: c4.branch });
+  assert.deepEqual([opened.status, opened.body.pull.number], [200, 4]);
+  assert.deepEqual([pulls.length, pulls[3].base], [4, c3.branch]);
 }));

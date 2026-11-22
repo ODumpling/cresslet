@@ -10,7 +10,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
-import { assertNotBelowTop, commitChange, followed, goBack, landed, locked, readStacks, restore, stackPulls, submitStack } from "./stack.ts";
+import { assertNotBelowTop, changePull, commitChange, followed, goBack, landed, locked, readStacks, restore, stackPulls, submitStack } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -1148,7 +1148,7 @@ export function gitRoutes(
   // The workspace committed as a new change: on the default branch a new stack, on a stack's top change the next one.
   app.post("/apps/:name/git/stack", async (c) => {
     await linked(c, "deploy"); // before reading what may be a large body
-    const input = await body<{ from?: unknown; baseSha?: unknown; files?: unknown; title?: unknown; prompt?: unknown } | null>(c, deployBodyLimit) ?? {};
+    const input = await body<{ from?: unknown; baseSha?: unknown; files?: unknown; title?: unknown; prompt?: unknown; submit?: unknown } | null>(c, deployBodyLimit) ?? {};
     const { a, r, repo, client, author } = await linked(c, "deploy");
     const from = branchName(input.from, "from");
     const baseSha = shaOf(input.baseSha, "baseSha");
@@ -1159,8 +1159,9 @@ export function gitRoutes(
       title: message(input.title, `Update ${a.name}`).split("\n")[0].slice(0, 200),
       prompt: typeof input.prompt === "string" ? input.prompt.slice(0, 5000) : "",
     });
-    // The app submits its stacks after each change: the change is made whatever happens to its pull requests.
-    const submitted = out.changed && repo.stack_auto_submit
+    // The app submits its stacks after each change (not one the studio makes on its way somewhere, `submit: false`):
+    // the change is made whatever happens to its pull requests.
+    const submitted = out.changed && repo.stack_auto_submit && input.submit !== false
       ? await submitStack(ctx, out.stack.id).catch((e) => ({ pulls: [], error: e instanceof HttpError ? e.message : "couldn't submit the stack" }))
       : undefined;
     return c.json({ ...out, ...(submitted ? { submitted } : {}) }, out.changed ? 201 : 200);
@@ -1217,15 +1218,20 @@ export function gitRoutes(
 
   // Pull requests, when the default branch takes no direct merges (protection, required reviews or checks).
   app.get("/apps/:name/git/pulls", async (c) => {
-    const { r, repo, client } = await linked(c, "read");
+    const { a, r, repo, client } = await linked(c, "read");
     const branch = branchName(c.req.query("branch"));
-    return c.json({ pull: await client.pull(r, branch, repo.default_branch) });
+    // A change of a stack: its pull request is the stack's (into the change below).
+    const stacked = await changePull({ provider: client, store, appId: a.id, repo, r }, branch, false);
+    return c.json({ pull: stacked ? stacked.pull : await client.pull(r, branch, repo.default_branch) });
   });
   app.post("/apps/:name/git/pulls", async (c) => {
     const { a, r, repo, client } = await linked(c, "deploy");
     const input = await body<{ branch?: unknown; title?: unknown; body?: unknown } | null>(c) ?? {};
     const branch = branchName(input.branch);
     if (branch === repo.default_branch) throw new HttpError(400, `a pull request needs a branch other than ${branch}`);
+    // A change of a stack: its stack is submitted (one pull request per change), not a second one into the default branch.
+    const stacked = await changePull({ provider: client, store, appId: a.id, repo, r }, branch, true);
+    if (stacked) return c.json({ pull: stacked.pull });
     const { pull, created } = await client.openPull(r, {
       head: branch, base: repo.default_branch,
       title: message(input.title, `Update ${a.name} (${branch})`).split("\n")[0].slice(0, 200),

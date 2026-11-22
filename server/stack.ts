@@ -210,8 +210,9 @@ export function goBack(ctx: Ctx, changeId: string, sha?: string, top?: { id: str
     const above = open.filter((x) => x.stack_id === c.stack_id && x.position > c.position);
     await ctx.store.setAsideAbove(ctx.appId, c.stack_id, c.position);
     const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).filter((x) => x.stack_id === c.stack_id);
-    // Their pull requests are closed (branches kept): reopened by restore.
-    const pullErrors = await setPulls(ctx, above, "closed");
+    // Their pull requests are closed (branches kept): reopened by restore. All the stack's set aside: one that failed
+    // to close before is tried again.
+    const pullErrors = await setPulls(ctx, aside, "closed");
     return {
       change: { ...view(c), github: "ok" }, stack: { id: c.stack_id, name: c.stack_name }, now: above.map((x) => x.id),
       setAside: aside.map((x) => ({ ...view(x), github: "ok" as const })), ...(pullErrors.length ? { pullErrors } : {}),
@@ -307,11 +308,19 @@ const why = (e: unknown) => (e instanceof HttpError ? e.message : "GitHub didn't
 /** Closes (changes set aside) or reopens (restored) changes' pull requests, best effort: what failed is returned. */
 async function setPulls(ctx: Ctx, changes: StackChange[], state: "open" | "closed"): Promise<PullError[]> {
   const errors: PullError[] = [];
-  await pool(changes.filter((c) => c.pr_number), 4, async (c) => {
+  await pool(changes, 4, async (c) => {
     try {
-      const p = await ctx.provider.getPull(ctx.r, c.pr_number!);
-      if (!p.merged && p.state !== state) await ctx.provider.updatePull(ctx.r, c.pr_number!, { state });
+      // Closing: also one opened from its branch before the stack was submitted (recorded, so restore reopens it).
+      let n = c.pr_number;
+      if (!n && state === "closed") {
+        n = (await ctx.provider.findPull(ctx.r, c.branch))?.number ?? null;
+        if (n) await ctx.store.setStackChangePull(c.id, n);
+      }
+      if (!n) return;
+      const p = await ctx.provider.getPull(ctx.r, n);
+      if (!p.merged && p.state !== state) await ctx.provider.updatePull(ctx.r, n, { state });
     } catch (e) {
+      if (e instanceof HttpError && e.code === "git_reauth_required") throw e;
       errors.push({ change: c.id, position: c.position, error: why(e) });
     }
   });
@@ -321,12 +330,15 @@ async function setPulls(ctx: Ctx, changes: StackChange[], state: "open" | "close
 /** Text for a markdown table cell. */
 const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
 
+/** No one notified: an `@name` in a prompt or title stays text. */
+const quiet = (s: string) => s.replace(/@(?=[\w-])/g, "@\u200b");
+
 /** A change's pull request description: its prompt, and the whole stack (newest on top), this change marked. */
 export function pullBody(c: StackChange, stack: StackChange[], numbers: Map<string, number>, defaultBranch: string) {
-  const prompt = c.prompt.trim() ? c.prompt.trim().slice(0, 2000).split(/\r?\n/).map((l) => `> ${l}`).join("\n") : `> ${c.title}`;
+  const prompt = quiet(c.prompt.trim() ? c.prompt.trim().slice(0, 2000).split(/\r?\n/).map((l) => `> ${l}`).join("\n") : `> ${c.title}`);
   const rows = [...stack].reverse().map((x) => {
     const n = numbers.get(x.id);
-    return `| ${x.id === c.id ? "→" : ""} | ${x.position} · ${cell(x.title)} | ${n ? `#${n}` : ""} |`;
+    return `| ${x.id === c.id ? "→" : ""} | ${x.position} · ${quiet(cell(x.title))} | ${n ? `#${n}` : ""} |`;
   });
   return [
     prompt,
@@ -340,7 +352,7 @@ export function pullBody(c: StackChange, stack: StackChange[], numbers: Map<stri
   ].join("\n");
 }
 
-export interface Submitted { change: string; position: number; number?: number; url?: string; created?: boolean; error?: string }
+export interface Submitted { change: string; position: number; number?: number; url?: string; created?: boolean; merged?: boolean; error?: string }
 
 /**
  * Submits a stack: a pull request per open change, the bottom one into the default branch, each other one into the
@@ -357,12 +369,19 @@ export function submitStack(ctx: Ctx, stackId: string): Promise<{ pulls: Submitt
     for (const [i, c] of s.entries()) {
       const base = i ? s[i - 1].branch : ctx.repo.default_branch;
       try {
-        let p: Pull | null = c.pr_number ? await provider.getPull(r, c.pr_number).catch(() => null) : null;
-        if (p && (p.head !== c.branch || p.merged)) p = null;
+        let p: Pull | null = c.pr_number
+          ? await provider.getPull(r, c.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e)))
+          : null;
+        // Merged on GitHub already (by hand): nothing more to open for it.
+        if (p && p.head === c.branch && p.merged) {
+          out.push({ change: c.id, position: c.position, number: p.number, url: p.url, merged: true });
+          continue;
+        }
+        if (p && p.head !== c.branch) p = null;
         p ??= await provider.findPull(r, c.branch);
         let created = false;
-        if (p && p.state === "closed") p = await provider.updatePull(r, p.number, { state: "open" });
-        if (p && p.base !== base) p = await provider.updatePull(r, p.number, { base });
+        // One call: reopened on its base (the old one may be gone).
+        if (p && (p.state === "closed" || p.base !== base)) p = await provider.updatePull(r, p.number, { base, ...(p.state === "closed" ? { state: "open" as const } : {}) });
         if (!p) {
           p = await provider.createPull(r, { head: c.branch, base, title: c.title, body: pullBody(c, s, new Map(), ctx.repo.default_branch) });
           created = true;
@@ -371,13 +390,15 @@ export function submitStack(ctx: Ctx, stackId: string): Promise<{ pulls: Submitt
         pulls.set(c.id, p);
         out.push({ change: c.id, position: c.position, number: p.number, url: p.url, created });
       } catch (e) {
+        if (e instanceof HttpError && e.code === "git_reauth_required") throw e;
         out.push({ change: c.id, position: c.position, error: why(e) });
       }
     }
     const numbers = new Map([...pulls].map(([id, p]) => [id, p.number]));
+    for (const x of out) if (x.merged && x.number) numbers.set(x.change, x.number);
     await pool(s.filter((c) => pulls.has(c.id)), 4, async (c) => {
       try {
-        await provider.updatePull(r, pulls.get(c.id)!.number, { body: pullBody(c, s, numbers, ctx.repo.default_branch) });
+        await provider.updatePull(r, pulls.get(c.id)!.number, { title: c.title, body: pullBody(c, s, numbers, ctx.repo.default_branch) });
       } catch (e) {
         const x = out.find((o) => o.change === c.id)!;
         x.error = `its description wasn't updated: ${why(e)}`;
@@ -385,6 +406,22 @@ export function submitStack(ctx: Ctx, stackId: string): Promise<{ pulls: Submitt
     });
     return { pulls: out };
   });
+}
+
+/**
+ * A branch's pull request, when it's an open change of a stack (Source control's pull request, and a protected
+ * default branch's: the stack's, never a second one into the default branch). `open`: submits its stack first.
+ */
+export async function changePull(ctx: Ctx, branch: string, open: boolean): Promise<{ change: true; pull: PullInfo | null } | null> {
+  const c = (await ctx.store.openStackChanges(ctx.appId)).find((x) => x.branch === branch);
+  if (!c) return null;
+  let n = c.pr_number;
+  if (open) {
+    const x = (await submitStack(ctx, c.stack_id)).pulls.find((p) => p.change === c.id);
+    if (!x?.number) throw new HttpError(422, x?.error ?? "GitHub wouldn't open its pull request", "pull_invalid");
+    n = x.number;
+  }
+  return { change: true, pull: n ? await ctx.provider.pullStatus(ctx.r, n) : null };
 }
 
 /** The review and checks of a stack's pull requests, by change id. */
