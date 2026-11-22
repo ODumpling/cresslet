@@ -70,6 +70,8 @@ const replies: [Block[], string][] = [
   [[{ type: "text", text: "Resolved the conflict." }], "end_turn"],
   [[{ type: "tool_use", id: "b1", name: "write_file", input: { path: "src/bluer.css", content: "h1 { color: navy; }\n" } }], "tool_use"],
   [[{ type: "text", text: "Made the heading bluer." }], "end_turn"],
+  [[{ type: "tool_use", id: "f1", name: "write_file", input: { path: "src/footer.txt", content: "footer\n" } }], "tool_use"],
+  [[{ type: "text", text: "Added a footer." }], "end_turn"],
 ];
 const claudeAsked: string[] = [];
 const cors = { "access-control-allow-origin": base, "access-control-allow-headers": "*", "access-control-allow-methods": "POST, OPTIONS" };
@@ -323,6 +325,20 @@ try {
   if (gh.repo(full).refs.has(EDITS)) fail("the folded change's branch is still there");
   await page.locator("#stack-panel").screenshot({ path: `${out}/git-stack-folded.png` });
   console.log("folded change 2 into change 1: pull request", bluerPr?.number);
+
+  // Undo change 1 with a later change kept: a new change on top reverses it (clean: committed at once).
+  await input.fill("Add a footer");
+  await input.press("Enter");
+  await page.locator("#builder-log .notice", { hasText: "Committed as change 2 of the stack" }).last().waitFor({ timeout: 60000 });
+  await page.locator("#stack-panel .stack-row", { hasText: "1 · Edits made in the studio" }).getByRole("button", { name: /Undo change 1/ }).click({ timeout: 30000 });
+  await toast(/Committed "Undo: Edits made in the studio" as a new change/, 60000);
+  await page.locator("#stack-panel .stack-row[data-here]", { hasText: "3 · Undo: Edits made in the studio" }).waitFor({ timeout: 30000 });
+  await page.locator('#tree button[data-path="src/bluer.css"]').waitFor({ state: "detached", timeout: 30000 });
+  await page.locator('#tree button[data-path="src/footer.txt"]').waitFor({ state: "attached" });
+  const undone = gh.files(full, [...gh.repo(full).refs.keys()].find((b) => b.includes("/3-undo-"))!);
+  if (undone["src/bluer.css"] || !undone["src/footer.txt"]) fail(`the undo change holds the wrong files: ${Object.keys(undone)}`);
+  await page.locator("#stack-panel").screenshot({ path: `${out}/git-stack-undone.png` });
+  console.log("undid change 1, keeping change 2");
 
   // A webhook says main moved on GitHub: the branch pill shows it.
   const upstreamSha = gh.write(gh.repo(full), "main", { "CHANGELOG.md": "x\n" }, "Changelog", "teammate");

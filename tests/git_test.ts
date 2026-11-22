@@ -1079,3 +1079,33 @@ test("stack: fold a change into the one below (its pull request on that one's ba
   const s = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
   assert.deepEqual(s.changes.map((c: { branch: string; pull: number }) => [c.branch, c.pull]), [[c2.branch, 2]]);
 }));
+
+test("stack: undo a change below the top (the real three-way merge): clean, conflicting, and what can't be undone here", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const base = linked.files;
+  const with_ = (extra: Record<string, string>) => [...base, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const c1 = await add("main", linked.sha, "Add a", { "a.txt": "a1\n" });
+  const c2 = await add(c1.branch, c1.sha, "Add b", { "a.txt": "a1\n", "b.txt": "b\n" });
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.equal(u.status, 200, JSON.stringify(u.body));
+  assert.deepEqual([u.body.title, u.body.top.sha, u.body.conflicts], ["Undo: Add a", c2.sha, []]);
+  const paths = u.body.files.map((f: { path: string }) => f.path);
+  assert.equal(paths.includes("a.txt"), false);
+  assert.ok(paths.includes("b.txt"));
+  assert.equal((await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c2.change.id}`, tok)).body.error, "top");
+
+  // A later change touched the same lines: markers.
+  const c3 = await add(c2.branch, c2.sha, "Edit a", { "a.txt": "a2\n", "b.txt": "b\n" });
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.deepEqual(v.body.conflicts, ["a.txt"]);
+  assert.equal(v.body.files.find((f: { path: string }) => f.path === "a.txt").data, "<<<<<<< now\na2\n=======\n>>>>>>> undo change 1\n");
+
+  // Binary on both sides: refused with its path.
+  const bin = Buffer.from([0, 1, 2]).toString("base64"), bin2 = Buffer.from([0, 1, 3]).toString("base64");
+  const d1 = (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c3.branch, baseSha: c3.sha, title: "Logo", files: [...with_({ "a.txt": "a2\n", "b.txt": "b\n" }), { path: "logo.bin", data: bin, encoding: "base64" }] })).body;
+  await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: d1.branch, baseSha: d1.sha, title: "Logo 2", files: [...with_({ "a.txt": "a2\n", "b.txt": "b\n" }), { path: "logo.bin", data: bin2, encoding: "base64" }] });
+  const w = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${d1.change.id}`, tok);
+  assert.deepEqual([w.status, w.body.error, w.body.paths], [409, "merge_unresolvable", ["logo.bin"]]);
+}));

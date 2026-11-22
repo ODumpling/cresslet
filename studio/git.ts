@@ -28,6 +28,11 @@ export interface ProjectGitState {
   conflicts?: string[];
   /** Gone back to a change of the stack (the AI builder is told): it, and the later changes set aside. */
   back?: { position: number; title: string; setAside: string[] };
+  /**
+   * Undoing a change (the workspace holds the undo, not committed yet): the next change is titled `title`, and isn't
+   * committed while a conflicted file still has its markers.
+   */
+  undo?: { title: string; conflicts: string[] };
 }
 
 /** An open pull request (GET /v1/apps/:name/git/pulls). */
@@ -192,6 +197,12 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     if (s.mergeParent) return syncNow(title);
     const rev = revision();
     const files = await o.files();
+    // An undo being finished: its title, and not while its conflicts have markers left.
+    if (s.undo) {
+      const left = s.undo.conflicts.filter((p) => files.some((f) => f.path === p && f.encoding !== "base64" && /^(?:<<<<<<<|>>>>>>>) /m.test(f.data)));
+      if (left.length) throw Object.assign(new Error(`resolve the undo's conflicts first (markers left in ${left.join(", ")})`), { code: "conflicts_left" });
+      title = s.undo.title;
+    }
     let r: { changed: boolean; sha: string; branch?: string; change?: StackChange; stack?: { id: string; name: string }; submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean };
     try {
       r = await post("/stack", { from: s.activeBranch, baseSha: s.headSha, files, title, prompt, ...(submit ? {} : { submit: false }) });
@@ -200,11 +211,11 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       return syncNow(title, { files, rev }); // what was read: an edit since stays here
     }
     if (!r.changed || !r.branch) {
-      await set({ dirty: revision() !== rev });
+      await set({ dirty: revision() !== rev, undo: undefined });
       return { sha: r.sha, changed: false, files };
     }
     await set({
-      activeBranch: r.branch, headSha: r.sha, dirty: revision() !== rev, back: undefined,
+      activeBranch: r.branch, headSha: r.sha, dirty: revision() !== rev, back: undefined, undo: undefined,
       ...(s.activeBranch === s.defaultBranch ? { baseSha: s.headSha } : {}),
     });
     o.log?.(`committed change ${r.change?.position ?? "?"} of ${r.stack?.name ?? "the stack"}: ${r.branch} @ ${r.sha.slice(0, 7)}`);
@@ -230,7 +241,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     const extra = (await opts.before?.()) ?? {};
     unchangedSince(rev, `loading ${branch}`);
     // Edited while it loaded (npm install, say): those are changes, kept dirty.
-    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, back: undefined, ...extra, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
+    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, back: undefined, undo: undefined, ...extra, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
     try {
       await o.hydrate(t.files);
     } catch (e) {
@@ -410,6 +421,33 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       else if (s && s.activeBranch === top && !r.landed.some((c) => c.branch === top)) await set({ baseSha: r.sha });
       return r;
     }),
+    /**
+     * Undoes a change below the stack's top (`top`, where the workspace is), keeping the later ones: changes here are
+     * committed first; the server's result is loaded; with no conflicts it's committed at once as a new change ("Undo:
+     * <title>"), else the workspace holds it, conflicted files with markers, until they're resolved and it's committed
+     * (the next commit: a request's, Push or Deploy). Resolves to the conflicts (none: committed).
+     */
+    undo: (change: StackChange, top: StackChange) => serial(async () => {
+      if (o.state()!.dirty) await changeNow("Edits made in the studio", "", false);
+      const s = o.state()!;
+      if (s.activeBranch !== top.branch || s.headSha !== top.sha) throw Object.assign(new Error("the stack changed meanwhile: look at it again"), { code: "changed" });
+      const rev = revision();
+      const r = await o.api<{ title: string; top: { branch: string; sha: string }; conflicts: string[]; files: GitFile[] }>(path(`/stack/undo?change=${encodeURIComponent(change.id)}`));
+      if (r.top.sha !== s.headSha) throw Object.assign(new Error("the stack changed meanwhile: look at it again"), { code: "changed" });
+      unchangedSince(rev, "loading the undo");
+      const holding = () => set({ dirty: true, undo: { title: r.title, conflicts: r.conflicts } });
+      try {
+        await o.hydrate(r.files);
+      } catch (e) {
+        if (!(e as { filesWritten?: boolean }).filesWritten) throw e;
+        await holding(); // its files are in: the undo is loaded either way
+        if (!r.conflicts.some((p) => /(?:^|\/)package(?:-lock)?\.json$/.test(p))) throw e;
+        return { conflicts: r.conflicts, title: r.title };
+      }
+      await holding();
+      if (!r.conflicts.length) await changeNow(r.title, "");
+      return { conflicts: r.conflicts, title: r.title };
+    }),
     /** Folds a change into the one below it (server/stack.ts fold). The workspace on it stays on it: same commit. */
     fold: (change: StackChange, into: StackChange) => post<{ change: StackChange; dropped: string; pullErrors?: PullError[] }>("/stack/fold", { change: change.id, into: into.id }),
     /** Every change set aside (Source control lists them), and deleting one (with the ones set aside above it). */
@@ -464,7 +502,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       // mid-turn), or edits on the default branch (by hand).
       const was = o.state()!;
       let synced: { sha: string; files: GitFile[] } | undefined;
-      if (was.dirty && !was.mergeParent && (turn || was.activeBranch === was.defaultBranch)) {
+      if (was.dirty && !was.mergeParent && (turn || was.undo || was.activeBranch === was.defaultBranch)) {
         log(`committing the changes here as a change…`);
         const rev0 = revision();
         synced = await changeNow(turn?.title ?? "Edits made in the studio", turn?.prompt ?? "", false);

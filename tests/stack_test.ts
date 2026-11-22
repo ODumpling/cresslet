@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Pull, Repo, SourceControlProvider } from "../server/git.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, pullBody, goBack, landed, landUpTo, MAX_STACK, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, pullBody, undoPlan, goBack, landed, landUpTo, MAX_STACK, pullIn, readStacks, restore,
   setAsideBranches, slug, stackPulls, submitStack,
 } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
@@ -72,6 +72,21 @@ function fakeProvider() {
       if (failUpdate.delete(n)) throw new HttpError(502, "GitHub: Server Error", "github_error");
       Object.assign(pullOf(n), Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)));
       return { ...pullOf(n) };
+    },
+    async revert(_r: Repo, input: { change: string; parent: string; top: string; label: string }) {
+      const [b, o, t] = [input.change, input.top, input.parent].map((x) => commits.get(x)!.files);
+      const files: { path: string; data: string; encoding: "utf8" }[] = [], conflicts: string[] = [];
+      for (const path of [...new Set([...b.keys(), ...o.keys(), ...t.keys()])].sort()) {
+        const [x, y, z] = [b.get(path), o.get(path), t.get(path)];
+        const pick = y === z || z === x ? y : y === x ? z : undefined;
+        if (y === z || z === x || y === x) {
+          if (pick !== undefined) files.push({ path, data: pick, encoding: "utf8" });
+          continue;
+        }
+        conflicts.push(path);
+        files.push({ path, data: `<<<<<<< now\n${y ?? ""}\n=======\n${z ?? ""}\n>>>>>>> undo ${input.label}\n`, encoding: "utf8" });
+      }
+      return { files, conflicts };
     },
     async commentPull(_r: Repo, n: number, body: string) {
       comments.push({ n, body });
@@ -914,6 +929,34 @@ test("stack: folding moves the changes above down; never the bottom, nor one set
   [s] = await readStacks(t.ctx);
   assert.equal(s.changes.length, 4);
   assert.equal(t.provider.refs.get(c3.branch), c3.sha);
+});
+
+test("stack: undoing change 1 of 3 (the others touched other files): the top without change 1's files, no conflicts", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const put = (from: string, baseSha: string, title: string, files: Record<string, string>) => commitChange(t.ctx, {
+    from, baseSha, title, prompt: "", author: { name: "octo", email: "o@x" }, by: null,
+    files: Object.entries({ "index.html": "<h1>hi</h1>", ...files }).map(([p, d]) => [p, new TextEncoder().encode(d)] as [string, Uint8Array]),
+  }).then(ok);
+  const c1 = await put("main", main, "Add a", { "a.txt": "a1" });
+  const c2 = await put(c1.branch, c1.sha, "Add b", { "a.txt": "a1", "b.txt": "b" });
+  const c3 = await put(c2.branch, c2.sha, "Add c", { "a.txt": "a1", "b.txt": "b", "c.txt": "c" });
+  const u = await undoPlan(t.ctx, c1.change.id);
+  assert.deepEqual([u.title, u.top, u.conflicts], ["Undo: Add a", { branch: c3.branch, sha: c3.sha }, []]);
+  assert.deepEqual(u.files.map((f) => f.path), ["b.txt", "c.txt", "index.html"]); // a.txt gone, the rest kept
+  // Committed from the top as a change of its own: change 4, "Undo: Add a"; 2 and 3 untouched.
+  const c4 = await put(c3.branch, c3.sha, u.title, { "b.txt": "b", "c.txt": "c" });
+  assert.deepEqual([c4.change.position, c4.change.title], [4, "Undo: Add a"]);
+  assert.equal(t.provider.refs.get(c2.branch), c2.sha);
+
+  // A later change touched the same file: it comes back with markers.
+  const d1 = await put(c4.branch, c4.sha, "Set x", { "b.txt": "b", "c.txt": "c", "x.txt": "one" });
+  const d2 = await put(d1.branch, d1.sha, "Change x", { "b.txt": "b", "c.txt": "c", "x.txt": "two" });
+  const v = await undoPlan(t.ctx, d1.change.id);
+  assert.deepEqual(v.conflicts, ["x.txt"]);
+  assert.match(v.files.find((f) => f.path === "x.txt")!.data, /^<<<<<<< now\ntwo\n=======\n\n>>>>>>> undo change 5\n$/);
+  // The top change: undone by going back instead.
+  await assert.rejects(undoPlan(t.ctx, d2.change.id), (e) => (e as HttpError).code === "top");
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {

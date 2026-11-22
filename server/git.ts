@@ -11,7 +11,7 @@ import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, goBack, landed, landUpTo, locked, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landUpTo, locked, pullIn, readStacks, restore,
   setAsideBranches, stackPulls, submitStack,
 } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
@@ -86,6 +86,8 @@ export interface SourceControlProvider {
   updatePull(r: Repo, number: number, input: { base?: string; title?: string; body?: string; state?: "open" | "closed" }): Promise<Pull>;
   /** Its review decision and its head's checks. */
   pullStatus(r: Repo, number: number): Promise<PullInfo>;
+  /** A change undone on `top`, file by file, for the workspace (conflicts marked); see GitHub#revert. */
+  revert(r: Repo, input: { change: string; parent: string; top: string; subdir: string; label: string }): Promise<{ conflicts: string[]; files: DeployFile[] }>;
   /** A comment on a pull request, as the user. */
   commentPull(r: Repo, number: number, body: string): Promise<void>;
   /**
@@ -458,10 +460,31 @@ export class GitHub implements SourceControlProvider {
     const [intoSha, headSha] = await Promise.all([this.branchHead(r, input.into), this.branchHead(r, input.head)]);
     if (!intoSha || !headSha) throw new HttpError(404, `no branch ${!intoSha ? input.into : input.head} on GitHub`, "branch_not_found");
     const cmp = await this.ok<{ merge_base_commit: { sha: string } }>("GET", this.#path(r, `/compare/${intoSha}...${headSha}`));
-    const full = await Promise.all([cmp.merge_base_commit.sha, headSha, intoSha].map((sha) => this.#entries(r, sha)));
+    const full = await Promise.all([cmp.merge_base_commit.sha, headSha, intoSha].map((sha) => this.#entries(r, sha))) as [Entries, Entries, Entries];
     // What the studio doesn't hold must merge by itself (else: a pull request).
     const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
     if (outside.both.length) throw unresolvable(outside.both);
+    return { intoSha, headSha, ...await this.#mergeHeld(r, full, input.subdir, outside, [input.head, input.into]) };
+  }
+
+  /**
+   * Change `change` (cut from `parent`) undone on `top`, for the workspace: a three-way merge of `top` with `parent`,
+   * `change` as the base. Every file of the result under `subdir`, as the workspace holds them; one later changes also
+   * touched where the change did is a conflict, both versions between markers (`top` / `undo`). Binary files both
+   * sides changed, and anything the change touched that the studio doesn't hold (outside `subdir`, dotenv files),
+   * can't be undone here (409 merge_unresolvable).
+   */
+  async revert(r: Repo, input: { change: string; parent: string; top: string; subdir: string; label: string }) {
+    const full = await Promise.all([input.change, input.top, input.parent].map((sha) => this.#entries(r, sha))) as [Entries, Entries, Entries];
+    const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
+    // (Taking those from the parent would need a commit the workspace can't make.)
+    if (outside.both.length || outside.take.length) throw unresolvable([...outside.both, ...outside.take.map((x) => x.path)].sort());
+    return this.#mergeHeld(r, full, input.subdir, outside, ["now", `undo ${input.label}`]);
+  }
+
+  /** The three-way merge of what the studio holds (base, ours, theirs), conflicts marked with `labels`. */
+  async #mergeHeld(r: Repo, full: [Entries, Entries, Entries], subdir: string, outside: Outside, labels: [string, string]) {
+    const input = { subdir, head: labels[0], into: labels[1] };
     const prefix = input.subdir ? input.subdir + "/" : "";
     const [base, ours, theirs] = full.map((m) => new Map([...m.values()].filter((e) => !outside.outside.has(e.path) && studioHolds(e.path, e, input.subdir)).map((e) => [e.path.slice(prefix.length), { ...e, rel: e.path.slice(prefix.length) }])));
     const out = new Map<string, Uint8Array>(), conflicts: string[] = [];
@@ -519,7 +542,7 @@ export class GitHub implements SourceControlProvider {
       const t = text(d);
       return t === null ? { path, data: Buffer.from(d).toString("base64"), encoding: "base64" } : { path, data: t, encoding: "utf8" };
     });
-    return { intoSha, headSha, conflicts: conflicts.sort(), files };
+    return { conflicts: conflicts.sort(), files };
   }
 
   #pull = (p: GhPull): Pull => ({
@@ -644,6 +667,9 @@ type GhRepo = {
   owner: { login: string }; permissions?: { push?: boolean };
 };
 type GhEntry = { path: string; mode: string; type: string; sha: string; size?: number };
+type Entries = Map<string, GhEntry>;
+/** What a merge does with what the studio doesn't hold (GitHub#mergeOutside). */
+type Outside = { take: { path: string; mode: string; type: string; sha: string | null }[]; both: string[]; outside: Set<string> };
 type GhPull = {
   number: number; html_url: string; title: string; draft?: boolean; head: { sha: string; ref?: string }; base?: { ref: string };
   state?: string; merged?: boolean; merged_at?: string | null;
@@ -1193,6 +1219,14 @@ export function gitRoutes(
     const input = await body<{ change?: unknown } | null>(c) ?? {};
     if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
     return c.json(await deleteSetAside({ provider: client, store, appId: a.id, repo, r }, input.change));
+  });
+  // Undoing a change below the top: the workspace's files for a new change that reverses it (conflicts marked).
+  app.get("/apps/:name/git/stack/undo", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const change = c.req.query("change");
+    if (!change) throw new HttpError(400, "change must be a change's id");
+    c.header("cache-control", "no-store");
+    return c.json(await undoPlan({ provider: client, store, appId: a.id, repo, r }, change));
   });
   // Folding a change into the one below it.
   app.post("/apps/:name/git/stack/fold", async (c) => {
