@@ -483,12 +483,32 @@ export class GitHub implements SourceControlProvider {
     }
     const full = await Promise.all([input.change, input.top, input.parent].map((sha) => this.#entries(r, sha))) as [Entries, Entries, Entries];
     const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
-    // (Taking those from the parent would need a commit the workspace can't make.)
+    // (Taking those from the parent would need a commit the workspace can't make, but for a dotenv file's public entries.)
     // The studio's commit can't set modes: an executable the change deleted or made plain (still so at the top), or a
     // file it made executable (still so), can't be put back.
     const exec = [...full[2].values()].filter((e) => e.mode === "100755" && full[0].get(e.path)?.mode !== "100755" && full[1].get(e.path)?.mode !== "100755")
       .concat([...full[0].values()].filter((e) => e.mode === "100755" && full[2].get(e.path)?.mode === "100644" && full[1].get(e.path)?.mode === "100755"));
-    const refused = [...new Set([...outside.both, ...outside.take.map((x) => x.path), ...exec.map((e) => e.path)])].sort();
+    // …nor keep a mode a later change gave a file the undo puts back or deletes.
+    const plain = (m?: string) => m === "100644" || m === "100755";
+    const moded = [...full[0].values()].filter((e) => {
+      const [t, p] = [full[1].get(e.path), full[2].get(e.path)];
+      return !!t && plain(e.mode) && plain(t.mode) && t.mode !== e.mode && (p?.sha !== e.sha || p?.mode !== e.mode);
+    });
+    // A dotenv file only the change touched, on both sides: put back through the workspace's commit (its public
+    // entries replaced, its private lines kept) when that gives the parent's file exactly.
+    const prefix = input.subdir ? input.subdir + "/" : "";
+    const dec = new TextDecoder();
+    const envBack = async (x: Outside["take"][number]) => {
+      const [t, p] = [full[1].get(x.path), full[2].get(x.path)];
+      if (!DOTENV.test(x.path) || !x.sha || !t || !p || t.mode !== p.mode || !workspaceEnv(t, x.path, prefix) || !workspaceEnv(p, x.path, prefix)) return false;
+      const [want, now] = await Promise.all([p.sha, t.sha].map((sha) => this.#blob(r, sha).then((d) => dec.decode(d))));
+      const pub = dec.decode(publicDotenv(new TextEncoder().encode(want)));
+      // (Its public entries as they are: the commit leaves the file alone.)
+      if (pub === dec.decode(publicDotenv(new TextEncoder().encode(now)))) return now === want;
+      return mergeDotenvText(now, pub) === want;
+    };
+    const back = new Set((await Promise.all(outside.take.map(async (x) => (await envBack(x)) ? x.path : null))).filter((x) => x !== null));
+    const refused = [...new Set([...outside.both, ...outside.take.map((x) => x.path).filter((x) => !back.has(x)), ...exec.map((e) => e.path), ...moded.map((e) => e.path)])].sort();
     const refuse = (paths: string[]) => Object.assign(
       new HttpError(409, `${paths.join(", ")} can't be undone in the studio (outside what it holds, binary, an executable, or a file where a folder is now): undo it on GitHub`, "merge_unresolvable"),
       { extra: { paths } },

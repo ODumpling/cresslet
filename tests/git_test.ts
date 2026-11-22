@@ -1180,3 +1180,29 @@ test("stack: undo keeps a file a later change made of a symlink, and refuses und
   const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c3.change.id}`, tok);
   assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["run.sh"]]);
 }));
+
+test("stack: undo puts back a dotenv file's public entries (its private lines kept), and refuses dropping a file a later change made executable", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const main = t.gh.write(t.gh.repo("octo/shop"), "main", { ".env": "VITE_THEME=light\nSECRET=s\n" });
+  // Change 1 switched the theme (the studio sends public entries only); change 2 touched another file.
+  const c1 = await add("main", main, "Dark theme", { ".env": "VITE_THEME=dark\n" });
+  assert.match(t.gh.files("octo/shop", c1.branch)[".env"], /VITE_THEME=dark[\s\S]*SECRET=s/);
+  const c2 = await add(c1.branch, c1.sha, "Add b", { ".env": "VITE_THEME=dark\n", "b.txt": "b\n" });
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.equal(u.status, 200, JSON.stringify(u.body));
+  const env = u.body.files.find((f: { path: string }) => f.path === ".env");
+  assert.deepEqual([env?.data, u.body.conflicts], ["VITE_THEME=light\n", []]);
+  // Committed as the studio would: the parent's file exactly.
+  const c3 = await add(c2.branch, c2.sha, u.body.title, { ".env": env.data, "b.txt": "b\n" });
+  assert.equal(t.gh.files("octo/shop", c3.branch)[".env"], "VITE_THEME=light\nSECRET=s\n");
+
+  // Change 4 added deploy.sh, change 5 only made it executable: undoing 4 would delete what 5 changed.
+  const c4 = await add(c3.branch, c3.sha, "Add deploy.sh", { ".env": env.data, "b.txt": "b\n", "deploy.sh": "#!/bin/sh\n" });
+  const c5 = await add(c4.branch, c4.sha, "Add c", { ".env": env.data, "b.txt": "b\n", "deploy.sh": "#!/bin/sh\n", "c.txt": "c\n" });
+  t.gh.commit(c5.sha).tree.set("deploy.sh", { ...t.gh.commit(c5.sha).tree.get("deploy.sh")!, mode: "100755" });
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}`, tok);
+  assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["deploy.sh"]]);
+}));
