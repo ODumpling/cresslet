@@ -268,14 +268,22 @@ export class GitHub implements SourceControlProvider {
       // Dotenv files are merged here: the studio's copy must be the merged one's public entries (an edit made while
       // resolving would be lost otherwise: commit it afterwards).
       const taken = new Map(m.take.map((x) => [x.path, x]));
-      for (const [p, d] of input.files) {
-        const path = prefix + p;
-        if (!DOTENV.test(path)) continue;
-        const e = taken.has(path) ? taken.get(path)! : ours.get(path);
-        const merged = e?.sha ? publicDotenv(await this.#blob(r, e.sha)) : null;
-        if (!merged || !Buffer.from(merged).equals(Buffer.from(d))) {
-          throw Object.assign(new HttpError(409, `${p} was changed while merging: commit the merge first, then that change`, "merge_dotenv_changed"), { extra: { paths: [p] } });
+      const result = (path: string) => (taken.has(path) ? taken.get(path)! : ours.get(path));
+      const sent = new Map(input.files.filter(([p]) => DOTENV.test(prefix + p)).map(([p, d]) => [prefix + p, d]));
+      const changed = (p: string) => Object.assign(new HttpError(409, `${p.slice(prefix.length)} was changed while merging: commit the merge first, then that change`, "merge_dotenv_changed"), { extra: { paths: [p.slice(prefix.length)] } });
+      for (const [path, d] of sent) {
+        const e = result(path);
+        // Gone upstream, kept here with only private lines (nothing public): fine, it's not committed.
+        if (!e?.sha) {
+          if (new TextDecoder().decode(publicDotenv(d)).trim()) throw changed(path);
+          continue;
         }
+        if (!Buffer.from(publicDotenv(await this.#blob(r, e.sha))).equals(Buffer.from(d))) throw changed(path);
+      }
+      // …and none deleted here meanwhile.
+      for (const path of new Set([...taken.keys(), ...ours.keys()])) {
+        const e = result(path);
+        if (e?.sha && e.type === "blob" && path.startsWith(prefix) && DOTENV.test(path) && !NOT_SOURCE.test(path.slice(prefix.length)) && !sent.has(path)) throw changed(path);
       }
     }
     const held = (path: string) => !input.mergeParent || (!DOTENV.test(path) && !notHeld.has(path));
@@ -403,19 +411,21 @@ export class GitHub implements SourceControlProvider {
       }
     };
     const paths = [...new Set([...base.keys(), ...ours.keys(), ...theirs.keys()])];
-    if (paths.length > this.limits.files) throw new HttpError(413, `the repository has more than ${this.limits.files} files`, "too_large");
     // Dotenv files (merged by mergeOutside): the result's, read below for their public entries.
     const taken = new Map(outside.take.map((x) => [x.path, x]));
     for (const [path, e] of full[1]) if (!taken.has(path) && path.startsWith(prefix) && DOTENV.test(path)) taken.set(path, { path, mode: e.mode, type: e.type, sha: e.sha });
+    // …and files the merge takes from the default branch that the workspace holds (a symlink there turned into a file).
     const envs = [...taken.values()].filter((x) => {
       const rel = x.path.slice(prefix.length);
-      if (!x.sha || !x.path.startsWith(prefix) || !DOTENV.test(x.path) || NOT_SOURCE.test(rel) || x.type !== "blob" || x.mode === "120000") return false;
+      if (!x.sha || !x.path.startsWith(prefix) || NOT_SOURCE.test(rel) || x.type !== "blob" || x.mode === "120000") return false;
+      if (!DOTENV.test(x.path) && !outside.take.includes(x)) return false;
       try {
         return safePath(rel) === rel;
       } catch {
         return false;
       }
     });
+    if (paths.length + envs.length > this.limits.files) throw new HttpError(413, `the repository has more than ${this.limits.files} files`, "too_large");
     const sizeOf = (sha: string) => [...full[1].values(), ...full[2].values()].find((e) => e.sha === sha)?.size ?? 0;
     // What's read: one side of a file only one side changed, both of a conflict, and the dotenv files.
     const size = paths.reduce((n, p) => {
@@ -446,7 +456,10 @@ export class GitHub implements SourceControlProvider {
     });
     if (binary.length) throw unresolvable(binary.map((p) => prefix + p));
     // Dotenv files (merged outside the studio's part): the result's public entries, as the workspace holds them.
-    for (const x of envs) out.set(x.path.slice(prefix.length), publicDotenv(await this.#blob(r, x.sha!)));
+    for (const x of envs) {
+      const d = await this.#blob(r, x.sha!);
+      out.set(x.path.slice(prefix.length), DOTENV.test(x.path) ? publicDotenv(d) : d);
+    }
     const files: DeployFile[] = [...out].sort(([x], [y]) => (x < y ? -1 : 1)).map(([path, d]) => {
       const t = text(d);
       return t === null ? { path, data: Buffer.from(d).toString("base64"), encoding: "base64" } : { path, data: t, encoding: "utf8" };

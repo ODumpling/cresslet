@@ -705,3 +705,44 @@ test("conflict resolution: a .env edited meanwhile, and binary files (NUL bytes)
   assert.equal(bin.body.error, "merge_unresolvable");
   assert.deepEqual(bin.body.paths, ["img.bin"]);
 }));
+
+test("conflict resolution: dotenv files deleted on one side are handled both ways", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const repo = t.gh.repo("octo/shop");
+  t.gh.write(repo, "main", { "a.txt": "a\n", ".env": "VITE_A=1\n" });
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "pull" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/g" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/g", baseSha: linked.body.sha, files: linked.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "mine\n" } : f)),
+  });
+  // main deletes .env (and conflicts on a.txt): the workspace keeps an empty (private-only) one: fine.
+  const theirs = t.gh.write(repo, "main", { "a.txt": "theirs\n", ".env": null });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/g", tok);
+  assert.equal(cf.body.files.some((f: { path: string }) => f.path === ".env"), false);
+  const files = [...cf.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "both\n" } : f)), { path: ".env", data: "" }];
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/g", baseSha: mine.body.sha, files, mergeParent: theirs });
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  assert.equal(t.gh.files("octo/shop", "feat/g")[".env"], undefined);
+}));
+
+test("conflict resolution: a .env deleted in the workspace while merging is refused", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const repo = t.gh.repo("octo/shop");
+  t.gh.write(repo, "main", { "a.txt": "a\n", ".env": "VITE_A=1\n" });
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "pull" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/h" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/h", baseSha: linked.body.sha, files: linked.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "mine\n" } : f)),
+  });
+  const theirs = t.gh.write(repo, "main", { "a.txt": "theirs\n" });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/h", tok);
+  const files = cf.body.files.filter((f: { path: string }) => f.path !== ".env").map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "both\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/h", baseSha: mine.body.sha, files, mergeParent: theirs });
+  assert.equal(s.body.error, "merge_dotenv_changed");
+}));
