@@ -165,9 +165,10 @@ test("organizations: site admins create them; admins manage members; org apps be
     assert.equal(await access(bob.token), null);
     assert.equal((await t.srv.store.appByName("bobapp"))!.account_id, alice.id);
 
-    // The last admin stays, unless a site admin says so.
+    // The last enabled admin stays (for site admins too).
     assert.equal((await t.send("DELETE", `/v1/orgs/acme/members/${alice.id}`, alice.token)).body.error, "last_admin");
     assert.equal((await t.send("PUT", `/v1/orgs/acme/members/${alice.id}`, alice.token, { role: "member" })).body.error, "last_admin");
+    assert.equal((await t.send("DELETE", `/v1/orgs/acme/members/${alice.id}`, boss.token)).body.error, "last_admin", "site admins promote another first");
     assert.equal((await add(alice.token, "carol@b.co", "admin")).status, 201);
     // Disabling an org admin hands its org apps to another one.
     assert.equal((await t.send("PATCH", `/v1/admin/accounts/${alice.id}`, boss.token, { disabled: true })).status, 200);

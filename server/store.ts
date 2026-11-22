@@ -376,8 +376,9 @@ export class Store implements RateHits {
   accountByGithub(githubId: number): Promise<Account | undefined> {
     return this.db.get<Account>("SELECT * FROM accounts WHERE github_id = ?", githubId);
   }
+  /** Not on a disabled account (disabled meanwhile: its GitHub id stays aside, see disableAccount). */
   async linkGithub(accountId: string, github: { id: number; login: string }) {
-    await this.db.run("UPDATE accounts SET github_id = ?, github_login = ? WHERE id = ?", github.id, github.login, accountId);
+    await this.db.run("UPDATE accounts SET github_id = ?, github_login = ? WHERE id = ? AND disabled_at IS NULL", github.id, github.login, accountId);
   }
   accountById(accountId: string): Promise<Account | undefined> {
     return this.db.get<Account>("SELECT * FROM accounts WHERE id = ?", accountId);
@@ -849,14 +850,15 @@ export class Store implements RateHits {
   }
   /**
    * Gives the organization's apps held by `fromAccount` (their `account_id`, which a server from before
-   * organizations treats as the owner) to another enabled org admin, if there is one: run when that account
-   * leaves or is removed, or is disabled.
+   * organizations treats as the owner) to another enabled org admin, else an enabled member: run when that account
+   * leaves or is removed, or is disabled. (Removing the last admin is refused; a disabled holder with nobody to
+   * hand to keeps them, locked out even on an older server.)
    */
   async reassignOrgApps(orgId: string, fromAccount: string) {
     const to = await this.db.get<{ account_id: string }>(
       `SELECT m.account_id FROM org_members m JOIN accounts ac ON ac.id = m.account_id
-       WHERE m.org_id = ? AND m.role = 'admin' AND ac.disabled_at IS NULL AND m.account_id <> ?
-       ORDER BY m.created_at, m.account_id LIMIT 1`,
+       WHERE m.org_id = ? AND ac.disabled_at IS NULL AND m.account_id <> ?
+       ORDER BY CASE WHEN m.role = 'admin' THEN 0 ELSE 1 END, m.created_at, m.account_id LIMIT 1`,
       orgId, fromAccount,
     );
     if (to) await this.db.run("UPDATE apps SET account_id = ? WHERE org_id = ? AND account_id = ?", to.account_id, orgId, fromAccount);

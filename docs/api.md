@@ -27,10 +27,10 @@ Account tokens have a **role** and optionally a list of **apps** (403 `forbidden
 - You can't disable or demote yourself, nor an account listed in `CRESSLET_SITE_ADMINS` (change the config).
 
 <a id="organizations"></a>
-**Organizations.** Site admins create organizations (`/#/admin-orgs`) and pick a first admin. Org admins add and remove members (existing accounts, by email: only site admins invite new people) and change roles; an organization keeps at least one enabled admin unless a site admin changes it. An app or artifact moved into an organization (`PUT /v1/apps/:name/org`, by its owner, who must be a member) belongs to it:
+**Organizations.** Site admins create organizations (`/#/admin-orgs`) and pick a first admin. Org admins add and remove members (existing accounts, by email: only site admins invite new people) and change roles; an organization keeps at least one enabled admin (site admins too: promote another first). An app or artifact moved into an organization (`PUT /v1/apps/:name/org`, by its owner, who must be a member) belongs to it:
 - org `admin`: owner access to every org app (delete, move out, everything).
 - org `member`: collaborator `admin` access to every org app (deploy, roll back, secrets, domains, sharing; not deleting).
-- A collaborator role on the app adds to that; the app's `account_id` (who created it or last held it) no longer counts on its own. Members who leave or are removed (or disabled) lose access, and the apps they held are handed to an enabled org admin, so a rolled-back server (which ignores organizations and treats `account_id` as the owner) keeps them with the org. Org apps don't count toward anyone's app limit; moving one out makes it the caller's personal app, within their limit.
+- A collaborator role on the app adds to that; the app's `account_id` (who created it or last held it) no longer counts on its own. Members who leave or are removed (or disabled) lose access, and the apps they held are handed to an enabled org admin (else member), so a rolled-back server (which ignores organizations and treats `account_id` as the owner) keeps them with the org. Org apps don't count toward anyone's app limit; moving one out makes it the caller's personal app, within their limit.
 - Site admins manage organizations but get no access to their apps unless they're members. An organization with apps (deleted ones included) can't be deleted: move them out first.
 - Not covered: deploy keys stay valid when an app changes hands (whoever holds the key keeps full access to that app); collaborators stay too.
 
@@ -107,7 +107,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/orgs` | token with `read` or more over the whole account: `{orgs: [{id, name, title, createdAt, role}]}` you belong to |
 | GET | `/v1/orgs/:org` | members and site admins: `{org, role, canManage, members: [{id, email, github, role, disabled, createdAt}], apps: [{name, kind, url, updatedAt}]}`; 404 to others |
 | POST | `/v1/orgs/:org/members` | org admin (full-access token) or site admin: `{email, role?: member\|admin}` → `{member}` (201). 404 `no_account` if no account has that email, 409 if already a member. At most 500 |
-| PUT | `/v1/orgs/:org/members/:accountId` | org admin or site admin: `{role}`. 400 `last_admin` demoting the last enabled admin (not for site admins) |
+| PUT | `/v1/orgs/:org/members/:accountId` | org admin or site admin: `{role}`. 400 `last_admin` demoting the last enabled admin |
 | DELETE | `/v1/orgs/:org/members/:accountId` | org admin or site admin; your own id: leave (full-access token). 400 `last_admin` as above. The apps they held go to an enabled org admin |
 | GET | `/v1/admin/orgs` | **site admin**: `{orgs: [{id, name, title, createdAt, members, apps}]}` |
 | POST | `/v1/admin/orgs` | **site admin**: `{name, title?, admin?: email}` → `{org}` (201). `name`: 1-40 of a-z, 0-9, single dashes. 404 `no_account` for an unknown admin email, 409 if taken |

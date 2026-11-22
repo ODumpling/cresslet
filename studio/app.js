@@ -1586,10 +1586,11 @@ function drawOrg(d) {
         ...["member", "admin"].map((v) => el("option", { value: v, textContent: ORG_ROLE_LABEL[v], selected: v === m.role })));
       role.addEventListener("change", async () => {
         if (me && role.value === "member" && !confirm(`Make yourself a member of ${name}? You won't be able to manage it any more.`)) return void (role.value = m.role);
+        const gen = routeGen;
         try {
           m.role = (await api(memberUrl(m.id), { method: "PUT", body: JSON.stringify({ role: role.value }) })).role;
           toast(`${personText(m)} is now ${ORG_ROLE_LABEL[m.role].toLowerCase()}`);
-          if (me) again();
+          if (me && gen === routeGen) again();
         } catch (e) {
           toast(`Could not change the role: ${e.message}`);
           role.value = m.role;

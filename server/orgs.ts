@@ -3,7 +3,7 @@
 // an organization belongs to it: org admins own it, members get admin access (Store.access).
 import type { Context, Hono } from "hono";
 import { appUrl, type Config } from "./config.ts";
-import { type Env, siteAdminActor } from "./admin.ts";
+import { type Env, siteAdminActor, stillSiteAdmin } from "./admin.ts";
 import { HttpError } from "./deploys.ts";
 import {
   type Account,
@@ -62,16 +62,22 @@ export function orgRoutes(
     if (await store.orgRole(o.id, acct.id) !== "admin") throw new HttpError(403, `only admins of ${o.name} can do that`, "forbidden");
     return { who: acct.github_login ?? acct.email, id: acct.id, site: false };
   };
-  /** Again after the body arrived, under the org's lock: the caller may have been demoted or removed meanwhile. */
+  /**
+   * Again after the body arrived, under the org's lock: the caller may have been demoted, removed or disabled
+   * meanwhile (a site admin too: its role, or its token).
+   */
   const stillManages = async (c: Context<Env>, o: Org, m: { site: boolean; id: string | null }) => {
-    if (m.site) return;
+    if (m.site) return void await stillSiteAdmin(cfg, store, c);
     const t = c.get("token")!;
     if (!(await store.tokens(m.id!)).some((x) => x.id === t.id)) throw new HttpError(401, "invalid token", "unauthorized");
     if (await store.orgRole(o.id, m.id!) !== "admin") throw new HttpError(403, `only admins of ${o.name} can do that`, "forbidden");
   };
-  /** An organization must keep an enabled admin, unless a site admin changes it. */
-  const keepAdmin = async (o: Org, accountId: string, site: boolean) => {
-    if (site || await store.orgRole(o.id, accountId) !== "admin") return;
+  /**
+   * An organization keeps an enabled admin (site admins too: promote another first), so the apps a leaving
+   * member held always have someone to go to.
+   */
+  const keepAdmin = async (o: Org, accountId: string) => {
+    if (await store.orgRole(o.id, accountId) !== "admin") return;
     const acct = await store.accountById(accountId);
     if (acct?.disabled_at) return; // doesn't count anyway
     if (await store.orgAdminCount(o.id) <= 1) {
@@ -140,7 +146,7 @@ export function orgRoutes(
     await store.serialized(orgLock(o.id), async () => {
       await stillManages(c, o, m);
       if (!await store.orgRole(o.id, target)) throw new HttpError(404, "member not found", "not_found");
-      if (role !== "admin") await keepAdmin(o, target, m.site);
+      if (role !== "admin") await keepAdmin(o, target);
       await store.setOrgMember(o.id, target, role);
     });
     console.log(`cresslet: ${target} is now ${role} of org ${o.name}, set by ${m.who}`);
@@ -158,7 +164,7 @@ export function orgRoutes(
     await store.serialized(orgLock(o.id), async () => {
       if (!m.self) await stillManages(c, o, m);
       if (!await store.orgRole(o.id, target)) throw new HttpError(404, "member not found", "not_found");
-      await keepAdmin(o, target, m.site);
+      await keepAdmin(o, target);
       await store.removeOrgMember(o.id, target);
       await store.reassignOrgApps(o.id, target);
     });
@@ -190,6 +196,7 @@ export function orgRoutes(
       if (!admin) throw new HttpError(404, `no account has the email ${email || String(input.admin)}: invite them first`, "no_account");
     }
     const o = await store.serialized("cresslet:create-org", async () => {
+      await stillSiteAdmin(cfg, store, c);
       if (await store.orgByName(name)) throw new HttpError(409, `an organization is already called ${name}`, "conflict");
       const o = await store.createOrg(name, title, sa.id);
       if (admin) await store.setOrgMember(o.id, admin.id, "admin");
@@ -205,6 +212,7 @@ export function orgRoutes(
     const sa = requireSiteAdmin(c);
     const o = await getOrg(c.req.param("org"));
     await store.serialized(orgLock(o.id), async () => {
+      await stillSiteAdmin(cfg, store, c);
       const n = await store.orgAppCount(o.id);
       if (n) throw new HttpError(409, `${o.name} still has ${n} app${n === 1 ? "" : "s"} or artifact${n === 1 ? "" : "s"}: move or delete them first`, "not_empty");
       await store.deleteOrg(o.id);
@@ -230,9 +238,14 @@ export function orgRoutes(
     const input = await body<{ org?: unknown } | null>(c) ?? {};
     if (input.org !== null && typeof input.org !== "string") throw new HttpError(400, "org must be an organization's name, or null");
     const to = input.org === null ? null : await getOrg(input.org);
-    // Under the app-creation lock: quotas can't race new apps; checked again there.
+    // Under the app-creation lock (quotas can't race new apps) and both organizations' locks (membership changes,
+    // deletion), taken in a fixed order; everything checked again there.
     const a = await store.serialized("cresslet:create-app", async () => {
+      const from = (await store.appByName(name))?.org_id ?? null;
+      for (const id of [...new Set([from, to?.id ?? null])].filter((x): x is string => !!x).sort()) await store.db.lock(orgLock(id));
       const a = await getApp();
+      if ((a.org_id ?? null) !== from) throw new HttpError(409, `${a.name} moved meanwhile: try again`, "conflict");
+      if (to && !await store.orgById(to.id)) throw new HttpError(404, `organization not found: ${to.name}`, "not_found");
       if (!(await store.tokens(acct.id)).some((x) => x.id === c.get("token")!.id)) throw new HttpError(401, "invalid token", "unauthorized");
       if ((a.org_id ?? null) === (to?.id ?? null)) return a;
       if (to && !await store.orgRole(to.id, acct.id)) throw new HttpError(403, `you're not a member of ${to.name}`, "forbidden");

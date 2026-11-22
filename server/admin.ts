@@ -75,6 +75,19 @@ export async function usage(cfg: Config, appId: string) {
   return { deploys, database, files, total: deploys + database + files };
 }
 
+/**
+ * Checks again (after a request body arrived, inside the write's transaction) that the caller is still a site
+ * admin: its token not revoked, its account not disabled or demoted. The operator token always is.
+ */
+export async function stillSiteAdmin(cfg: Config, store: Store, c: Context<Env>) {
+  const acct = c.get("account"), t = c.get("token");
+  if (!acct || !t) return; // the operator token
+  const now = await store.accountById(acct.id);
+  if (!(await store.tokens(acct.id)).some((x) => x.id === t.id) || !isSiteAdmin(cfg, now)) {
+    throw new HttpError(403, "site admin only", "forbidden");
+  }
+}
+
 export function adminRoutes(
   app: Hono<Env>,
   { cfg, store, runtime, isAdminToken, body }: {
@@ -289,6 +302,7 @@ export function adminRoutes(
       orgRole = (input.orgRole as OrgRole | undefined) ?? "member";
     }
     const acct = await store.serialized("cresslet:invite-account", async () => {
+      await stillSiteAdmin(cfg, store, c);
       if (await store.accountByEmail(email) || await store.disabledAccount({ emails: [email] })) {
         throw new HttpError(409, `${email} already has an account`, "conflict");
       }
@@ -311,14 +325,18 @@ export function adminRoutes(
     if (input.siteAdmin !== undefined && typeof input.siteAdmin !== "boolean") throw new HttpError(400, "siteAdmin must be true or false");
     if (input.disabled !== undefined && typeof input.disabled !== "boolean") throw new HttpError(400, "disabled must be true or false");
     if (input.disabled === true) changeable(c, a, "disable");
-    if (input.siteAdmin !== undefined) await setSiteAdmin(c, who, a, input.siteAdmin);
-    if (input.disabled === true && await store.disableAccount(a.id)) {
-      console.log(`cresslet: ${a.email} disabled by ${who}`);
-    } else if (input.disabled === false && a.disabled_at) {
+    if (input.siteAdmin === false) changeable(c, a, "remove the site admin role from");
+    await stillSiteAdmin(cfg, store, c);
+    // Enabling first: it can be refused (409), and then nothing has changed.
+    if (input.disabled === false && a.disabled_at) {
       if (await store.enableAccount(a.id) === "taken") {
         throw new HttpError(409, `another account now has ${a.disabled_email ?? a.email} or its GitHub login: change that one first`, "conflict");
       }
       console.log(`cresslet: ${a.disabled_email} enabled by ${who}`);
+    }
+    if (input.siteAdmin !== undefined) await setSiteAdmin(c, who, a, input.siteAdmin);
+    if (input.disabled === true && await store.disableAccount(a.id)) {
+      console.log(`cresslet: ${a.email} disabled by ${who}`);
     }
     owners.clear();
     return c.json({ account: await accountRowById(a.id) });
@@ -343,6 +361,7 @@ export function adminRoutes(
     const acct = email ? await store.accountByEmail(email) : undefined;
     if (!acct) throw new HttpError(404, "account not found", "not_found");
     if (role === null && acct.id === c.get("account")?.id) throw new HttpError(400, "you can't remove your own role");
+    await stillSiteAdmin(cfg, store, c);
     await setSiteAdmin(c, who, acct, role === SITE_ADMIN);
     return c.json({ account: { id: acct.id, email: acct.email, github: acct.github_login, role } });
   });

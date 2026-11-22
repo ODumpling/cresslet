@@ -993,7 +993,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     // and every 15s.
     const acct = c.get("account");
     const collaborator = !!access;
-    const revoked = async () => collaborator && !await store.access(a, acct!.id);
+    // The app as it is now (it may have moved out of an organization since).
+    const revoked = async () => {
+      if (!collaborator) return false;
+      const now = await store.appById(a.id);
+      return !now || !await store.access(now, acct!.id);
+    };
     const follow = c.req.query("follow") === "1";
     const enc = new TextEncoder();
     const line = (l: unknown) => enc.encode(JSON.stringify(l) + "\n");
