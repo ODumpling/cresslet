@@ -87,6 +87,14 @@ try {
   if (!await page.getByRole("radio", { name: "Create a new repository" }).isDisabled()) fail("Create offered without source");
   if (!await page.locator("#repo-link").isDisabled()) fail("Link enabled without a choice");
   await page.screenshot({ path: `${out}/git-deployed-nosource.png`, fullPage: true });
+  // A repository the user has, left as it is: linked, nothing pushed.
+  const before = gh.repo("octo/shop").refs.get("main");
+  await page.locator("#repo-pick").selectOption({ label: "octo/shop (private)" });
+  await page.getByRole("radio", { name: /Keep the repository's files/ }).check();
+  await page.locator("#repo-link").click();
+  await page.locator("#repo-linked", { hasText: "octo/shop" }).waitFor();
+  if ((await call("/v1/apps/bare", token)).repo?.fullName !== "octo/shop") fail("bare not linked");
+  if (gh.repo("octo/shop").refs.get("main") !== before) fail("linking without a push wrote to the repository");
   console.log("linked an already-deployed app from its Settings tab:", paths);
 } catch (e) {
   await page.screenshot({ path: `${out}/git-deployed-fail.png`, fullPage: true }).catch(() => {});

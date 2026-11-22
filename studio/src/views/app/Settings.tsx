@@ -253,8 +253,10 @@ function Repository() {
   const [initial, setInitial] = useState<"deploy" | "none" | null>(null);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
-  // The one picked, or the first by default; none when a reload dropped the one picked (chosen again, never swapped).
-  const pick = picked ? (repos.data?.some((r) => r.fullName === picked) ? picked : "") : repos.data?.[0]?.fullName ?? "";
+  // The one picked (by GitHub's id: a renamed one's old name may be another's now), or the first by default; none when a
+  // reload dropped the one picked (chosen again, never swapped).
+  const pickRepo = picked ? repos.data?.find((r) => r.id === picked) : repos.data?.[0];
+  const pick = pickRepo?.fullName ?? "";
   // Back from choosing which repositories Cresslet reaches (another tab): the list may have changed.
   const reloadRepos = repos.reload;
   useEffect(() => {
@@ -298,12 +300,12 @@ function Repository() {
     if (!sync) return setErr("Choose what the repository starts with.");
     if (mode === "link" && sync === "deploy" && !confirm(`Push ${name}'s live source to ${pick}? Its default branch then holds exactly these files: others there are deleted.`)) return;
     void run(mode === "create" ? "Creating the repository…" : "Linking…", async () => {
-      let owner: string, repo: string, created: string | null = null;
+      let owner: string, repo: string, created: API.GitRepo | null = null;
       if (mode === "create") {
         const r = await api<{ repo: API.GitRepo }>("/v1/git/github/repos", json("POST", { name: repoName.trim(), private: priv }));
-        [owner, repo, created] = [r.repo.owner, r.repo.name, r.repo.fullName];
+        [owner, repo, created] = [r.repo.owner, r.repo.name, r.repo];
       } else {
-        [owner, repo] = pick.split("/") as [string, string];
+        [owner, repo] = [pickRepo!.owner, pickRepo!.name]; // pick: checked above
       }
       try {
         const r = await api<{ repo: API.AppRepo }>(appPath(name, "/git/connect"), json("POST", {
@@ -316,10 +318,10 @@ function Repository() {
         await reloadRepos();
         if (alive.current) {
           setMode("link");
-          setPicked(created);
+          setPicked(created.id);
           setInitial(null); // the user chooses the first sync again; the new repository may not be listed yet
         }
-        throw Object.assign(new Error(`Created ${created}, but couldn't link it: ${errorMessage(e)}. Link it below to try again.`), { code: gitCode(e) });
+        throw Object.assign(new Error(`Created ${created.fullName}, but couldn't link it: ${errorMessage(e)}. Link it below to try again.`), { code: gitCode(e) });
       }
     });
   };
@@ -375,9 +377,9 @@ function Repository() {
             <>
               <div className="field">
                 <label htmlFor="repo-pick">Repository</label>
-                <select id="repo-pick" className="input" value={pick} onChange={(e) => setPicked(e.target.value)}>
+                <select id="repo-pick" className="input" value={pickRepo?.id ?? ""} onChange={(e) => setPicked(e.target.value)}>
                   {!pick ? <option value="" disabled>Choose a repository</option> : null}
-                  {repos.data?.map((r) => <option key={r.id} value={r.fullName}>{r.fullName}{r.private ? " (private)" : ""}</option>)}
+                  {repos.data?.map((r) => <option key={r.id} value={r.id}>{r.fullName}{r.private ? " (private)" : ""}</option>)}
                 </select>
               </div>
               <fieldset className="field">
