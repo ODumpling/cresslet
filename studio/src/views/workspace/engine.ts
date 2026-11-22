@@ -6,8 +6,9 @@ import { Container } from "../../../vendor/cresslet-container/cresslet-container
 import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWithTab, javascript, json, keymap, oneDark } from "../../../vendor/editor.js";
 import { FitAddon, Terminal } from "../../../vendor/terminal.js";
 import { fromTree, ignored, migrateDeployKeys, projects, toTree, type Deploy, type StoredProject } from "../../../store.ts";
-import { createCresslet, type CressletConfig } from "../../../cresslet-plugin.ts";
-import { errorMessage, meta } from "../../lib/api.ts";
+import { createCresslet, localOnly, projectSources, type CressletConfig } from "../../../cresslet-plugin.ts";
+import { createGitWorkspace, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
+import { api, errorMessage, meta } from "../../lib/api.ts";
 import { session } from "../../lib/session.ts";
 
 export interface TreeItem {
@@ -30,6 +31,10 @@ export interface Callbacks {
   /** The AI builder: whether one of its commands runs, and asking the user to approve a deploy. */
   builderRunning(): boolean;
   approveDeploy(text: string, signal?: AbortSignal): Promise<boolean>;
+  /** Source control: the project's repository and branch changed (or it was linked or unlinked). */
+  git(state: ProjectGitState | undefined): void;
+  /** Something to tell the user (a branch was started for their edit). */
+  notice(text: string): void;
 }
 
 // ANSI colors too: xterm's defaults are made for black and fail AA on these surfaces (≥ 4.5:1 here).
@@ -80,11 +85,28 @@ export class Engine {
 
   private project: StoredProject;
   private cb: Callbacks;
+  /** Source control (studio/git.ts): its app's repository, when linked. */
+  readonly git: GitWorkspace;
+  /** Writing a pulled or merged tree: those changes aren't the user's. */
+  private hydrating = 0;
 
   constructor(project: StoredProject, cb: Callbacks, editorEl: HTMLElement) {
     this.project = project;
     this.cb = cb;
     this.locked = project.trusted === false;
+    this.git = createGitWorkspace({
+      app: () => project.deploy?.name,
+      api: (path, init) => api(path, init),
+      state: () => project.git,
+      save: async (s) => {
+        project.git = s;
+        await projects.put(project);
+        if (!this.disposed) cb.git(s);
+      },
+      files: () => projectSources(this.c!), // booted: the workspace's tools run after
+      hydrate: (files) => this.hydrate(files),
+      log: (line) => this.term.writeln(`\x1b[36m${line}\x1b[0m`),
+    });
     this.term = new Terminal({
       convertEol: true,
       cursorBlink: true,
@@ -123,6 +145,15 @@ export class Engine {
             if (!u.docChanged || this.suppress || !this.current || !this.c) return;
             void this.c.fs.writeFile(`${this.c.workdir}/${this.current}`, u.state.doc.toString());
             this.save();
+            // A hand edit on the default branch of a linked app goes on a branch of its own: the default branch stays
+            // what's deployed until Deploy merges it.
+            if (this.git.connected && this.git.onDefault) {
+              const file = this.current;
+              void this.git.ensureBranch("edit", file.replace(/\.[^./]+$/, "")).then(
+                (b) => b && this.cb.notice(`Editing on a new branch, ${b}: ${this.project.git?.defaultBranch ?? "main"} stays as deployed until you deploy.`),
+                (e) => this.cb.notice(`Couldn't start a branch for this edit: ${errorMessage(e)}. It's kept here, on ${this.project.git?.activeBranch}.`),
+              );
+            }
           }),
         ],
       }),
@@ -223,13 +254,21 @@ export class Engine {
       },
       // `cresslet deploy` in a command the AI builder started: the user says yes first.
       builderRunning: () => cb.builderRunning(),
-      approveDeploy: (target, signal) => cb.approveDeploy(`Claude wants to deploy ${target ? `to ${target}` : "this project as a new app"}. It goes live at once.`, signal),
+      approveDeploy: (target, signal) => {
+        const g = this.git.connected ? project.git! : null;
+        return cb.approveDeploy(g && target && g.activeBranch !== g.defaultBranch
+          ? `Claude wants to merge ${g.activeBranch} into ${g.defaultBranch} and deploy ${target} from ${g.defaultBranch}. It goes live at once.`
+          : `Claude wants to deploy ${target ? `to ${target}` : "this project as a new app"}${g ? ` from ${g.defaultBranch}` : ""}. It goes live at once.`, signal);
+      },
+      // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
+      beforeDeploy: (log) => (this.git.connected ? this.git.prepareDeploy(log) : Promise.resolve(null)),
     });
 
     // keep the tree in sync with terminal changes
     const watcher = c.fs.watch(wd, { recursive: true }, (_e, filename) => {
       if (filename && ignored(filename.replace(`${wd}/`, ""))) return;
       this.dirty = true; // saved below, or when the view goes before that
+      if (!this.hydrating && !(filename && localOnly(filename.replace(`${wd}/`, "")))) this.git.markDirty();
       clearTimeout(this.treeTimer);
       this.treeTimer = setTimeout(() => {
         void this.renderTree();
@@ -349,6 +388,62 @@ export class Engine {
     this.save();
     await this.renderTree();
     await this.openFile(path);
+  }
+
+  /** The project's source as it would be committed (no local secrets). */
+  sources(): Promise<GitFile[]> {
+    if (!this.c) return Promise.reject(new Error("the runtime isn't running"));
+    return projectSources(this.c);
+  }
+
+  /**
+   * Makes the workspace hold `files` (a branch pulled, or a merge that brought the default branch's commits): changed
+   * ones written, ones it no longer has removed, dependencies installed again if package.json or its lockfile
+   * changed. Local-only files (.env.local, .dev.vars…) stay, and so does an existing dotenv file (the repository's
+   * copy only has its public entries).
+   */
+  async hydrate(files: GitFile[]) {
+    const c = this.c;
+    if (!c) throw new Error("the runtime isn't running");
+    const wd = c.workdir;
+    const dotenv = /(?:^|\/)\.env[^/]*$/i;
+    const want = new Map(files.map((f) => [f.path, f]));
+    let deps = false;
+    this.hydrating++;
+    try {
+      for (const f of await projectSources(c)) {
+        if (want.has(f.path) || dotenv.test(f.path)) continue;
+        await c.fs.rm(`${wd}/${f.path}`).catch(() => {});
+        deps ||= /^package(?:-lock)?\.json$/.test(f.path);
+      }
+      for (const f of files) {
+        if (localOnly(f.path)) continue;
+        const path = `${wd}/${f.path}`;
+        const exists = await c.fs.exists(path).catch(() => false);
+        if (dotenv.test(f.path) && exists) continue;
+        const data = f.encoding === "base64" ? Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)) : f.data;
+        if (exists) {
+          const now = await c.fs.readFile(path, typeof data === "string" ? "utf8" : undefined).catch(() => null);
+          if (typeof data === "string" ? now === data : now instanceof Uint8Array && now.length === data.length && now.every((b, i) => b === data[i])) continue;
+        }
+        const i = f.path.lastIndexOf("/");
+        if (i > 0) await c.fs.mkdir(`${wd}/${f.path.slice(0, i)}`, { recursive: true });
+        await c.fs.writeFile(path, data);
+        deps ||= /^package(?:-lock)?\.json$/.test(f.path);
+      }
+      if (deps) {
+        this.term.writeln("\x1b[36mdependencies changed: npm install\x1b[0m");
+        const p = await c.spawn("jsh", ["-c", "npm install"], { cwd: wd });
+        void p.output.pipeTo(new WritableStream({ write: (d) => this.term.write(d) })).catch(() => {});
+        await p.input.close().catch(() => {});
+        if (await p.exit !== 0) throw new Error("npm install failed (see the terminal)");
+      }
+    } finally {
+      // The watcher reports these writes a moment later: still not the user's.
+      setTimeout(() => this.hydrating--, 1000);
+    }
+    await this.saveNow();
+    if (this.current) await this.openFile(this.current);
   }
 
   writeln(text: string) {

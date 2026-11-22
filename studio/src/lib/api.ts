@@ -3,7 +3,7 @@ import { auth } from "../../store.ts";
 import type * as API from "../../api-types.ts";
 
 /** An API error: the server's message, and the HTTP status. */
-export type ApiError = Error & { status: number };
+export type ApiError = Error & { status: number; code?: string; body?: Record<string, unknown> };
 /** What was thrown, as its message (an Error, or the API's error). */
 export const errorMessage = (e: unknown): string => (e as Error).message;
 export const statusOf = (e: unknown): number | undefined => (e as Partial<ApiError>).status;
@@ -23,14 +23,17 @@ async function call<T>(path: string, init: Init, anonymous: boolean): Promise<T>
   const sent = anonymous ? null : auth.token;
   if (sent) headers.authorization = `Bearer ${sent}`;
   const res = await fetch(path, { ...init, headers });
-  if (res.status === 401 && sent && auth.token === sent) {
+  // GitHub access expired (source control): the Cresslet session is fine, the user reconnects GitHub.
+  const gitReauth = res.status === 401 && (await res.clone().json().catch(() => null))?.error === "git_reauth_required";
+  if (res.status === 401 && sent && auth.token === sent && !gitReauth) {
     // Token revoked (e.g. regenerated elsewhere): drop it and retry logged out. (If the session changed meanwhile,
     // the refusal was for the old account: it's reported below, never sent again as the new one.)
     onExpired();
     return call<T>(path, init, true); // logged out, even if another tab logs in meanwhile
   }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(body.message ?? `${res.status}`), { status: res.status });
+  // `code`: the API's error code (`body`: the rest of the error, e.g. a merge conflict's paths).
+  if (!res.ok) throw Object.assign(new Error(body.message ?? `${res.status}`), { status: res.status, code: body.error, body });
   return body;
 }
 /** A JSON body for `api`. */

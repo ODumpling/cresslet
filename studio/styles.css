@@ -939,3 +939,11 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .modal-head .icon-btn { margin: -4px -6px 0 0; }
 .modal-foot { padding-top: 16px; margin-top: 4px; border-top: 1px solid var(--line); }
 .modal p { margin: 0; }
+
+/* Source control: the workspace's branch pill (studio/src/views/workspace/GitDialog.tsx). */
+.git-pill { gap: 6px; max-width: 16rem; }
+.git-pill #git-btn-branch { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-dirty { width: 7px; height: 7px; border-radius: 50%; background: var(--warning, var(--accent-text)); flex: none; }
+#git-dialog fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+#git-dialog legend { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+#git-dialog .kv { margin: 4px 0 8px; }

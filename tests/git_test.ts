@@ -481,7 +481,7 @@ test("deploys record the commit they were built from", withServer(async (t) => {
   assert.equal(d.status, 201);
   await t.deploy(tok, "shop");
   const app = await t.send("GET", "/v1/apps/shop", tok);
-  assert.deepEqual(app.body.deploys.map((x: { git: unknown }) => x.git), [null, { sha, branch: "main", repo: "octo/shop" }]);
+  assert.deepEqual(app.body.deploys.map((x: { git: unknown }) => x.git), [null, { sha, branch: "main", repo: "octo/shop", url: `${t.gh.base}/octo/shop/commit/${sha}` }]);
   assert.equal(app.body.repo, null);
   for (const git of [{ sha: "nope" }, { sha, branch: "a b" }, { sha, repo: "no-slash" }, "x"]) {
     assert.equal((await t.deploy(tok, "shop", { git })).status, 400, JSON.stringify(git));

@@ -25,6 +25,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
   const stats = { refreshes: 0, calls: [] as { login: string; method: string; path: string }[] };
   let expiresIn = 0; // seconds; 0 = tokens don't expire
   let badSecret = false;
+  let authorizeAs: GhUser | null = null;
   let n = 0;
 
   const treeId = (t: Map<string, Entry>) => {
@@ -122,6 +123,17 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       const u = codes.get(b.code);
       codes.delete(b.code);
       return u ? json(200, issue(u)) : json(200, { error: "bad_verification_code" });
+    }
+    // The browser's side of the web flow: the user `authorizeAs` approves at once.
+    if (p === "/login/oauth/authorize") {
+      if (!authorizeAs) return json(403, { message: "nobody to authorize as" });
+      const c = `code_${++n}`;
+      codes.set(c, authorizeAs);
+      const back = new URL(url.searchParams.get("redirect_uri")!);
+      back.searchParams.set("code", c);
+      back.searchParams.set("state", url.searchParams.get("state")!);
+      res.writeHead(302, { location: back.href });
+      return res.end();
     }
     if (p.startsWith("/applications/") && req.method === "DELETE") {
       const t = JSON.parse(raw).access_token;
@@ -281,6 +293,8 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       return c;
     },
     setExpiresIn: (s: number) => { expiresIn = s; },
+    /** Who approves when a browser comes to /login/oauth/authorize. */
+    authorizeAs: (u: GhUser) => { authorizeAs = u; },
     revokeAll: () => { tokens.clear(); refreshTokens.clear(); },
     expireAccessTokens: () => { for (const t of tokens.values()) t.exp = Date.now() - 1; },
     addRepo,

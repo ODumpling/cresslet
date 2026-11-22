@@ -758,7 +758,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         server: !!d.has_server,
         source: d.source,
         current: d.id === a.current_deploy_id,
-        git: d.git_sha ? { sha: d.git_sha, branch: d.git_branch, repo: d.git_repo } : null,
+        git: d.git_sha ? { sha: d.git_sha, branch: d.git_branch, repo: d.git_repo, url: d.git_repo ? `${githubSync(cfg)?.webUrl ?? cfg.git.webUrl}/${d.git_repo}/commit/${d.git_sha}` : null } : null,
       })),
       repo: (r => r ? git.repoView(r) : null)(await store.getAppRepo(a.id)),
       runtime: { running: runtime.status(a.id).running }, // no pid or host details for app users

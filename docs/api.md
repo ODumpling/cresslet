@@ -58,7 +58,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/templates/:name` | `{files: [{path, data, encoding: utf8\|base64}]}` |
 | POST | `/v1/deploys` | see below |
 | GET | `/v1/apps` | apps the account owns, collaborates on or reaches through an [organization](#organizations); each has `access: owner\|admin\|viewer` and `org: {name, title} \| null` |
-| GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 10 deploys (each with `git: {sha, branch, repo} \| null`), runtime status, secret names, `repo` (the linked [repository](#source-control) or null) |
+| GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 10 deploys (each with `git: {sha, branch, repo, url} \| null`, `url`: the commit on GitHub), runtime status, secret names, `repo` (the linked [repository](#source-control) or null) |
 | DELETE | `/v1/apps/:name?id=` | delete app + data (owner or deploy key; not an invited admin). `id` (optional): only if it's still that app, else 409 `conflict` |
 | PUT | `/v1/apps/:name/org` | owner (org app: an org admin), full-access token: `{org: "name" \| null}` → `{app, org}`. Into an organization you're a member of, or out of one (`null`: your personal app, within your app limit) |
 | GET | `/v1/apps/:name/collaborators` | **owner or admin**: `{owner: {id, email, github} \| null, org: {name, title} \| null, collaborators: [{id, email, github, role, createdAt}], invites: [{id, email, role, invitedBy, createdAt}]}` |

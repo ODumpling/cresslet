@@ -426,3 +426,143 @@ test("cresslet deploy from the builder: asks first, deploys to the app it named,
     globalThis.fetch = realFetch;
   }
 });
+
+// ---- source control (studio/git.ts): branch first, merge then deploy
+
+const gitMod = "../studio/git.ts"; // browser module: typed by studio/tsconfig.json, not this program
+const { createGitWorkspace, branchSlug, commitMessage } = await import(gitMod);
+
+/** A linked project over a scripted /v1/apps/:name/git API: the calls it made, its state, what was loaded. */
+function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true } = {}) {
+  const calls: { path: string; body?: Json }[] = [];
+  const hydrated: Json[] = [];
+  let state: Json = {
+    provider: "github", owner: "octo", repo: "shop", url: "https://github.example/octo/shop", defaultBranch: "main",
+    activeBranch: onDefault ? "main" : "feat/x", baseSha: "a".repeat(40), headSha: "a".repeat(40), dirty: false,
+  };
+  let n = 0;
+  const api = async (path: string, init: Json = {}) => {
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path.endsWith("/git/branches")) {
+      if (taken.includes(body.name)) throw Object.assign(new Error("exists"), { status: 409, code: "branch_exists" });
+      return { branch: { name: body.name, sha: body.from } };
+    }
+    if (path.endsWith("/git/sync")) return { branch: body.branch, sha: String(++n).padStart(40, "b"), changed: true };
+    if (path.endsWith("/git/merge")) {
+      if (merge?.error) throw Object.assign(new Error(merge.error), { status: merge.status, code: merge.error, body: merge.body ?? {} });
+      return merge ?? { mergedSha: "c".repeat(40), fastForward: true, treeChanged: false, branch: "main", deletedBranch: true };
+    }
+    if (path.includes("/git/tree")) return { sha: "d".repeat(40), files: [{ path: "a.txt", data: "pulled" }] };
+    throw new Error(`unexpected ${path}`);
+  };
+  const git = createGitWorkspace({
+    app: () => "shop", api, state: () => state, save: (s: Json) => void (state = s),
+    files: async () => [{ path: "index.html", data: "<h1>hi</h1>" }],
+    hydrate: async (f: Json) => void hydrated.push(f),
+  });
+  return { git, calls, hydrated, get state() { return state; } };
+}
+
+test("git: branch names and commit messages come from the prompt", () => {
+  assert.equal(branchSlug("Add a dark-mode toggle to the header, please!"), "add-a-dark-mode-toggle-to-the-header");
+  assert.equal(branchSlug("¿Qué?"), "que");
+  assert.equal(branchSlug("!!!"), "change");
+  assert.equal(commitMessage("  Fix the footer\nand more"), "Fix the footer");
+  assert.equal(commitMessage("x".repeat(100)).length, 72);
+});
+
+test("AI builder on a linked app: a change cuts a feature branch before the first write; follow-ups stay on it; questions don't branch", async () => {
+  const c = fakeContainer({ "src/App.tsx": "<h1>Todos</h1>" });
+  const g = fakeGit({ taken: ["feat/rename-the-heading"] });
+  let prompt = "Rename the heading";
+  const order: string[] = [];
+  const tools = createTools(c, {
+    beforeChange: async () => void (await g.git.ensureBranch("feat", prompt), order.push("branch")),
+    onChange: (p: string) => order.push(`change ${p}`),
+  });
+  // Reading isn't a change: no branch.
+  assert.equal((await tools.execute("read_file", { path: "src/App.tsx" })).error, undefined);
+  assert.equal((await tools.execute("list_files", {})).error, undefined);
+  assert.equal(g.calls.length, 0);
+  assert.equal(g.state.activeBranch, "main");
+
+  await tools.execute("edit_file", { path: "src/App.tsx", old_text: "Todos", new_text: "Tasks" });
+  assert.deepEqual(order, ["branch", "change src/App.tsx"]); // the branch first
+  assert.deepEqual(g.calls.map((x) => x.body?.name), ["feat/rename-the-heading", "feat/rename-the-heading-2"]); // taken → -2
+  assert.equal(g.calls[1].body.from, "a".repeat(40)); // from the workspace's commit
+  assert.equal(g.state.activeBranch, "feat/rename-the-heading-2");
+  assert.equal(c.files.get("/project/src/App.tsx"), "<h1>Tasks</h1>");
+
+  // A follow-up in the same chat stays on that branch.
+  prompt = "Now make it blue";
+  await tools.execute("write_file", { path: "src/style.css", content: "h1{color:blue}" });
+  await tools.execute("delete_file", { path: "src/style.css" });
+  assert.equal(g.calls.length, 2);
+  assert.equal(g.state.activeBranch, "feat/rename-the-heading-2");
+
+  // Branching fails: the file isn't changed and the tool says why.
+  const failing = createTools(c, { beforeChange: async () => { throw new Error("GitHub is down"); } });
+  const r = await failing.execute("write_file", { path: "x.txt", content: "x" });
+  assert.equal(r.error, true);
+  assert.match(r.text, /GitHub is down/);
+  assert.equal(c.files.has("/project/x.txt"), false);
+});
+
+test("AI builder: the repository and branch go to Claude with each message", async () => {
+  const api = fakeClient([{ text: ["ok"], content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }]);
+  const agent = createAgent({ client: async () => api, tools: createTools(fakeContainer()), context: () => "[Source control: on feat/x]" });
+  await agent.send("hi");
+  assert.deepEqual(api.calls[0].params.messages[0].content, [{ type: "text", text: "[Source control: on feat/x]" }, { type: "text", text: "hi" }]);
+  assert.equal(api.calls[0].params.system, SYSTEM); // the cached prefix doesn't change
+});
+
+test("deploy on a linked app: commit the branch, merge it into main, build main (loading its files if main moved)", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.dirty = true;
+  const prov = await g.git.prepareDeploy();
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1]), ["/sync", "/merge"]);
+  assert.equal(g.calls[0].body.branch, "feat/x");
+  assert.deepEqual(g.calls[0].body.files, [{ path: "index.html", data: "<h1>hi</h1>" }]);
+  assert.deepEqual(prov, { sha: "c".repeat(40), branch: "main", repo: "octo/shop" });
+  assert.equal(g.state.activeBranch, "main"); // back on main, at the merge
+  assert.equal(g.state.headSha, "c".repeat(40));
+  assert.equal(g.state.dirty, false);
+  assert.deepEqual(g.hydrated, []);
+
+  // main had commits of its own: its merged files are loaded before the build.
+  const moved = fakeGit({ onDefault: false, merge: { mergedSha: "e".repeat(40), fastForward: false, treeChanged: true, files: [{ path: "NOTES.md", data: "up" }] } });
+  await moved.git.prepareDeploy();
+  assert.deepEqual(moved.hydrated, [[{ path: "NOTES.md", data: "up" }]]);
+
+  // On main already: just the commit.
+  const main = fakeGit();
+  const p2 = await main.git.prepareDeploy();
+  assert.deepEqual(main.calls.map((x) => x.path.split("/git")[1]), ["/sync"]);
+  assert.equal(p2.branch, "main");
+});
+
+test("deploy on a linked app: a conflict or a protected main stops it, with a pull request link", async () => {
+  const cf = fakeGit({ onDefault: false, merge: { error: "merge_conflict", status: 409, body: { paths: ["src/App.tsx"] } } });
+  await assert.rejects(cf.git.prepareDeploy(), (e: Json) => {
+    assert.match(e.message, /doesn't merge cleanly.*src\/App\.tsx.*Nothing was deployed/);
+    assert.equal(e.compare, "https://github.example/octo/shop/compare/main...feat%2Fx?expand=1");
+    return true;
+  });
+  assert.equal(cf.state.activeBranch, "feat/x"); // still on the branch, to fix it
+  const big = fakeGit({ onDefault: false, merge: { mergedSha: "e".repeat(40), fastForward: false, treeChanged: true, filesError: "too many files" } });
+  await assert.rejects(big.git.prepareDeploy(), /couldn't load the result \(too many files\)\. Nothing was deployed/);
+  assert.equal(big.state.activeBranch, "feat/x");
+  const pr = fakeGit({ onDefault: false, merge: { error: "branch_protected", status: 422 } });
+  await assert.rejects(pr.git.prepareDeploy(), /protected on GitHub.*pull request/);
+});
+
+test("git: steps run one at a time; switching branches pushes changes first; New chat's way back to main", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.dirty = true;
+  await Promise.all([g.git.ensureBranch("feat", "x"), g.git.switchTo("main")]);
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1].split("?")[0]), ["/sync", "/tree"]);
+  assert.equal(g.state.activeBranch, "main");
+  assert.equal(g.state.baseSha, "d".repeat(40));
+  assert.deepEqual(g.hydrated, [[{ path: "a.txt", data: "pulled" }]]);
+});

@@ -135,9 +135,42 @@ export interface CressletOptions {
    * new one.
    */
   approveDeploy?: (target: string | null, signal: AbortSignal) => Promise<boolean>;
+  /**
+   * Source control (studio/git.ts): runs after any approval and before the build. A project linked to a repository
+   * commits and merges its branch here (it may change the workspace's files), and resolves to the commit to build
+   * and record; it throws to stop the deploy before anything is built. Null: not linked.
+   */
+  beforeDeploy?: (log: (line: string) => void, signal?: AbortSignal) => Promise<{ sha: string; branch: string; repo: string } | null>;
 }
 
 type Log = (line: string) => void;
+
+/**
+ * The project's source as stored with a deploy or committed to its repository: regular files, without build output,
+ * dependencies or local secrets, and other dotenv files cut to their public entries (as the server does again).
+ */
+export async function projectSources(c: Container): Promise<{ path: string; data: string; encoding?: "base64" }[]> {
+  const sources: { path: string; data: string; encoding?: "base64" }[] = [];
+  const walk = (tree: FileSystemTree, prefix: string) => {
+    for (const [name, node] of Object.entries(tree)) {
+      // Same path form as the server's check (it normalizes "\\" to "/").
+      const rel = (prefix ? `${prefix}/${name}` : name).replace(/\\/g, "/");
+      if ("directory" in node && node.directory) walk(node.directory, rel);
+      // Regular files only (symlinks have no contents); same secret rules as the server, applied here
+      // so local secrets never leave the browser.
+      else if ("file" in node && node.file && "contents" in node.file && !NOT_SOURCE.test(rel)) {
+        let v = node.file.contents;
+        if (DOTENV.test(rel)) v = publicDotenv(typeof v === "string" ? v : dec.decode(v));
+        sources.push(typeof v === "string" ? { path: rel, data: v } : { path: rel, data: toBase64(v), encoding: "base64" });
+      }
+    }
+  };
+  walk(await c.export(c.workdir, { excludes: ["node_modules/**", "dist/**", ".cresslet/**", ".git/**"] }), "");
+  return sources;
+}
+
+/** Never in a repository or deploy source (as NOT_SOURCE): a pull or merge leaves these local files alone. */
+export const localOnly = (rel: string) => NOT_SOURCE.test(rel);
 
 export function createCresslet(c: Container, opts: CressletOptions) {
   const wd = c.workdir;
@@ -227,6 +260,8 @@ export function createCresslet(c: Container, opts: CressletOptions) {
   async function deploy(log: Log = () => {}, signal: AbortSignal | undefined = undefined, cfg: CressletConfig | undefined = undefined, target: Target | undefined = undefined): Promise<DeployResult> {
     cfg ??= await config();
     target ??= targetOf(cfg);
+    const git = await opts.beforeDeploy?.(log, signal) ?? null;
+    signal?.throwIfAborted();
     const { files: built, outDir, server } = await build(log);
     signal?.throwIfAborted();
     const files: { path: string; data: string; encoding?: "base64" }[] = [];
@@ -242,22 +277,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     if (token) headers.authorization = `Bearer ${token}`;
     if (target.deployKey) headers["x-cresslet-deploy-key"] = target.deployKey;
     // Project source too, so the CLI (`cresslet pull`) or another browser can open it. Never local secrets.
-    const sources: typeof files = [];
-    const walk = (tree: FileSystemTree, prefix: string) => {
-      for (const [name, node] of Object.entries(tree)) {
-        // Same path form as the server's check (it normalizes "\\" to "/").
-        const rel = (prefix ? `${prefix}/${name}` : name).replace(/\\/g, "/");
-        if ("directory" in node && node.directory) walk(node.directory, rel);
-        // Regular files only (symlinks have no contents); same secret rules as the server, applied here
-        // so local secrets never leave the browser.
-        else if ("file" in node && node.file && "contents" in node.file && !NOT_SOURCE.test(rel)) {
-          let v = node.file.contents;
-          if (DOTENV.test(rel)) v = publicDotenv(typeof v === "string" ? v : dec.decode(v));
-          sources.push(typeof v === "string" ? { path: rel, data: v } : { path: rel, data: toBase64(v), encoding: "base64" });
-        }
-      }
-    };
-    walk(await c.export(wd, { excludes: ["node_modules/**", "dist/**", ".cresslet/**", ".git/**"] }), "");
+    const sources = await projectSources(c);
     log(`uploading ${files.length} files…`);
     const payload = {
       app: target.app,
@@ -267,6 +287,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       config: { routes: cfg.routes, crons: cfg.crons },
       source: "studio",
       sources,
+      ...(git ? { git } : {}),
     };
     let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload), signal });
     let body: DeployResult & { error?: string; message?: string } = await res.json();
@@ -276,6 +297,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       body = await res.json();
     }
     if (!res.ok) throw new Error(body.message ?? `deploy failed (${res.status})`);
+    if (git) log(`built from ${git.repo} ${git.branch} @ ${git.sha.slice(0, 7)}`);
     // A new app's name into cresslet.json as it is now (it may have been edited since it was read); a name the user
     // removed meanwhile isn't put back.
     const now = await config().catch(() => null);
