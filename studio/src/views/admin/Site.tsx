@@ -1,4 +1,4 @@
-// #/admin/<name> (site admins): one site: its deploys, storage and overview, with delete, restore and purge.
+// /admin/<name> (site admins): one site: its deploys, storage and overview, with delete, restore and purge.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { Fragment, type ReactNode } from "react";
 import type * as API from "../../../api-types.ts";

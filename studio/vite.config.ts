@@ -81,7 +81,7 @@ export default defineConfig(async ({ command }) => {
     publicDir: "public",
     plugins: [
       studioStatic(),
-      // Rendered in the browser only (hash routes; IndexedDB, the token in localStorage, the container): the root route
+      // Rendered in the browser only (IndexedDB, the token in localStorage, the container): the root route
       // is ssr: false, so the prerendered shell is the document and nothing else.
       // installDevServerMiddleware: in dev, Vite runs in middleware mode inside the server (server/studio.ts).
       tanstackStart({ spa: { enabled: true }, vite: { installDevServerMiddleware: true } }),

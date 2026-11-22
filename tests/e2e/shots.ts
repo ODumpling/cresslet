@@ -16,7 +16,7 @@ for (const scheme of ["dark", "light"] as const) {
   for (const [vp, size] of [["desktop", { width: 1440, height: 900 }], ["phone", { width: 390, height: 844 }]] as const) {
     const page = await browser.newPage({ viewport: size, colorScheme: scheme });
     await page.addInitScript(([t]) => { localStorage.setItem("cresslet.token", t); localStorage.setItem("cresslet.email", "admin@example.com"); }, [token]);
-    for (const [route, file] of [["/", "home"], ["/#/settings", "settings"], ["/#/admin", "admin"]]) {
+    for (const [route, file] of [["/", "home"], ["/settings", "settings"], ["/admin", "admin"]]) {
       await page.goto(base + route);
       await page.waitForTimeout(800);
       await page.screenshot({ path: `${out}/${file}-${scheme}-${vp}.png`, fullPage: vp === "desktop" });

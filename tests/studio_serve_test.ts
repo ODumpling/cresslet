@@ -48,6 +48,35 @@ test("studio: the shell at / revalidates, can't be framed, and is cross-origin i
   }
 });
 
+test("studio: a page load of a route's path gets the shell; anything else asking for a missing file, a 404", async () => {
+  const dist = await built();
+  try {
+    const s = await studio({ dist });
+    const html = { accept: "text/html,application/xhtml+xml,*/*;q=0.8" };
+    for (const path of ["/artifacts", "/p/abc", "/view/pg-1?path=%2Fx", "/apps/a/database/t.x", "/no-such-route"]) {
+      const r = await get(s, path, { headers: html });
+      assert.equal(r.status, 200, path);
+      assert.equal(await r.text(), SHELL);
+      assert.equal(r.headers.get("cache-control"), "no-cache");
+      assert.equal(r.headers.get("content-security-policy"), "frame-ancestors 'none'");
+      assert.equal(r.headers.get("vary"), "accept");
+      isolated(r);
+    }
+    assert.equal((await get(s, "/settings", { method: "HEAD", headers: html })).status, 200);
+    // Not a page load (a script, an image, fetch), or a write: no shell.
+    for (const [path, init] of [["/artifacts", {}], ["/nope.png", { headers: { accept: "image/*" } }], ["/settings", { method: "POST", headers: html }]] as const) {
+      const r = await get(s, path, init);
+      assert.equal(r.status, 404, path);
+      assert.equal(r.headers.get("vary"), "accept");
+    }
+    // Files are still files, whatever the request asks for; an old release's path isn't a route.
+    assert.equal(await (await get(s, "/server-worker.js", { headers: html })).text(), "self.x = 1;");
+    assert.equal((await get(s, "/_v/0123abcd4567/styles.css", { headers: html })).status, 404);
+  } finally {
+    await rm(dist, { recursive: true, force: true });
+  }
+});
+
 test("studio: hashed assets are immutable; stable-URL files revalidate; all isolated", async () => {
   const dist = await built();
   try {
@@ -94,8 +123,8 @@ test("studio: a page from an earlier release reloads into this one", async () =>
         new Function("location", "console", code)({ href, replace: (u: string) => (to = u) }, { error() {} });
         return to;
       };
-      assert.equal(run("http://localhost/#/p/abc"), `/?_r=${release}#/p/abc`);
-      assert.equal(run(`http://localhost/?_r=${release}#/p/abc`), null);
+      assert.equal(run("http://localhost/p/abc?x=1"), `/p/abc?x=1&_r=${release}`);
+      assert.equal(run(`http://localhost/p/abc?_r=${release}`), null);
     }
     // Anything else an old page asks for under /_v/ comes from this release, if it's still at that URL.
     const worker = await get(s, "/_v/0123abcd4567/server-worker.js");

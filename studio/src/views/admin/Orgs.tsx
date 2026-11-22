@@ -1,4 +1,4 @@
-// #/admin-orgs (site admins): every organization; create and delete them.
+// /admin-orgs (site admins): every organization; create and delete them.
 import { Link } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
 import { flushSync } from "react-dom";

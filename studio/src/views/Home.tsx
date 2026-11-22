@@ -1,4 +1,4 @@
-// #/ with a session (or local projects on a server without login): templates, local projects, invitations and the
+// / with a session (or local projects on a server without login): templates, local projects, invitations and the
 // deployed apps you can see.
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";

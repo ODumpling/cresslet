@@ -1,4 +1,4 @@
-// #/orgs: the organizations you belong to (the admin pages' layout).
+// /orgs: the organizations you belong to (the admin pages' layout).
 import { Link } from "@tanstack/react-router";
 import { ORG_ROLE_LABEL } from "../../lib/format.ts";
 import { useView } from "../../lib/hooks.ts";

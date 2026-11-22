@@ -97,17 +97,17 @@ export async function loadMyOrgs() {
   return orgs;
 }
 
-/** Where to go once logged in (a hash route), kept across the GitHub round trip. */
-export function rememberAfterLogin(hash: string) {
+/** Where to go once logged in (a studio path), kept across the GitHub round trip. */
+export function rememberAfterLogin(path: string) {
   try {
-    sessionStorage.setItem("cresslet.afterLogin", hash);
+    sessionStorage.setItem("cresslet.afterLogin", path);
   } catch { /* storage blocked: login lands on the home page */ }
 }
 export function takeAfterLogin() {
   try {
     const after = sessionStorage.getItem("cresslet.afterLogin");
     sessionStorage.removeItem("cresslet.afterLogin");
-    return after;
+    return after?.replace(/^#/, "") ?? null; // `#/…`: stored before the studio's routes were paths
   } catch {
     return null; // storage blocked
   }
@@ -129,7 +129,7 @@ export function takeLoginCallback() {
   history.replaceState(null, "", location.pathname + location.search);
   pending = error ? { error } : { code: code! }; // one of them is set
 }
-/** Finishes a login callback, if the page was opened with one. Resolves to where to go next (a hash route), if anywhere. */
+/** Finishes a login callback, if the page was opened with one. Resolves to where to go next (a studio path), if anywhere. */
 export async function finishLogin(): Promise<string | null> {
   const p = pending;
   pending = null;
@@ -146,7 +146,7 @@ export async function finishLogin(): Promise<string | null> {
   }
   // Back to what needed the login (a private page, a project, the CLI login, artifacts).
   const after = takeAfterLogin();
-  if (after?.startsWith("#/view/") || after?.startsWith("#/p/") || after === "#/cli" || after === "#/artifacts" || after === "#/settings") return after;
+  if (after?.startsWith("/view/") || after?.startsWith("/p/") || after === "/cli" || after === "/artifacts" || after === "/settings") return after;
   toast(`Logged in as ${auth.email}`);
   return null;
 }

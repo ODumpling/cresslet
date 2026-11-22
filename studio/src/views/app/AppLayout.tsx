@@ -1,4 +1,4 @@
-// #/apps/<name>[/database[/<table>]|/secrets|/logs]: one deployed app's dashboard (anyone with access; viewers read
+// /apps/<name>[/database[/<table>]|/secrets|/logs]: one deployed app's dashboard (anyone with access; viewers read
 // only): the header, its actions and tabs. The app's detail loads here and the tabs read it (useApp); Refresh
 // reloads it and the open tab's own data.
 import { Link, Outlet, useNavigate, useParams } from "@tanstack/react-router";

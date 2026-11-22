@@ -1,6 +1,6 @@
 # The studio's UI (React, TanStack Start in SPA mode)
 
-`routes/` are the hash routes (`#/settings` → `routes/settings.tsx`; `routeTree.gen.ts` is generated from them by
+`routes/` are the routes (`/settings` → `routes/settings.tsx`; `routeTree.gen.ts` is generated from them by
 `npm run dev`, `npm run build` or `node scripts/routes.ts`, and checked by `npm run check`). Each route renders a view
 from `views/`. Code that isn't UI stays in the plain modules beside `src/` (`store.ts`, `builder.ts`,
 `cresslet-plugin.ts`, `start-build.ts`, …).
@@ -20,7 +20,7 @@ from `views/`. Code that isn't UI stays in the plain modules beside `src/` (`sto
   (`message`, `status`). A 401 for the session's token logs out and retries logged out (a 401 for a token the tab has since left is just thrown). `meta()`: `GET /v1`, once per page.
 - **`useSession()`** (`lib/session.ts`): `{ token, email, accountId, siteAdmin, orgs }`. Key a view's data on `token`
   (pass it in `useLoad` deps, or `key={token}`) so another account's data never stays shown. `logIn(after?)` goes to
-  GitHub and comes back to `after` (a `#/…` hash); `logOut()`.
+  GitHub and comes back to `after` (a studio path, `/…`); `logOut()`.
 - **`toast(content, ms?)`** (`lib/toast.tsx`): the one toast. It stays open while hovered or focused (WCAG 2.2.1),
   Escape or × closes it, and it moves off the focused control (2.4.11). Form errors go beside their form instead
   (`<FormError>`), until the user changes the form.

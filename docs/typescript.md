@@ -23,13 +23,13 @@ flags anywhere).
 
 ## The studio's build
 
-The studio is a TanStack Start app in SPA mode with hash routes (`#/p/<id>`): `studio/src/routes/` are the routes
+The studio is a TanStack Start app in SPA mode with plain paths (`/p/<id>`; old `/#/p/<id>` links redirect): `studio/src/routes/` are the routes
 (`src/routeTree.gen.ts` is generated from them; `npm run check` fails if it's stale), `studio/src/README.md` the
 conventions its views follow. Nothing renders on a server: Start prerenders the shell once at build time, and the
 Hono `/v1` API stays the only backend.
 
 - **`npm run build`** writes `studio/dist/client`, which the server serves ([`server/studio.ts`](../server/studio.ts)):
-  the shell for `/` with `no-cache`, `/assets/*` as `immutable`, the stable-URL files with `no-cache` (ETag), and
+  the shell for `/` and every route path with `no-cache`, `/assets/*` as `immutable`, the stable-URL files with `no-cache` (ETag), and
   cross-origin isolation (COOP/COEP/CORP) on everything, `frame-ancestors 'none'` on HTML. `npm start` needs it; the
   Docker image builds it in a build stage.
 - **`npm run dev`** runs Vite in middleware mode inside the server (`CRESSLET_STUDIO_DEV=1`), so `/v1`, the app hosts

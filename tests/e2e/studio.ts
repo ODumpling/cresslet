@@ -12,7 +12,7 @@ page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /react/ }).click();
-  await page.waitForURL(/#\/p\//);
+  await page.waitForURL(/\/p\//);
   const frame = page.frameLocator("#preview");
   await frame.getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
   console.log("preview rendered");
@@ -181,7 +181,7 @@ async function settings() {
   s.on("dialog", (d) => d.accept());
   await s.goto(base + "/");
   await s.evaluate(([t, e]) => (localStorage.setItem("cresslet.token", t), localStorage.setItem("cresslet.email", e)), [root, email]);
-  await s.goto(base + "/#/settings");
+  await s.goto(base + "/settings");
   const tokens = s.locator("#tokens");
   await tokens.getByText("Operator-issued").waitFor({ timeout: 10000 });
   await tokens.getByText("this browser").waitFor();

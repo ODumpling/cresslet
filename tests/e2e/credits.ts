@@ -42,7 +42,7 @@ try {
   // Logged out: the builder offers a login (credits) or an own key.
   await page.goto(base + "/");
   await page.getByRole("button", { name: /react/ }).click();
-  await page.waitForURL(/#\/p\//);
+  await page.waitForURL(/\/p\//);
   await page.locator("#builder-login").waitFor();
   if (!(await page.getByLabel("Anthropic API key").isVisible())) fail("own key not offered next to the login");
 
@@ -73,7 +73,7 @@ try {
   console.log("builder on credits ok");
 
   // Settings: what's left and the use.
-  await page.goto(base + "/#/settings");
+  await page.goto(base + "/settings");
   await page.locator("#credits-section").waitFor();
   await page.locator("#credits-history", { hasText: "AI builder (claude-opus-5-5)" }).waitFor();
   const avail = await page.locator("#credits-available").textContent();

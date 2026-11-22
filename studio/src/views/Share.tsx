@@ -1,4 +1,4 @@
-// #/share/<app>: who has access to an app or an artifact (its owner and admins change it), the organization it's
+// /share/<app>: who has access to an app or an artifact (its owner and admins change it), the organization it's
 // in, and invites.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type FormEvent, type RefObject, useEffect, useRef, useState } from "react";

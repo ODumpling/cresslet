@@ -184,7 +184,7 @@ test("CLI browser login: studio approves the code, the poll gets a new token onc
   const start = await t.json("/v1/auth/cli", { method: "POST", body: "{}" });
   assert.equal(start.status, 200);
   assert.match(start.body.userCode, /^[A-Z]{4}-[A-Z]{4}$/);
-  assert.equal(start.body.verificationUri, "http://test.local/#/cli"); // the user types the code
+  assert.equal(start.body.verificationUri, "http://test.local/cli"); // the user types the code
   const poll = (deviceCode = start.body.deviceCode) =>
     t.json("/v1/auth/cli/token", { method: "POST", body: JSON.stringify({ deviceCode }) });
   assert.deepEqual((await poll()).body, { status: "pending" });

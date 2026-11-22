@@ -24,7 +24,7 @@ try {
   // Reflow: no horizontal page scroll at 320 CSS px.
   const narrow = await browser.newPage({ viewport: { width: 320, height: 640 } });
   await narrow.addInitScript((t) => localStorage.setItem("cresslet.token", t), token);
-  for (const r of ["/", "/#/settings", "/#/admin", "/#/admin-credits"]) {
+  for (const r of ["/", "/settings", "/admin", "/admin-credits"]) {
     await narrow.goto(base + r);
     await narrow.waitForTimeout(600);
     const w = await narrow.evaluate(() => document.documentElement.scrollWidth);
@@ -32,7 +32,7 @@ try {
   }
   // A 40-character app name in the token form's app picker wraps too.
   await narrow.route("**/v1/apps", (r) => r.fulfill({ json: { apps: [{ name: "a".repeat(40), url: "http://x.localhost", updatedAt: new Date().toISOString() }] } }));
-  await narrow.goto(base + "/#/settings");
+  await narrow.goto(base + "/settings");
   await narrow.getByLabel("Only these apps").check();
   await narrow.getByLabel("a".repeat(40)).waitFor();
   const pw = await narrow.evaluate(() => document.documentElement.scrollWidth);
@@ -95,7 +95,7 @@ try {
 
   // Admin: a failed Delete leaves the button usable; Refresh keeps focus.
   page.on("dialog", (d) => d.accept());
-  await page.goto(base + "/#/admin");
+  await page.goto(base + "/admin");
   await page.route("**/v1/admin/sites/*", (r) => r.request().method() === "DELETE" ? r.fulfill({ status: 500, body: "{}" }) : r.continue());
   const del = page.getByRole("button", { name: /^Delete / }).first();
   await del.click();
@@ -108,7 +108,7 @@ try {
   console.log("admin focus ok");
 
   // Settings: after Revoke, focus lands on the list heading.
-  await page.goto(base + "/#/settings");
+  await page.goto(base + "/settings");
   await page.getByLabel("Name", { exact: true }).fill("a11y temp");
   // A validation error stays beside the form (not a toast that times out) until the form changes.
   await page.getByLabel("Only these apps").check();
@@ -131,7 +131,7 @@ try {
   await dup.route("**/v1/me/tokens", (r) => r.fulfill({ json: { tokens: toks } }));
   await dup.route("**/v1/me/tokens/*", (r) => (toks = toks.filter((t) => !r.request().url().endsWith(`/${t.id}`)), r.fulfill({ json: {} })));
   await dup.addInitScript(() => localStorage.setItem("cresslet.token", "clv_mocked"));
-  await dup.goto(base + "/#/settings");
+  await dup.goto(base + "/settings");
   await dup.locator("#revoke-t1").focus();
   await dup.keyboard.press("Enter");
   await dup.locator("#revoke-t1").waitFor({ state: "detached" });

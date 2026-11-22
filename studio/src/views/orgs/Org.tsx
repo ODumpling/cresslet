@@ -1,4 +1,4 @@
-// #/orgs/<name>: one organization: its members (admins change roles, add and remove members) and its apps. Uses the
+// /orgs/<name>: one organization: its members (admins change roles, add and remove members) and its apps. Uses the
 // admin pages' layout; a site admin who isn't a member manages it from here too.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";

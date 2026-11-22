@@ -200,7 +200,7 @@ test("pages: link pages aren't indexed; private pages need a signed-in owner or 
     // No session: off to the studio, which signs the visitor in and comes back.
     r = await t.visit(priv.name, "/x?y=1");
     assert.equal(r.status, 302);
-    assert.equal(r.headers.get("location"), `http://test.local/#/view/${priv.name}?path=%2Fx%3Fy%3D1`);
+    assert.equal(r.headers.get("location"), `http://test.local/view/${priv.name}?path=%2Fx%3Fy%3D1`);
     assert.equal(r.headers.get("cache-control"), "no-store");
 
     const signIn = async (tok: string, path = "/") => {

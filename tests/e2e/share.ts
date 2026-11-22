@@ -68,7 +68,7 @@ try {
   await i.getByRole("button", { name: `Leave ${app}` }).waitFor();
   assert(!(await i.getByRole("link", { name: `Share ${app}` }).count()), "viewers have no Share link");
   assert((await i.locator("#apps tr", { hasText: app }).locator("td").nth(1).textContent()) === "Viewer", "viewer access");
-  await i.goto(`${base}/#/share/${app}`);
+  await i.goto(`${base}/share/${app}`);
   await i.locator("#people").getByText(/can't do that/).waitFor();
   assert(await i.locator("#invite-form").isHidden(), "no invite form for viewers");
   await i.goto(base + "/");
@@ -79,7 +79,7 @@ try {
 
   // Reflow: no horizontal page scroll at 320 CSS px on the Share page.
   const narrow = await as(owner.token, { width: 320, height: 640 });
-  await narrow.goto(`${base}/#/share/${app}`);
+  await narrow.goto(`${base}/share/${app}`);
   await narrow.getByRole("heading", { name: "People with access" }).waitFor();
   await narrow.waitForTimeout(300);
   const w = await narrow.evaluate(() => document.documentElement.scrollWidth);

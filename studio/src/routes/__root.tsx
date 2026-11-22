@@ -5,8 +5,8 @@ import "../../vendor/xterm.css";
 import "../../styles.css";
 
 export const Route = createRootRoute({
-  // Nothing renders server-side: the prerendered shell is just the document (the app needs the browser: hash routes,
-  // localStorage, IndexedDB, the container).
+  // Nothing renders server-side: the prerendered shell is just the document (the app needs the browser: localStorage,
+  // IndexedDB, the container).
   ssr: false,
   head: () => ({
     meta: [

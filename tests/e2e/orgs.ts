@@ -1,4 +1,4 @@
-// Browser e2e for account management (#/admin-users), organizations (#/admin-orgs, #/orgs/<name>) and moving an
+// Browser e2e for account management (/admin-users), organizations (/admin-orgs, /orgs/<name>) and moving an
 // app into one (its Share page). Run the server with an admin token:
 //   CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev
 // then: cd tests/e2e && npm i && node orgs.ts [outdir]
@@ -35,7 +35,7 @@ try {
   let page = await open(boss.token);
   await page.goto(base + "/");
   await page.getByRole("link", { name: "Users" }).click();
-  await page.waitForURL(/#\/admin-users$/);
+  await page.waitForURL(/\/admin-users$/);
   await page.getByRole("heading", { name: "Users", level: 1 }).waitFor();
   if ((await page.getByRole("link", { name: "Users" }).getAttribute("aria-current")) !== "page") fail("Users nav link not current");
   const table = page.getByRole("region", { name: "Accounts table" });
@@ -55,7 +55,7 @@ try {
 
   // ---- site admin: Organizations
   await page.getByRole("link", { name: "Organizations" }).last().click();
-  await page.waitForURL(/#\/admin-orgs$/);
+  await page.waitForURL(/\/admin-orgs$/);
   await page.locator("main:not([hidden])").getByLabel("Name", { exact: true }).fill(`acme-${stamp}`);
   await page.locator("main:not([hidden])").getByLabel("Display name (optional)").fill(`Acme ${stamp}`);
   await page.locator("main:not([hidden])").getByLabel("First admin").fill(devEmail);
@@ -67,14 +67,14 @@ try {
   // ---- the org admin: Share page → move the app in, then the org page
   const dev2 = await call("/v1/accounts", admin, { email: devEmail }); // its tokens went when it was disabled
   page = await open(dev2.token);
-  await page.goto(`${base}/#/share/${app}`);
+  await page.goto(`${base}/share/${app}`);
   await page.getByRole("heading", { name: "Organization" }).waitFor();
   await page.locator("main:not([hidden])").getByLabel("Belongs to").selectOption(`acme-${stamp}`);
   await page.getByRole("button", { name: "Move" }).click();
   await page.getByText("Organization: its admins own this").waitFor();
   await page.screenshot({ path: `${out}/share-org.png`, fullPage: true });
   await page.getByRole("link", { name: "Organizations" }).first().click();
-  await page.waitForURL(/#\/orgs$/);
+  await page.waitForURL(/\/orgs$/);
   await page.waitForTimeout(500);
   await page.screenshot({ path: `${out}/orgs-list.png`, fullPage: true });
   await page.getByRole("link", { name: `Acme ${stamp}` }).click();

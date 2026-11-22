@@ -12,7 +12,7 @@ import { Icon, Sprite, SrOnly } from "./icons.tsx";
 
 const NavLink = ({ to, nav, current, icon, children }: { to: string; nav: string; current?: string; icon: string; children: string }) => (
   <li>
-    <a href={`#${to}`} data-nav={nav} aria-current={current === nav ? "page" : undefined}><Icon name={icon} />{children}</a>
+    <Link to={to} data-nav={nav} aria-current={current === nav ? "page" : undefined}><Icon name={icon} />{children}</Link>
   </li>
 );
 const ExtNav = ({ href, icon, children }: { href: string; icon: string; children: string }) => (
@@ -34,7 +34,7 @@ export function Layout() {
     void meta().then((m) => setCredits(!!m.ai?.credits));
     // Opened by the GitHub login callback: finish it, then back to what needed the login.
     void finishLogin().then((to) => {
-      if (to) void navigate({ href: to.slice(1) });
+      if (to) void navigate({ href: to });
     });
   }, [navigate]);
 
@@ -77,16 +77,16 @@ export function Layout() {
     <>
       <Sprite />
       <a className="skip-link" id="skip-link" href="#content" onClick={(e) => {
-        e.preventDefault(); // its #content href would be read as a route
+        e.preventDefault(); // focus the view, not just scroll to it
         focusView({ scroll: true });
       }}>Skip to content</a>
       <div className="app" id="app" data-view={view.view || undefined}>
         <aside className="sidebar" aria-label="Studio">
-          <a className="brand" href="#/">
+          <Link className="brand" to="/">
             <Icon name="logo" className="brand-mark" />
             <span>Cresslet</span>
             <span className="brand-tag">Studio</span>
-          </a>
+          </Link>
           <nav className="nav" aria-label="Main">
             <p className="nav-label" id="nav-workspace">Workspace</p>
             <ul aria-labelledby="nav-workspace">

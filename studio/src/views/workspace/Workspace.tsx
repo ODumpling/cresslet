@@ -1,6 +1,6 @@
-// #/p/<id>: a project. Chat first: the AI builder beside the app's preview, the code (files + editor) when asked for,
+// /p/<id>: a project. Chat first: the AI builder beside the app's preview, the code (files + editor) when asked for,
 // and the terminal and deploy log in a drawer under them. What was last shown is remembered in this browser.
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { Container } from "../../../vendor/cresslet-container/cresslet-container.js";
@@ -30,7 +30,7 @@ export function Workspace() {
       // Projects need the session when this server offers login: leave them for the landing page.
       if (await mustLogIn()) {
         if (!live) return;
-        rememberAfterLogin(`#/p/${id}`);
+        rememberAfterLogin(`/p/${id}`);
         return void navigate({ to: "/", replace: true });
       }
       const p = await projects.get(id);
@@ -261,10 +261,10 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   return (
     <>
       <header className="topbar" id="topbar">
-        <a className="topbar-home" href="#/">
+        <Link className="topbar-home" to="/">
           <Icon name="logo" className="brand-mark" />
           <SrOnly>Cresslet: all projects</SrOnly>
-        </a>
+        </Link>
         <div className="project-title" id="project-title">
           <span className="crumb-sep" aria-hidden="true">/</span>
           <input id="project-name" ref={nameEl} aria-label="Project name" spellCheck={false} autoComplete="off" defaultValue={project.name} />

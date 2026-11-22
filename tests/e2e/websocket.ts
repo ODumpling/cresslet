@@ -84,7 +84,7 @@ const boot = async () => (await (await frame()).evaluate(() => fetch("/api/boot"
 try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /vanilla/i }).click();
-  await page.waitForURL(/#\/p\//);
+  await page.waitForURL(/\/p\//);
   await page.frameLocator("#preview").getByRole("heading", { name: "Hello from Cresslet" }).waitFor({ timeout: 120000 });
   await page.getByRole("button", { name: "Terminal", exact: true }).click(); // the drawer: dev server output
   await waitFor(async () => /dev server on port/.test(await term.innerText()), "the dev server");

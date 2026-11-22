@@ -1,4 +1,4 @@
-// #/artifacts (was #/pages): deploy and manage artifacts, static HTML with a visibility and a retention. Logged out:
+// /artifacts (was /pages): deploy and manage artifacts, static HTML with a visibility and a retention. Logged out:
 // what they are, and a login.
 import { Link, useRouter } from "@tanstack/react-router";
 import { type ReactNode, type Ref, useEffect, useImperativeHandle, useRef, useState } from "react";
@@ -89,7 +89,7 @@ export function Artifacts() {
         <section className="block first" id="pages-login">
           <div className="panel split">
             <p className="muted small">Log in to deploy artifacts: private to the people you share them with, link-only, or public, and kept for as long as you choose.</p>
-            <button className="btn primary" id="pages-login-btn" type="button" onClick={() => void logIn("#/artifacts")}><Icon name="github" />Log in with GitHub</button>
+            <button className="btn primary" id="pages-login-btn" type="button" onClick={() => void logIn("/artifacts")}><Icon name="github" />Log in with GitHub</button>
           </div>
         </section>
       )}

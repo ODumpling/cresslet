@@ -60,7 +60,7 @@ const fail = (m: string): never => { throw new Error(m); };
 try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /react/ }).click();
-  await page.waitForURL(/#\/p\//);
+  await page.waitForURL(/\/p\//);
   const frame = page.frameLocator("#preview");
   await frame.getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
   console.log("preview rendered");
