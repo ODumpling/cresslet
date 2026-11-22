@@ -78,7 +78,7 @@ function Body({ m }: { m: API.Metrics }) {
         </div>
       ) : <div className="banner">Nothing deployed yet.</div>}
       <div className="stats">
-        <Stat label="Status" value={STATUS[status]} sub={rt.running ? `pid ${rt.pid}` : a.config?.server ? "Starts on the next request" : "Static site"}
+        <Stat label="Status" value={STATUS[status]} sub={rt.running ? "Serving requests" : a.config?.server ? "Starts on the next request" : "Static site"}
           extra={<i className="dot" aria-hidden="true" data-s={status} />} />
         <Stat label="Requests" value={<>{t.requests.toLocaleString()}<small>24h</small></>}
           sub={`${plural(t.errors, "server error")} · ${t.requests ? Math.round((t.errors / t.requests) * 1000) / 10 : 0}% · ${t.clientErrors.toLocaleString()} 4xx`} />

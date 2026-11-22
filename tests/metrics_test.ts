@@ -68,6 +68,8 @@ test("GET /v1/apps/:name/metrics: requests, usage and tables, for anyone who can
     await (await call("/", { host })).text();
     await (await call("/nope.png", { host })).text();
 
+    // the app's runtime is only up or down to its users: no pid or other host details
+    assert.deepEqual((await json("/v1/apps/shop", { headers: bearer(owner) })).body.runtime, { running: true });
     assert.equal((await json("/v1/apps/shop/metrics", { headers: bearer(other) })).status, 403);
     const m = await json("/v1/apps/shop/metrics", { headers: bearer(owner) });
     assert.equal(m.status, 200);

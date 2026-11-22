@@ -114,7 +114,7 @@ export interface AppDetail {
     egress: string[] | null;
     createdAt: string;
   };
-  runtime: { running: boolean; pid?: number };
+  runtime: { running: boolean };
   deploys: DeployInfo[];
   secrets: string[];
 }

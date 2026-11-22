@@ -748,7 +748,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         source: d.source,
         current: d.id === a.current_deploy_id,
       })),
-      runtime: runtime.status(a.id),
+      runtime: { running: runtime.status(a.id).running }, // no pid or host details for app users
       secrets: await store.secretKeys(a.id),
     });
   });
