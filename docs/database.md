@@ -17,6 +17,7 @@ Every `Store` method is async. [`server/db.ts`](../server/db.ts) gives both data
 
 - Version 1 (`baseline`) is the schema as of this release. On Postgres it creates the tables. On SQLite it upgrades a database from any earlier release in place (they added columns as they went, before migrations were recorded), so existing `cresslet.db` files carry on.
 - Version 2 (`orgs`) adds disabled and invited accounts (`accounts.disabled_at`, `disabled_email`, `disabled_github_id`, `invited_at`, `invited_by`), organizations (`orgs`, `org_members`) and `apps.org_id`. A release from before it, after a rollback, ignores them: org apps go back to their `account_id` holder (kept an org admin or member), and disabled accounts stay locked out (no tokens; email and GitHub id moved aside).
+- Version 3 (`cron_pauses`) adds `apps.paused_crons`: crons paused in the studio. A release from before it ignores it: they fire on schedule again, and its deploys don't forget pauses of crons they drop (back on this release, such a cron brought back later starts out paused).
 - To change the schema, append a migration with the next number and give each dialect its SQL:
 
   ```ts

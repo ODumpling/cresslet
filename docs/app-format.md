@@ -75,7 +75,7 @@ if (req.headers.get("upgrade") === "websocket") {
 }
 ```
 
-Cron triggers: each `crons` entry in `cresslet.json` (standard 5-field expression incl. `MON-FRI`/`JAN` names, UTC, ≤ 5, claimed apps; one run at a time per app) calls the server's `scheduled` export; the result is logged (`cresslet logs`).
+Cron triggers: each `crons` entry in `cresslet.json` (standard 5-field expression incl. `MON-FRI`/`JAN` names, UTC, ≤ 5, claimed apps; one run at a time per app) calls the server's `scheduled` export; the result is logged (`cresslet logs`). The studio's Crons tab shows each one's next runs and recent results, and pauses, resumes or runs one now.
 
 ```ts
 export default {

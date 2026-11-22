@@ -34,6 +34,7 @@ import {
   type Token,
   AccountDisabledError,
   accountLock,
+  cronsLock,
   inviteLock,
 } from "./store.ts";
 import { orgRefs, orgRoutes } from "./orgs.ts";
@@ -43,6 +44,7 @@ import { github } from "./github.ts";
 import { cliLogin } from "./cli-login.ts";
 import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
+import { pausedCrons, type Scheduler, upcoming } from "./cron.ts";
 import { adminRoutes, isSiteAdmin, purgeApp, usage } from "./admin.ts";
 import { aiRoutes } from "./credits.ts";
 import { ipKey, RateLimit } from "./limits.ts";
@@ -124,7 +126,8 @@ async function readCappedBytes(req: Request, maxBytes: number): Promise<Uint8Arr
   return total === buf.byteLength ? buf : buf.subarray(0, total);
 }
 
-export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluster) {
+/** `scheduler`: this node's cron scheduler (Run now, and what's running); without one, Run now answers 503. */
+export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluster, scheduler?: Pick<Scheduler, "runNow" | "state">) {
   const app = new Hono<Env>().basePath("/v1");
   app.use("*", cors({ origin: "*", allowHeaders: ["authorization", "content-type", "x-cresslet-deploy-key"] }));
 
@@ -777,6 +780,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.delete("/apps/:name", async (c) => {
     const a = await getApp(c.req.param("name"));
     await authorize(c, a, "admin", { owner: true });
+    // `?id=`: only that app (not one made with its name since the caller looked).
+    const only = c.req.query("id");
+    if (only && only !== a.id) throw new HttpError(409, `${a.name} is a different app now: reload to see it`, "conflict");
     await purgeApp(cfg, store, runtime, a);
     return c.json({ deleted: a.name });
   });
@@ -830,6 +836,83 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     runtime.logs.push(a.id, "system", `rolled back to ${d.id}`);
     return c.json({ app: view((await store.appById(a.id))!) });
   });
+
+  // ---- crons (docs/app-format.md): the app's schedule, recent runs (in memory on the node that runs them),
+  // pause / resume (stored: they skip their scheduled runs until resumed) and Run now.
+  const appCrons = (a: App): string[] => JSON.parse(a.config).crons ?? [];
+  const cronsView = (a: App) => {
+    const paused = pausedCrons(a), runs = runtime.cronRuns.list(a.id), now = Date.now();
+    const runView = (r: (typeof runs)[number]) => ({
+      cron: r.cron, at: iso(r.at), startedAt: iso(r.startedAt), ms: r.ms, status: r.status, ok: r.status >= 200 && r.status < 300, manual: r.manual,
+    });
+    return {
+      crons: appCrons(a).map((c) => {
+        let next: string[] = [];
+        try {
+          // Unclaimed apps' crons don't fire.
+          if (a.account_id && !paused.has(c)) next = upcoming(c, now).map((t) => iso(t)!);
+        } catch { /* stored before validation tightened: never fires */ }
+        const last = runtime.cronRuns.last(a.id, c);
+        return { cron: c, paused: paused.has(c), state: scheduler?.state(a.id, c) ?? null, next, last: last ? runView(last) : null };
+      }),
+      runs: runs.map(runView),
+      since: iso(runtime.cronRuns.since),
+    };
+  };
+  /** The body's cron, and the app as it is now (a deploy may have changed its crons while the body arrived). */
+  const cronParam = async (c: Context<Env>, a: App) => {
+    const cron = (await body<{ cron?: unknown } | null>(c))?.cron;
+    const now = await store.appById(a.id);
+    if (!now) throw new HttpError(404, `app not found: ${a.name}`, "not_found");
+    return { cron: hasCron(now, cron), app: now };
+  };
+  /** A cron the app's current deploy declares (as in its config). */
+  const hasCron = (a: App, cron: unknown) => {
+    if (typeof cron !== "string" || !appCrons(a).includes(cron)) throw new HttpError(404, `no cron ${JSON.stringify(cron)} in ${a.name}'s current deploy`, "not_found");
+    return cron;
+  };
+
+  app.get("/apps/:name/crons", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    notPage(a);
+    await authorize(c, a, "read");
+    return c.json(cronsView(a));
+  });
+
+  app.post("/apps/:name/crons/run", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    notPage(a);
+    await authorize(c, a, "deploy");
+    if (!a.account_id) throw new HttpError(403, "crons run in claimed apps only (cresslet claim)", "unclaimed");
+    const { cron, app: now } = await cronParam(c, a);
+    await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
+    if (!scheduler) throw new HttpError(503, "crons aren't running on this server", "unavailable");
+    if (!scheduler.runNow(a.id, cron)) throw new HttpError(409, `cron "${cron}" is already running or queued`, "busy");
+    return c.json(cronsView(now), 202);
+  });
+
+  for (const [path, pause] of [["pause", true], ["resume", false]] as const) {
+    app.post(`/apps/:name/crons/${path}`, async (c) => {
+      const a = await getApp(c.req.param("name"));
+      notPage(a);
+      await authorize(c, a, "deploy");
+      const { cron } = await cronParam(c, a);
+      // Under a per-app lock (two pauses can't drop each other's); only crons the current deploy still has are kept.
+      const now = await store.serialized(cronsLock(a.id), async () => {
+        await authorize(c, a, "deploy"); // again, right before the change: access may have changed while waiting
+        const cur = await store.appById(a.id);
+        if (!cur) throw new HttpError(404, `app not found: ${a.name}`, "not_found");
+        hasCron(cur, cron);
+        const set = pausedCrons(cur);
+        if (pause) set.add(cron);
+        else set.delete(cron);
+        await store.setPausedCrons(a.id, appCrons(cur).filter((x) => set.has(x)));
+        return (await store.appById(a.id))!;
+      });
+      runtime.logs.push(a.id, "system", `cron "${cron}" ${pause ? "paused" : "resumed"}`);
+      return c.json(cronsView(now));
+    });
+  }
 
   // ---- collaborators: accounts invited to an app as admin or viewer (see docs/api.md)
   const MAX_COLLABORATORS = 50; // collaborators + pending invites, per app

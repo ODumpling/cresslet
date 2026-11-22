@@ -12,7 +12,7 @@ Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 
 Account tokens have a **role** and optionally a list of **apps** (403 `forbidden` outside them):
 - `read`: `GET` endpoints of the account's apps (app, logs, source, secret names, egress, domains, db) and `POST /apps/:name/db/query` (read-only).
-- `deploy`: `read`, plus `POST /deploys` (existing apps) and `POST /apps/:name/rollback`. Deployed code can read the app's secrets, so treat it as close to `admin` for that app.
+- `deploy`: `read`, plus `POST /deploys` (existing apps), `POST /apps/:name/rollback` and the cron controls (`POST /apps/:name/crons/run|pause|resume`). Deployed code can read the app's secrets, so treat it as close to `admin` for that app.
 - `admin`: everything on the apps (secrets, egress, domains, delete).
 - `apps`: limit the token to these apps (by id: a deleted app doesn't come back into scope if its name is reused). Without it, the token covers every app, including new ones.
 
@@ -59,7 +59,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/deploys` | see below |
 | GET | `/v1/apps` | apps the account owns, collaborates on or reaches through an [organization](#organizations); each has `access: owner\|admin\|viewer` and `org: {name, title} \| null` |
 | GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 10 deploys, runtime status, secret names |
-| DELETE | `/v1/apps/:name` | delete app + data (owner or deploy key; not an invited admin) |
+| DELETE | `/v1/apps/:name?id=` | delete app + data (owner or deploy key; not an invited admin). `id` (optional): only if it's still that app, else 409 `conflict` |
 | PUT | `/v1/apps/:name/org` | owner (org app: an org admin), full-access token: `{org: "name" \| null}` → `{app, org}`. Into an organization you're a member of, or out of one (`null`: your personal app, within your app limit) |
 | GET | `/v1/apps/:name/collaborators` | **owner or admin**: `{owner: {id, email, github} \| null, org: {name, title} \| null, collaborators: [{id, email, github, role, createdAt}], invites: [{id, email, role, invitedBy, createdAt}]}` |
 | POST | `/v1/apps/:name/collaborators` | **owner or admin**: `{email, role?: viewer\|admin (default viewer)}` → `{invite}` (201; 200 if that email had a pending invite, now with this role). 409 if that account already has access |
@@ -74,6 +74,10 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/apps/:name/source?deploy=` | `{app, deployId, files: [{path, data, encoding}]}` source uploaded with the current (or given) deploy; 404 `no_source` if none |
 | GET | `/v1/apps/:name/metrics` | the dashboard's numbers: `{since, bucketMs, totals: {requests, errors, clientErrors, avgMs, maxMs}, series: [{t, requests, errors, avgMs}], usage: {deploys, database, files, total}, database: {tables: [{name, rows}], error}, domains}`. Requests are counted in memory over the last 24 h in 5-minute buckets (`since`: when counting started, at server start); `avgMs`/`maxMs` time server routes only |
 | GET | `/v1/apps/:name/logs?n=200&follow=1` | NDJSON `{t, kind: stdout\|stderr\|system\|request, msg}`; `follow` streams |
+| GET | `/v1/apps/:name/crons` | `{crons: [{cron, paused, state: running\|queued\|null, next: [iso, …≤3], last}], runs: [{cron, at, startedAt, ms, status, ok, manual}], since}`: the current deploy's crons, the next times each fires (none while paused or unclaimed), each one's last run, and the last 50 runs, kept in memory since `since` (server start). `status` 0: the app couldn't be reached |
+| POST | `/v1/apps/:name/crons/run` | `deploy`: `{cron}` (as in the config) → 202 with the view above. Queues one run behind the app's others, also of a paused cron; 409 `busy` if it's already running or queued. While it's queued, the cron's scheduled runs are skipped, as for any run still going. Claimed apps only |
+| POST | `/v1/apps/:name/crons/pause` | `deploy`: `{cron}` → the view above. Stops its scheduled runs until resumed (stored by expression: it stays paused across deploys and rollbacks that keep the expression; one without it forgets the pause) |
+| POST | `/v1/apps/:name/crons/resume` | `deploy`: `{cron}` → the view above |
 | GET | `/v1/apps/:name/secrets` | `{keys}` (values are write-only) |
 | PUT | `/v1/apps/:name/secrets` | `{KEY: "value" \| null}` merge; claimed apps only |
 | DELETE | `/v1/apps/:name/secrets/:key` | |
