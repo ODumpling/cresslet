@@ -285,7 +285,11 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
         if (failed.length) on({ type: "notice", text: `The stack's pull requests weren't all updated (${failed.join("; ")}). Submit it again from the stack.`, error: true });
       }
     } catch (e) {
-      if (gitCode(e) === "moved") onStackStale();
+      if (gitCode(e) === "moved") {
+        onStackStale();
+        on({ type: "notice", text: `Not committed: ${errorMessage(e)}. Until then, requests aren't committed either. Pull it in or carry on from it in the stack above (either loads the branch as GitHub has it, over the changes here: copy any you want to keep).`, error: true });
+        return;
+      }
       on({ type: "notice", text: `Couldn't commit to GitHub: ${errorMessage(e)}. The changes are kept here (the next request's commit takes them too, or push them from the branch menu).`, error: true });
     }
   }
