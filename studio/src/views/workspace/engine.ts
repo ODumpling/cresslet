@@ -30,11 +30,14 @@ export interface Callbacks {
   deployed(d: Deploy): void;
   /** The AI builder: whether one of its commands runs, and asking the user to approve a deploy. */
   builderRunning(): boolean;
+  /**
+   * The request it's working on: a deploy while one of its commands runs commits that turn as a change first (one
+   * started by hand meanwhile too: the turn's edits are in it).
+   */
+  builderTurn(): { title: string; prompt: string } | null;
   approveDeploy(text: string, signal?: AbortSignal): Promise<boolean>;
   /** Source control: the project's repository and branch changed (or it was linked or unlinked). */
   git(state: ProjectGitState | undefined): void;
-  /** Something to tell the user (a branch was started for their edit). */
-  notice(text: string): void;
 }
 
 // ANSI colors too: xterm's defaults are made for black and fail AA on these surfaces (≥ 4.5:1 here).
@@ -97,8 +100,6 @@ export class Engine {
   private installFailed = false;
   /** Counts the workspace's changes (studio/git.ts: a sync is clean only if none came in meanwhile). */
   private rev = 0;
-  /** A branch being started for a hand edit, or when the last try failed (one try per burst, not per keystroke). */
-  private branching: { busy: boolean; failedAt: number; on: string } = { busy: false, failedAt: 0, on: "" };
 
   constructor(project: StoredProject, cb: Callbacks, editorEl: HTMLElement) {
     this.project = project;
@@ -158,7 +159,6 @@ export class Engine {
             void this.c.fs.writeFile(`${this.c.workdir}/${this.current}`, u.state.doc.toString());
             this.save();
             this.changed();
-            this.editBranch(this.current);
           }),
         ],
       }),
@@ -268,7 +268,10 @@ export class Engine {
       // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
       beforeDeploy: async (log, signal, app) => {
         if (this.git.connected && (!app || app === project.deploy?.name)) {
-          const { files, ...p } = await this.git.prepareDeploy(log, signal);
+          // Where it came from, as it was asked for (a builder command's, approved; or by hand): not when its queued
+          // step runs, when another command of a request started since may be running.
+          const fromBuilder = cb.builderRunning();
+          const { files, ...p } = await this.git.prepareDeploy(log, signal, { turn: () => cb.builderTurn(), running: () => fromBuilder });
           return { ...p, source: sourceDigest(files) };
         }
         // Linked to a repository elsewhere (another browser, the CLI), not here: deploying this workspace would skip it.
@@ -412,27 +415,9 @@ export class Engine {
     this.git.markDirty();
   }
 
-  /**
-   * A hand change on the default branch of a linked app goes on a branch of its own (`edit/<file>`): the default
-   * branch stays what's deployed until Deploy merges it. One try at a time; after a failure, none for a while.
-   */
-  private editBranch(file: string) {
-    const g = this.git, b = this.branching, on = this.project.git?.activeBranch ?? "";
-    if (!g.connected || !g.onDefault || b.busy || (b.on === on && Date.now() - b.failedAt < 30_000)) return;
-    b.busy = true;
-    void g.ensureBranch("edit", file.replace(/\.[^./]+$/, "")).then(
-      (name) => name && this.cb.notice(`Editing on a new branch, ${name}: ${this.project.git?.defaultBranch ?? "main"} stays as deployed until you deploy.`),
-      (e) => {
-        Object.assign(b, { failedAt: Date.now(), on });
-        this.cb.notice(`Couldn't start a branch for this edit: ${errorMessage(e)}. It's kept here (not pushed), on ${on}.`);
-      },
-    ).finally(() => (b.busy = false));
-  }
-
   async newFile(path: string) {
     const c = this.c;
     if (!c) return;
-    this.editBranch(path);
     await c.fs.writeFile(`${c.workdir}/${path}`, "");
     this.save();
     await this.renderTree();

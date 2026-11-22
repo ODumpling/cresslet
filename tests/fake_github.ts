@@ -180,6 +180,10 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       const sha = r.refs.get(decodeURIComponent(x[1]));
       return sha ? json(200, { ref: `refs/heads/${x[1]}`, object: { sha, type: "commit" } }) : json(404, { message: "Not Found" });
     }
+    if ((x = /^\/git\/matching-refs\/heads\/(.*)$/.exec(rest))) {
+      const prefix = decodeURIComponent(x[1]);
+      return json(200, [...r.refs].filter(([b]) => b.startsWith(prefix)).map(([b, sha]) => ({ ref: `refs/heads/${b}`, object: { sha, type: "commit" } })));
+    }
     if (rest.startsWith("/branches")) {
       return json(200, [...r.refs].map(([name, sha]) => ({ name, commit: { sha }, protected: r.protected.has(name) })));
     }
@@ -187,6 +191,8 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       if (!canPush) return json(403, { message: "Resource not accessible" });
       const name = body.ref.replace(/^refs\/heads\//, "");
       if (r.refs.has(name)) return json(422, { message: "Reference already exists" });
+      // A branch whose name is a folder of this one (or the other way): git can't have both.
+      if ([...r.refs.keys()].some((x) => name.startsWith(x + "/") || x.startsWith(name + "/"))) return json(422, { message: "Reference update failed" });
       r.refs.set(name, body.sha);
       return json(201, { ref: body.ref, object: { sha: body.sha } });
     }

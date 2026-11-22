@@ -276,6 +276,25 @@ async function gitUpstream(db: Db) {
   if (!(await cols(db, "app_repos")).includes("upstream_sha")) await db.exec("ALTER TABLE app_repos ADD COLUMN upstream_sha TEXT");
 }
 
+/**
+ * Stacked changes (docs/architecture.md#stacked-changes): each AI builder turn that changed files, as a change of
+ * its app's stack (its branch, the commit it holds, the one it was cut from). An older server ignores the table.
+ */
+async function stacks(db: Db) {
+  const big = db.dialect === "postgres" ? "BIGINT" : "INTEGER";
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS stack_changes (
+      id TEXT PRIMARY KEY, app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      stack_id TEXT NOT NULL, stack_name TEXT NOT NULL, position INTEGER NOT NULL,
+      branch TEXT NOT NULL, sha TEXT NOT NULL, base_sha TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL DEFAULT '',
+      state TEXT NOT NULL DEFAULT 'open', landed_sha TEXT, pr_number INTEGER,
+      author TEXT, created_by TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+      created_at ${big} NOT NULL, updated_at ${big} NOT NULL,
+      UNIQUE (stack_id, position));
+    CREATE INDEX IF NOT EXISTS stack_changes_app ON stack_changes (app_id, state);
+  `);
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
@@ -283,12 +302,14 @@ export const MIGRATIONS: Migration[] = [
   { version: 3, name: "cron_pauses", up: cronPauses },
   { version: 4, name: "git", up: git },
   { version: 5, name: "git_upstream", up: gitUpstream },
+  { version: 6, name: "stacks", up: stacks },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */
 export const TABLES = [
   "accounts", "orgs", "apps", "tokens", "deploys", "secrets", "domains", "meta", "collaborators", "invites",
   "page_sessions", "rate_hits", "ai_wallets", "ai_ledger", "org_members", "git_connections", "app_repos",
+  "stack_changes",
 ] as const;
 
 export interface MigrateResult {

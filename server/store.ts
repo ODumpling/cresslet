@@ -97,6 +97,33 @@ export interface Deploy {
 export const GIT_PROVIDERS = ["github"] as const;
 export type GitProvider = (typeof GIT_PROVIDERS)[number];
 
+/** One change of an app's stack (server/stack.ts): a builder turn's commit, on a branch of its own. */
+export interface StackChange {
+  id: string;
+  app_id: string;
+  stack_id: string;
+  /** The stack's name: its branches are `feat/<name>/<position>-<slug>`. */
+  stack_name: string;
+  /** 1 = the bottom (cut from the default branch). */
+  position: number;
+  branch: string;
+  /** The commit the branch is recorded at (GitHub is the authority: see readStacks). */
+  sha: string;
+  /** The commit it was cut from: the change below's, or the default branch's for the bottom one. */
+  base_sha: string;
+  title: string;
+  prompt: string;
+  state: "open" | "landed" | "set_aside";
+  /** The default branch's commit that took it in (landed). */
+  landed_sha: string | null;
+  pr_number: number | null;
+  /** The provider login it was committed as. */
+  author: string | null;
+  created_by: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
 /** An account's own connection to a provider: Cresslet acts as this user there. Tokens are plaintext here, sealed at rest. */
 export interface GitConnection {
   account_id: string;
@@ -1107,6 +1134,7 @@ export class Store implements RateHits {
   }
   async setAppRepo(r: Omit<AppRepo, "connected_at" | "updated_at">) {
     const now = Date.now();
+    await this.db.run("DELETE FROM stack_changes WHERE app_id = ?", r.app_id); // a new link: no stacks yet
     await this.db.run(
       `INSERT INTO app_repos (app_id, provider, repo_id, owner, name, default_branch, subdir, delete_branch, connected_by,
          last_synced_sha, connected_at, updated_at)
@@ -1127,7 +1155,43 @@ export class Store implements RateHits {
     )).changes;
   }
   async deleteAppRepo(appId: string): Promise<boolean> {
+    // Its stacks were that repository's branches.
+    await this.db.run("DELETE FROM stack_changes WHERE app_id = ?", appId);
     return (await this.db.run("DELETE FROM app_repos WHERE app_id = ?", appId)).changes > 0;
+  }
+
+  // ---- stacked changes (server/stack.ts)
+  /** The app's open changes, by stack (oldest stack first), bottom first. */
+  openStackChanges(appId: string): Promise<StackChange[]> {
+    return this.db.all<StackChange>(
+      "SELECT * FROM stack_changes WHERE app_id = ? AND state = 'open' ORDER BY created_at, stack_id, position", appId,
+    );
+  }
+  async addStackChange(c: Omit<StackChange, "state" | "landed_sha" | "pr_number" | "created_at" | "updated_at">): Promise<StackChange> {
+    const now = Date.now();
+    await this.db.run(
+      `INSERT INTO stack_changes (id, app_id, stack_id, stack_name, position, branch, sha, base_sha, title, prompt, author,
+         created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      c.id, c.app_id, c.stack_id, c.stack_name, c.position, c.branch, c.sha, c.base_sha, c.title, c.prompt, c.author,
+      c.created_by, now, now,
+    );
+    return { ...c, state: "open", landed_sha: null, pr_number: null, created_at: now, updated_at: now };
+  }
+  /** A commit onto the top change's branch from its recorded commit (a hand edit pushed, a merge resolved): it follows. */
+  async followStackTop(appId: string, branch: string, from: string, to: string): Promise<boolean> {
+    return (await this.db.run(
+      `UPDATE stack_changes SET sha = ?, updated_at = ? WHERE app_id = ? AND branch = ? AND sha = ? AND state = 'open'
+         AND position = (SELECT MAX(s.position) FROM stack_changes s WHERE s.stack_id = stack_changes.stack_id AND s.state = 'open')`,
+      to, Date.now(), appId, branch, from,
+    )).changes > 0;
+  }
+  /** A stack's open changes up to `position`, landed in the default branch at `sha`. */
+  async landStack(appId: string, stackId: string, position: number, sha: string): Promise<number> {
+    return (await this.db.run(
+      "UPDATE stack_changes SET state = 'landed', landed_sha = ?, updated_at = ? WHERE app_id = ? AND stack_id = ? AND state = 'open' AND position <= ?",
+      sha, Date.now(), appId, stackId, position,
+    )).changes;
   }
   /**
    * The last commit Cresslet wrote or read, and what the provider says about the repository now (renamed,

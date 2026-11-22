@@ -433,7 +433,8 @@ const gitMod = "../studio/git.ts"; // browser module: typed by studio/tsconfig.j
 const { createGitWorkspace, branchSlug, commitMessage } = await import(gitMod);
 
 /** A linked project over a scripted /v1/apps/:name/git API: the calls it made, its state, what was loaded. */
-function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true, hydrate = null as null | ((f: Json) => Promise<void>), duringSync = () => {} } = {}) {
+function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true, hydrate = null as null | ((f: Json) => Promise<void>), duringSync = () => {}, duringStack = () => {}, stackError = null as string | null } = {}) {
+  const opts = { stackError };
   const calls: { path: string; body?: Json }[] = [];
   const hydrated: Json[] = [];
   let state: Json = {
@@ -448,7 +449,16 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       if (taken.includes(body.name)) throw Object.assign(new Error("exists"), { status: 409, code: "branch_exists" });
       return { branch: { name: body.name, sha: body.from } };
     }
+    if (path.endsWith("/git/stack") && init.method === "POST") {
+      duringStack();
+      if (opts.stackError) throw Object.assign(new Error(opts.stackError), { status: 409, code: opts.stackError });
+      if (body.from !== "main" && body.from !== "feat/s/1-one") throw Object.assign(new Error("not a change of a stack"), { status: 409, code: "not_on_stack" });
+      if (body.files.some((f: Json) => f.data === "same")) return { changed: false, sha: body.baseSha };
+      return { changed: true, sha: String(++n).padStart(40, "c"), branch: "feat/s/2-two", change: { position: 2 }, stack: { id: "stk_1", name: "s" } };
+    }
+    if (path.endsWith("/git/stack")) return { defaultBranch: "main", stacks: [{ id: "stk_1", name: "s", baseSha: "a".repeat(40), changes: [{ branch: "feat/s/1-one" }] }] };
     if (path.endsWith("/git/sync")) {
+      if (body.branch === "feat/s/1-lower") throw Object.assign(new Error("below its top"), { status: 409, code: "not_on_top" });
       duringSync();
       if (body.branch === "gone") throw Object.assign(new Error("no branch"), { status: 404, code: "branch_not_found" });
       return { branch: body.branch, sha: String(++n).padStart(40, "b"), changed: true };
@@ -470,7 +480,10 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     hydrate: hydrate ?? (async (f: Json) => void hydrated.push(f)),
     revision: () => rev.n,
   });
-  return { git, calls, hydrated, rev, files, get state() { return state; }, set state(s: Json) { state = s; } };
+  return {
+    git, calls, hydrated, rev, files, get state() { return state; }, set state(s: Json) { state = s; },
+    get stackError() { return opts.stackError; }, set stackError(v: string | null) { opts.stackError = v; },
+  };
 }
 
 test("git: branch names and commit messages come from the prompt", () => {
@@ -481,41 +494,89 @@ test("git: branch names and commit messages come from the prompt", () => {
   assert.equal(commitMessage("x".repeat(100)).length, 72);
 });
 
-test("AI builder on a linked app: a change cuts a feature branch before the first write; follow-ups stay on it; questions don't branch", async () => {
-  const c = fakeContainer({ "src/App.tsx": "<h1>Todos</h1>" });
-  const g = fakeGit({ taken: ["feat/rename-the-heading"] });
-  let prompt = "Rename the heading";
-  const order: string[] = [];
-  const tools = createTools(c, {
-    beforeChange: async () => void (await g.git.ensureBranch("feat", prompt), order.push("branch")),
-    onChange: (p: string) => order.push(`change ${p}`),
-  });
-  // Reading isn't a change: no branch.
-  assert.equal((await tools.execute("read_file", { path: "src/App.tsx" })).error, undefined);
-  assert.equal((await tools.execute("list_files", {})).error, undefined);
-  assert.equal(g.calls.length, 0);
-  assert.equal(g.state.activeBranch, "main");
+test("git: a turn's commit is a change of the stack: on its own branch from the workspace's commit, or the branch as before", async () => {
+  // On the default branch: a new change (the server starts the stack); the workspace moves to its branch.
+  const g = fakeGit();
+  g.state.dirty = true;
+  const out = await g.git.commitChange("Add a thing", "Add a thing, please");
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1]), ["/stack"]);
+  assert.deepEqual(g.calls[0].body, { from: "main", baseSha: "a".repeat(40), files: [{ path: "index.html", data: "<h1>hi</h1>" }], title: "Add a thing", prompt: "Add a thing, please" });
+  assert.equal(out.change.position, 2);
+  assert.deepEqual([g.state.activeBranch, g.state.headSha, g.state.baseSha, g.state.dirty], ["feat/s/2-two", "1".padStart(40, "c"), "a".repeat(40), false]);
 
-  await tools.execute("edit_file", { path: "src/App.tsx", old_text: "Todos", new_text: "Tasks" });
-  assert.deepEqual(order, ["branch", "change src/App.tsx"]); // the branch first
-  assert.deepEqual(g.calls.map((x) => x.body?.name), ["feat/rename-the-heading", "feat/rename-the-heading-2"]); // taken → -2
-  assert.equal(g.calls[1].body.from, "a".repeat(40)); // from the workspace's commit
-  assert.equal(g.state.activeBranch, "feat/rename-the-heading-2");
-  assert.equal(c.files.get("/project/src/App.tsx"), "<h1>Tasks</h1>");
+  // Nothing changed: the workspace stays where it is.
+  const same = fakeGit();
+  same.state.dirty = true;
+  same.files.list = [{ path: "index.html", data: "same" }];
+  assert.equal((await same.git.commitChange("x")).changed, false);
+  assert.deepEqual([same.state.activeBranch, same.state.dirty], ["main", false]);
 
-  // A follow-up in the same chat stays on that branch.
-  prompt = "Now make it blue";
-  await tools.execute("write_file", { path: "src/style.css", content: "h1{color:blue}" });
-  await tools.execute("delete_file", { path: "src/style.css" });
-  assert.equal(g.calls.length, 2);
-  assert.equal(g.state.activeBranch, "feat/rename-the-heading-2");
+  // On a stack's top change GitHub moved (the server says not_on_stack): committed to its branch, as before.
+  const own = fakeGit({ onDefault: false });
+  own.state.dirty = true;
+  await own.git.commitChange("Fix");
+  assert.deepEqual(own.calls.map((x) => x.path.split("/git")[1]), ["/stack", "/sync"]);
+  assert.deepEqual([own.calls[1].body.branch, own.state.activeBranch], ["feat/x", "feat/x"]);
 
-  // Branching fails: the file isn't changed and the tool says why.
-  const failing = createTools(c, { beforeChange: async () => { throw new Error("GitHub is down"); } });
-  const r = await failing.execute("write_file", { path: "x.txt", content: "x" });
-  assert.equal(r.error, true);
-  assert.match(r.text, /GitHub is down/);
-  assert.equal(c.files.has("/project/x.txt"), false);
+  // Below a stack's top (not_on_top), or GitHub unreachable: nothing committed, the changes kept here; the next
+  // turn's commit sends them again.
+  for (const code of ["not_on_top", "github_error"]) {
+    const kept = fakeGit({ onDefault: false, stackError: code });
+    kept.state.dirty = true;
+    await assert.rejects(kept.git.commitChange("One"), (e: Json) => e.code === code);
+    assert.deepEqual([kept.state.activeBranch, kept.state.dirty], ["feat/x", true]);
+    kept.stackError = null;
+    kept.state.activeBranch = "main";
+    await kept.git.commitChange("Two");
+    assert.deepEqual(kept.calls.map((x) => x.path.split("/git")[1]), ["/stack", "/stack"]);
+    assert.deepEqual(kept.calls[1].body.files, kept.calls[0].body.files);
+    assert.equal(kept.state.dirty, false);
+  }
+
+  // Finishing a merge: that's committed to its branch (with its second parent), not a new change.
+  const merging = fakeGit({ onDefault: false });
+  merging.state = { ...merging.state, dirty: true, mergeParent: "f".repeat(40), conflicts: [] };
+  await merging.git.commitChange("Resolve");
+  assert.deepEqual(merging.calls.map((x) => x.path.split("/git")[1]), ["/sync"]);
+  assert.equal(merging.calls[0].body.mergeParent, "f".repeat(40));
+
+  // The stack the workspace is on.
+  const on = fakeGit();
+  on.state.activeBranch = "feat/s/1-one";
+  assert.equal((await on.git.stacks()).current?.id, "stk_1");
+  assert.equal((await fakeGit().git.stacks()).current, null);
+});
+
+test("git: edits on a change below its stack's top (one added elsewhere) go on a branch of their own when switching away", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.activeBranch = "feat/s/1-lower";
+  g.state.dirty = true;
+  await g.git.switchTo("feat/s/2-two");
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1].split("?")[0]), ["/sync", "/branches", "/sync", "/tree"]);
+  assert.deepEqual([g.calls[1].body.name, g.calls[2].body.branch, g.state.activeBranch], ["keep/feat-s-1-lower", "keep/feat-s-1-lower", "feat/s/2-two"]);
+});
+
+test("git: a change's fallback commit (its top moved on GitHub) commits what was read, not an edit made meanwhile", async () => {
+  let g: Json;
+  g = fakeGit({ onDefault: false, stackError: "not_on_stack", duringStack: () => {
+    g.rev.n++;
+    g.files.list = [{ path: "index.html", data: "late" }];
+  } });
+  g.state.dirty = true;
+  await g.git.commitChange("One");
+  assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack", "/sync"]);
+  assert.deepEqual(g.calls[1].body.files, g.calls[0].body.files);
+  assert.equal(g.state.dirty, true); // the edit stays to commit
+});
+
+test("git: switching away from the default branch with edits puts them on a branch of their own first", async () => {
+  const g = fakeGit();
+  g.state.dirty = true;
+  await g.git.switchTo("feat/s/1-one");
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1].split("?")[0]), ["/branches", "/sync", "/tree"]);
+  assert.equal(g.calls[0].body.name, "edit/changes");
+  assert.equal(g.calls[1].body.branch, "edit/changes");
+  assert.equal(g.state.activeBranch, "feat/s/1-one");
 });
 
 test("AI builder: the repository and branch go to Claude with each message", async () => {
@@ -545,6 +606,45 @@ test("deploy on a linked app: commit the branch, merge it into main, build main 
   assert.deepEqual(moved.hydrated, [[{ path: "NOTES.md", data: "up" }]]);
   assert.deepEqual(movedProv.files, [{ path: "NOTES.md", data: "up" }]); // the merge's own files, not the workspace after npm install
 
+  // Edits on main: a change of their own first, then merged like any other.
+  const edited = fakeGit();
+  edited.state.dirty = true;
+  const p1 = await edited.git.prepareDeploy();
+  assert.deepEqual(edited.calls.map((x) => x.path.split("/git")[1]), ["/stack", "/merge"]);
+  assert.deepEqual([edited.calls[0].body.from, edited.calls[1].body.branch], ["main", "feat/s/2-two"]);
+  assert.equal(p1.branch, "main");
+
+  // Claude deploys mid-turn: that turn is a change of its own (its title and prompt) first, and that commit is built.
+  const turn = fakeGit({ onDefault: false });
+  turn.state.activeBranch = "feat/s/1-one";
+  turn.state.dirty = true;
+  const p3 = await turn.git.prepareDeploy(() => {}, undefined, { turn: () => ({ title: "Dark mode", prompt: "Dark mode please" }), running: () => true });
+  assert.deepEqual(turn.calls.map((x) => x.path.split("/git")[1]), ["/stack", "/merge"]);
+  assert.deepEqual([turn.calls[0].body.title, turn.calls[0].body.prompt, turn.calls[1].body.branch], ["Dark mode", "Dark mode please", "feat/s/2-two"]);
+  assert.equal(turn.calls[1].body.headSha, "1".padStart(40, "c"));
+  assert.equal(p3.branch, "main");
+  // Deployed by hand while the builder works on a request (checked when the step runs, after any queued before it):
+  // refused, nothing sent.
+  const busy = fakeGit({ onDefault: false });
+  busy.state.dirty = true;
+  let working = false;
+  const queued = busy.git.sync("before");
+  const refused = busy.git.prepareDeploy(() => {}, undefined, { turn: () => (working ? { title: "x", prompt: "x" } : null), running: () => false });
+  working = true; // the request starts while the deploy waits behind the sync
+  await queued;
+  await assert.rejects(refused, /AI builder is working on a request/);
+  assert.deepEqual(busy.calls.map((x: Json) => x.path.split("/git")[1]), ["/sync"]);
+
+  // An edit made while that change was being committed: nothing merged, nothing synced on its own (onto main); it
+  // stays here.
+  let late: Json;
+  late = fakeGit({ duringStack: () => void late.rev.n++ });
+  late.state.dirty = true;
+  late.files.list = [{ path: "index.html", data: "same" }]; // the change itself is a no-op: still on main
+  await assert.rejects(late.git.prepareDeploy(), /changed while deploying/);
+  assert.deepEqual(late.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack"]);
+  assert.deepEqual([late.state.activeBranch, late.state.dirty], ["main", true]);
+
   // On main already: just the commit.
   const main = fakeGit();
   const p2 = await main.git.prepareDeploy();
@@ -570,8 +670,9 @@ test("deploy on a linked app: a conflict or a protected main stops it, with a pu
 test("git: steps run one at a time; switching branches pushes changes first; New chat's way back to main", async () => {
   const g = fakeGit({ onDefault: false });
   g.state.dirty = true;
-  await Promise.all([g.git.ensureBranch("feat", "x"), g.git.switchTo("main")]);
-  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1].split("?")[0]), ["/sync", "/tree"]);
+  await Promise.all([g.git.newBranch("keep", "x"), g.git.switchTo("main")]);
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1].split("?")[0]), ["/branches", "/sync", "/tree"]); // in order
+  assert.equal(g.calls[1].body.branch, "keep/x");
   assert.equal(g.state.activeBranch, "main");
   assert.equal(g.state.baseSha, "d".repeat(40));
   assert.deepEqual(g.hydrated, [[{ path: "a.txt", data: "pulled" }]]);

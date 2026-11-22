@@ -152,6 +152,10 @@ async function fill(store: Store) {
     app_id: app.id, provider: "github", repo_id: "9", owner: "own", name: "shop", default_branch: "main", subdir: "",
     delete_branch: 1, connected_by: owner.id, last_synced_sha: "a".repeat(40),
   });
+  await store.addStackChange({
+    id: "chg_1", app_id: app.id, stack_id: "stk_1", stack_name: "dark-mode", position: 1, branch: "feat/dark-mode/1-dark-mode",
+    sha: "b".repeat(40), base_sha: "a".repeat(40), title: "Dark mode", prompt: "Dark mode ✓", author: "own", created_by: owner.id,
+  });
   await store.setSecret(app.id, "API_KEY", "s3cret");
   await store.setSecret(app.id, "OTHER", "ünïcode ✓");
   await store.addDomain(app.id, "shop.example.com");
@@ -198,6 +202,7 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
     assert.deepEqual(rows, {
       accounts: 2, apps: 3, tokens: 2, deploys: 3, secrets: 2, domains: 1, meta: 1, collaborators: 1, invites: 1,
       page_sessions: 1, rate_hits: 1, ai_wallets: 1, ai_ledger: 2, orgs: 1, org_members: 2, git_connections: 1, app_repos: 1,
+      stack_changes: 1,
     });
 
     // The copy works as the database of a server.
@@ -210,6 +215,7 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
       const conn = await store.getGitConnection(seed.owner.id, "github");
       assert.deepEqual([conn?.access_token, conn?.refresh_token], ["ghu_abc", "ghr_def"]);
       assert.equal((await store.getAppRepo(seed.app.id))?.name, "shop");
+      assert.deepEqual((await store.openStackChanges(seed.app.id)).map((c) => [c.branch, c.prompt]), [["feat/dark-mode/1-dark-mode", "Dark mode ✓"]]);
       assert.deepEqual((await store.appsWithCrons()).map((a) => a.name), ["shop"]);
       assert.equal(await store.access(seed.app, seed.guest.id), "admin");
       assert.equal(await store.access(seed.orgApp, seed.guest.id), "admin", "an org member");

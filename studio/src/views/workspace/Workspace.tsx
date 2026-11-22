@@ -8,7 +8,7 @@ import { projects, type Deploy, type StoredProject } from "../../../store.ts";
 import type { CressletConfig } from "../../../cresslet-plugin.ts";
 import type * as API from "../../../api-types.ts";
 import { api, errorMessage, meta, mustLogIn } from "../../lib/api.ts";
-import type { ProjectGitState, PullRequest } from "../../../git.ts";
+import type { ProjectGitState, PullRequest, Stack } from "../../../git.ts";
 import { viewShown } from "../../lib/focus.ts";
 import { useView } from "../../lib/hooks.ts";
 import { projectsChanged } from "../../lib/projects.ts";
@@ -19,6 +19,7 @@ import { Builder, type BuilderHandle } from "./Builder.tsx";
 import { DatabaseView, type RunSql } from "./DatabaseView.tsx";
 import { DeployDialog, type DeployDialogHandle } from "./DeployDialog.tsx";
 import { GitDialog, type GitDialogHandle } from "./GitDialog.tsx";
+import { StackPanel } from "./StackPanel.tsx";
 import { Engine, type TreeItem } from "./engine.ts";
 
 /** The project, once loaded; keyed by its id, so opening another project starts over (and disposes of this one). */
@@ -148,8 +149,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       },
       deployed: setDeploy,
       git: setGitState,
-      notice: (text) => toast(text, 8000),
       builderRunning: () => builder.current?.running() ?? false,
+      builderTurn: () => builder.current?.turn() ?? null,
       approveDeploy: (text, signal) => builder.current?.approve(text, signal) ?? Promise.resolve(false),
     }, editorEl.current!); // mounted
     engine.current = e;
@@ -189,6 +190,17 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     };
   }, [gitState?.owner, gitState?.repo, gitState?.activeBranch, token, deploy?.name, gitTick]);
   const upstreamMoved = !!gitState && !!upstream && ![gitState.baseSha, gitState.headSha, gitState.mergeParent].includes(upstream);
+  // The app's stack (server/stack.ts): the one the workspace is on, else the newest open one. Read again when the
+  // workspace moves (a turn committed a change) and with the checks above.
+  const [stack, setStack] = useState<Stack | null>(null);
+  const [stackBusy, setStackBusy] = useState(false);
+  useEffect(() => {
+    const g = engine.current?.git;
+    if (!gitState || !token || !deploy?.name || !g) return setStack(null);
+    let live = true;
+    void g.stacks().then((r) => live && setStack(r.current ?? r.stacks[0] ?? null), () => {});
+    return () => void (live = false);
+  }, [gitState?.owner, gitState?.repo, gitState?.activeBranch, gitState?.headSha, token, deploy?.name, gitTick]);
 
   // Back from connecting GitHub (server/git.ts redirects here with the outcome in the hash): once the project runs,
   // the dialog opens again where it left off.
@@ -322,6 +334,9 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   async function onDeploy() {
     const btn = deployBtn.current!, e = engine.current;
     if (!e?.cresslet) return;
+    // Linked: what the AI builder is changing becomes its request's change when the request ends; deployed now, it'd
+    // go into the change before.
+    if (e.git.connected && builder.current?.busy()) return void toast("Wait for the AI builder to finish this request, then deploy.", 6000);
     // A new app: the user keeps the generated address or picks their own first. (A cresslet.json that won't parse
     // skips this: the deploy below reports it.)
     let cfg: CressletConfig | undefined, newApp: { app: string; create: boolean } | undefined;
@@ -423,6 +438,16 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         <h1 className="sr-only" id="workspace-title" tabIndex={-1}>{`${name}: AI builder, preview, code and database`}</h1>
         {container ? (
           <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
+            stack={stack && gitState && gitOn && token && !locked ? (
+              <StackPanel stack={stack} state={gitState} busy={stackBusy || deploying} onContinue={(branch) => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                if (!confirm(`Load ${branch} (the top of ${stack.name}) into this workspace?${gitState.dirty ? " Changes not pushed yet are pushed first." : ""}`)) return;
+                setStackBusy(true);
+                void g.switchTo(branch).then(() => toast(`On ${branch}`), (e) => toast(`Couldn't load ${branch}: ${errorMessage(e)}`, 10000)).finally(() => setStackBusy(false));
+              }} />
+            ) : null}
             devLog={() => engine.current?.termOut ?? ""}
             // A file the builder changed is the one in the editor: show the new contents.
             onChange={(path) => {

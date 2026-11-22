@@ -26,7 +26,7 @@ How you work:
   - Broadcast: on the platform only the request that opened a socket may use it; \`send\` from any other request (another socket's message handler, a POST) throws "Cannot perform I/O on behalf of a different request". \`cresslet dev\` and this preview don't enforce that, so such code works here and fails once deployed. All of an app's sockets live in one server process, so keep a module-level \`Map\` from room (chat room, document, game; one room for the whole app if there's only one) to a \`Set\` of entries \`{ q: [], wake: null }\` (socket bookkeeping is the one thing that belongs in globals). To broadcast to a room, push the message to each of that room's entries' \`q\` and call its \`wake?.()\`; never send private data to entries of rooms the user wasn't let into. The upgrade handler starts the entry's sender loop without awaiting it, then returns the 101: \`(async () => { while (open) { if (!e.q.length) await new Promise((r) => (e.wake = r)); e.wake = null; for (const m of e.q.splice(0)) { if (!open) break; try { server.send(m); } catch { cleanup(); } } } })();\`. One idempotent \`cleanup\`, run on the socket's close and error events, sets \`open = false\`, removes the entry from its room's Set (and an empty Set from the Map) and calls \`e.wake?.()\`, so the loop ends.
   - State: sockets only deliver. Keep durable state in \`db\`/\`files\` and send it when a client connects; things that only exist while connected (who's online) can come from the open sockets.
   - Client: connect to \`\${location.protocol === "https:" ? "wss" : "ws"}://\${location.host}/api/ws\`. Send a small message (e.g. "ping", which the server ignores) every 30 seconds: proxies close quiet sockets (Cloudflare after ~100 seconds). Sockets also close on every redeploy, after 10 idle minutes, after an hour, and in the preview when a server file is saved: reconnect with a backoff and refetch the state. Open sockets per app are capped (past it, upgrades get 503).
-- If the project is connected to a GitHub repository, a note with the user's message says so and names the branch. Your file changes go on a branch of their own (one is started for you before the first change, so the default branch stays as deployed), and they're committed when your turn ends; \`cresslet deploy\` merges that branch into the default branch, then deploys it. There's no git in the shell: don't run it.
+- If the project is connected to a GitHub repository, a note with the user's message says so and names the branch. When your turn ends, what it changed is committed as a change: a branch of its own, cut from the one the workspace is on, so each request is one change and a chat's changes form a stack (newest on top; the default branch stays as deployed). \`cresslet deploy\` merges the top change, which holds all of them, into the default branch, then deploys it. There's no git in the shell: don't run it.
 - Prefer small, targeted edits (edit_file) to rewriting whole files.
 - When you're done, say briefly what you changed. The user sees the preview update by itself.`;
 
@@ -92,11 +92,6 @@ const tail = (s: string, n = MAX_OUTPUT) => (s.length > n ? `[… ${s.length - n
 export interface ToolsOptions {
   devLog?: () => string;
   onChange?: (path: string) => void;
-  /**
-   * Before the first change to a file (write_file, edit_file, delete_file): source control moves the workspace off
-   * the default branch here (studio/git.ts). If it throws, the file isn't changed and the tool reports why.
-   */
-  beforeChange?: () => Promise<void>;
   timeoutMs?: number;
   paused?: () => boolean;
   clock?: () => number;
@@ -113,7 +108,7 @@ export interface ToolResult {
 /** Tool inputs after `validate`: an object of strings. */
 type Input = Record<string, string>;
 
-export function createTools(c: Pick<Container, "fs" | "spawn" | "workdir">, { devLog = () => "", onChange = () => {}, beforeChange = async () => {}, timeoutMs = COMMAND_TIMEOUT_MS, paused = () => false, clock = () => performance.now() }: ToolsOptions = {}) {
+export function createTools(c: Pick<Container, "fs" | "spawn" | "workdir">, { devLog = () => "", onChange = () => {}, timeoutMs = COMMAND_TIMEOUT_MS, paused = () => false, clock = () => performance.now() }: ToolsOptions = {}) {
   const wd = c.workdir;
   let running = 0;
   const abs = (rel: string) => (rel ? `${wd}/${rel}` : wd);
@@ -148,7 +143,6 @@ export function createTools(c: Pick<Container, "fs" | "spawn" | "workdir">, { de
   }
 
   async function write(rel: string, content: string) {
-    await beforeChange();
     const i = rel.lastIndexOf("/");
     if (i > 0) await c.fs.mkdir(abs(rel.slice(0, i)), { recursive: true });
     await c.fs.writeFile(abs(rel), content);
@@ -251,7 +245,6 @@ export function createTools(c: Pick<Container, "fs" | "spawn" | "workdir">, { de
         case "delete_file": {
           const rel = projectPath(input.path);
           if (!(await exists(rel))) throw new Error(`no such file: ${rel}`);
-          await beforeChange();
           await c.fs.rm(abs(rel));
           onChange(rel);
           return { text: `deleted ${rel}`, summary: `Deleted ${rel}` };

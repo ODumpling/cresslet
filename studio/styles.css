@@ -483,6 +483,27 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .credit-delta { flex: none; min-width: 4.5rem; text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
 .builder-setup .error:empty { display: none; }
 .builder-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* the stack of changes (StackPanel.tsx): newest on top, joined by a rail, the default branch at the bottom */
+.stack-panel { flex: none; max-height: 40%; overflow: auto; border-bottom: 1px solid var(--line); padding: 8px 14px; font-size: 13px; }
+.stack-panel summary { cursor: pointer; min-height: 28px; display: flex; align-items: center; gap: 4px; }
+.stack-head { font-weight: 600; }
+.stack-note { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 4px 0 8px; }
+.stack { list-style: none; margin: 4px 0 0; padding: 0; }
+.stack-row { position: relative; display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; }
+.stack-row::before { content: ""; position: absolute; left: 7px; top: 0; bottom: 0; width: 2px; background: var(--line-strong); }
+.stack-row:first-child::before { top: 9px; }
+.stack-row:last-child::before { bottom: calc(100% - 9px); }
+.stack-dot { position: relative; margin-top: 4px; width: 10px; height: 10px; margin-left: 3px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--surface); }
+.stack-row[data-base] .stack-dot { background: var(--surface); border: 2px solid var(--line-strong); box-sizing: border-box; }
+.stack-row[data-github="gone"] .stack-dot { background: var(--text-3); }
+.stack-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding-bottom: 10px; }
+.stack-row:last-child .stack-body { padding-bottom: 2px; }
+.stack-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-weight: 500; overflow-wrap: anywhere; }
+.stack-row[data-here] .stack-title > span:first-child { color: var(--accent-text); }
+.stack-branch { font-size: 11.5px; color: var(--text-2); overflow-wrap: anywhere; }
+.pill[data-s="here"] { color: var(--accent-text); background: var(--accent-soft); border-color: transparent; line-height: 18px; }
+.pill[data-s="warn"] { color: var(--warn); background: var(--warn-soft); border-color: transparent; line-height: 18px; }
 .builder-log { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .builder-log:focus-visible { outline-offset: -2px; }
 .builder-log:empty::before { content: "Say what to build or change. Claude reads the project, edits it and checks the dev server."; color: var(--text-2); font-size: 13px; }
