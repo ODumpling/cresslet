@@ -32,8 +32,10 @@ import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
 import { Route as ShareNameRouteImport } from './routes/share.$name'
 import { Route as ViewNameRouteImport } from './routes/view.$name'
 import { Route as AppsNameIndexRouteImport } from './routes/apps.$name.index'
+import { Route as AppsNameCronsRouteImport } from './routes/apps.$name.crons'
 import { Route as AppsNameLogsRouteImport } from './routes/apps.$name.logs'
 import { Route as AppsNameSecretsRouteImport } from './routes/apps.$name.secrets'
+import { Route as AppsNameSettingsRouteImport } from './routes/apps.$name.settings'
 import { Route as AppsNameDatabaseChar123TableChar125RouteImport } from './routes/apps.$name.database.{-$table}'
 
 const IndexRoute = IndexRouteImport.update({
@@ -151,6 +153,11 @@ const AppsNameIndexRoute = AppsNameIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppsNameRoute,
 } as any)
+const AppsNameCronsRoute = AppsNameCronsRouteImport.update({
+  id: '/crons',
+  path: '/crons',
+  getParentRoute: () => AppsNameRoute,
+} as any)
 const AppsNameLogsRoute = AppsNameLogsRouteImport.update({
   id: '/logs',
   path: '/logs',
@@ -159,6 +166,11 @@ const AppsNameLogsRoute = AppsNameLogsRouteImport.update({
 const AppsNameSecretsRoute = AppsNameSecretsRouteImport.update({
   id: '/secrets',
   path: '/secrets',
+  getParentRoute: () => AppsNameRoute,
+} as any)
+const AppsNameSettingsRoute = AppsNameSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => AppsNameRoute,
 } as any)
 const AppsNameDatabaseChar123TableChar125Route =
@@ -191,8 +203,10 @@ export interface FileRoutesByFullPath {
   '/admin/': typeof AdminIndexRoute
   '/orgs/': typeof OrgsIndexRoute
   '/settings/': typeof SettingsIndexRoute
+  '/apps/$name/crons': typeof AppsNameCronsRoute
   '/apps/$name/logs': typeof AppsNameLogsRoute
   '/apps/$name/secrets': typeof AppsNameSecretsRoute
+  '/apps/$name/settings': typeof AppsNameSettingsRoute
   '/apps/$name/': typeof AppsNameIndexRoute
   '/apps/$name/database/{-$table}': typeof AppsNameDatabaseChar123TableChar125Route
 }
@@ -217,8 +231,10 @@ export interface FileRoutesByTo {
   '/admin': typeof AdminIndexRoute
   '/orgs': typeof OrgsIndexRoute
   '/settings': typeof SettingsIndexRoute
+  '/apps/$name/crons': typeof AppsNameCronsRoute
   '/apps/$name/logs': typeof AppsNameLogsRoute
   '/apps/$name/secrets': typeof AppsNameSecretsRoute
+  '/apps/$name/settings': typeof AppsNameSettingsRoute
   '/apps/$name': typeof AppsNameIndexRoute
   '/apps/$name/database/{-$table}': typeof AppsNameDatabaseChar123TableChar125Route
 }
@@ -246,8 +262,10 @@ export interface FileRoutesById {
   '/admin/': typeof AdminIndexRoute
   '/orgs/': typeof OrgsIndexRoute
   '/settings/': typeof SettingsIndexRoute
+  '/apps/$name/crons': typeof AppsNameCronsRoute
   '/apps/$name/logs': typeof AppsNameLogsRoute
   '/apps/$name/secrets': typeof AppsNameSecretsRoute
+  '/apps/$name/settings': typeof AppsNameSettingsRoute
   '/apps/$name/': typeof AppsNameIndexRoute
   '/apps/$name/database/{-$table}': typeof AppsNameDatabaseChar123TableChar125Route
 }
@@ -276,8 +294,10 @@ export interface FileRouteTypes {
     | '/admin/'
     | '/orgs/'
     | '/settings/'
+    | '/apps/$name/crons'
     | '/apps/$name/logs'
     | '/apps/$name/secrets'
+    | '/apps/$name/settings'
     | '/apps/$name/'
     | '/apps/$name/database/{-$table}'
   fileRoutesByTo: FileRoutesByTo
@@ -302,8 +322,10 @@ export interface FileRouteTypes {
     | '/admin'
     | '/orgs'
     | '/settings'
+    | '/apps/$name/crons'
     | '/apps/$name/logs'
     | '/apps/$name/secrets'
+    | '/apps/$name/settings'
     | '/apps/$name'
     | '/apps/$name/database/{-$table}'
   id:
@@ -330,8 +352,10 @@ export interface FileRouteTypes {
     | '/admin/'
     | '/orgs/'
     | '/settings/'
+    | '/apps/$name/crons'
     | '/apps/$name/logs'
     | '/apps/$name/secrets'
+    | '/apps/$name/settings'
     | '/apps/$name/'
     | '/apps/$name/database/{-$table}'
   fileRoutesById: FileRoutesById
@@ -520,6 +544,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppsNameIndexRouteImport
       parentRoute: typeof AppsNameRoute
     }
+    '/apps/$name/crons': {
+      id: '/apps/$name/crons'
+      path: '/crons'
+      fullPath: '/apps/$name/crons'
+      preLoaderRoute: typeof AppsNameCronsRouteImport
+      parentRoute: typeof AppsNameRoute
+    }
     '/apps/$name/logs': {
       id: '/apps/$name/logs'
       path: '/logs'
@@ -532,6 +563,13 @@ declare module '@tanstack/react-router' {
       path: '/secrets'
       fullPath: '/apps/$name/secrets'
       preLoaderRoute: typeof AppsNameSecretsRouteImport
+      parentRoute: typeof AppsNameRoute
+    }
+    '/apps/$name/settings': {
+      id: '/apps/$name/settings'
+      path: '/settings'
+      fullPath: '/apps/$name/settings'
+      preLoaderRoute: typeof AppsNameSettingsRouteImport
       parentRoute: typeof AppsNameRoute
     }
     '/apps/$name/database/{-$table}': {
@@ -563,15 +601,19 @@ const SettingsRouteWithChildren = SettingsRoute._addFileChildren(
 )
 
 interface AppsNameRouteChildren {
+  AppsNameCronsRoute: typeof AppsNameCronsRoute
   AppsNameLogsRoute: typeof AppsNameLogsRoute
   AppsNameSecretsRoute: typeof AppsNameSecretsRoute
+  AppsNameSettingsRoute: typeof AppsNameSettingsRoute
   AppsNameIndexRoute: typeof AppsNameIndexRoute
   AppsNameDatabaseChar123TableChar125Route: typeof AppsNameDatabaseChar123TableChar125Route
 }
 
 const AppsNameRouteChildren: AppsNameRouteChildren = {
+  AppsNameCronsRoute: AppsNameCronsRoute,
   AppsNameLogsRoute: AppsNameLogsRoute,
   AppsNameSecretsRoute: AppsNameSecretsRoute,
+  AppsNameSettingsRoute: AppsNameSettingsRoute,
   AppsNameIndexRoute: AppsNameIndexRoute,
   AppsNameDatabaseChar123TableChar125Route:
     AppsNameDatabaseChar123TableChar125Route,

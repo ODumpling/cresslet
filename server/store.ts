@@ -64,6 +64,8 @@ export interface App {
   page_deploy_id: string | null;
   /** The organization it belongs to: its admins and members get access (see Store.access). */
   org_id: string | null;
+  /** JSON string[]: cron expressions paused in the studio (they don't fire on schedule); null = none. */
+  paused_crons: string | null;
 }
 
 export type AppKind = "app" | "page";
@@ -502,6 +504,7 @@ export class Store implements RateHits {
         title: null,
         page_deploy_id: null,
         org_id: null,
+        paused_crons: null,
       };
       await this.db.run(
         `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at, anon_client)
@@ -539,6 +542,7 @@ export class Store implements RateHits {
         title: p.title,
         page_deploy_id: null,
         org_id: null,
+        paused_crons: null,
       };
       await this.db.run(
         `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at,
@@ -644,6 +648,9 @@ export class Store implements RateHits {
   async setCurrentDeploy(appId: string, deployId: string, config: unknown) {
     await this.db.run("UPDATE apps SET current_deploy_id = ?, config = ?, updated_at = ? WHERE id = ?",
       deployId, JSON.stringify(config ?? {}), Date.now(), appId);
+  }
+  async setPausedCrons(appId: string, crons: string[]) {
+    await this.db.run("UPDATE apps SET paused_crons = ?, updated_at = ? WHERE id = ?", crons.length ? JSON.stringify(crons) : null, Date.now(), appId);
   }
   async setEgress(appId: string, allow: string[] | null) {
     await this.db.run("UPDATE apps SET egress = ?, updated_at = ? WHERE id = ?", allow ? JSON.stringify(allow) : null, Date.now(), appId);

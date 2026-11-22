@@ -229,10 +229,20 @@ async function orgs(db: Db) {
   await db.exec("CREATE INDEX IF NOT EXISTS apps_org ON apps (org_id)");
 }
 
+/**
+ * Crons paused in the studio (`apps.paused_crons`, a JSON array of expressions). An older server, after a
+ * rollback, ignores it: they fire on schedule again.
+ */
+async function cronPauses(db: Db) {
+  if (db.dialect === "postgres") return db.exec("ALTER TABLE apps ADD COLUMN IF NOT EXISTS paused_crons TEXT");
+  if (!(await cols(db, "apps")).includes("paused_crons")) await db.exec("ALTER TABLE apps ADD COLUMN paused_crons TEXT");
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
   { version: 2, name: "orgs", up: orgs },
+  { version: 3, name: "cron_pauses", up: cronPauses },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */

@@ -7,6 +7,7 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { App, Store } from "./store.ts";
 import type { AppSpec, Runtime } from "./runtime.ts";
+import { pausedCrons, type RunCron } from "./cron.ts";
 
 export function matchRoute(pattern: string, path: string): boolean {
   if (pattern.endsWith("/*")) {
@@ -73,23 +74,35 @@ export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
   };
 }
 
-/** One cron invocation: an internal request the sandbox entry routes to `scheduled()` (runtime/worker.ts). */
-export function scheduled(cfg: Config, store: Store, runtime: Runtime) {
-  return async (appId: string, cron: string, at: Date) => {
+/**
+ * One cron invocation: an internal request the sandbox entry routes to `scheduled()` (runtime/worker.ts).
+ * `manual`: Run now (from the studio), which runs a paused cron too.
+ */
+export function scheduled(cfg: Config, store: Store, runtime: Runtime): RunCron {
+  return async (appId, cron, at, manual = false) => {
     const app = await store.appById(appId);
-    // Checked at dispatch: a run queued behind another may outlive a redeploy that dropped the cron.
+    // Checked at dispatch: a run queued behind another may outlive a redeploy that dropped the cron, or a pause.
     if (!app?.current_deploy_id || !app.account_id || !(JSON.parse(app.config).crons ?? []).includes(cron)) return;
-    const started = performance.now();
-    const res = await runtime.fetch(
-      appSpec(cfg, store, app),
-      new Request(`${appUrl(cfg, app.name)}/`, {
-        method: "POST",
-        headers: { "x-cresslet-scheduled": JSON.stringify({ cron, scheduledTime: at.getTime() }) },
-      }),
-      { internal: true },
-    );
-    await res.body?.cancel();
-    runtime.logs.push(app.id, "system", `cron "${cron}" ${res.ok ? "ok" : `failed (${res.status})`} ${Math.round(performance.now() - started)}ms`);
+    if (!manual && pausedCrons(app).has(cron)) return;
+    const startedAt = Date.now(), started = performance.now();
+    let status = 0;
+    try {
+      const res = await runtime.fetch(
+        appSpec(cfg, store, app),
+        new Request(`${appUrl(cfg, app.name)}/`, {
+          method: "POST",
+          headers: { "x-cresslet-scheduled": JSON.stringify({ cron, scheduledTime: at.getTime() }) },
+        }),
+        { internal: true },
+      );
+      status = res.status;
+      await res.body?.cancel();
+    } finally {
+      const ms = Math.round(performance.now() - started);
+      runtime.cronRuns.record(app.id, { cron, at: at.getTime(), startedAt, ms, status, manual });
+      const ok = status >= 200 && status < 300;
+      runtime.logs.push(app.id, "system", `cron "${cron}"${manual ? " (run now)" : ""} ${ok ? "ok" : `failed (${status || "error"})`} ${ms}ms`);
+    }
   };
 }
 

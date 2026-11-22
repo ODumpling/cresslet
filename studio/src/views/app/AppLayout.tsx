@@ -1,4 +1,4 @@
-// /apps/<name>[/database[/<table>]|/secrets|/logs]: one deployed app's dashboard (anyone with access; viewers read
+// /apps/<name>[/database[/<table>]|/secrets|/crons|/logs|/settings]: one deployed app's dashboard (anyone with access; viewers read
 // only): the header, its actions and tabs. The app's detail loads here and the tabs read it (useApp); Refresh
 // reloads it and the open tab's own data.
 import { Link, Outlet, useNavigate, useParams } from "@tanstack/react-router";
@@ -52,7 +52,9 @@ const TABS = [
   ["", "Overview", "server"],
   ["database", "Database", "database"],
   ["secrets", "Secrets", "key"],
+  ["crons", "Crons", "clock"],
   ["logs", "Logs", "terminal"],
+  ["settings", "Settings", "settings"],
 ] as const;
 
 export function AppLayout() {
@@ -147,8 +149,7 @@ function Tabs({ name }: { name: string }) {
         const p = { className: "site-tab", activeProps: {} } as const;
         return k === "" ? <Link key={k} {...p} to="/apps/$name" params={{ name }} activeOptions={{ exact: true }}>{inner}</Link>
           : k === "database" ? <Link key={k} {...p} to="/apps/$name/database/{-$table}" params={{ name, table: undefined }}>{inner}</Link>
-          : k === "secrets" ? <Link key={k} {...p} to="/apps/$name/secrets" params={{ name }} activeOptions={{ exact: true }}>{inner}</Link>
-          : <Link key={k} {...p} to="/apps/$name/logs" params={{ name }} activeOptions={{ exact: true }}>{inner}</Link>;
+          : <Link key={k} {...p} to={`/apps/$name/${k}`} params={{ name }} activeOptions={{ exact: true }}>{inner}</Link>;
       })}
     </nav>
   );

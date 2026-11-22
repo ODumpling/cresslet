@@ -8,6 +8,7 @@ const NAMES: Record<number, string[]> = {
   4: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"],
 };
 export const MAX_CRONS = 5;
+const MINUTE = 60_000;
 
 export interface Cron {
   fields: Set<number>[];
@@ -42,12 +43,68 @@ export function parseCron(expr: string): Cron {
   return { fields, domStar: parts[2].startsWith("*"), dowStar: parts[4].startsWith("*") };
 }
 
-export function cronMatches({ fields, domStar, dowStar }: Cron, d: Date): boolean {
-  const [min, hour, dom, mon, dow] = fields;
-  if (!min.has(d.getUTCMinutes()) || !hour.has(d.getUTCHours()) || !mon.has(d.getUTCMonth() + 1)) return false;
+export function cronMatches(cron: Cron, d: Date): boolean {
+  const [min, hour, , mon] = cron.fields;
+  return min.has(d.getUTCMinutes()) && hour.has(d.getUTCHours()) && mon.has(d.getUTCMonth() + 1) && dayMatches(cron, d);
+}
+
+function dayMatches({ fields: [, , dom, , dow], domStar, dowStar }: Cron, d: Date): boolean {
   const domOk = dom.has(d.getUTCDate()), dowOk = dow.has(d.getUTCDay());
   // Both restricted: either may match; otherwise both must.
   return domStar || dowStar ? domOk && dowOk : domOk || dowOk;
+}
+
+/**
+ * The next `n` minutes (ms, UTC) after `from` the cron fires at, within `horizonMs` (an expression like
+ * `0 0 30 2 *` never fires: fewer or none). Skips whole months, days and hours that can't match.
+ */
+export function nextRuns(cron: Cron, from: number, n: number, horizonMs = 5 * 366 * 86_400_000): number[] {
+  const [min, hour, , mon] = cron.fields;
+  const out: number[] = [];
+  const end = from + horizonMs;
+  for (let t = Math.floor(from / MINUTE) * MINUTE + MINUTE; out.length < n && t <= end;) {
+    const d = new Date(t);
+    const y = d.getUTCFullYear(), m = d.getUTCMonth(), day = d.getUTCDate(), h = d.getUTCHours();
+    if (!mon.has(m + 1)) t = Date.UTC(y, m + 1, 1);
+    else if (!dayMatches(cron, d)) t = Date.UTC(y, m, day + 1);
+    else if (!hour.has(h)) t = Date.UTC(y, m, day, h + 1);
+    else {
+      if (min.has(d.getUTCMinutes())) out.push(t);
+      t += MINUTE;
+    }
+  }
+  return out;
+}
+
+/** One finished run: `at` the minute it was due (or when it was asked for), `status` 0 if it couldn't reach the app. */
+export interface CronRun {
+  cron: string;
+  at: number;
+  startedAt: number;
+  ms: number;
+  status: number;
+  /** Started with Run now, not the schedule. */
+  manual: boolean;
+}
+
+/** Recent runs per app, newest first, in memory on the node that runs them (a restart starts over: see `since`). */
+export class CronRuns {
+  static readonly KEEP = 50;
+  #apps = new Map<string, CronRun[]>();
+  readonly since = Date.now();
+
+  record(appId: string, run: CronRun) {
+    let list = this.#apps.get(appId);
+    if (!list) this.#apps.set(appId, list = []);
+    list.unshift(run);
+    if (list.length > CronRuns.KEEP) list.length = CronRuns.KEEP;
+  }
+  list(appId: string): readonly CronRun[] {
+    return this.#apps.get(appId) ?? [];
+  }
+  drop(appId: string) {
+    this.#apps.delete(appId);
+  }
 }
 
 export function normalizeCrons(crons: unknown): string[] {
@@ -61,27 +118,64 @@ export function normalizeCrons(crons: unknown): string[] {
   return [...new Set(out)];
 }
 
-const MINUTE = 60_000;
 /** Minutes missed during an event-loop stall that still fire late (bounded). */
 const CATCH_UP = 5;
 
+/** Performs one invocation (see host.ts); `manual`: Run now, which also runs a paused cron. */
+export type RunCron = (appId: string, cron: string, at: Date, manual?: boolean) => Promise<void>;
+
+/** The expressions of an app's crons paused in the studio (`apps.paused_crons`). */
+export const pausedCrons = (app: { paused_crons?: string | null }): Set<string> =>
+  new Set(app.paused_crons ? JSON.parse(app.paused_crons) as string[] : []);
+
 /**
  * Fires due crons once per minute. Runs of one app go one at a time (they share the sandbox's
- * connection, so each gets its own full request timeout), and a cron still running is not started
- * again. `run` performs one invocation (see host.ts).
+ * connection, so each gets its own full request timeout), and a cron still running or queued is not
+ * started again. Paused crons are skipped (and checked again at dispatch, in `run`).
  */
 export class Scheduler {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #store: Pick<Store, "appsWithCrons">;
-  #run: (appId: string, cron: string, at: Date) => Promise<void>;
+  #run: RunCron;
   #last: number;
   #queues = new Map<string, Promise<void>>();
+  /** `<appId> <cron>`: queued or running. */
   #running = new Set<string>();
+  /** The cron each app is running right now (one at a time). */
+  #active = new Map<string, string>();
 
-  constructor(store: Pick<Store, "appsWithCrons">, run: (appId: string, cron: string, at: Date) => Promise<void>, now = Date.now()) {
+  constructor(store: Pick<Store, "appsWithCrons">, run: RunCron, now = Date.now()) {
     this.#store = store;
-    this.#run = run;
+    this.#run = async (appId, cron, at, manual) => {
+      this.#active.set(appId, cron);
+      try {
+        await run(appId, cron, at, manual);
+      } finally {
+        this.#active.delete(appId);
+      }
+    };
     this.#last = Math.floor(now / MINUTE) * MINUTE;
+  }
+
+  /** What an app's crons are doing on this node: `running` (now) or `queued` (waiting behind another run). */
+  state(appId: string, cron: string): "running" | "queued" | null {
+    return this.#active.get(appId) === cron ? "running" : this.#running.has(`${appId} ${cron}`) ? "queued" : null;
+  }
+
+  /**
+   * Run now: queues one run of the cron behind the app's others, also when it's paused. False if that
+   * cron is already running or queued.
+   */
+  runNow(appId: string, cron: string, at = new Date()): boolean {
+    const key = `${appId} ${cron}`;
+    if (this.#running.has(key)) return false;
+    this.#running.add(key);
+    const job = (this.#queues.get(appId) ?? Promise.resolve())
+      .then(() => this.#run(appId, cron, at, true)).catch(() => {})
+      .finally(() => this.#running.delete(key));
+    this.#queues.set(appId, job);
+    void job.then(() => this.#queues.get(appId) === job && this.#queues.delete(appId));
+    return true;
   }
 
   start() {
@@ -119,7 +213,9 @@ export class Scheduler {
     for (const app of await this.#store.appsWithCrons()) {
       // One app's runs go in minute order (then cron order), as they would without a stall.
       const due: { m: Date; c: string }[] = [];
+      const paused = pausedCrons(app);
       for (const c of (JSON.parse(app.config) as { crons?: string[] }).crons ?? []) {
+        if (paused.has(c)) continue;
         let cron;
         try {
           cron = parseCron(c);

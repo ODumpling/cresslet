@@ -39,7 +39,13 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
     await store.close();
     throw e;
   }
-  const control = api(cfg, store, runtime, cluster);
+  // Each app's crons fire on the node that owns it (checked again at dispatch: runs queue).
+  const run = scheduled(cfg, store, runtime);
+  const scheduler = new Scheduler(
+    { appsWithCrons: async () => (await store.appsWithCrons()).filter((a) => cluster.local(a.id)) },
+    async (appId, cron, at, manual) => cluster.local(appId) ? run(appId, cron, at, manual) : undefined,
+  );
+  const control = api(cfg, store, runtime, cluster, scheduler);
   const serveApp = host(cfg, store, runtime);
   const upgradeApp = upgrader(cfg, store, runtime);
   const suffix = "." + cfg.domain;
@@ -50,12 +56,6 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
   // The studio's pages: its build, or Vite in dev (CRESSLET_STUDIO_DEV=1, npm run dev).
   const studioDev = process.env.CRESSLET_STUDIO_DEV === "1";
   const ui = await studio({ dev: studioDev, host: new URL(rootUrl(cfg)).hostname });
-  // Each app's crons fire on the node that owns it (checked again at dispatch: runs queue).
-  const run = scheduled(cfg, store, runtime);
-  const scheduler = new Scheduler(
-    { appsWithCrons: async () => (await store.appsWithCrons()).filter((a) => cluster.local(a.id)) },
-    async (appId, cron, at) => cluster.local(appId) ? run(appId, cron, at) : undefined,
-  );
   scheduler.start();
 
   /**

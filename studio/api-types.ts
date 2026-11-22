@@ -107,7 +107,7 @@ export interface DeployInfo {
 /** GET /v1/apps/:name */
 export interface AppDetail {
   app: AppSummary & {
-    config?: { server?: boolean; crons?: unknown[] } | null;
+    config?: { server?: boolean; crons?: string[] } | null;
     claimed: boolean;
     expiresAt: string | null;
     currentDeployId: string | null;
@@ -122,6 +122,38 @@ export interface AppDetail {
 export interface Domain {
   domain: string;
   verified: boolean;
+}
+
+/** GET /v1/apps/:name/domains: with the DNS records to set. */
+export interface DomainDetail extends Domain {
+  dns: { type: string; name: string; value: string }[];
+}
+
+/** One cron run (GET /v1/apps/:name/crons). `status` 0: it couldn't reach the app. */
+export interface CronRun {
+  cron: string;
+  at: string;
+  startedAt: string;
+  ms: number;
+  status: number;
+  ok: boolean;
+  manual: boolean;
+}
+
+/** GET /v1/apps/:name/crons (and what pause, resume and run answer). */
+export interface Crons {
+  crons: {
+    cron: string;
+    paused: boolean;
+    /** On the node that runs it: running now, or waiting behind another run of the app. */
+    state: "running" | "queued" | null;
+    /** The next (up to 3) times it fires, none while paused. */
+    next: string[];
+    last: CronRun | null;
+  }[];
+  /** Newest first: the last 50 since `since` (when the server started). */
+  runs: CronRun[];
+  since: string;
 }
 
 /** GET /v1/apps/:name/metrics */
