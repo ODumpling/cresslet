@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Pull, Repo, SourceControlProvider } from "../server/git.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, followed, goBack, landed, MAX_STACK, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, followed, goBack, landed, landUpTo, MAX_STACK, pullIn, readStacks, restore,
   setAsideBranches, slug, stackPulls, submitStack,
 } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
@@ -29,15 +29,31 @@ function fakeProvider() {
   const pulls: (Pull & { title: string; body: string })[] = [];
   const refuse = new Set<string>(); // branches GitHub won't open a pull request from
   const keep = new Set<string>(); // branches GitHub won't delete (a rule)
+  const guarded = new Set<string>(); // protected branches
+  const failUpdate = new Set<number>(); // pull requests GitHub won't change (once)
+  const contains = (sha: string, of: string) => { // `of` is `sha` or one of its ancestors
+    for (let x: string | null = sha; x; x = commits.get(x)?.parent ?? null) if (x === of) return true;
+    return false;
+  };
   const pullOf = (n: number) => {
     const x = pulls[n - 1];
     if (!x) throw new HttpError(404, "not found on GitHub", "git_not_found");
     return x;
   };
   const p: SourceControlProvider & {
-    refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; keep: Set<string>; push(branch: string, files: Record<string, string>): string;
+    refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; keep: Set<string>; guarded: Set<string>; failUpdate: Set<number>;
+    push(branch: string, files: Record<string, string>): string;
   } = {
-    refs, commits, pulls, refuse, keep,
+    refs, commits, pulls, refuse, keep, guarded, failUpdate,
+    async branchProtection(_r: Repo, branch: string) {
+      return guarded.has(branch) ? `${branch} is protected on GitHub` : null;
+    },
+    async moveBranch(_r: Repo, branch: string, from: string, to: string) {
+      if (refs.get(branch) !== from || !contains(to, from)) throw new HttpError(409, `${branch} moved on GitHub meanwhile: try again`, "conflict");
+      refs.set(branch, to);
+      // GitHub marks a pull request merged when its base moves to hold its head.
+      for (const x of pulls) if (x.state === "open" && x.base === branch && contains(to, refs.get(x.head) ?? "")) Object.assign(x, { state: "closed", merged: true });
+    },
     async getPull(_r: Repo, n: number) {
       return { ...pullOf(n) };
     },
@@ -52,6 +68,7 @@ function fakeProvider() {
       return { ...x };
     },
     async updatePull(_r: Repo, n: number, input: { base?: string; title?: string; body?: string; state?: "open" | "closed" }) {
+      if (failUpdate.delete(n)) throw new HttpError(502, "GitHub: Server Error", "github_error");
       Object.assign(pullOf(n), Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)));
       return { ...pullOf(n) };
     },
@@ -592,6 +609,83 @@ test("stack: at its most changes, a turn joins the top change and says so", asyn
   const j2 = k;
   const [s] = await readStacks(t.ctx);
   assert.deepEqual([s.id, s.changes.length, s.changes.at(-1)!.sha], [id, MAX_STACK, j2.sha]);
+});
+
+test("stack: landing up to a change moves the default branch to it change by change; each pull request merged with its own turn", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await submitStack(t.ctx, c1.stack.id);
+  const pr = t.provider.pulls;
+  const l = await landUpTo(t.ctx, c2.change.id);
+  assert.deepEqual([l.sha, l.landed.map((c) => c.title)], [c2.sha, ["One", "Two"]]);
+  assert.equal(t.provider.refs.get("main"), c2.sha);
+  assert.deepEqual(pr.map((x) => [x.state, x.merged, x.base]), [["closed", true, "main"], ["closed", true, "main"], ["open", false, "main"]]);
+  assert.equal(t.provider.refs.has(c1.branch) || t.provider.refs.has(c2.branch), false); // landed branches go
+  assert.equal(t.provider.refs.get(c3.branch), c3.sha);
+  const [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes.map((c) => c.title), s.baseSha], [["Three"], c2.sha]);
+  const rows = await t.store.db.all<{ title: string; state: string; landed_sha: string }>("SELECT title, state, landed_sha FROM stack_changes ORDER BY position");
+  assert.deepEqual(rows.map((x) => [x.title, x.state, x.landed_sha]), [["One", "landed", c1.sha], ["Two", "landed", c2.sha], ["Three", "open", null]]);
+  // The rest: change 3 lands on its own.
+  await landUpTo(t.ctx, c3.change.id);
+  assert.deepEqual([t.provider.refs.get("main"), pr[2].merged], [c3.sha, true]);
+  assert.deepEqual(await readStacks(t.ctx), []);
+});
+
+test("stack: landing is refused before anything moves on a protected default branch, one that moved, or a change pushed to", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const code = (e: unknown) => (e as HttpError).code;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  t.provider.guarded.add("main");
+  await assert.rejects(landUpTo(t.ctx, c2.change.id), (e) => code(e) === "branch_protected" && /through its pull requests/.test((e as Error).message));
+  t.provider.guarded.clear();
+  const pushed = t.provider.push(c1.branch, { x: "outside" });
+  await assert.rejects(landUpTo(t.ctx, c2.change.id), (e) => code(e) === "moved");
+  t.provider.refs.set(c1.branch, c1.sha);
+  void pushed;
+  const teammate = t.provider.push("main", { y: "teammate" });
+  await assert.rejects(landUpTo(t.ctx, c2.change.id), (e) => code(e) === "default_moved");
+  assert.equal(t.provider.refs.get("main"), teammate);
+  assert.equal((await readStacks(t.ctx))[0].changes.length, 2);
+});
+
+test("stack: a landing that stops half way is recorded, and landing again carries on (no pull request closed unmerged)", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await submitStack(t.ctx, c1.stack.id);
+  t.provider.failUpdate.add(2); // retargeting change 2's pull request fails
+  await assert.rejects(landUpTo(t.ctx, c3.change.id), (e) => (e as HttpError).code === "github_error");
+  assert.equal(t.provider.refs.get("main"), c1.sha); // change 1 landed, nothing after it
+  assert.deepEqual(t.provider.pulls.map((x) => [x.state, x.merged]), [["closed", true], ["open", false], ["open", false]]);
+  assert.deepEqual((await readStacks(t.ctx))[0].changes.map((c) => c.title), ["Two", "Three"]);
+  await landUpTo(t.ctx, c3.change.id);
+  assert.equal(t.provider.refs.get("main"), c3.sha);
+  assert.deepEqual(t.provider.pulls.map((x) => x.merged), [true, true, true]);
+
+  // Moved but not recorded (stopped between the two): taken as landed, and carried on from.
+  const d1 = ok(await t.change("main", c3.sha, "Four", "4"));
+  const d2 = ok(await t.change(d1.branch, d1.sha, "Five", "5"));
+  t.provider.refs.set("main", d1.sha);
+  const l = await landUpTo(t.ctx, d2.change.id);
+  assert.deepEqual([l.sha, (await readStacks(t.ctx)).length], [d2.sha, 0]);
+});
+
+test("stack: landing a stack never submitted (no pull requests), with GitHub having deleted a landed branch already", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  t.provider.refs.delete(c1.branch);
+  const l = await landUpTo(t.ctx, c2.change.id);
+  assert.deepEqual([l.sha, t.provider.refs.get("main"), t.provider.pulls.length], [c2.sha, c2.sha, 0]);
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {

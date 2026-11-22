@@ -473,6 +473,19 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 void g.submitStack(stack.id).then((r) => said(r.pulls), (e) => toast(`Couldn't submit the stack: ${errorMessage(e)}`, 10000))
                   .finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
+              onLand={(change) => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                const n = stack.changes.filter((c) => c.position <= change.position).length;
+                if (!confirm(`Land ${n === 1 ? `change ${change.position}` : `changes ${stack.changes[0].position}–${change.position}`} in ${gitState.defaultBranch}?\n\n` +
+                  `${gitState.defaultBranch} moves to ${n === 1 ? "it" : "them"}, one at a time (their pull requests show as merged), and ${n === 1 ? "its branch goes" : "their branches go"}. Nothing is deployed: Deploy puts ${gitState.defaultBranch} live.`)) return;
+                setStackBusy(true);
+                void g.land(change).then(
+                  (r) => toast(`Landed ${r.landed.length} ${r.landed.length === 1 ? "change" : "changes"} in ${gitState.defaultBranch} @ ${r.sha.slice(0, 7)}. Not deployed yet: ${gitState.defaultBranch} is ahead of what's live (Deploy puts it live).${pullsSaid(r.pullErrors, "moved onto " + gitState.defaultBranch)}`, 12000),
+                  (e) => toast(`Not landed: ${errorMessage(e)}`, 12000),
+                ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+              }}
               onOutside={(how, change) => {
                 const g = engine.current?.git;
                 if (!g) return;

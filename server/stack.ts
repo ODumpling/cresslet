@@ -321,9 +321,7 @@ export async function landed(ctx: Ctx, input: { branch: string; headSha: string;
     await pool(s.slice(0, -1), 4, async (c) => {
       if (await ctx.provider.branchHead(ctx.r, c.branch).catch(() => null) === c.sha) await ctx.provider.deleteBranch(ctx.r, c.branch).catch(() => false);
     });
-    // Its changes set aside go too (also ones moved out of it for good), once nothing of it is open any more.
-    const open = (await ctx.store.openStackChanges(ctx.appId)).some((c) => c.stack_id === top.stack_id);
-    if (!open) await dropBranches(ctx, (await ctx.store.setAsideStackChanges(ctx.appId)).filter((c) => c.stack_id === top.stack_id || c.origin_stack_id === top.stack_id));
+    await dropLandedAside(ctx, top.stack_id);
   }
   return { stack: top.stack_name, changes: n };
 }
@@ -583,5 +581,82 @@ export function carryOn(ctx: Ctx, changeId: string, sha: string): Promise<{ chan
       await ctx.store.moveStackChanges(ctx.appId, leaving.map((x) => x.id), id("stk"), "outside");
     });
     return { change: { ...view({ ...c, sha: head }), github: "ok" }, left: leaving.length };
+  });
+}
+
+/** A stack's changes set aside (also ones moved out of it for good) go once nothing of it is open any more. */
+async function dropLandedAside(ctx: Ctx, stackId: string) {
+  if ((await ctx.store.openStackChanges(ctx.appId)).some((c) => c.stack_id === stackId)) return;
+  await dropBranches(ctx, (await ctx.store.setAsideStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId || c.origin_stack_id === stackId));
+}
+
+// ---- landing: the default branch moved forward to a change, one change at a time
+
+/** A change's open pull request (recorded, or open from its branch), pointed at `base` if it isn't. */
+async function retarget(ctx: Ctx, c: StackChange, base: string) {
+  let p = c.pr_number ? await ctx.provider.getPull(ctx.r, c.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e))) : null;
+  if (!p || p.head !== c.branch || p.state !== "open") p = await ctx.provider.findPull(ctx.r, c.branch);
+  if (p && p.state === "open" && p.base !== base) await ctx.provider.updatePull(ctx.r, p.number, { base });
+}
+
+/**
+ * Lands a change and the ones below it (when the default branch takes direct moves): one at a time, each change's
+ * pull request is pointed at the default branch and the default branch moved (fast-forward, never forced) to its
+ * commit, so GitHub marks each merged with only its own turn (checked against GitHub, #117/#122). Each step is
+ * recorded as it's done, so a landing that stops half way carries on from there. Then the change above becomes the
+ * bottom (its pull request on the default branch), and the landed branches go (the app's delete-branch setting, only
+ * while at their change). Refused, before anything moves: a protected default branch (`branch_protected`), one that
+ * moved since the stack was cut (`default_moved`), a change pushed to on GitHub (`moved`).
+ */
+export function landUpTo(ctx: Ctx, changeId: string): Promise<{ landed: ChangeView[]; sha: string; stack: string; pullErrors?: PullError[] }> {
+  return locked(ctx.appId, async () => {
+    const { provider, store, r, repo, appId } = ctx;
+    const open = await store.openStackChanges(appId);
+    const c = open.find((x) => x.id === changeId);
+    if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
+    const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
+    const k = s.findIndex((x) => x.id === c.id);
+    const def = repo.default_branch;
+    const guarded = await provider.branchProtection(r, def);
+    if (guarded) throw new HttpError(422, `${guarded}: land the stack through its pull requests on GitHub`, "branch_protected");
+    const heads = await pool(s.slice(0, k + 1), 8, (x) => provider.branchHead(r, x.branch));
+    const moved = s.find((x, i) => i <= k && heads[i] && heads[i] !== x.sha);
+    if (moved) throw new HttpError(409, `${moved.branch} was pushed to on GitHub: pull it in, or carry on from it, first`, "moved");
+    let at = await provider.branchHead(r, def);
+    if (!at) throw new HttpError(404, `no branch ${def} on GitHub`, "branch_not_found");
+    // Where the default branch is: where the stack was cut, or at one of its changes (a landing that stopped half way).
+    let from = 0;
+    if (at !== s[0].base_sha) {
+      const j = s.findIndex((x) => x.sha === at);
+      if (j < 0) {
+        throw new HttpError(409, `${def} moved on GitHub since the stack was cut: nothing was landed. Deploy merges it in (resolving any conflicts there)`, "default_moved");
+      }
+      await store.landStack(appId, c.stack_id, s[j].position, s[j].sha);
+      from = j + 1;
+    }
+    for (let i = from; i <= k; i++) {
+      const x = s[i];
+      // Its pull request on the default branch first (the bottom's too: a landing that stopped half way may have left
+      // it on the branch below): one whose base moves past it without it can't be marked merged.
+      await retarget(ctx, x, def);
+      await provider.moveBranch(r, def, at, x.sha);
+      at = x.sha;
+      await store.landStack(appId, c.stack_id, x.position, x.sha);
+    }
+    // The change above is the bottom now: its pull request on the default branch (before any branch below goes: an
+    // API delete of a base branch closes the pull requests on it for good).
+    const pullErrors: PullError[] = [];
+    if (s[k + 1]) await retarget(ctx, s[k + 1], def).catch((e) => pullErrors.push({ change: s[k + 1].id, position: s[k + 1].position, error: why(e) }));
+    if (repo.delete_branch) {
+      // (GitHub's own "delete branch on merge" may have done it: gone is fine.)
+      await pool(s.slice(0, k + 1), 4, async (x) => {
+        if (await provider.branchHead(r, x.branch).catch(() => null) === x.sha) await provider.deleteBranch(r, x.branch).catch(() => false);
+      });
+      await dropLandedAside(ctx, c.stack_id);
+    }
+    return {
+      landed: s.slice(0, k + 1).map((x) => ({ ...view(x), github: "ok" as const })), sha: at, stack: c.stack_name,
+      ...(pullErrors.length ? { pullErrors } : {}),
+    };
   });
 }

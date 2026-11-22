@@ -5,7 +5,7 @@
 import type { ProjectGitState, PullRequest, Stack, StackChange } from "../../../git.ts";
 import { ExtLink } from "../../ui/icons.tsx";
 
-export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside }: {
+export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside, onLand }: {
   stack: Stack;
   state: ProjectGitState;
   busy: boolean;
@@ -13,6 +13,8 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
   pulls?: Record<string, PullRequest>;
   /** Opens or updates a pull request per change. */
   onSubmit: () => void;
+  /** Lands a change and the ones below it into the default branch. */
+  onLand: (change: StackChange) => void;
   /** A change pushed to on GitHub: pulled in as the stack's top, or carried on from as a branch of its own. */
   onOutside: (how: "pull-in" | "carry-on", change: StackChange) => void;
   /** Loads the stack's top change into the workspace (it's on another branch). */
@@ -38,8 +40,12 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
             {aside ? <span className="sr-only"> (set aside)</span> : null}
             {here ? <span className="pill" data-s="here">workspace</span> : null}
             {c.github !== "ok" ? <span className="pill" data-s="warn">{c.github === "gone" ? "gone on GitHub" : "moved on GitHub"}</span> : null}
-            {!aside && on && c !== top ? (
-              <button className="btn sm stack-back" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button>
+            {!aside && on ? (
+              <span className="stack-actions">
+                {c !== top ? <button className="btn sm" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button> : null}
+                <button className="btn sm" type="button" disabled={busy} onClick={() => onLand(c)}
+                  aria-label={c === stack.changes[0] ? `Land change ${c.position} in ${state.defaultBranch}` : `Land changes ${stack.changes[0].position} to ${c.position} in ${state.defaultBranch}`}>Land</button>
+              </span>
             ) : null}
           </span>
           <ExtLink className="ext stack-branch mono" href={tree(c.branch)}>{c.branch}</ExtLink>
