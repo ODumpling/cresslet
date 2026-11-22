@@ -74,7 +74,9 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
     bubble: null as number | null, step: null as number | null,
     replied: "", failed: "", id: 0, stick: false,
     prompt: "", git, // the message being worked on (a new branch is named after it); the project's repository
-    rev: 0, branchFailed: false, // the workspace's change count when it was sent; branching failed this turn
+    // This turn changed files (its tools, or a command while it ran: not the user's edits meanwhile); branching failed;
+    // the workspace's change count when the running command started.
+    turnChanged: false, branchFailed: false, cmdRev: 0,
     gone: false, // unmounted (the user left the project): no more UI updates
   }).current;
   r.locked = locked;
@@ -82,7 +84,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
   const [tools] = useState(() => createTools(c, {
     devLog,
     onChange: (path) => {
-      r.git?.markDirty();
+      r.turnChanged = true;
       return onChange(path);
     },
     // Branch first: on the default branch of a linked repository, a new branch before the first change. If GitHub
@@ -182,11 +184,13 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
         setWorking("Writing…");
         break;
       case "tool":
+        if (ev.name === "run_command") r.cmdRev = r.git?.revision ?? 0;
         r.bubble = null;
         r.step = add({ kind: "step", state: "running", icon: STEP_ICON[ev.name] ?? "file", text: runningText(ev.name, ev.input) });
         setWorking(`${runningText(ev.name, ev.input)}…`);
         break;
       case "tool-done":
+        if (ev.name === "run_command" && (r.git?.revision ?? 0) !== r.cmdRev) r.turnChanged = true;
         if (r.step !== null) {
           update(r.step, (x) => ({ id: x.id, kind: "step", state: ev.error ? "error" : "ok", icon: ev.error ? "x" : STEP_ICON[ev.name] ?? "check", text: ev.summary, failed: ev.error }));
         }
@@ -235,8 +239,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
     setWorking("Thinking…");
     setStatus("Sent. Claude is working on it.");
     r.prompt = text;
-    r.rev = git?.revision ?? 0;
-    r.branchFailed = false;
+    r.turnChanged = r.branchFailed = false;
     try {
       await r.agent.send(text);
       await commitTurn(text);
@@ -261,7 +264,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
     const g = r.git;
     if (!g?.connected || r.gone) return;
     await new Promise((res) => setTimeout(res, 500)); // the file watcher reports a command's changes a moment later
-    if (!g.state?.dirty || g.revision === r.rev) return; // this turn changed nothing (earlier changes aren't its own)
+    if (!g.state?.dirty || !r.turnChanged) return; // this turn changed nothing (earlier or hand changes aren't its own)
     try {
       await g.ensureBranch("feat", text);
       const out = await g.sync(commitMessage(text));
@@ -317,7 +320,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
             // Nothing is sent until the workspace holds the default branch.
             r.busy = true;
             setBusy(true);
-            setWorking(`Switching to ${s.defaultBranch}…`);
+            queueMicrotask(() => setWorking(`Switching to ${s.defaultBranch}…`)); // after the reset below
             void g!.switchTo(s.defaultBranch).then(
               () => setStatus(`On ${s.defaultBranch}`),
               (e) => add({ kind: "notice", text: `Couldn't switch to ${s.defaultBranch}: ${errorMessage(e)}`, error: true }),

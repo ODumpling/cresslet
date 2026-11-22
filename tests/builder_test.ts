@@ -617,3 +617,29 @@ test("git: an app linked elsewhere is adopted by loading its default branch", as
   assert.deepEqual(g.hydrated, [[{ path: "a.txt", data: "pulled" }]]);
   assert.deepEqual([g.state.activeBranch, g.state.headSha, g.state.baseSha], ["main", "d".repeat(40), "d".repeat(40)]);
 });
+
+test("git: a pull or switch whose npm install fails is still on the branch whose files it wrote; changes made meanwhile stop it", async () => {
+  const g = fakeGit({ onDefault: false, hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  await assert.rejects(g.git.switchTo("main"), /npm install failed/);
+  assert.deepEqual([g.state.activeBranch, g.state.headSha], ["main", "d".repeat(40)]);
+  const adopted = fakeGit({ hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  adopted.state = undefined;
+  await assert.rejects(adopted.git.adopt({ provider: "github", owner: "o", name: "r", url: "u", defaultBranch: "main" }));
+  assert.equal(adopted.state.activeBranch, "main"); // still linked: its files are in
+
+  // An edit while the switch's push was on its way: the switch stops, nothing is overwritten.
+  let busy: Json;
+  busy = fakeGit({ onDefault: false, duringSync: () => void busy.rev.n++ });
+  busy.state.dirty = true;
+  await assert.rejects(busy.git.switchTo("main"), /changed while/);
+  assert.deepEqual(busy.hydrated, []);
+  assert.equal(busy.state.activeBranch, "feat/x");
+});
+
+test("deploy on a linked app: an edit made while it syncs stops it before the merge", async () => {
+  let g: Json;
+  g = fakeGit({ onDefault: false, duringSync: () => void g.rev.n++ });
+  await assert.rejects(g.git.prepareDeploy(), /changed while deploying/);
+  assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/sync"]);
+  assert.equal(g.state.dirty, true);
+});

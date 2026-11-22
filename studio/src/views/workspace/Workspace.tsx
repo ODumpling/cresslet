@@ -349,7 +349,10 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null}
             devLog={() => engine.current?.termOut ?? ""}
             // A file the builder changed is the one in the editor: show the new contents.
-            onChange={(path) => path === engine.current?.current && engine.current.openFile(path)} />
+            onChange={(path) => {
+              engine.current?.changed(); // counted at once (the watcher's report may fall in a pull's quiet window)
+              return path === engine.current?.current && engine.current.openFile(path);
+            }} />
         ) : null}
         <section className="pane files" id="files-pane" aria-labelledby="files-title" hidden={view !== "code"}>
           <div className="pane-head">

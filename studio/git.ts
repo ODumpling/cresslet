@@ -77,6 +77,12 @@ export interface Provenance {
   repo: string;
 }
 
+/** The workspace's revision when `p` was prepared: checked again before the upload (a change during the build). */
+export const sameRevision = (git: GitWorkspace) => {
+  const rev = git.revision;
+  return () => git.revision === rev;
+};
+
 /**
  * One project's source control: branch first (a change on the default branch moves to a new branch), sync (one commit
  * of the workspace), pull, and merge-then-deploy. Steps run one at a time.
@@ -115,12 +121,25 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     return r;
   }
 
+  /** Changes made since `rev` would be overwritten: stop instead. */
+  const unchangedSince = (rev: number, what: string) => {
+    if (revision() !== rev) throw Object.assign(new Error(`the workspace changed while ${what}: nothing was overwritten, try again`), { code: "changed" });
+  };
+
   async function pullNow(branch: string) {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
+    const rev = revision();
     const t = await o.api<{ sha: string; files: GitFile[] }>(path(`/tree?ref=${encodeURIComponent(branch)}`));
-    await o.hydrate(t.files);
-    await set({ activeBranch: branch, headSha: t.sha, dirty: false, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
+    unchangedSince(rev, `loading ${branch}`);
+    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: false, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
+    try {
+      await o.hydrate(t.files);
+    } catch (e) {
+      if ((e as { filesWritten?: boolean }).filesWritten) await done(); // its files are in: the workspace is on it
+      throw e;
+    }
+    await done();
     return t.sha;
   }
 
@@ -181,7 +200,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       try {
         return await pullNow(repo.defaultBranch);
       } catch (e) {
-        await o.save(undefined); // not loaded: not linked here either
+        if (!(e as { filesWritten?: boolean }).filesWritten) await o.save(undefined); // not loaded: not linked here either
         throw e;
       }
     }),
@@ -198,8 +217,11 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     /** Changes committed to the active branch (if any), then another branch loaded. */
     switchTo: (branch: string) => serial(async () => {
       if (o.state()!.dirty) await syncNow(`Work in progress on ${o.state()!.activeBranch}`);
+      if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: switch again"), { code: "changed" });
       return pullNow(branch);
     }),
+    /** Another branch loaded, this workspace's changes dropped (its branch is gone, say). */
+    discardAndSwitch: (branch: string) => serial(() => pullNow(branch)),
     /**
      * Deploy = merge into the default branch, then deploy it: commits the workspace to its branch, merges that into
      * the default branch (on it already: just the commit), loads the merged files when the default branch had commits
@@ -211,7 +233,10 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       const repo = `${s.owner}/${s.repo}`;
       signal?.throwIfAborted();
       log(`syncing ${s.activeBranch} with ${repo}…`);
+      const rev = revision();
       const synced = await syncNow(`Deploy from ${s.activeBranch}`);
+      // What's built must be what was committed: a change made since stops the deploy (it stays, unpushed).
+      unchangedSince(rev, "deploying");
       if (s.activeBranch === s.defaultBranch) return { sha: synced.sha, branch: s.defaultBranch, repo };
       signal?.throwIfAborted(); // stopped: nothing merged
       log(`merging ${s.activeBranch} into ${s.defaultBranch}…`);
@@ -232,6 +257,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         throw e;
       }
       if (m.treeChanged) {
+        unchangedSince(rev, "deploying");
         // Merged, but its files didn't come back: this workspace isn't what was merged, so it isn't built (or
         // pushed over the default branch). It stays on the branch, which GitHub kept.
         if (!m.files) throw new Error(`Merged ${s.activeBranch} into ${s.defaultBranch}, but couldn't load the result (${m.filesError ?? "no files"}). Nothing was deployed.`);

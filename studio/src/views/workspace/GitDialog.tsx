@@ -44,8 +44,13 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
 
   // A new repository is named after the app (also once one was just reserved).
   useEffect(() => setRepoName((n) => n || (app ?? "")), [app]);
+  // The app as of now (a reservation sets it before this dialog renders again).
+  const appRef = useRef(app);
+  appRef.current ??= app;
+  if (app) appRef.current = app;
 
   async function refresh() {
+    const app = appRef.current;
     setError(null);
     const me = await api<API.MeGit>("/v1/me/git").catch(() => null);
     if (!me) return setLoad({ me: { provider: "github", available: false, kind: null, connected: false, login: null, status: null, installUrl: null }, status: null, repos: null, linked: null });
@@ -149,6 +154,10 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
             <p className="muted">A repository links to an app: pick this project's app address first. Nothing goes live until you deploy.</p>
             <div className="row start"><button className="btn primary" type="button" id="git-reserve" disabled={!!busy} onClick={() => void run("Reserving the address…", async () => {
               const name = await reserve();
+              if (name) {
+                appRef.current = name;
+                setRepoName((n) => n || name);
+              }
               return name ? `Reserved ${name}` : undefined;
             })}><Icon name="globe" />Choose an address</button></div>
           </>
@@ -256,6 +265,19 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
           <div className="error small" role="alert" id="git-error">
             <p>{error.text}</p>
             {error.code === "git_reauth_required" ? <button className="btn sm" type="button" onClick={() => void connectGithub()}>Reconnect GitHub</button> : null}
+            {error.code === "branch_not_found" && s ? (
+              <div className="row start">
+                <button className="btn sm" type="button" onClick={() => void run("Pushing to a new branch…", async () => {
+                  const b = await git!.newBranch("keep", s.activeBranch);
+                  await git!.sync(message.trim() || `Changes kept from ${s.activeBranch}`);
+                  return `Pushed to a new branch, ${b}`;
+                })}>Push to a new branch</button>
+                <button className="btn sm" type="button" onClick={() => {
+                  if (!confirm(`Drop this workspace's changes and load ${s.defaultBranch}?`)) return;
+                  void run(`Switching to ${s.defaultBranch}…`, async () => (await git!.discardAndSwitch(s.defaultBranch), `On ${s.defaultBranch}`));
+                }}>Discard changes and switch to {s.defaultBranch}</button>
+              </div>
+            ) : null}
             {error.code === "conflict" && s ? (
               <div className="row start">
                 <button className="btn sm" type="button" onClick={() => void run("Pushing to a new branch…", async () => {

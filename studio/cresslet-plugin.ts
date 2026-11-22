@@ -140,7 +140,7 @@ export interface CressletOptions {
    * commits and merges its branch here (it may change the workspace's files), and resolves to the commit to build
    * and record; it throws to stop the deploy before anything is built. Null: not linked.
    */
-  beforeDeploy?: (log: (line: string) => void, signal?: AbortSignal) => Promise<{ sha: string; branch: string; repo: string } | null>;
+  beforeDeploy?: (log: (line: string) => void, signal: AbortSignal | undefined, app: string | undefined) => Promise<{ sha: string; branch: string; repo: string; current?: () => boolean } | null>;
 }
 
 type Log = (line: string) => void;
@@ -260,7 +260,8 @@ export function createCresslet(c: Container, opts: CressletOptions) {
   async function deploy(log: Log = () => {}, signal: AbortSignal | undefined = undefined, cfg: CressletConfig | undefined = undefined, target: Target | undefined = undefined): Promise<DeployResult> {
     cfg ??= await config();
     target ??= targetOf(cfg);
-    const git = await opts.beforeDeploy?.(log, signal) ?? null;
+    const prepared = await opts.beforeDeploy?.(log, signal, target.app) ?? null;
+    const git = prepared && { sha: prepared.sha, branch: prepared.branch, repo: prepared.repo };
     signal?.throwIfAborted();
     // The merge may have brought another cresslet.json: its routes and crons are what's built (the target stays).
     if (git) cfg = { ...(await config()), name: cfg.name };
@@ -280,6 +281,8 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     if (target.deployKey) headers["x-cresslet-deploy-key"] = target.deployKey;
     // Project source too, so the CLI (`cresslet pull`) or another browser can open it. Never local secrets.
     const sources = await projectSources(c);
+    // Built from the commit recorded with it: not if the workspace changed during the build.
+    if (prepared?.current && !prepared.current()) throw new Error(`the workspace changed while building, so it isn't ${git!.branch} @ ${git!.sha.slice(0, 7)} any more: nothing was deployed, deploy again`);
     log(`uploading ${files.length} files…`);
     const payload = {
       app: target.app,

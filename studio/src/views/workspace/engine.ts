@@ -6,8 +6,8 @@ import { Container } from "../../../vendor/cresslet-container/cresslet-container
 import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWithTab, javascript, json, keymap, oneDark } from "../../../vendor/editor.js";
 import { FitAddon, Terminal } from "../../../vendor/terminal.js";
 import { fromTree, ignored, migrateDeployKeys, projects, toTree, type Deploy, type StoredProject } from "../../../store.ts";
-import { createCresslet, localOnly, projectSources, publicDotenv, type CressletConfig } from "../../../cresslet-plugin.ts";
-import { createGitWorkspace, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
+import { createCresslet, localOnly, projectSources, type CressletConfig } from "../../../cresslet-plugin.ts";
+import { createGitWorkspace, sameRevision, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
 import { session } from "../../lib/session.ts";
 
@@ -89,6 +89,8 @@ export class Engine {
   readonly git: GitWorkspace;
   /** Paths a pull or merge just wrote (until when): the watcher's reports of those aren't the user's changes. */
   private quiet = new Map<string, number>();
+  /** The last hydrate's npm install failed. */
+  private installFailed = false;
   /** Counts the workspace's changes (studio/git.ts: a sync is clean only if none came in meanwhile). */
   private rev = 0;
   /** A branch being started for a hand edit, or when the last try failed (one try per burst, not per keystroke). */
@@ -259,10 +261,13 @@ export class Engine {
           : `Claude wants to deploy ${target ? `to ${target}` : "this project as a new app"}${g ? ` from ${g.defaultBranch}` : ""}. It goes live at once.`, signal);
       },
       // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
-      beforeDeploy: async (log, signal) => {
-        if (this.git.connected) return this.git.prepareDeploy(log, signal);
+      beforeDeploy: async (log, signal, app) => {
+        if (this.git.connected && (!app || app === project.deploy?.name)) {
+          const p = await this.git.prepareDeploy(log, signal);
+          return { ...p, current: sameRevision(this.git) };
+        }
         // Linked to a repository elsewhere (another browser, the CLI), not here: deploying this workspace would skip it.
-        const name = project.deploy?.name;
+        const name = app ?? project.deploy?.name;
         const linked = name && session().token
           ? await api<{ repo?: { fullName: string } | null }>(`/v1/apps/${encodeURIComponent(name)}`).then((d) => d.repo, () => null)
           : null;
@@ -389,8 +394,8 @@ export class Engine {
     this.cb.openFile(path);
   }
 
-  /** The user changed the workspace. */
-  private changed() {
+  /** The workspace changed (the user, or the AI builder's tools). */
+  changed() {
     this.rev++;
     this.git.markDirty();
   }
@@ -441,12 +446,31 @@ export class Engine {
     const wd = c.workdir;
     const dotenv = /(?:^|\/)\.env[^/]*$/i;
     const want = new Map(files.map((f) => [f.path, f]));
-    const quiet = (rel: string) => this.quiet.set(rel, Date.now() + 2000);
+    const quiet = (rel: string, ms = 2000) => {
+      for (let p = rel; p; p = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "") this.quiet.set(p, Date.now() + ms);
+    };
+    /** A dotenv file's own private lines (the repository has only public entries): by key, comments and all. */
+    const privateLines = (text: string) => text.split(/\r?\n/).filter((l) => l.trim() && !/^\s*(?:export\s+)?(?:CRESSLET_PUBLIC_|VITE_)/.test(l));
+    /** Any file under a folder (empty folders don't count). */
+    const hasFiles = async (dir: string): Promise<boolean> => {
+      for (const e of await c.fs.readdir(dir, { withFileTypes: true })) {
+        if (!e.isDirectory() || await hasFiles(`${dir}/${e.name}`)) return true;
+      }
+      return false;
+    };
     const isDir = (path: string) => c.fs.stat(path).then((st) => st.isDirectory(), () => false);
     let deps = false;
     for (const f of await projectSources(c)) {
-      if (want.has(f.path) || dotenv.test(f.path)) continue;
+      if (want.has(f.path)) continue;
       quiet(f.path);
+      if (dotenv.test(f.path)) {
+        // Gone from the repository: its public entries go, its private ones stay.
+        const own = privateLines(await c.fs.readFile(`${wd}/${f.path}`, "utf8").catch(() => ""));
+        if (own.length) {
+          await c.fs.writeFile(`${wd}/${f.path}`, own.join("\n") + "\n");
+          continue;
+        }
+      }
       await c.fs.rm(`${wd}/${f.path}`).catch(() => {});
       deps ||= /^package(?:-lock)?\.json$/.test(f.path);
     }
@@ -456,16 +480,15 @@ export class Engine {
       let data: string | Uint8Array = f.encoding === "base64" ? Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)) : f.data;
       // A directory where a file now goes (foo/index.ts → foo): it's emptied of source above; local files keep it.
       if (await isDir(path)) {
-        if ((await c.fs.readdir(path)).length) throw new Error(`${f.path} is a file now, but this workspace has local files in a folder of that name`);
+        if (await hasFiles(path)) throw new Error(`${f.path} is a file now, but this workspace has local files in a folder of that name`);
+        quiet(f.path);
         await c.fs.rm(path, { recursive: true });
       }
       const exists = await c.fs.exists(path).catch(() => false);
       if (exists) {
         const now = await c.fs.readFile(path, typeof data === "string" ? "utf8" : undefined).catch(() => null);
         if (dotenv.test(f.path) && typeof now === "string" && typeof data === "string") {
-          const pub = new Set(publicDotenv(now).split("\n"));
-          const own = now.split(/\r?\n/).filter((l) => l.trim() && !pub.has(l));
-          data = [data.replace(/\n*$/, ""), ...own].filter(Boolean).join("\n") + "\n";
+          data = [data.replace(/\n*$/, ""), ...privateLines(now)].filter(Boolean).join("\n") + "\n";
         }
         if (typeof data === "string" ? now === data : now instanceof Uint8Array && now.length === data.length && now.every((b, i) => b === (data as Uint8Array)[i])) continue;
       }
@@ -477,12 +500,21 @@ export class Engine {
     }
     await this.saveNow();
     if (this.current) await this.openFile(this.current);
-    if (deps) {
+    if (deps || this.installFailed) {
       this.term.writeln("\x1b[36mdependencies changed: npm install\x1b[0m");
-      const p = await c.spawn("jsh", ["-c", "npm install"], { cwd: wd });
-      void p.output.pipeTo(new WritableStream({ write: (d) => this.term.write(d) })).catch(() => {});
-      await p.input.close().catch(() => {});
-      if (await p.exit !== 0) throw Object.assign(new Error("npm install failed (see the terminal)"), { filesWritten: true });
+      // Its lockfile rewrite isn't the user's change either.
+      const until = setInterval(() => quiet("package-lock.json"), 1000);
+      quiet("package-lock.json");
+      try {
+        const p = await c.spawn("jsh", ["-c", "npm install"], { cwd: wd });
+        void p.output.pipeTo(new WritableStream({ write: (d) => this.term.write(d) })).catch(() => {});
+        await p.input.close().catch(() => {});
+        this.installFailed = await p.exit !== 0; // tried again on the next pull, even if nothing changes then
+      } finally {
+        clearInterval(until);
+        quiet("package-lock.json");
+      }
+      if (this.installFailed) throw Object.assign(new Error("npm install failed (see the terminal)"), { filesWritten: true });
     }
   }
 
