@@ -6,7 +6,7 @@ Auth (either):
 - `Authorization: Bearer clv_acct_…` (or `clv_scoped_…`) — account token (GitHub login, or created in the studio under Settings → API tokens).
 - `X-Cresslet-Deploy-Key: clv_app_…` (or `Authorization: Bearer clv_app_…`) — per-app key, returned once on app creation.
 
-Site admin = an account with the `SiteAdmin` role (or listed in `CRESSLET_SITE_ADMINS`) using a full-access token (`admin`, all apps), or the operator's `CRESSLET_ADMIN_TOKEN`. The studio shows them an **Admin** page (`/#/admin`), **Users** (`/#/admin-users`) and **Organizations** (`/#/admin-orgs`), and, with AI credits on, an **AI credits** page (`/#/admin-credits`): use per day, model and account, and giving or taking back credits.
+Site admin = an account with the `SiteAdmin` role (or listed in `CRESSLET_SITE_ADMINS`) using a full-access token (`admin`, all apps), or the operator's `CRESSLET_ADMIN_TOKEN`. The studio shows them an **Admin** page (`/admin`), **Users** (`/admin-users`) and **Organizations** (`/admin-orgs`), and, with AI credits on, an **AI credits** page (`/admin-credits`): use per day, model and account, and giving or taking back credits.
 
 Errors: `{ "error": "<code>", "message": "…" }` with 4xx/5xx.
 
@@ -21,13 +21,13 @@ Account tokens have a **role** and optionally a list of **apps** (403 `forbidden
 - `admin`: everything on the app, including deploys, secrets, egress, domains and managing collaborators, but not deleting it (owner only).
 - Managing collaborators needs an account (a deploy key isn't one). Shared apps are listed in `GET /v1/apps` with `access: owner|admin|viewer`, can be named in a token's `apps`, and don't count toward the invitee's app limit. At most 50 collaborators and pending invites per app. Deleting the app removes them.
 
-**Accounts (site admins).** Site admins list every account (`/#/admin-users` in the studio), invite people, disable accounts and grant the `SiteAdmin` role:
+**Accounts (site admins).** Site admins list every account (`/admin-users` in the studio), invite people, disable accounts and grant the `SiteAdmin` role:
 - **Invite**: sets up an account for an email (status `invited`). The person signs in with GitHub; any verified email on their GitHub account that matches links it, also while signup is closed (`CRESSLET_OPEN_SIGNUP=false`). No email is sent. An invite can be withdrawn (the account deleted) until they sign in. Optionally adds them to an [organization](#organizations).
 - **Disable**: signs the account out everywhere (tokens and private-page sessions deleted), refuses its GitHub login (by GitHub id or any of its verified emails), its tokens, and deploys with its personal apps' deploy keys. Its sites keep serving: delete them on the Sites page. Its email and GitHub id are moved aside while it's disabled (`email` reads `disabled+<id>@invalid` in the database), so a server from before this release, after a rollback, can't sign it in either. **Enable** puts them back (409 if another account took that email or GitHub id meanwhile).
 - You can't disable or demote yourself, nor an account listed in `CRESSLET_SITE_ADMINS` (change the config).
 
 <a id="organizations"></a>
-**Organizations.** Site admins create organizations (`/#/admin-orgs`) and pick a first admin. Org admins add and remove members (existing accounts, by email: only site admins invite new people) and change roles; an organization keeps at least one enabled admin (site admins too: promote another first). Disabling an org's only admin is allowed; until a site admin makes someone else admin, no app moves in and nobody holding its apps can leave. An app or artifact moved into an organization (`PUT /v1/apps/:name/org`, by its owner, who must be a member) belongs to it:
+**Organizations.** Site admins create organizations (`/admin-orgs`) and pick a first admin. Org admins add and remove members (existing accounts, by email: only site admins invite new people) and change roles; an organization keeps at least one enabled admin (site admins too: promote another first). Disabling an org's only admin is allowed; until a site admin makes someone else admin, no app moves in and nobody holding its apps can leave. An app or artifact moved into an organization (`PUT /v1/apps/:name/org`, by its owner, who must be a member) belongs to it:
 - org `admin`: owner access to every org app (delete, move out, everything).
 - org `member`: collaborator `admin` access to every org app (deploy, roll back, secrets, domains, sharing; not deleting).
 - A collaborator role on the app adds to that; the app's `account_id` (who created it or last held it) no longer counts on its own. Members who leave or are removed (or disabled) lose access, and the apps they held are handed to an enabled org admin (else member), so a rolled-back server (which ignores organizations and treats `account_id` as the owner) keeps them with the org. Org apps don't count toward anyone's app limit; moving one out makes it the caller's personal app, within their limit.
@@ -49,7 +49,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` |
 | POST | `/v1/auth/github/device` | CLI/agents: → `{deviceCode, userCode, verificationUri, expiresIn, interval}` |
 | POST | `/v1/auth/github/device/token` | `{deviceCode}` → `{status: pending\|slow_down}` or `{status: complete, account, token}`; poll every `interval`s |
-| POST | `/v1/auth/cli` | CLI browser login: → `{deviceCode, userCode, verificationUri, expiresIn, interval}`; open `verificationUri` (the studio's `#/cli`) and show `userCode`, which the user types there. 20 per client per 10 min |
+| POST | `/v1/auth/cli` | CLI browser login: → `{deviceCode, userCode, verificationUri, expiresIn, interval}`; open `verificationUri` (the studio's `/cli`) and show `userCode`, which the user types there. 20 per client per 10 min |
 | POST | `/v1/auth/cli/approve` | full-access account token (the studio) + `{userCode}` (case, dashes ignored) → `{approved: true}`; 404 if unknown, expired or already approved. 10 tries per account per 10 min |
 | POST | `/v1/auth/cli/token` | `{deviceCode}` → `{status: pending}` or `{status: complete, account, token}` (a new token, once); 400 `expired_token` after, or if the approving token was revoked. Poll every `interval`s |
 | GET | `/v1/templates` | `{templates: [{name, description}]}` |
@@ -129,7 +129,7 @@ App or artifact? An app is software that runs: an optional server with a databas
 A name you choose can be guessed: keep the generated one for a `link` artifact that only the people you send it to should open.
 
 `visibility`:
-- `private`: only its owner and [collaborators](#http-api-v1) (any role), logged in. A visitor without a session is sent to the studio (`/#/view/<name>?path=…`), which calls `POST /v1/pages/:name/view` and sends them back with a one-time ticket (`?cresslet_view=…`, 2 minutes). The page's host swaps it for an HttpOnly session cookie for that host only (`__Host-cresslet_page` on https, 24 h) and drops it from the URL. Each request checks that the account still has access, so removing a collaborator takes effect at once. Responses are `cache-control: private, no-store`.
+- `private`: only its owner and [collaborators](#http-api-v1) (any role), logged in. A visitor without a session is sent to the studio (`/view/<name>?path=…`), which calls `POST /v1/pages/:name/view` and sends them back with a one-time ticket (`?cresslet_view=…`, 2 minutes). The page's host swaps it for an HttpOnly session cookie for that host only (`__Host-cresslet_page` on https, 24 h) and drops it from the URL. Each request checks that the account still has access, so removing a collaborator takes effect at once. Responses are `cache-control: private, no-store`.
 - `link`: anyone with the URL. `x-robots-tag: noindex, nofollow` and `referrer-policy: no-referrer` (the URL doesn't leak to the sites it links to).
 - `public`: anyone; search engines may index it.
 

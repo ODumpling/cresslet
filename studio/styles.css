@@ -553,7 +553,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .day-axis { display: flex; justify-content: space-between; margin-top: 6px; color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
 .mt { margin-top: 22px !important; }
 
-/* ------------------------------------------------------------------ app dashboard (#/apps/<name>) */
+/* ------------------------------------------------------------------ app dashboard (/apps/<name>) */
 .site-tabs { display: flex; gap: 2px; margin: -12px 0 20px; box-shadow: inset 0 -1px 0 var(--line); overflow: auto hidden; scrollbar-width: thin; }
 .site-tab {
   display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; color: var(--text-2); text-decoration: none;
