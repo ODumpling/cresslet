@@ -414,8 +414,8 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     type Res = Omit<ResponseMessage, "type" | "id" | "body"> & { body: ArrayBuffer | Uint8Array<ArrayBuffer> | null };
     const waiting = new Map<number, { w: ProjectWorker; done: (m: Res) => void }>(); // request id → { w, done }
     // Database view scripts sent to a worker, by id (the same counter as requests), until answered (and saved)
-    // (`stale`: still running when a replacement read the database without it)
-    const scripts = new Map<number, { w: ProjectWorker; done: Promise<unknown>; stale?: boolean; resolve: (r: SqlResult) => void; reject: (e: Error) => void }>();
+    // (`stale`: the starts that read the database while it still ran, and may serve without it)
+    const scripts = new Map<number, { w: ProjectWorker; done: Promise<unknown>; stale?: number; resolve: (r: SqlResult) => void; reject: (e: Error) => void }>();
     // The workers' database snapshots, written in order; each step: the error if the last one wasn't written.
     let saved: Promise<Error | null> = Promise.resolve(null);
     // Workers loading the database, by start (from reading it until it serves, or fails, or a later one serves):
@@ -432,6 +432,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     const runSql = async (script: string) => {
       // (a replacement stuck starting: not for ever)
       while (loads.size) await within(Promise.all([...loads.values()].map((l) => l.done)), 15_000, "the server is restarting: try again in a moment");
+      if (stopped) throw new Error("the dev server stopped");
       const w = worker;
       if (!w) throw new Error(workerError ?? ((await hasServer()) ? "the server is starting" : "this project has no server (server/index.ts), so no database"));
       const id = ++reqId;
@@ -540,9 +541,13 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         loads.delete(seq);
       };
       // Scripts already sent (to the serving worker) first, then the latest snapshot: this one starts from them.
-      // (One stuck in a long statement: not for ever; it's told its changes may be lost.)
-      await within(Promise.all([...scripts.values()].map((s) => s.done)), 10_000);
-      for (const s of scripts.values()) s.stale = true;
+      // (One stuck in a long statement: not for ever; it's told its changes may be lost, unless this start doesn't
+      // serve after all.)
+      const sent = [...scripts.values()];
+      await within(Promise.all(sent.map((s) => s.done)), 10_000);
+      const marked = seq > readySeq ? sent.filter((s) => [...scripts.values()].includes(s)) : [];
+      for (const s of marked) s.stale = (s.stale ?? 0) + 1;
+      const unmark = () => marked.splice(0).forEach((s) => s.stale!--); // (once)
       await saved;
       let db: Uint8Array | null = null;
       try {
@@ -556,6 +561,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         w = await c.projectWorker(staticUrl("server-worker.js"), { name: "cresslet-server" });
         if (stopped) return (loaded(), w.terminate()); // dev ended meanwhile
       } catch (e) {
+        unmark();
         loaded();
         workerError = `server failed to start:\n${(e as Error).message}`;
         out(`\x1b[31m${workerError}\x1b[0m`);
@@ -596,7 +602,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
               const unsaved = e && m.snapshot ? `not saved (a restart loses it): ${e.message}` : null;
               if ("error" in m) r.reject(new Error(unsaved ? `${m.error}; what ran before it was ${unsaved}` : m.error));
               else if (unsaved) r.reject(new Error(`done in the running preview, but ${unsaved}`));
-              else if (r.stale && m.snapshot) r.reject(new Error("done, but the server restarted from the database as it was before it finished: its changes may be lost (run it again)"));
+              else if (r.stale && m.snapshot) r.reject(new Error("done, but the server restarted from the database as it was before it finished: its changes may be lost (check before running it again)"));
               else r.resolve(m.result);
             });
           } else if (m.type === "files") {
@@ -620,7 +626,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       } satisfies ToWorker);
       try {
         await ready.finally(() => initializing.delete(w));
-        if (stopped || seq < readySeq) return w.terminate(); // dev ended, or a later save's worker got ready first
+        if (stopped || seq < readySeq) return (unmark(), w.terminate()); // dev ended, or a later save's worker got ready first
         readySeq = seq;
         endLoads(seq); // earlier starts (stuck, say) are moot now
         retire(worker, 1012, "server restarting", "server restarted");
@@ -630,6 +636,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         out("\x1b[32m✔\x1b[0m server ready");
         reloads?.postMessage({ type: "cresslet-start-reload" }); // a new client build too
       } catch (e) {
+        unmark(); // the worker it would replace still serves, with their changes
         w.terminate();
         if (seq < readySeq) return; // a later save's worker serves already
         workerError = `server failed to start:\n${(e as Error).message}`;
