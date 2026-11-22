@@ -411,7 +411,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       return r;
     }),
     /** Folds a change into the one below it (server/stack.ts fold). The workspace on it stays on it: same commit. */
-    fold: (change: StackChange) => post<{ change: StackChange; dropped: string; pullErrors?: PullError[] }>("/stack/fold", { change: change.id }),
+    fold: (change: StackChange, into: StackChange) => post<{ change: StackChange; dropped: string; pullErrors?: PullError[] }>("/stack/fold", { change: change.id, into: into.id }),
     /** Every change set aside (Source control lists them), and deleting one (with the ones set aside above it). */
     setAside: () => o.api<{ changes: (StackChange & { stackName: string; restorable: boolean })[] }>(path("/stack/aside")).then((r) => r.changes),
     deleteSetAside: (change: string) => post<{ dropped: string[]; kept: PullError[] }>("/stack/aside/delete", { change }),

@@ -374,7 +374,7 @@ const quiet = (s: string) => s.replace(/@(?=[\w-])/g, "@\u200b");
 
 /** A change's pull request description: its prompt, and the whole stack (newest on top), this change marked. */
 export function pullBody(c: StackChange, stack: StackChange[], numbers: Map<string, number>, defaultBranch: string) {
-  const prompt = quiet(c.prompt.trim() ? c.prompt.trim().slice(0, 2000).split(/\r?\n/).map((l) => `> ${l}`).join("\n") : `> ${c.title}`);
+  const prompt = quiet(c.prompt.trim() ? c.prompt.trim().slice(0, 20000).split(/\r?\n/).map((l) => `> ${l}`).join("\n") : `> ${c.title}`);
   const rows = [...stack].reverse().map((x) => {
     const n = numbers.get(x.id);
     return `| ${x.id === c.id ? "→" : ""} | ${x.position} · ${quiet(cell(x.title))} | ${n ? `#${n}` : ""} |`;
@@ -744,15 +744,24 @@ async function dropLanded(ctx: Ctx, stackId: string, keep: string | undefined, e
 
 // ---- folding a change into the one below
 
+/** A change's pull request (recorded, else the open one from its branch), or null; merged ones count. */
+async function pullOf(ctx: Ctx, c: StackChange): Promise<Pull | null> {
+  let p = c.pr_number ? await ctx.provider.getPull(ctx.r, c.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e))) : null;
+  if (!p || p.head !== c.branch || p.state !== "open") p = await ctx.provider.findPull(ctx.r, c.branch) ?? (p?.head === c.branch ? p : null);
+  return p;
+}
+
 /**
- * Folds a change into the one below it, for a small follow-up that doesn't deserve a pull request of its own. The
- * chain is straight, so no commit changes: the lower change's branch and pull request go, the upper one takes its
- * place (its base, its position, the lower one's title, both prompts). Its pull request is pointed at the lower one's
- * base first, so no pull request is closed by a base branch being deleted; the lower one's is closed with a note
- * pointing at it. The stack's pull request tables are refreshed. Not the bottom change (nothing below it), nor one set
- * aside or landed.
+ * Folds a change into the one below it (`into`, the one the caller confirmed), for a small follow-up that doesn't
+ * deserve a pull request of its own. The chain is straight, so no commit changes: the lower change leaves the stack,
+ * the upper one takes its place (its base, its position, the lower one's title, both prompts), and the ones above
+ * (open or set aside) move down. Its pull request is pointed at the lower one's base first (refused: nothing
+ * changes); when the stack has pull requests it's submitted (the remaining change gets one, the tables are
+ * refreshed); then the lower one's pull request is closed with a note pointing at the one it's in now, and its branch
+ * goes. Either is kept (and said) while nothing points at the remaining change yet, or a pull request is still on the
+ * lower branch, or GitHub won't delete it. Not the bottom change (nothing below it), nor one set aside or landed.
  */
-export function fold(ctx: Ctx, changeId: string): Promise<{ change: ChangeView; dropped: string; pullErrors?: PullError[] }> {
+export function fold(ctx: Ctx, changeId: string, into?: string): Promise<{ change: ChangeView; dropped: string; pullErrors?: PullError[] }> {
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo, appId } = ctx;
     const open = await store.openStackChanges(appId);
@@ -762,40 +771,48 @@ export function fold(ctx: Ctx, changeId: string): Promise<{ change: ChangeView; 
     const i = s.indexOf(upper);
     if (i === 0) throw new HttpError(409, `${upper.branch} is the stack's bottom change: there's nothing below it to fold it into`, "bottom");
     const lower = s[i - 1];
+    if (into && lower.id !== into) throw new HttpError(409, "the stack changed meanwhile (in another tab?): look at it again", "conflict");
     const heads = await Promise.all([lower, upper].map((x) => provider.branchHead(r, x.branch)));
     const off = [lower, upper].find((x, j) => heads[j] !== x.sha);
     if (off) throw new HttpError(409, `${off.branch} ${heads[[lower, upper].indexOf(off)] ? "was pushed to" : "is gone"} on GitHub: nothing was folded`, "moved");
     const base = i > 1 ? s[i - 2].branch : repo.default_branch;
+    const [lowerPull, upperPull] = await Promise.all([pullOf(ctx, lower), pullOf(ctx, upper)]);
     // Its pull request onto the lower one's base first (before that branch goes). Refused: nothing changes.
-    await retarget(ctx, upper, base);
-    const prompt = [lower.prompt || lower.title, upper.prompt || upper.title].join("\n\n");
-    await store.foldStackChange(lower, upper, id("stk"), prompt);
+    if (upperPull?.state === "open" && upperPull.base !== base) await provider.updatePull(r, upperPull.number, { base });
+    await store.foldStackChange(lower, upper, id("stk"), [lower.prompt || lower.title, upper.prompt || upper.title].join("\n\n"));
+    if (upperPull && !upperPull.merged && upper.pr_number !== upperPull.number) await store.setStackChangePull(upper.id, upperPull.number);
     const pullErrors: PullError[] = [];
-    let hadPull = false;
-    // The lower one's pull request: closed, with a note pointing at the one it's in now (opened by the refresh below
-    // if it had none).
-    try {
-      let lp = lower.pr_number ? await provider.getPull(r, lower.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e))) : null;
-      if (!lp || lp.head !== lower.branch || lp.state !== "open") lp = await provider.findPull(r, lower.branch) ?? lp;
-      if (lp?.state === "open") {
-        hadPull = true;
-        if (!upper.pr_number && !await provider.findPull(r, upper.branch)) await submitNow(ctx, upper.stack_id);
-        const up = (await store.openStackChanges(appId)).find((x) => x.id === upper.id)?.pr_number ?? (await provider.findPull(r, upper.branch))?.number ?? null;
-        await provider.commentPull(r, lp.number, `Folded into ${up ? `#${up}` : upper.branch} (Cresslet): ${upper.branch} now holds this change and the one that was above it.`);
-        await provider.updatePull(r, lp.number, { state: "closed" });
-      }
-    } catch (e) {
-      pullErrors.push({ change: lower.id, position: lower.position, error: `its pull request wasn't closed: ${why(e)}` });
-    }
-    // Its branch goes (only while at its change). A pull request still open on it is kept from closing: not deleted.
-    if (!pullErrors.length && await provider.branchHead(r, lower.branch).catch(() => null) === lower.sha) await provider.deleteBranch(r, lower.branch).catch(() => false);
-    // Tables: the stack's pull requests say what it is now.
+    // The stack's pull requests say what it is now (the remaining change gets one if the stack has any): once.
     const after = (await store.openStackChanges(appId)).filter((x) => x.stack_id === upper.stack_id);
-    if (hadPull || after.some((x) => x.pr_number)) {
+    if ((lowerPull?.state === "open") || upperPull || after.some((x) => x.pr_number)) {
       const sub = await submitNow(ctx, upper.stack_id).catch((e) => ({ pulls: [{ change: upper.id, position: lower.position, error: why(e) }] as Submitted[] }));
       for (const x of sub.pulls) if (x.error) pullErrors.push({ change: x.change, position: x.position, error: x.error });
     }
-    const now = after.find((x) => x.id === upper.id)!;
+    const now = (await store.openStackChanges(appId)).find((x) => x.id === upper.id)!;
+    // Where the remaining change's pull request is now (a base still on the lower branch keeps that branch).
+    const nowPull = now.pr_number ? await provider.getPull(r, now.pr_number).catch(() => null) : null;
+    const replaced = nowPull?.state === "open";
+    let keep = !!nowPull && nowPull.state === "open" && nowPull.base === lower.branch;
+    if (lowerPull?.state === "open") {
+      if (!replaced) {
+        keep = true;
+        pullErrors.push({ change: lower.id, position: lower.position, error: `#${lowerPull.number} is kept open (and ${lower.branch}): there's no open pull request for the change it's folded into yet` });
+      } else {
+        try {
+          await provider.commentPull(r, lowerPull.number, `Folded into #${nowPull!.number} (Cresslet): ${upper.branch} now holds this change and the one that was above it.`);
+          await provider.updatePull(r, lowerPull.number, { state: "closed" });
+        } catch (e) {
+          keep = true;
+          pullErrors.push({ change: lower.id, position: lower.position, error: `#${lowerPull.number} wasn't closed (${why(e)}): it and ${lower.branch} are kept` });
+        }
+      }
+    }
+    // Its branch goes, only while at its change and nothing above is still on it.
+    if (keep) {
+      if (!pullErrors.some((x) => x.change === lower.id)) pullErrors.push({ change: lower.id, position: lower.position, error: `${lower.branch} is kept: a pull request is still on it` });
+    } else if (await provider.branchHead(r, lower.branch).catch(() => null) !== lower.sha || !await provider.deleteBranch(r, lower.branch).catch(() => false)) {
+      pullErrors.push({ change: lower.id, position: lower.position, error: `${lower.branch} is kept (moved on GitHub, or GitHub didn't delete it): delete it there` });
+    }
     return { change: { ...view(now), github: "ok" }, dropped: lower.id, ...(pullErrors.length ? { pullErrors } : {}) };
   });
 }

@@ -816,6 +816,43 @@ test("stack: folding change 3 into 2 leaves a stack of two; its pull request tak
   assert.match(pr[0].body, /\| {2}\| 2 · Two \| #3 \|\n\| → \| 1 · One \| #1 \|/); // tables refreshed
 });
 
+test("stack: folding with changes set aside above: restored, they follow with no gap; a fold confirmed against another change below is refused", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  ok(await t.change(c3.branch, c3.sha, "Four", "4"));
+  await goBack(t.ctx, c3.change.id); // 4 set aside
+  await assert.rejects(fold(t.ctx, c3.change.id, c1.change.id), (e) => (e as HttpError).code === "conflict"); // 2 is below it
+  await fold(t.ctx, c3.change.id, c2.change.id);
+  await restore(t.ctx, c1.stack.id);
+  const [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((c) => [c.position, c.title]), [[1, "One"], [2, "Two"], [3, "Four"]]);
+  // Run again (a retry): it isn't folded one further down.
+  await assert.rejects(fold(t.ctx, c3.change.id, c2.change.id), (e) => (e as HttpError).code === "conflict");
+});
+
+test("stack: a pull request opened by hand from the upper branch is the one kept; with none to point at, the lower one isn't closed", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  await t.provider.createPull(t.ctx.r, { head: c2.branch, base: c1.branch, title: "by hand", body: "" });
+  const f = await fold(t.ctx, c2.change.id);
+  assert.deepEqual([f.change.pull, t.provider.pulls[0].base, t.provider.pulls[0].title], [1, "main", "One"]);
+  assert.equal(t.provider.refs.has(c1.branch), false);
+
+  // The lower one has a pull request; one can't be opened for the upper one: the lower one and its branch stay.
+  const d1 = ok(await t.change(f.change.branch, f.change.sha, "Three", "3"));
+  const d2 = ok(await t.change(d1.branch, d1.sha, "Four", "4"));
+  await t.provider.createPull(t.ctx.r, { head: d1.branch, base: f.change.branch, title: "Three", body: "" });
+  t.provider.refuse.add(d2.branch);
+  const g = await fold(t.ctx, d2.change.id);
+  assert.ok(g.pullErrors?.some((x) => /is kept open/.test(x.error)));
+  assert.deepEqual([t.provider.pulls.find((x) => x.head === d1.branch)?.state, t.provider.refs.has(d1.branch)], ["open", true]);
+});
+
 test("stack: folding a change with no pull request onto one that has one: it gets one on that base", async () => {
   await using t = await setup();
   const main = t.provider.refs.get("main")!;

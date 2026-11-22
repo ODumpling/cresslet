@@ -477,11 +477,12 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 const g = engine.current?.git;
                 if (!g) return;
                 if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
-                const below = stack.changes.find((c) => c.position === change.position - 1)!;
+                const below = stack.changes[stack.changes.indexOf(change) - 1];
+                if (!below) return;
                 if (!confirm(`Fold change ${change.position}, "${change.title}", into change ${below.position}, "${below.title}"?\n\n` +
                   `They're one change after it, titled "${below.title}" (both requests in its description). ${below.branch} and its pull request go; ${change.branch} takes its place. No commit changes.`)) return;
                 setStackBusy(true);
-                void g.fold(change).then(
+                void g.fold(change, below).then(
                   (r) => toast(`Folded into one change: ${r.change.position} · ${r.change.title}.${pullsSaid(r.pullErrors, "updated")}`, r.pullErrors?.length ? 15000 : 8000),
                   (e) => toast(`Not folded: ${errorMessage(e)}`, 10000),
                 ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));

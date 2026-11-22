@@ -1213,9 +1213,9 @@ export class Store implements RateHits {
         "UPDATE stack_changes SET position = ?, base_sha = ?, title = ?, prompt = ?, updated_at = ? WHERE id = ?",
         lower.position, lower.base_sha, lower.title, prompt, now, upper.id,
       );
-      // One at a time, lowest first: a position is never held twice.
+      // Those above (set aside too: they come back above it), one at a time, lowest first: a position is never held twice.
       const above = await this.db.all<{ id: string; position: number }>(
-        "SELECT id, position FROM stack_changes WHERE stack_id = ? AND state = 'open' AND position > ? ORDER BY position", upper.stack_id, upper.position,
+        "SELECT id, position FROM stack_changes WHERE stack_id = ? AND state IN ('open', 'set_aside') AND position > ? ORDER BY position", upper.stack_id, upper.position,
       );
       for (const x of above) await this.db.run("UPDATE stack_changes SET position = ?, updated_at = ? WHERE id = ?", x.position - 1, now, x.id);
     });
