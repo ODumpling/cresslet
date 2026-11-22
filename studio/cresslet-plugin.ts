@@ -186,7 +186,9 @@ export async function projectSources(c: Container): Promise<{ path: string; data
 
 /** Project source files, comparable (what was committed vs what's uploaded). */
 export const sourceDigest = (files: { path: string; data: string; encoding?: string }[]) =>
-  JSON.stringify([...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((f) => [f.path, f.encoding ?? "utf8", f.data]));
+  // By bytes: the server and the workspace may each send a file as UTF-8 text or base64.
+  JSON.stringify([...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .map((f) => [f.path, f.encoding === "base64" ? f.data : toBase64(enc.encode(f.data))]));
 
 /** Never in a repository or deploy source (as NOT_SOURCE): a pull or merge leaves these local files alone. */
 export const localOnly = (rel: string) => NOT_SOURCE.test(rel);

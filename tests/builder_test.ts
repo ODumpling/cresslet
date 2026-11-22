@@ -538,8 +538,9 @@ test("deploy on a linked app: commit the branch, merge it into main, build main 
 
   // main had commits of its own: its merged files are loaded before the build.
   const moved = fakeGit({ onDefault: false, merge: { mergedSha: "e".repeat(40), fastForward: false, treeChanged: true, files: [{ path: "NOTES.md", data: "up" }] } });
-  await moved.git.prepareDeploy();
+  const movedProv = await moved.git.prepareDeploy();
   assert.deepEqual(moved.hydrated, [[{ path: "NOTES.md", data: "up" }]]);
+  assert.deepEqual(movedProv.files, [{ path: "NOTES.md", data: "up" }]); // the merge's own files, not the workspace after npm install
 
   // On main already: just the commit.
   const main = fakeGit();
@@ -677,4 +678,10 @@ test("cresslet deploy on a linked app: the upload is refused if the source isn't
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("source digests compare bytes, whichever way a file was sent", async () => {
+  const { sourceDigest } = await import("../studio/cresslet-plugin.ts" as string);
+  assert.equal(sourceDigest([{ path: "a", data: "héllo" }]), sourceDigest([{ path: "a", data: Buffer.from("héllo").toString("base64"), encoding: "base64" }]));
+  assert.notEqual(sourceDigest([{ path: "a", data: "x" }]), sourceDigest([{ path: "a", data: "y" }]));
 });

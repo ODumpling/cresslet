@@ -288,7 +288,8 @@ export class Engine {
       const rel = filename?.replace(`${wd}/`, "");
       if (!(rel && ((this.quiet.get(rel) ?? 0) > Date.now() || localOnly(rel)))) {
         this.changed();
-        if (!rel || (this.hand.get(rel) ?? 0) <= Date.now()) this.commandRev++;
+        // A command the AI builder runs (not a terminal command, the file tree, or the editor).
+        if (this.cb.builderRunning() && (!rel || (this.hand.get(rel) ?? 0) <= Date.now())) this.commandRev++;
       }
       clearTimeout(this.treeTimer);
       this.treeTimer = setTimeout(() => {
@@ -496,7 +497,8 @@ export class Engine {
       if (exists) {
         const now = await c.fs.readFile(path, typeof data === "string" ? "utf8" : undefined).catch(() => null);
         if (dotenv.test(f.path) && typeof now === "string" && typeof data === "string") {
-          data = [data.replace(/\n*$/, ""), ...privateLines(now)].filter(Boolean).join("\n") + "\n";
+          // Its own lines first: incoming public entries come last, so they win over any stale one among them.
+          data = [...privateLines(now), data.replace(/\n*$/, "")].filter(Boolean).join("\n") + "\n";
         }
         if (typeof data === "string" ? now === data : now instanceof Uint8Array && now.length === data.length && now.every((b, i) => b === (data as Uint8Array)[i])) continue;
       }
@@ -510,18 +512,11 @@ export class Engine {
     if (this.current) await this.openFile(this.current);
     if (deps || this.installFailed) {
       this.term.writeln("\x1b[36mdependencies changed: npm install\x1b[0m");
-      // Its lockfile rewrite isn't the user's change either.
-      const until = setInterval(() => quiet("package-lock.json"), 1000);
-      quiet("package-lock.json");
-      try {
-        const p = await c.spawn("jsh", ["-c", "npm install"], { cwd: wd });
-        void p.output.pipeTo(new WritableStream({ write: (d) => this.term.write(d) })).catch(() => {});
-        await p.input.close().catch(() => {});
-        this.installFailed = await p.exit !== 0; // tried again on the next pull, even if nothing changes then
-      } finally {
-        clearInterval(until);
-        quiet("package-lock.json");
-      }
+      // A lockfile it rewrites is a change to commit (it differs from the commit loaded).
+      const p = await c.spawn("jsh", ["-c", "npm install"], { cwd: wd });
+      void p.output.pipeTo(new WritableStream({ write: (d) => this.term.write(d) })).catch(() => {});
+      await p.input.close().catch(() => {});
+      this.installFailed = await p.exit !== 0; // tried again on the next pull, even if nothing changes then
       if (this.installFailed) throw Object.assign(new Error("npm install failed (see the terminal)"), { filesWritten: true });
     }
   }

@@ -128,7 +128,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     const rev = revision();
     const t = await o.api<{ sha: string; files: GitFile[] }>(path(`/tree?ref=${encodeURIComponent(branch)}`));
     unchangedSince(rev, `loading ${branch}`);
-    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: false, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
+    // Edited while it loaded (npm install, say): those are changes, kept dirty.
+    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
     try {
       await o.hydrate(t.files);
     } catch (e) {
@@ -136,7 +137,6 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       throw e;
     }
     await done();
-    if (revision() !== rev) await set({ dirty: true }); // edited while it loaded (npm install, say): those are changes
     return t.sha;
   }
 
@@ -263,14 +263,15 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
           await o.hydrate(m.files);
         } catch (e) {
           // The files are main's now (only installing failed): the workspace is on main, at the merge.
-          if ((e as { filesWritten?: boolean }).filesWritten) await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: false });
+          if ((e as { filesWritten?: boolean }).filesWritten) await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: revision() !== rev });
           throw e;
         }
       }
       await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: revision() !== rev });
       log(`merged into ${s.defaultBranch} @ ${m.mergedSha.slice(0, 7)}${m.fastForward ? " (fast-forward)" : ""}`);
-      // The files built must be these (the plugin checks the upload): what was synced, or the merge just loaded.
-      const files = m.treeChanged ? await o.files() : synced.files;
+      // The files built must be the commit's (the plugin checks the upload): what was synced, or the merge's own. If
+      // npm install rewrote its lockfile, they aren't: that deploy stops, and the change is pushed with the next one.
+      const files = m.treeChanged ? m.files! : synced.files;
       unchangedSince(rev, "deploying");
       return { sha: m.mergedSha, branch: s.defaultBranch, repo, files };
     }),
