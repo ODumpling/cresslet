@@ -173,6 +173,10 @@ export function orgRoutes(
       await keepAdmin(o, target);
       await store.removeOrgMember(o.id, target);
       await store.reassignOrgApps(o.id, target);
+      // Nobody left to hand them to: they'd have no owner here, and be theirs again on an older server.
+      if (await store.orgAppsHeldBy(o.id, target)) {
+        throw new HttpError(409, `${o.name} has nobody else to take over the apps they hold: add someone first`, "no_successor");
+      }
     });
     console.log(`cresslet: ${target} ${m.self ? "left" : "removed from"} org ${o.name}${m.self ? "" : ` by ${m.who}`}`);
     return c.json({ removed: target });
@@ -186,7 +190,7 @@ export function orgRoutes(
     });
   });
 
-  // `admin`: the email of an existing account to make its first admin.
+  // `admin`: the email of an existing account to make its first admin (required: an org always has one).
   app.post("/admin/orgs", async (c) => {
     const sa = requireSiteAdmin(c);
     const input = await body<{ name?: unknown; title?: unknown; admin?: unknown } | null>(c) ?? {};
@@ -195,20 +199,18 @@ export function orgRoutes(
     const title = typeof input.title === "string" && input.title.trim() ? input.title.trim() : null;
     if (input.title != null && typeof input.title !== "string") throw new HttpError(400, "title must be a string");
     if (title && title.length > 100) throw new HttpError(400, "title must be at most 100 characters");
-    let admin: Account | undefined;
-    if (input.admin != null) {
-      const email = typeof input.admin === "string" ? input.admin.trim().toLowerCase() : "";
-      admin = email ? await store.accountByEmail(email) : undefined;
-      if (!admin) throw new HttpError(404, `no account has the email ${email || String(input.admin)}: invite them first`, "no_account");
-    }
+    const email = typeof input.admin === "string" ? input.admin.trim().toLowerCase() : "";
+    if (!email) throw new HttpError(400, "admin required: the email of the organization's first admin");
+    const admin = await store.accountByEmail(email);
+    if (!admin) throw new HttpError(404, `no account has the email ${email}: invite them first`, "no_account");
     const o = await store.serialized("cresslet:create-org", async () => {
       await stillSiteAdmin(cfg, store, c);
       if (await store.orgByName(name)) throw new HttpError(409, `an organization is already called ${name}`, "conflict");
       const o = await store.createOrg(name, title, sa.id);
-      if (admin) await store.setOrgMember(o.id, admin.id, "admin");
+      await store.setOrgMember(o.id, admin.id, "admin");
       return o;
     });
-    console.log(`cresslet: org ${o.name} created by ${sa.who}${admin ? `, admin ${admin.email}` : ""}`);
+    console.log(`cresslet: org ${o.name} created by ${sa.who}, admin ${admin.email}`);
     return c.json({ org: orgView(o) }, 201);
   });
 
@@ -255,6 +257,7 @@ export function orgRoutes(
       if (!(await store.tokens(acct.id)).some((x) => x.id === c.get("token")!.id)) throw new HttpError(401, "invalid token", "unauthorized");
       if ((a.org_id ?? null) === (to?.id ?? null)) return a;
       if (to && !await store.orgRole(to.id, acct.id)) throw new HttpError(404, `organization not found: ${to.name}`, "not_found");
+      if (to && !await store.orgAdminCount(to.id)) throw new HttpError(409, `${to.name} has no enabled admin to own it`, "no_admin");
       if (!to) await checkQuota(acct, a.kind);
       await store.setAppOrg(a.id, to?.id ?? null, acct.id);
       return (await store.appById(a.id))!;

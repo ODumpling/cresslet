@@ -128,11 +128,12 @@ test("organizations: site admins create them; admins manage members; org apps be
     const dave = await t.account("dave@b.co");
 
     // Created by site admins only.
-    assert.equal((await t.send("POST", "/v1/admin/orgs", alice.token, { name: "acme" })).status, 403);
-    assert.equal((await t.send("POST", "/v1/admin/orgs", boss.token, { name: "Bad Name" })).status, 400);
+    assert.equal((await t.send("POST", "/v1/admin/orgs", alice.token, { name: "acme", admin: "alice@b.co" })).status, 403);
+    assert.equal((await t.send("POST", "/v1/admin/orgs", boss.token, { name: "Bad Name", admin: "alice@b.co" })).status, 400);
     assert.equal((await t.send("POST", "/v1/admin/orgs", boss.token, { name: "acme", admin: "nobody@b.co" })).status, 404);
     assert.equal((await t.send("POST", "/v1/admin/orgs", boss.token, { name: "acme", title: "Acme", admin: "alice@b.co" })).status, 201);
-    assert.equal((await t.send("POST", "/v1/admin/orgs", boss.token, { name: "acme" })).status, 409);
+    assert.equal((await t.send("POST", "/v1/admin/orgs", boss.token, { name: "acme", admin: "alice@b.co" })).status, 409);
+    assert.equal((await t.send("POST", "/v1/admin/orgs", boss.token, { name: "solo" })).status, 400, "a first admin is required");
     assert.deepEqual((await t.send("GET", "/v1/orgs", alice.token)).body.orgs.map((o: { name: string; role: string }) => [o.name, o.role]), [["acme", "admin"]]);
 
     // Members: existing accounts, added by an org admin with a full-access token.
@@ -197,6 +198,18 @@ test("organizations: site admins create them; admins manage members; org apps be
     assert.equal((await t.send("GET", "/v1/admin/orgs", boss.token)).body.orgs[0].apps, 0);
     assert.equal((await t.send("DELETE", "/v1/admin/orgs/acme", boss.token)).status, 200);
     assert.deepEqual((await t.send("GET", "/v1/orgs", carol.token)).body.orgs, []);
+
+    // An org whose only admin is disabled: its apps go to a member, who then can't leave holding them, and no
+    // app moves in until it has an enabled admin again.
+    assert.equal((await t.send("POST", "/v1/admin/orgs", boss.token, { name: "beta", admin: "dave@b.co" })).status, 201);
+    assert.equal((await t.send("POST", "/v1/orgs/beta/members", dave.token, { email: "bob@b.co" })).status, 201);
+    assert.equal((await move(dave.token, "daveapp", "beta")).status, 200);
+    await t.send("PATCH", `/v1/admin/accounts/${dave.id}`, boss.token, { disabled: true });
+    assert.equal((await t.srv.store.appByName("daveapp"))!.account_id, bob.id);
+    assert.equal((await t.send("DELETE", `/v1/orgs/beta/members/${bob.id}`, bob.token)).body.error, "no_successor");
+    assert.equal(await access(bob.token, "daveapp"), "admin", "still a member");
+    assert.equal((await t.deploy(bob.token, "bob2")).status, 201);
+    assert.equal((await move(bob.token, "bob2", "beta")).body.error, "no_admin");
   } finally {
     await t.srv.close();
     await rm(t.dataDir, { recursive: true, force: true });

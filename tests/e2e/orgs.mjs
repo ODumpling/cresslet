@@ -58,7 +58,7 @@ try {
   await page.waitForURL(/#\/admin-orgs$/);
   await page.locator("main:not([hidden])").getByLabel("Name", { exact: true }).fill(`acme-${stamp}`);
   await page.locator("main:not([hidden])").getByLabel("Display name (optional)").fill(`Acme ${stamp}`);
-  await page.locator("main:not([hidden])").getByLabel("First admin (optional)").fill(devEmail);
+  await page.locator("main:not([hidden])").getByLabel("First admin").fill(devEmail);
   await page.getByRole("button", { name: "Create organization" }).click();
   await page.getByRole("link", { name: `Acme ${stamp}` }).waitFor();
   await page.screenshot({ path: `${out}/admin-orgs.png`, fullPage: true });

@@ -1457,7 +1457,7 @@ async function renderAdminOrgs() {
   const name = el("input", { className: "input mono", id: "org-name", required: true, maxLength: 40, pattern: "[a-z0-9](?:[a-z0-9]|-(?!-))*[a-z0-9]|[a-z0-9]", autocomplete: "off", spellcheck: false, placeholder: "acme" });
   name.setAttribute("aria-describedby", "org-name-hint");
   const title = el("input", { className: "input", id: "org-title", maxLength: 100, autocomplete: "off", placeholder: "Acme Inc." });
-  const admin = el("input", { className: "input", id: "org-admin", type: "email", maxLength: 254, autocomplete: "off", spellcheck: false, placeholder: "name@example.com" });
+  const admin = el("input", { className: "input", id: "org-admin", type: "email", required: true, maxLength: 254, autocomplete: "off", spellcheck: false, placeholder: "name@example.com" });
   admin.setAttribute("aria-describedby", "org-admin-hint");
   const err = formError();
   const submit = el("button", { className: "btn primary", type: "submit" }, icon("plus"), "Create organization");
@@ -1465,7 +1465,7 @@ async function renderAdminOrgs() {
     el("h2", { textContent: "New organization" }),
     field("Name", name, "Lowercase letters, digits and single dashes, up to 40."),
     field("Display name (optional)", title),
-    field("First admin (optional)", admin, "The email of an existing account. Admins add and remove members; invite new people on the Users page first."),
+    field("First admin", admin, "The email of an existing account. Admins add and remove members; invite new people on the Users page first."),
     err,
     el("div", { className: "row start" }, submit));
   form.addEventListener("input", () => showError(err, ""));
@@ -1477,7 +1477,7 @@ async function renderAdminOrgs() {
     try {
       const r = await api("/v1/admin/orgs", {
         method: "POST",
-        body: JSON.stringify({ name: name.value.trim(), ...(title.value.trim() ? { title: title.value.trim() } : {}), ...(admin.value.trim() ? { admin: admin.value.trim() } : {}) }),
+        body: JSON.stringify({ name: name.value.trim(), ...(title.value.trim() ? { title: title.value.trim() } : {}), admin: admin.value.trim() }),
       });
       toast(`Created ${r.org.name}`);
       if (gen === routeGen) again(() => $("org-name"));

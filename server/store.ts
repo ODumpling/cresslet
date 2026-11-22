@@ -327,7 +327,10 @@ export class Store implements RateHits {
       );
       await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
       await this.db.run("DELETE FROM page_sessions WHERE account_id = ?", accountId);
-      for (const o of await this.orgsFor(accountId)) await this.reassignOrgApps(o.id, accountId);
+      // Each organization's lock (in a fixed order), as member changes take: they can't interleave with this.
+      const orgs = (await this.orgsFor(accountId)).map((o) => o.id).sort();
+      for (const o of orgs) await this.db.lock(orgLock(o));
+      for (const o of orgs) await this.reassignOrgApps(o, accountId);
       return r.changes > 0;
     });
   }
@@ -867,6 +870,10 @@ export class Store implements RateHits {
       orgId, fromAccount,
     );
     if (to) await this.db.run("UPDATE apps SET account_id = ? WHERE org_id = ? AND account_id = ?", to.account_id, orgId, fromAccount);
+  }
+  /** Apps and artifacts in the organization (deleted ones included) whose `account_id` is this account. */
+  async orgAppsHeldBy(orgId: string, accountId: string): Promise<number> {
+    return (await this.db.get<{ n: number }>("SELECT count(*) AS n FROM apps WHERE org_id = ? AND account_id = ?", orgId, accountId))!.n;
   }
   /** Apps and artifacts in the organization, deleted ones included. */
   async orgAppCount(orgId: string): Promise<number> {

@@ -31,7 +31,7 @@ Account tokens have a **role** and optionally a list of **apps** (403 `forbidden
 - org `admin`: owner access to every org app (delete, move out, everything).
 - org `member`: collaborator `admin` access to every org app (deploy, roll back, secrets, domains, sharing; not deleting).
 - A collaborator role on the app adds to that; the app's `account_id` (who created it or last held it) no longer counts on its own. Members who leave or are removed (or disabled) lose access, and the apps they held are handed to an enabled org admin (else member), so a rolled-back server (which ignores organizations and treats `account_id` as the owner) keeps them with the org. Org apps don't count toward anyone's app limit; moving one out makes it the caller's personal app, within their limit.
-- Site admins manage organizations but get no access to their apps unless they're members. An organization with apps (deleted ones included) can't be deleted: move them out first.
+- Site admins manage organizations but get no access to their apps unless they're members. An organization with apps (deleted ones included) can't be deleted: move them out first (a deleted one: restore it, or purge it on the Sites page). A member who holds org apps can't be removed while there's nobody (enabled) to hand them to (409 `no_successor`), and apps can't move into an organization with no enabled admin (409 `no_admin`).
 - Not covered: deploy keys stay valid when an app changes hands (whoever holds the key keeps full access to that app); collaborators stay too.
 
 Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin` over all apps. Tokens issued before named tokens, and login tokens, are `admin` over all apps. `GET /v1/me` works with any token. Deploy keys (`clv_app_…`) are unchanged: full access to their one app.
@@ -110,7 +110,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | PUT | `/v1/orgs/:org/members/:accountId` | org admin or site admin: `{role}`. 400 `last_admin` demoting the last enabled admin |
 | DELETE | `/v1/orgs/:org/members/:accountId` | org admin or site admin; your own id: leave (full-access token). 400 `last_admin` as above. The apps they held go to an enabled org admin |
 | GET | `/v1/admin/orgs` | **site admin**: `{orgs: [{id, name, title, createdAt, members, apps}]}` |
-| POST | `/v1/admin/orgs` | **site admin**: `{name, title?, admin?: email}` → `{org}` (201). `name`: 1-40 of a-z, 0-9, single dashes. 404 `no_account` for an unknown admin email, 409 if taken |
+| POST | `/v1/admin/orgs` | **site admin**: `{name, title?, admin: email}` → `{org}` (201); `admin`: its first admin, an existing account. `name`: 1-40 of a-z, 0-9, single dashes. 404 `no_account` for an unknown admin email, 409 if taken |
 | DELETE | `/v1/admin/orgs/:org` | **site admin**: delete an empty organization; 409 `not_empty` while it has apps or artifacts |
 | GET | `/v1/me/credits` | token with `read` or more over the whole account: `{enabled: false}`, or `{enabled: true, available, balance, monthly: {allowance, used, remaining, resetsAt}, creditsPerUsd, history: [{at, kind: usage\|grant, credits, model?, inputTokens?, outputTokens?, cacheReadTokens?, cacheWriteTokens?, estimated?, note?}]}` (last 50) |
 | POST | `/v1/ai/v1/messages` | `deploy` token over the whole account: a streamed Anthropic Messages request, on [AI credits](#ai-credits) |
