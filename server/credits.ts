@@ -220,19 +220,32 @@ export function aiRoutes(
     return { balance: w.balance, allowance, used: w.periodUsed, monthly, available: w.balance + monthly };
   };
 
-  // The account's credits and recent usage (any whole-account token).
+  // The account's credits and a page of its usage, newest first (any whole-account token).
   app.get("/me/credits", async (c) => {
     const acct = accountWide(c, "read");
     const ai = cfg.ai;
     if (!ai) return c.json({ enabled: false });
+    const int = (k: string, def: number, min: number, max: number) => {
+      const v = c.req.query(k)?.trim();
+      const n = v ? Math.trunc(Number(v)) : def;
+      return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : def;
+    };
+    const limit = int("limit", 50, 1, 100);
+    const offset = int("offset", 0, 0, Number.MAX_SAFE_INTEGER);
+    // Paging from the same newest entry (upTo: the last response's historyUpTo) keeps pages put while use is added.
+    const upTo = Number.isFinite(Number(c.req.query("upTo")?.trim() || "x")) ? int("upTo", 0, 0, Number.MAX_SAFE_INTEGER) : null;
     const w = await wallet(ai, acct);
+    const n = await store.aiLedgerCount(acct.id, upTo);
+    const top = upTo ?? n.last;
     return c.json({
       enabled: true,
       creditsPerUsd: ai.creditsPerUsd,
       available: credits(w.available),
       balance: credits(w.balance),
       monthly: { allowance: credits(w.allowance), used: credits(w.used), remaining: credits(w.monthly), resetsAt: nextPeriod() },
-      history: (await store.aiLedger(acct.id, 50)).map((r) => ledgerEntry(r)),
+      history: (await store.aiLedger(acct.id, limit, offset, top)).map((r) => ledgerEntry(r)),
+      historyTotal: n.count,
+      historyUpTo: top,
     });
   });
 

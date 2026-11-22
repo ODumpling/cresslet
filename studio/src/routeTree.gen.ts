@@ -25,6 +25,10 @@ import { Route as AppsNameRouteImport } from './routes/apps.$name'
 import { Route as OrgsIndexRouteImport } from './routes/orgs.index'
 import { Route as OrgsNameRouteImport } from './routes/orgs.$name'
 import { Route as PIdRouteImport } from './routes/p.$id'
+import { Route as SettingsIndexRouteImport } from './routes/settings.index'
+import { Route as SettingsArtifactsRouteImport } from './routes/settings.artifacts'
+import { Route as SettingsCreditsRouteImport } from './routes/settings.credits'
+import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
 import { Route as ShareNameRouteImport } from './routes/share.$name'
 import { Route as ViewNameRouteImport } from './routes/view.$name'
 import { Route as AppsNameIndexRouteImport } from './routes/apps.$name.index'
@@ -112,6 +116,26 @@ const PIdRoute = PIdRouteImport.update({
   path: '/p/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsIndexRoute = SettingsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsArtifactsRoute = SettingsArtifactsRouteImport.update({
+  id: '/artifacts',
+  path: '/artifacts',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsCreditsRoute = SettingsCreditsRouteImport.update({
+  id: '/credits',
+  path: '/credits',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsTokensRoute = SettingsTokensRouteImport.update({
+  id: '/tokens',
+  path: '/tokens',
+  getParentRoute: () => SettingsRoute,
+} as any)
 const ShareNameRoute = ShareNameRouteImport.update({
   id: '/share/$name',
   path: '/share/$name',
@@ -152,17 +176,21 @@ export interface FileRoutesByFullPath {
   '/artifacts': typeof ArtifactsRoute
   '/cli': typeof CliRoute
   '/pages': typeof PagesRoute
-  '/settings': typeof SettingsRoute
+  '/settings': typeof SettingsRouteWithChildren
   '/admin-credits/$id': typeof AdminCreditsIdRoute
   '/admin/$name': typeof AdminNameRoute
   '/apps/$name': typeof AppsNameRouteWithChildren
   '/orgs/$name': typeof OrgsNameRoute
   '/p/$id': typeof PIdRoute
+  '/settings/artifacts': typeof SettingsArtifactsRoute
+  '/settings/credits': typeof SettingsCreditsRoute
+  '/settings/tokens': typeof SettingsTokensRoute
   '/share/$name': typeof ShareNameRoute
   '/view/$name': typeof ViewNameRoute
   '/admin-credits/': typeof AdminCreditsIndexRoute
   '/admin/': typeof AdminIndexRoute
   '/orgs/': typeof OrgsIndexRoute
+  '/settings/': typeof SettingsIndexRoute
   '/apps/$name/logs': typeof AppsNameLogsRoute
   '/apps/$name/secrets': typeof AppsNameSecretsRoute
   '/apps/$name/': typeof AppsNameIndexRoute
@@ -176,16 +204,19 @@ export interface FileRoutesByTo {
   '/artifacts': typeof ArtifactsRoute
   '/cli': typeof CliRoute
   '/pages': typeof PagesRoute
-  '/settings': typeof SettingsRoute
   '/admin-credits/$id': typeof AdminCreditsIdRoute
   '/admin/$name': typeof AdminNameRoute
   '/orgs/$name': typeof OrgsNameRoute
   '/p/$id': typeof PIdRoute
+  '/settings/artifacts': typeof SettingsArtifactsRoute
+  '/settings/credits': typeof SettingsCreditsRoute
+  '/settings/tokens': typeof SettingsTokensRoute
   '/share/$name': typeof ShareNameRoute
   '/view/$name': typeof ViewNameRoute
   '/admin-credits': typeof AdminCreditsIndexRoute
   '/admin': typeof AdminIndexRoute
   '/orgs': typeof OrgsIndexRoute
+  '/settings': typeof SettingsIndexRoute
   '/apps/$name/logs': typeof AppsNameLogsRoute
   '/apps/$name/secrets': typeof AppsNameSecretsRoute
   '/apps/$name': typeof AppsNameIndexRoute
@@ -200,17 +231,21 @@ export interface FileRoutesById {
   '/artifacts': typeof ArtifactsRoute
   '/cli': typeof CliRoute
   '/pages': typeof PagesRoute
-  '/settings': typeof SettingsRoute
+  '/settings': typeof SettingsRouteWithChildren
   '/admin-credits/$id': typeof AdminCreditsIdRoute
   '/admin/$name': typeof AdminNameRoute
   '/apps/$name': typeof AppsNameRouteWithChildren
   '/orgs/$name': typeof OrgsNameRoute
   '/p/$id': typeof PIdRoute
+  '/settings/artifacts': typeof SettingsArtifactsRoute
+  '/settings/credits': typeof SettingsCreditsRoute
+  '/settings/tokens': typeof SettingsTokensRoute
   '/share/$name': typeof ShareNameRoute
   '/view/$name': typeof ViewNameRoute
   '/admin-credits/': typeof AdminCreditsIndexRoute
   '/admin/': typeof AdminIndexRoute
   '/orgs/': typeof OrgsIndexRoute
+  '/settings/': typeof SettingsIndexRoute
   '/apps/$name/logs': typeof AppsNameLogsRoute
   '/apps/$name/secrets': typeof AppsNameSecretsRoute
   '/apps/$name/': typeof AppsNameIndexRoute
@@ -232,11 +267,15 @@ export interface FileRouteTypes {
     | '/apps/$name'
     | '/orgs/$name'
     | '/p/$id'
+    | '/settings/artifacts'
+    | '/settings/credits'
+    | '/settings/tokens'
     | '/share/$name'
     | '/view/$name'
     | '/admin-credits/'
     | '/admin/'
     | '/orgs/'
+    | '/settings/'
     | '/apps/$name/logs'
     | '/apps/$name/secrets'
     | '/apps/$name/'
@@ -250,16 +289,19 @@ export interface FileRouteTypes {
     | '/artifacts'
     | '/cli'
     | '/pages'
-    | '/settings'
     | '/admin-credits/$id'
     | '/admin/$name'
     | '/orgs/$name'
     | '/p/$id'
+    | '/settings/artifacts'
+    | '/settings/credits'
+    | '/settings/tokens'
     | '/share/$name'
     | '/view/$name'
     | '/admin-credits'
     | '/admin'
     | '/orgs'
+    | '/settings'
     | '/apps/$name/logs'
     | '/apps/$name/secrets'
     | '/apps/$name'
@@ -279,11 +321,15 @@ export interface FileRouteTypes {
     | '/apps/$name'
     | '/orgs/$name'
     | '/p/$id'
+    | '/settings/artifacts'
+    | '/settings/credits'
+    | '/settings/tokens'
     | '/share/$name'
     | '/view/$name'
     | '/admin-credits/'
     | '/admin/'
     | '/orgs/'
+    | '/settings/'
     | '/apps/$name/logs'
     | '/apps/$name/secrets'
     | '/apps/$name/'
@@ -298,7 +344,7 @@ export interface RootRouteChildren {
   ArtifactsRoute: typeof ArtifactsRoute
   CliRoute: typeof CliRoute
   PagesRoute: typeof PagesRoute
-  SettingsRoute: typeof SettingsRoute
+  SettingsRoute: typeof SettingsRouteWithChildren
   AdminCreditsIdRoute: typeof AdminCreditsIdRoute
   AdminNameRoute: typeof AdminNameRoute
   AppsNameRoute: typeof AppsNameRouteWithChildren
@@ -425,6 +471,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings/': {
+      id: '/settings/'
+      path: '/'
+      fullPath: '/settings/'
+      preLoaderRoute: typeof SettingsIndexRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/artifacts': {
+      id: '/settings/artifacts'
+      path: '/artifacts'
+      fullPath: '/settings/artifacts'
+      preLoaderRoute: typeof SettingsArtifactsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/credits': {
+      id: '/settings/credits'
+      path: '/credits'
+      fullPath: '/settings/credits'
+      preLoaderRoute: typeof SettingsCreditsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/tokens': {
+      id: '/settings/tokens'
+      path: '/tokens'
+      fullPath: '/settings/tokens'
+      preLoaderRoute: typeof SettingsTokensRouteImport
+      parentRoute: typeof SettingsRoute
+    }
     '/share/$name': {
       id: '/share/$name'
       path: '/share/$name'
@@ -470,6 +544,24 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface SettingsRouteChildren {
+  SettingsArtifactsRoute: typeof SettingsArtifactsRoute
+  SettingsCreditsRoute: typeof SettingsCreditsRoute
+  SettingsTokensRoute: typeof SettingsTokensRoute
+  SettingsIndexRoute: typeof SettingsIndexRoute
+}
+
+const SettingsRouteChildren: SettingsRouteChildren = {
+  SettingsArtifactsRoute: SettingsArtifactsRoute,
+  SettingsCreditsRoute: SettingsCreditsRoute,
+  SettingsTokensRoute: SettingsTokensRoute,
+  SettingsIndexRoute: SettingsIndexRoute,
+}
+
+const SettingsRouteWithChildren = SettingsRoute._addFileChildren(
+  SettingsRouteChildren,
+)
+
 interface AppsNameRouteChildren {
   AppsNameLogsRoute: typeof AppsNameLogsRoute
   AppsNameSecretsRoute: typeof AppsNameSecretsRoute
@@ -497,7 +589,7 @@ const rootRouteChildren: RootRouteChildren = {
   ArtifactsRoute: ArtifactsRoute,
   CliRoute: CliRoute,
   PagesRoute: PagesRoute,
-  SettingsRoute: SettingsRoute,
+  SettingsRoute: SettingsRouteWithChildren,
   AdminCreditsIdRoute: AdminCreditsIdRoute,
   AdminNameRoute: AdminNameRoute,
   AppsNameRoute: AppsNameRouteWithChildren,

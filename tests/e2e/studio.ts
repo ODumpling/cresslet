@@ -181,7 +181,7 @@ async function settings() {
   s.on("dialog", (d) => d.accept());
   await s.goto(base + "/");
   await s.evaluate(([t, e]) => (localStorage.setItem("cresslet.token", t), localStorage.setItem("cresslet.email", e)), [root, email]);
-  await s.goto(base + "/settings");
+  await s.goto(base + "/settings/tokens");
   const tokens = s.locator("#tokens");
   await tokens.getByText("Operator-issued").waitFor({ timeout: 10000 });
   await tokens.getByText("this browser").waitFor();

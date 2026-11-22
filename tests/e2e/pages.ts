@@ -38,7 +38,7 @@ const as = async (token: string, viewport?: { width: number; height: number }) =
 try {
   // Settings: defaults start at the server's; save link-only, kept 7 days.
   const o = await as(owner.token);
-  await o.goto(base + "/settings");
+  await o.goto(base + "/settings/artifacts");
   await o.getByLabel("Who can open new artifacts").waitFor();
   await o.waitForFunction(() => document.getElementById("def-server")!.textContent !== "—");
   assert(await o.getByLabel("Who can open new artifacts").inputValue() === "private", "server default visibility");
@@ -193,7 +193,7 @@ try {
   await narrow.goto(base + "/pages");
   await narrow.getByRole("heading", { name: "Artifacts", exact: true }).waitFor();
   await narrow.getByLabel("Who can open report").waitFor();
-  for (const path of ["/", "/pages", "/settings"]) {
+  for (const path of ["/", "/pages", "/settings", "/settings/artifacts"]) {
     await narrow.goto(base + path);
     await narrow.waitForTimeout(300);
     const over = await narrow.evaluate(() => document.documentElement.scrollWidth - innerWidth);

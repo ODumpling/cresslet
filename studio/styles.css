@@ -816,7 +816,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 }
 @media (forced-colors: active) {
   .btn, .icon-btn, .card, .tab, .seg button, .account, .pill, .status, .nav a, .tree li > button { border: 1px solid ButtonText; }
-  .nav a[aria-current="page"], .tab[aria-selected="true"], .seg button[aria-pressed="true"], .tree li > button[aria-current="true"] {
+  .nav a[aria-current="page"], .site-tab[aria-current="page"], .tab[aria-selected="true"], .seg button[aria-pressed="true"], .tree li > button[aria-current="true"] {
     forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight;
   }
   .dot, .status-dot, .eyebrow-dot { forced-color-adjust: none; background: CanvasText; }

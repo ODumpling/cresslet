@@ -135,7 +135,7 @@ function Browse({ sel, tables }: { sel: Table; tables: API.DbTables }) {
     setOffset(to);
   };
 
-  const p = page.data;
+  const p = page.error ? undefined : page.data; // a failed page: no pager (Refresh retries), as before useLoad kept data
   const last = p ? Math.min(p.offset + p.rows.length, sel.count) : 0;
   return (
     <div className="panel">

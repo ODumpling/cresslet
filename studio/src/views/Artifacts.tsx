@@ -484,7 +484,7 @@ function NewArtifactDialog({ ref, reload }: { ref: Ref<DialogHandle>; reload: ()
             <select className="input" id="page-retention" aria-describedby="page-retention-hint" value={retention} onChange={(e) => setRetention(e.currentTarget.value)}>
               {keepOptions(keepDays).map((v) => <option key={v} value={v}>{keepText(keepParse(v))}</option>)}
             </select>
-            <p className="muted small" id="page-retention-hint">Counted from each deploy or change. Defaults are in <Link to="/settings">Settings</Link>.</p>
+            <p className="muted small" id="page-retention-hint">Counted from each deploy or change. Defaults are in <Link to="/settings/artifacts">Settings → Artifact defaults</Link>.</p>
           </div>
         </div>
         <p className="error small" id="page-error" role="alert" hidden={!error}>{error}</p>
