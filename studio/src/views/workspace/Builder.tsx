@@ -70,6 +70,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
     approved: false, stopped: false, busy: false, locked,
     bubble: null as number | null, step: null as number | null,
     replied: "", failed: "", id: 0, stick: false,
+    gone: false, // unmounted (the user left the project): no more UI updates
   }).current;
   r.locked = locked;
   const [tools] = useState(() => createTools(c, { devLog, onChange, paused: () => r.approvals.size > 0 }));
@@ -99,6 +100,8 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
   // Leaving the project: the conversation stops with it (no more requests, tools or credits spent), and a deploy
   // waiting for approval is declined.
   useEffect(() => () => {
+    r.gone = true;
+    r.stopped = true;
     r.agent?.stop();
     for (const decline of r.approvals) decline();
   }, [r]);
@@ -227,6 +230,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
           if (!r.approvals.delete(stop)) return; // already answered
           r.approved ||= ok;
           signal?.removeEventListener("abort", stop);
+          if (r.gone) return resolve(false);
           const row = document.getElementById(`approval-${id}`);
           const hadFocus = !!row?.contains(document.activeElement);
           flushSync(() => update(id, (x) => ({ id: x.id, kind: "step", state: ok ? "ok" : "error", icon: ok ? "rocket" : "x", text: ok ? "Deploy approved" : "Deploy not approved" })));

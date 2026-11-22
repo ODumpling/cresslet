@@ -49,7 +49,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
   }
   // The studio's pages: its build, or Vite in dev (CRESSLET_STUDIO_DEV=1, npm run dev).
   const studioDev = process.env.CRESSLET_STUDIO_DEV === "1";
-  const ui = studio({ dev: studioDev });
+  const ui = await studio({ dev: studioDev });
   // Each app's crons fire on the node that owns it (checked again at dispatch: runs queue).
   const run = scheduled(cfg, store, runtime);
   const scheduler = new Scheduler(
@@ -132,7 +132,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
     if (reqHost !== pub.host) {
       return Response.redirect(pub.origin + url.pathname + url.search, 302);
     }
-    const res = await (await ui).serve(req, env && "outgoing" in env ? { incoming: env.incoming as IncomingMessage, outgoing: env.outgoing as ServerResponse } : undefined);
+    const res = await ui.serve(req, env && "outgoing" in env ? { incoming: env.incoming as IncomingMessage, outgoing: env.outgoing as ServerResponse } : undefined);
     return res ?? RESPONSE_ALREADY_SENT;
   }
 
@@ -163,7 +163,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
     handler,
     async close() {
       clearInterval(reaper);
-      await (await ui).close();
+      await ui.close();
       scheduler.stop();
       runtime.close();
       await store.close();

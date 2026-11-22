@@ -93,7 +93,7 @@ function builtStudio(dist: string): Studio {
       const h = new Headers(res.headers);
       for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
       // Content-hashed: a new build never reuses the URL. The rest (stable URLs) revalidate every time.
-      h.set("cache-control", res.ok && path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache");
+      h.set("cache-control", (res.ok || res.status === 304) && path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache");
       if (h.get("content-type")?.startsWith("text/html")) h.set("content-security-policy", NO_FRAMING);
       return new Response(res.body, { status: res.status, headers: h });
     },
@@ -125,14 +125,14 @@ async function devStudio(): Promise<Studio> {
   return {
     async serve(req, node) {
       if (!node) return new Response("The studio's dev server needs the Node request", { status: 500 });
-      const { incoming, outgoing } = node;
-      for (const [k, v] of Object.entries(ISOLATION)) outgoing.setHeader(k, v);
-      outgoing.setHeader("cache-control", "no-cache");
-      outgoing.setHeader("content-security-policy", NO_FRAMING);
       // Under Vite, the shell is at / (Start renders it); the pre-build entry reloads into it.
       if (VERSIONED.test(new URL(req.url).pathname)) {
         return new Response(reloadModule("dev"), { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store", ...ISOLATION } });
       }
+      const { incoming, outgoing } = node;
+      for (const [k, v] of Object.entries(ISOLATION)) outgoing.setHeader(k, v);
+      outgoing.setHeader("cache-control", "no-cache");
+      outgoing.setHeader("content-security-policy", NO_FRAMING);
       await new Promise<void>((resolve) => {
         outgoing.once("finish", resolve).once("close", resolve);
         vite.middlewares(incoming, outgoing, () => {

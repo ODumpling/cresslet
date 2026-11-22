@@ -40,7 +40,7 @@ export function AppLogs() {
     };
     void (async () => {
       try {
-        const res = await fetch(appPath(name, "/logs?n=200&follow=1"), { headers: { authorization: `Bearer ${token}` }, signal: ctrl.signal });
+        const res = await fetch(appPath(name, "/logs?n=200&follow=1"), { headers: token ? { authorization: `Bearer ${token}` } : {}, signal: ctrl.signal });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message ?? `${res.status}`);
         setState("Live");
         const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader(); // an ok GET's body
