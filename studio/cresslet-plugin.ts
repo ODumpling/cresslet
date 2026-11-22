@@ -414,7 +414,8 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     type Res = Omit<ResponseMessage, "type" | "id" | "body"> & { body: ArrayBuffer | Uint8Array<ArrayBuffer> | null };
     const waiting = new Map<number, { w: ProjectWorker; done: (m: Res) => void }>(); // request id → { w, done }
     // Database view scripts sent to a worker, by id (the same counter as requests), until answered (and saved)
-    const scripts = new Map<number, { w: ProjectWorker; done: Promise<unknown>; resolve: (r: SqlResult) => void; reject: (e: Error) => void }>();
+    // (`stale`: still running when a replacement read the database without it)
+    const scripts = new Map<number, { w: ProjectWorker; done: Promise<unknown>; stale?: boolean; resolve: (r: SqlResult) => void; reject: (e: Error) => void }>();
     // The workers' database snapshots, written in order; each step: the error if the last one wasn't written.
     let saved: Promise<Error | null> = Promise.resolve(null);
     // Workers loading the database, by start (from reading it until it serves, or fails, or a later one serves):
@@ -531,6 +532,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       }
       if (!code) return;
       const bundles = lastBundles;
+      if (stopped || seq < readySeq) return; // dev ended, or a later save's worker serves already
       let end!: () => void;
       loads.set(seq, { done: new Promise<void>((resolve) => (end = resolve)), end });
       const loaded = () => {
@@ -538,8 +540,9 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         loads.delete(seq);
       };
       // Scripts already sent (to the serving worker) first, then the latest snapshot: this one starts from them.
-      // (One stuck in a long statement: not for ever.)
+      // (One stuck in a long statement: not for ever; it's told its changes may be lost.)
       await within(Promise.all([...scripts.values()].map((s) => s.done)), 10_000);
+      for (const s of scripts.values()) s.stale = true;
       await saved;
       let db: Uint8Array | null = null;
       try {
@@ -593,6 +596,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
               const unsaved = e && m.snapshot ? `not saved (a restart loses it): ${e.message}` : null;
               if ("error" in m) r.reject(new Error(unsaved ? `${m.error}; what ran before it was ${unsaved}` : m.error));
               else if (unsaved) r.reject(new Error(`done in the running preview, but ${unsaved}`));
+              else if (r.stale && m.snapshot) r.reject(new Error("done, but the server restarted from the database as it was before it finished: its changes may be lost (run it again)"));
               else r.resolve(m.result);
             });
           } else if (m.type === "files") {
@@ -775,6 +779,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     clearTimeout(timer);
     for (const w of watchers) w.close();
     for (const w of initializing) w.terminate();
+    endLoads(Infinity); // (terminated: they never get ready to end theirs)
     server?.close();
     builder?.close();
     reloads?.close();
