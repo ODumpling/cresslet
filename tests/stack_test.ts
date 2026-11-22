@@ -862,8 +862,15 @@ test("stack: folding publishes nothing else: only the remaining change's pull re
   await t.provider.createPull(t.ctx.r, { head: c3.branch, base: c2.branch, title: "by hand", body: "" });
   await fold(t.ctx, c3.change.id, c2.change.id);
   assert.deepEqual(t.provider.pulls.map((x) => [x.head, x.base, x.title]), [[c3.branch, c1.branch, "Two"]]); // change 1 not published
+  // Change 1's recorded pull request closed, a newer one opened from its branch: that one's table is refreshed.
+  await submitStack(t.ctx, c1.stack.id);
+  Object.assign(t.provider.pulls.find((x) => x.head === c1.branch)!, { state: "closed" });
+  await t.provider.createPull(t.ctx.r, { head: c1.branch, base: "main", title: "newer", body: "stale" });
+  const c4 = ok(await t.change(c3.branch, c3.sha, "Four", "4"));
+  await fold(t.ctx, c4.change.id, c3.change.id);
+  assert.match(t.provider.pulls.at(-2)!.body, /\| → \| 1 · One \|/);
   const [s] = await readStacks(t.ctx);
-  const row = (await t.store.openStackChanges(t.app.id)).find((x) => x.id === c3.change.id)!;
+  const row = (await t.store.openStackChanges(t.app.id)).find((x) => x.id === c4.change.id)!;
   const body = pullBody({ ...row, prompt: `${"a".repeat(25000)}\n\nthe newest request` }, [row], new Map(), "main");
   assert.ok(body.includes("the newest request") && body.length < 25000);
   void s;

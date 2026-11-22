@@ -426,8 +426,12 @@ async function submitNow(ctx: Ctx, stackId: string, only?: Set<string>): Promise
         }
         if (p && p.head !== c.branch) p = null;
         p ??= await provider.findPull(r, c.branch);
-        // (Not one of the ones to open: only an open pull request of its own is refreshed.)
-        if (only && !only.has(c.id) && p?.state !== "open") continue;
+        // (Not one of the ones to open: only an open pull request of its own is refreshed, a newer one from its
+        // branch too if the recorded one closed.)
+        if (only && !only.has(c.id)) {
+          if (p?.state !== "open") p = await provider.findPull(r, c.branch);
+          if (p?.state !== "open") continue;
+        }
         let created = false;
         if (p && p.state === "closed") p = await provider.updatePull(r, p.number, { state: "open" });
         // Above one merged by hand, its base is left as it is (landing part of a stack is #122's).
@@ -805,7 +809,9 @@ export function fold(ctx: Ctx, changeId: string, into: string): Promise<{ change
       : null;
     // A replacement: open, from the remaining branch, on the base it should have.
     const replaced = nowPull?.state === "open" && nowPull.head === upper.branch && nowPull.base === base;
-    let keep = unread || (!!nowPull && nowPull.state === "open" && nowPull.base === lower.branch);
+    let keep = !!nowPull && nowPull.state === "open" && nowPull.base === lower.branch;
+    if (unread) pullErrors.push({ change: lower.id, position: lower.position, error: `${lower.branch} is kept: the remaining change's pull request couldn't be checked` });
+    keep ||= unread;
     if (lowerPull?.state === "open") {
       if (!replaced) {
         keep = true;
