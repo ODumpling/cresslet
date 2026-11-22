@@ -294,6 +294,7 @@ function Repository() {
   const link = (e: FormEvent) => {
     e.preventDefault();
     const sync = mode === "create" || initial === "deploy" ? (deployed ? "deploy" : null) : initial;
+    if (mode === "link" && !pick) return setErr("Choose a repository.");
     if (!sync) return setErr("Choose what the repository starts with.");
     if (mode === "link" && sync === "deploy" && !confirm(`Push ${name}'s live source to ${pick}? Its default branch then holds exactly these files: others there are deleted.`)) return;
     void run(mode === "create" ? "Creating the repository…" : "Linking…", async () => {
@@ -316,7 +317,7 @@ function Repository() {
         if (alive.current) {
           setMode("link");
           setPicked(created);
-          setInitial(null); // chosen again, as the repository may be (the list may not show it yet)
+          setInitial(null); // the user chooses the first sync again; the new repository may not be listed yet
         }
         throw Object.assign(new Error(`Created ${created}, but couldn't link it: ${errorMessage(e)}. Link it below to try again.`), { code: gitCode(e) });
       }
