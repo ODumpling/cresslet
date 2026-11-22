@@ -65,6 +65,21 @@ export function publicDotenv(text: string) {
 }
 
 /**
+ * A dotenv file's lines that `publicDotenv` doesn't keep, as written (private entries, comments, multi-line values,
+ * and everything after the first line it can't read): what a repository's copy never has.
+ */
+export function privateDotenvLines(text: string): string[] {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/), own: string[] = [];
+  for (const [i, l] of lines.entries()) {
+    const m = /[\r\u2028\u2029]/.test(l) ? null : /^[ \t]*$/.test(l) ? "blank" : /^[ \t]*#/.test(l) ? "comment" : SAFE_ENTRY.exec(l);
+    if (m === null) return [...own, ...lines.slice(i)]; // publicDotenv stops here: the rest is all private
+    if (m === "blank") continue;
+    if (m === "comment" || !/^(?:CRESSLET_PUBLIC_|VITE_)/.test(m[2]!)) own.push(l);
+  }
+  return own;
+}
+
+/**
  * `import ... from "cresslet"` in server code: the SDK the studio ships (vendor/cresslet-sdk.js, `npm run vendor:sdk`),
  * as a virtual module, not the project's node_modules/cresslet (the CLI package: esbuild & co., maybe not installed
  * yet, maybe another version than this studio's preview and platform).
@@ -140,7 +155,7 @@ export interface CressletOptions {
    * commits and merges its branch here (it may change the workspace's files), and resolves to the commit to build
    * and record; it throws to stop the deploy before anything is built. Null: not linked.
    */
-  beforeDeploy?: (log: (line: string) => void, signal: AbortSignal | undefined, app: string | undefined) => Promise<{ sha: string; branch: string; repo: string; current?: () => boolean } | null>;
+  beforeDeploy?: (log: (line: string) => void, signal: AbortSignal | undefined, app: string | undefined) => Promise<{ sha: string; branch: string; repo: string; source?: string } | null>;
 }
 
 type Log = (line: string) => void;
@@ -168,6 +183,10 @@ export async function projectSources(c: Container): Promise<{ path: string; data
   walk(await c.export(c.workdir, { excludes: ["node_modules/**", "dist/**", ".cresslet/**", ".git/**"] }), "");
   return sources;
 }
+
+/** Project source files, comparable (what was committed vs what's uploaded). */
+export const sourceDigest = (files: { path: string; data: string; encoding?: string }[]) =>
+  JSON.stringify([...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((f) => [f.path, f.encoding ?? "utf8", f.data]));
 
 /** Never in a repository or deploy source (as NOT_SOURCE): a pull or merge leaves these local files alone. */
 export const localOnly = (rel: string) => NOT_SOURCE.test(rel);
@@ -281,8 +300,9 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     if (target.deployKey) headers["x-cresslet-deploy-key"] = target.deployKey;
     // Project source too, so the CLI (`cresslet pull`) or another browser can open it. Never local secrets.
     const sources = await projectSources(c);
-    // Built from the commit recorded with it: not if the workspace changed during the build.
-    if (prepared?.current && !prepared.current()) throw new Error(`the workspace changed while building, so it isn't ${git!.branch} @ ${git!.sha.slice(0, 7)} any more: nothing was deployed, deploy again`);
+    // Built from the commit recorded with it: the source uploaded must be what was committed (an edit, a branch switch
+    // during the build: not deployed under that commit).
+    if (prepared?.source !== undefined && sourceDigest(sources) !== prepared.source) throw new Error(`the workspace changed while building, so it isn't ${git!.branch} @ ${git!.sha.slice(0, 7)} any more: nothing was deployed, deploy again`);
     log(`uploading ${files.length} files…`);
     const payload = {
       app: target.app,

@@ -530,7 +530,7 @@ test("deploy on a linked app: commit the branch, merge it into main, build main 
   assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1]), ["/sync", "/merge"]);
   assert.equal(g.calls[0].body.branch, "feat/x");
   assert.deepEqual(g.calls[0].body.files, [{ path: "index.html", data: "<h1>hi</h1>" }]);
-  assert.deepEqual(prov, { sha: "c".repeat(40), branch: "main", repo: "octo/shop" });
+  assert.deepEqual(prov, { sha: "c".repeat(40), branch: "main", repo: "octo/shop", files: [{ path: "index.html", data: "<h1>hi</h1>" }] });
   assert.equal(g.state.activeBranch, "main"); // back on main, at the merge
   assert.equal(g.state.headSha, "c".repeat(40));
   assert.equal(g.state.dirty, false);
@@ -642,4 +642,39 @@ test("deploy on a linked app: an edit made while it syncs stops it before the me
   await assert.rejects(g.git.prepareDeploy(), /changed while deploying/);
   assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/sync"]);
   assert.equal(g.state.dirty, true);
+});
+
+test("dotenv: a file's private lines are exactly those the deploy filter doesn't keep", async () => {
+  const { privateDotenvLines, publicDotenv } = await import("../studio/cresslet-plugin.ts" as string);
+  const text = "# config\nVITE_A=1 # note\nSECRET=s\n\nVITE_B=2\nKEY=\"-----BEGIN\nVITE_INSIDE=1\n-----END\"\nVITE_AFTER=3\n";
+  assert.equal(publicDotenv(text), "VITE_A=1\n\nVITE_B=2");
+  // Everything publicDotenv drops is kept as written: comments, private entries, and all lines from the multi-line
+  // value on (its VITE_ lines are part of a private value, not entries).
+  assert.deepEqual(privateDotenvLines(text), ["# config", "SECRET=s", "KEY=\"-----BEGIN", "VITE_INSIDE=1", "-----END\"", "VITE_AFTER=3", ""]);
+});
+
+test("cresslet deploy on a linked app: the upload is refused if the source isn't what was committed", async () => {
+  const { createCresslet, sourceDigest } = await import("../studio/cresslet-plugin.ts" as string);
+  const c = fakeContainer({ "index.html": "<h1>v2</h1>", "cresslet.json": "{}" });
+  const realFetch = globalThis.fetch;
+  const posted: Json[] = [];
+  globalThis.fetch = (async (_u: string, init: Json) => (posted.push(init), new Response(JSON.stringify({ app: { name: "a", url: "u", claimed: true } }), { status: 201 }))) as typeof fetch;
+  Object.assign(c, {
+    async build() { return { files: [] }; },
+    async bundle() { return { outputFiles: [] }; },
+    async export() { return { "index.html": { file: { contents: c.files.get("/project/index.html") } }, "cresslet.json": { file: { contents: "{}" } } }; },
+    registerCommand() {},
+  });
+  try {
+    const committed = sourceDigest([{ path: "cresslet.json", data: "{}" }, { path: "index.html", data: "<h1>v1</h1>" }]);
+    const cr = createCresslet(c as Json, { auth: () => ({}), project: () => ({ deploy: { name: "a" } }), beforeDeploy: async () => ({ sha: "a".repeat(40), branch: "main", repo: "o/r", source: committed }) });
+    await assert.rejects(cr.deploy(), /changed while building/);
+    assert.equal(posted.length, 0);
+    const same = createCresslet(c as Json, { auth: () => ({}), project: () => ({ deploy: { name: "a" } }), beforeDeploy: async () => ({ sha: "a".repeat(40), branch: "main", repo: "o/r", source: sourceDigest([{ path: "cresslet.json", data: "{}" }, { path: "index.html", data: "<h1>v2</h1>" }]) }) });
+    await same.deploy();
+    assert.equal(posted.length, 1);
+    assert.deepEqual(JSON.parse(posted[0].body).git, { sha: "a".repeat(40), branch: "main", repo: "o/r" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

@@ -6,8 +6,8 @@ import { Container } from "../../../vendor/cresslet-container/cresslet-container
 import { basicSetup, Compartment, css, EditorState, EditorView, html, indentWithTab, javascript, json, keymap, oneDark } from "../../../vendor/editor.js";
 import { FitAddon, Terminal } from "../../../vendor/terminal.js";
 import { fromTree, ignored, migrateDeployKeys, projects, toTree, type Deploy, type StoredProject } from "../../../store.ts";
-import { createCresslet, localOnly, projectSources, type CressletConfig } from "../../../cresslet-plugin.ts";
-import { createGitWorkspace, sameRevision, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
+import { createCresslet, localOnly, privateDotenvLines, projectSources, sourceDigest, type CressletConfig } from "../../../cresslet-plugin.ts";
+import { createGitWorkspace, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
 import { session } from "../../lib/session.ts";
 
@@ -89,6 +89,10 @@ export class Engine {
   readonly git: GitWorkspace;
   /** Paths a pull or merge just wrote (until when): the watcher's reports of those aren't the user's changes. */
   private quiet = new Map<string, number>();
+  /** Paths the editor just wrote (until when): the watcher's reports of those are hand edits. */
+  private hand = new Map<string, number>();
+  /** Changes the watcher saw that weren't hand edits (a command's, or the AI builder's tools'). */
+  commandRev = 0;
   /** The last hydrate's npm install failed. */
   private installFailed = false;
   /** Counts the workspace's changes (studio/git.ts: a sync is clean only if none came in meanwhile). */
@@ -150,6 +154,7 @@ export class Engine {
           this.lang.of([]),
           EditorView.updateListener.of((u) => {
             if (!u.docChanged || this.suppress || !this.current || !this.c) return;
+            this.hand.set(this.current, Date.now() + 1500);
             void this.c.fs.writeFile(`${this.c.workdir}/${this.current}`, u.state.doc.toString());
             this.save();
             this.changed();
@@ -263,8 +268,8 @@ export class Engine {
       // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
       beforeDeploy: async (log, signal, app) => {
         if (this.git.connected && (!app || app === project.deploy?.name)) {
-          const p = await this.git.prepareDeploy(log, signal);
-          return { ...p, current: sameRevision(this.git) };
+          const { files, ...p } = await this.git.prepareDeploy(log, signal);
+          return { ...p, source: sourceDigest(files) };
         }
         // Linked to a repository elsewhere (another browser, the CLI), not here: deploying this workspace would skip it.
         const name = app ?? project.deploy?.name;
@@ -281,7 +286,10 @@ export class Engine {
       if (filename && ignored(filename.replace(`${wd}/`, ""))) return;
       this.dirty = true; // saved below, or when the view goes before that
       const rel = filename?.replace(`${wd}/`, "");
-      if (!(rel && ((this.quiet.get(rel) ?? 0) > Date.now() || localOnly(rel)))) this.changed();
+      if (!(rel && ((this.quiet.get(rel) ?? 0) > Date.now() || localOnly(rel)))) {
+        this.changed();
+        if (!rel || (this.hand.get(rel) ?? 0) <= Date.now()) this.commandRev++;
+      }
       clearTimeout(this.treeTimer);
       this.treeTimer = setTimeout(() => {
         void this.renderTree();
@@ -449,8 +457,8 @@ export class Engine {
     const quiet = (rel: string, ms = 2000) => {
       for (let p = rel; p; p = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "") this.quiet.set(p, Date.now() + ms);
     };
-    /** A dotenv file's own private lines (the repository has only public entries): by key, comments and all. */
-    const privateLines = (text: string) => text.split(/\r?\n/).filter((l) => l.trim() && !/^\s*(?:export\s+)?(?:CRESSLET_PUBLIC_|VITE_)/.test(l));
+    /** A dotenv file's own lines, those the repository never has (the deploy filter's own reading of it). */
+    const privateLines = privateDotenvLines;
     /** Any file under a folder (empty folders don't count). */
     const hasFiles = async (dir: string): Promise<boolean> => {
       for (const e of await c.fs.readdir(dir, { withFileTypes: true })) {
@@ -493,8 +501,8 @@ export class Engine {
         if (typeof data === "string" ? now === data : now instanceof Uint8Array && now.length === data.length && now.every((b, i) => b === (data as Uint8Array)[i])) continue;
       }
       const i = f.path.lastIndexOf("/");
+      quiet(f.path); // and its folders, before mkdir reports them
       if (i > 0) await c.fs.mkdir(`${wd}/${f.path.slice(0, i)}`, { recursive: true });
-      quiet(f.path);
       await c.fs.writeFile(path, data);
       deps ||= /^package(?:-lock)?\.json$/.test(f.path);
     }

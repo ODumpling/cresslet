@@ -346,7 +346,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       <main id="workspace" className="workspace" aria-labelledby="workspace-title" data-view={view} data-drawer={drawer ? "open" : ""} data-builder={container && chat ? "open" : ""}>
         <h1 className="sr-only" id="workspace-title" tabIndex={-1}>{`${name}: AI builder, preview and code`}</h1>
         {container ? (
-          <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null}
+          <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
             devLog={() => engine.current?.termOut ?? ""}
             // A file the builder changed is the one in the editor: show the new contents.
             onChange={(path) => {

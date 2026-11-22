@@ -46,7 +46,6 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
   useEffect(() => setRepoName((n) => n || (app ?? "")), [app]);
   // The app as of now (a reservation sets it before this dialog renders again).
   const appRef = useRef(app);
-  appRef.current ??= app;
   if (app) appRef.current = app;
 
   async function refresh() {
@@ -120,11 +119,18 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
     const r = await api<{ repo: API.AppRepo; sha: string; files?: GitFile[] }>(`/v1/apps/${encodeURIComponent(app!)}/git/connect`, json("POST", {
       owner, repo, initialSync: sync, ...(sync === "push" ? { files: await files(), message: `Add ${app} from Cresslet` } : {}),
     }));
-    if (r.files) await hydrate(r.files);
     const st: ProjectGitState = {
       provider: "github", owner: r.repo.owner, repo: r.repo.name, url: r.repo.url, defaultBranch: r.repo.defaultBranch,
       activeBranch: r.repo.defaultBranch, baseSha: r.sha, headSha: r.sha, dirty: false,
     };
+    if (r.files) {
+      try {
+        await hydrate(r.files);
+      } catch (e) {
+        if ((e as { filesWritten?: boolean }).filesWritten) await git!.attach(st); // its files are in: linked here too
+        throw e;
+      }
+    }
     await git!.attach(st);
     return `Linked to ${r.repo.fullName}`;
   });

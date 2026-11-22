@@ -39,10 +39,12 @@ export interface BuilderHandle {
   focusIn(): void;
 }
 
-export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }: {
+export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, ref }: {
   c: Container;
   /** Source control: the project's repository, when linked (changes go on a branch; a finished turn is committed). */
   git: GitWorkspace | null;
+  /** Workspace changes that weren't hand edits (a command's), counted (engine.ts). */
+  commandRev?: () => number;
   devLog: () => string;
   onChange: (path: string) => unknown;
   locked: boolean;
@@ -74,8 +76,8 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
     bubble: null as number | null, step: null as number | null,
     replied: "", failed: "", id: 0, stick: false,
     prompt: "", git, // the message being worked on (a new branch is named after it); the project's repository
-    // This turn changed files (its tools, or a command while it ran: not the user's edits meanwhile); branching failed;
-    // the workspace's change count when the running command started.
+    // This turn changed files (its file tools); branching failed; the count of non-hand changes when it was sent
+    // (commands': `commandRev`, studio/src/views/workspace/engine.ts).
     turnChanged: false, branchFailed: false, cmdRev: 0,
     gone: false, // unmounted (the user left the project): no more UI updates
   }).current;
@@ -184,13 +186,11 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
         setWorking("Writing…");
         break;
       case "tool":
-        if (ev.name === "run_command") r.cmdRev = r.git?.revision ?? 0;
         r.bubble = null;
         r.step = add({ kind: "step", state: "running", icon: STEP_ICON[ev.name] ?? "file", text: runningText(ev.name, ev.input) });
         setWorking(`${runningText(ev.name, ev.input)}…`);
         break;
       case "tool-done":
-        if (ev.name === "run_command" && (r.git?.revision ?? 0) !== r.cmdRev) r.turnChanged = true;
         if (r.step !== null) {
           update(r.step, (x) => ({ id: x.id, kind: "step", state: ev.error ? "error" : "ok", icon: ev.error ? "x" : STEP_ICON[ev.name] ?? "check", text: ev.summary, failed: ev.error }));
         }
@@ -240,6 +240,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
     setStatus("Sent. Claude is working on it.");
     r.prompt = text;
     r.turnChanged = r.branchFailed = false;
+    r.cmdRev = commandRev();
     try {
       await r.agent.send(text);
       await commitTurn(text);
@@ -264,7 +265,8 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, ref }
     const g = r.git;
     if (!g?.connected || r.gone) return;
     await new Promise((res) => setTimeout(res, 500)); // the file watcher reports a command's changes a moment later
-    if (!g.state?.dirty || !r.turnChanged) return; // this turn changed nothing (earlier or hand changes aren't its own)
+    // This turn changed nothing (earlier or hand changes aren't its own): its tools didn't, nor did its commands.
+    if (!g.state?.dirty || !(r.turnChanged || commandRev() !== r.cmdRev)) return;
     try {
       await g.ensureBranch("feat", text);
       const out = await g.sync(commitMessage(text));

@@ -70,18 +70,13 @@ export interface GitWorkspaceOptions {
   log?: (line: string) => void;
 }
 
-/** What a deploy was built from (POST /v1/deploys `git`). */
+/** What a deploy was built from (POST /v1/deploys `git`), and that commit's files (to check the upload against). */
 export interface Provenance {
   sha: string;
   branch: string;
   repo: string;
+  files: GitFile[];
 }
-
-/** The workspace's revision when `p` was prepared: checked again before the upload (a change during the build). */
-export const sameRevision = (git: GitWorkspace) => {
-  const rev = git.revision;
-  return () => git.revision === rev;
-};
 
 /**
  * One project's source control: branch first (a change on the default branch moves to a new branch), sync (one commit
@@ -104,13 +99,14 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
 
   const revision = () => o.revision?.() ?? 0;
 
-  async function syncNow(message: string): Promise<{ sha: string; changed: boolean }> {
+  async function syncNow(message: string): Promise<{ sha: string; changed: boolean; files: GitFile[] }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
     const rev = revision(); // before the snapshot: a change after it keeps the workspace dirty
+    const files = await o.files();
     let r: { sha: string; changed: boolean };
     try {
-      r = await post<{ sha: string; changed: boolean }>("/sync", { branch: s.activeBranch, baseSha: s.headSha, files: await o.files(), message });
+      r = await post<{ sha: string; changed: boolean }>("/sync", { branch: s.activeBranch, baseSha: s.headSha, files, message });
     } catch (e) {
       if (gitCode(e) === "branch_not_found") {
         throw Object.assign(new Error(`${s.activeBranch} is gone on GitHub (merged and deleted?). Switch to ${s.defaultBranch} in Source control, or push these changes to a new branch.`), { code: "branch_not_found" });
@@ -118,7 +114,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       throw e;
     }
     await set({ headSha: r.sha, dirty: revision() !== rev, ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : {}) });
-    return r;
+    return { ...r, files };
   }
 
   /** Changes made since `rev` would be overwritten: stop instead. */
@@ -140,6 +136,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       throw e;
     }
     await done();
+    if (revision() !== rev) await set({ dirty: true }); // edited while it loaded (npm install, say): those are changes
     return t.sha;
   }
 
@@ -237,7 +234,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       const synced = await syncNow(`Deploy from ${s.activeBranch}`);
       // What's built must be what was committed: a change made since stops the deploy (it stays, unpushed).
       unchangedSince(rev, "deploying");
-      if (s.activeBranch === s.defaultBranch) return { sha: synced.sha, branch: s.defaultBranch, repo };
+      if (s.activeBranch === s.defaultBranch) return { sha: synced.sha, branch: s.defaultBranch, repo, files: synced.files };
       signal?.throwIfAborted(); // stopped: nothing merged
       log(`merging ${s.activeBranch} into ${s.defaultBranch}…`);
       let m: { mergedSha: string; fastForward: boolean; treeChanged: boolean; files?: GitFile[]; filesError?: string };
@@ -270,9 +267,12 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
           throw e;
         }
       }
-      await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: false });
+      await set({ activeBranch: s.defaultBranch, baseSha: m.mergedSha, headSha: m.mergedSha, dirty: revision() !== rev });
       log(`merged into ${s.defaultBranch} @ ${m.mergedSha.slice(0, 7)}${m.fastForward ? " (fast-forward)" : ""}`);
-      return { sha: m.mergedSha, branch: s.defaultBranch, repo };
+      // The files built must be these (the plugin checks the upload): what was synced, or the merge just loaded.
+      const files = m.treeChanged ? await o.files() : synced.files;
+      unchangedSince(rev, "deploying");
+      return { sha: m.mergedSha, branch: s.defaultBranch, repo, files };
     }),
   };
 }
