@@ -88,28 +88,37 @@ export interface CronRun {
   manual: boolean;
 }
 
+const upcomingCache = new Map<string, { from: number; until: number; runs: number[] }>();
+/**
+ * `nextRuns(parseCron(expr), now, 3)`, remembered until the first of them passes (one that rarely or never fires
+ * takes milliseconds to work out, and the studio asks every few seconds).
+ */
+export function upcoming(expr: string, now = Date.now()): number[] {
+  const hit = upcomingCache.get(expr);
+  if (hit && now >= hit.from && now < hit.until) return hit.runs;
+  const runs = nextRuns(parseCron(expr), now, 3);
+  if (upcomingCache.size >= 1000) upcomingCache.clear();
+  upcomingCache.set(expr, { from: now, until: runs[0] ?? Infinity, runs });
+  return runs;
+}
+
 /**
  * Recent runs per app, newest first, and each cron's last one (kept also once its run left the recent ones), in
  * memory on the node that runs them (a restart starts over: see `since`).
  */
 export class CronRuns {
   static readonly KEEP = 50;
-  /** Crons whose last run is kept (most recently run first): an app has at most MAX_CRONS at a time. */
-  static readonly KEEP_LAST = 2 * MAX_CRONS;
   #apps = new Map<string, { runs: CronRun[]; last: Map<string, CronRun> }>();
   readonly since = Date.now();
 
-  record(appId: string, run: CronRun) {
+  /** `crons`: the app's crons now; the others' last runs are let go. */
+  record(appId: string, run: CronRun, crons: readonly string[]) {
     let a = this.#apps.get(appId);
     if (!a) this.#apps.set(appId, a = { runs: [], last: new Map() });
     a.runs.unshift(run);
     if (a.runs.length > CronRuns.KEEP) a.runs.length = CronRuns.KEEP;
-    a.last.delete(run.cron); // to the end: the most recent
     a.last.set(run.cron, run);
-    for (const k of a.last.keys()) {
-      if (a.last.size <= CronRuns.KEEP_LAST) break;
-      a.last.delete(k);
-    }
+    for (const k of a.last.keys()) if (!crons.includes(k)) a.last.delete(k);
   }
   list(appId: string): readonly CronRun[] {
     return this.#apps.get(appId)?.runs ?? [];

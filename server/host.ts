@@ -99,9 +99,11 @@ export function scheduled(cfg: Config, store: Store, runtime: Runtime): RunCron 
       await res.body?.cancel();
     } finally {
       const ms = Math.round(performance.now() - started);
-      runtime.cronRuns.record(app.id, { cron, at: at.getTime(), startedAt, ms, status, manual });
       const ok = status >= 200 && status < 300;
       runtime.logs.push(app.id, "system", `cron "${cron}"${manual ? " (run now)" : ""} ${ok ? "ok" : `failed (${status || "error"})`} ${ms}ms`);
+      // Not for an app deleted meanwhile (its history is gone); as of its crons now.
+      const now = await store.appById(app.id).catch(() => app);
+      if (now) runtime.cronRuns.record(app.id, { cron, at: at.getTime(), startedAt, ms, status, manual }, JSON.parse(now.config).crons ?? []);
     }
   };
 }

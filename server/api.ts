@@ -44,7 +44,7 @@ import { github } from "./github.ts";
 import { cliLogin } from "./cli-login.ts";
 import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
-import { nextRuns, parseCron, pausedCrons, type Scheduler } from "./cron.ts";
+import { pausedCrons, type Scheduler, upcoming } from "./cron.ts";
 import { adminRoutes, isSiteAdmin, purgeApp, usage } from "./admin.ts";
 import { aiRoutes } from "./credits.ts";
 import { ipKey, RateLimit } from "./limits.ts";
@@ -782,7 +782,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     await authorize(c, a, "admin", { owner: true });
     // `?id=`: only that app (not one made with its name since the caller looked).
     const only = c.req.query("id");
-    if (only !== undefined && only !== a.id) throw new HttpError(409, `${a.name} is a different app now (${a.id})`, "conflict");
+    if (only && only !== a.id) throw new HttpError(409, `${a.name} is a different app now: reload to see it`, "conflict");
     await purgeApp(cfg, store, runtime, a);
     return c.json({ deleted: a.name });
   });
@@ -850,7 +850,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         let next: string[] = [];
         try {
           // Unclaimed apps' crons don't fire.
-          if (a.account_id && !paused.has(c)) next = nextRuns(parseCron(c), now, 3).map((t) => iso(t)!);
+          if (a.account_id && !paused.has(c)) next = upcoming(c, now).map((t) => iso(t)!);
         } catch { /* stored before validation tightened: never fires */ }
         const last = runtime.cronRuns.last(a.id, c);
         return { cron: c, paused: paused.has(c), state: scheduler?.state(a.id, c) ?? null, next, last: last ? runView(last) : null };

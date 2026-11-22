@@ -22,7 +22,8 @@ export function AppSettings() {
         : !canManage(a.access) ? <p className="muted small">Only the owner and admins can change these settings.</p> : null}
       {a.claimed ? <Domains /> : null}
       {a.config?.server ? <Egress /> : null}
-      {a.access === "owner" ? <Delete /> : null}
+      {/* by id: a different app under this name (after a Refresh) needs its own confirmation */}
+      {a.access === "owner" ? <Delete key={a.id} /> : null}
     </>
   );
 }
@@ -73,9 +74,11 @@ function Domains() {
       });
     } catch (e2) {
       if (alive.current) setErr(`Could not add: ${errorMessage(e2)}`);
-    } finally {
-      if (alive.current) mark("+", false);
     }
+    if (!alive.current) return;
+    flushSync(() => mark("+", false));
+    refocusId("domain-input"); // if the disabled Add button had it
+
   }
 
   async function verify(domain: string) {
@@ -244,10 +247,12 @@ function Delete() {
       // The app this page shows, not one made with its name since (deleted and recreated elsewhere): 409 then.
       await api(appPath(name, `?id=${encodeURIComponent(d.app.id)}`), { method: "DELETE" });
     } catch (e2) {
-      if (alive.current) {
+      if (!alive.current) return;
+      flushSync(() => {
         setErr(`Could not delete: ${errorMessage(e2)}`);
         setBusy(false);
-      }
+      });
+      refocusId("delete-app"); // it was disabled meanwhile
       return;
     }
     toast(`${name} deleted`);
@@ -267,7 +272,7 @@ function Delete() {
       </div>
       <FormError text={err} />
       <div className="row start">
-        <button className="btn danger" type="submit" disabled={busy || typed.trim() !== name}><Icon name="trash" />Delete app</button>
+        <button className="btn danger" type="submit" id="delete-app" disabled={busy || typed.trim() !== name}><Icon name="trash" />Delete app</button>
       </div>
     </form>
   );

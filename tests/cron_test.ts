@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
-import { cronMatches, CronRuns, nextRuns, normalizeCrons, parseCron, Scheduler } from "../server/cron.ts";
+import { cronMatches, CronRuns, nextRuns, normalizeCrons, parseCron, Scheduler, upcoming } from "../server/cron.ts";
 
 const at = (iso: string) => new Date(iso);
 const matches = (expr: string, iso: string) => cronMatches(parseCron(expr), at(iso));
@@ -55,18 +55,26 @@ test("next runs", () => {
   }
 });
 
-test("each cron's last run outlives the recent runs; old crons' are let go", () => {
+test("each cron's last run outlives the recent runs; dropped crons' are let go", () => {
   const r = new CronRuns();
-  const run = (cron: string) => r.record("app_1", { cron, at: 0, startedAt: 0, ms: 1, status: 200, manual: false });
-  run("0 3 * * *");
-  for (let i = 0; i < 60; i++) run("* * * * *");
+  const run = (cron: string, crons: string[]) => r.record("app_1", { cron, at: 0, startedAt: 0, ms: 1, status: 200, manual: false }, crons);
+  const both = ["0 3 * * *", "* * * * *"];
+  run("0 3 * * *", both);
+  for (let i = 0; i < 60; i++) run("* * * * *", both);
   assert.equal(r.list("app_1").length, CronRuns.KEEP);
   assert.ok(!r.list("app_1").some((x) => x.cron === "0 3 * * *"));
   assert.equal(r.last("app_1", "0 3 * * *")?.cron, "0 3 * * *");
-  for (let i = 0; i < CronRuns.KEEP_LAST; i++) run(`${i} 1 * * *`);
+  run("* * * * *", ["* * * * *"]); // a deploy dropped 0 3
   assert.equal(r.last("app_1", "0 3 * * *"), undefined);
-  assert.equal(r.last("app_1", "* * * * *"), undefined);
-  assert.ok(r.last("app_1", `${CronRuns.KEEP_LAST - 1} 1 * * *`));
+  assert.ok(r.last("app_1", "* * * * *"));
+});
+
+test("upcoming runs are remembered until the first passes", () => {
+  const t = Date.parse("2026-11-19T10:07:30Z");
+  assert.deepEqual(upcoming("*/5 * * * *", t), nextRuns(parseCron("*/5 * * * *"), t, 3));
+  assert.deepEqual(upcoming("*/5 * * * *", t + 60_000), nextRuns(parseCron("*/5 * * * *"), t + 60_000, 3)); // 10:08:30: same
+  assert.deepEqual(upcoming("*/5 * * * *", Date.parse("2026-11-19T10:10:00Z")).map((x) => new Date(x).toISOString().slice(11, 16)), ["10:15", "10:20", "10:25"]);
+  assert.deepEqual(upcoming("0 0 30 2 *", t), []);
 });
 
 test("a paused cron doesn't fire on schedule; Run now runs it once, queued behind the app's other runs", async () => {
