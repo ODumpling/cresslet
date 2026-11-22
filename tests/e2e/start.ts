@@ -46,7 +46,7 @@ async function signUpAndTodo(f: Page | FrameLocator, reload: () => Promise<unkno
 try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /tanstack-start/ }).click();
-  await page.waitForURL(/#\/p\//);
+  await page.waitForURL(/\/p\//);
   await frame.getByRole("heading", { name: "TanStack Start on Cresslet" }).waitFor({ timeout: 240000 });
   console.log("preview rendered");
 

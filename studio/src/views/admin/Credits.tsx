@@ -1,4 +1,4 @@
-// #/admin-credits (site admins): AI credit use across every account; give and take back credits.
+// /admin-credits (site admins): AI credit use across every account; give and take back credits.
 import { Link } from "@tanstack/react-router";
 import { useRef, useState } from "react";
 import type * as API from "../../../api-types.ts";

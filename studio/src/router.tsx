@@ -1,11 +1,10 @@
-import { createHashHistory, createRouter } from "@tanstack/react-router";
+import { createRouter } from "@tanstack/react-router";
 import { routeTree } from "./routeTree.gen.ts";
 import { takeLoginCallback } from "./lib/session.ts";
 
 /**
- * The studio's router: hash URLs (`#/p/<id>`, `#/settings`), so every link from outside keeps working (the GitHub
- * login callback, the private-page redirect, CLI login, bookmarks). Server-side (the prerendered shell) it's never
- * shown: the root route is client-only.
+ * The studio's router: plain paths (`/p/<id>`, `/settings`); the server answers every studio path with the shell
+ * (server/studio.ts). Server-side (the prerendered shell) it's never shown: the root route is client-only.
  */
 export function getRouter() {
   if (typeof window !== "undefined") {
@@ -17,10 +16,14 @@ export function getRouter() {
       u.searchParams.delete("_r");
       history.replaceState(history.state, "", u.pathname + u.search + u.hash);
     }
+    // An address from when the studio's routes were hashes (`/#/p/<id>`: bookmarks, links already sent): its path.
+    if (location.hash.startsWith("#/")) {
+      const to = new URL(location.hash.slice(1), location.origin); // `#//host`: another origin, not a path
+      history.replaceState(history.state, "", to.origin === location.origin ? to.pathname + to.search + to.hash : "/");
+    }
   }
   return createRouter({
     routeTree,
-    history: typeof window === "undefined" ? undefined : createHashHistory(),
     defaultPreload: false,
     // Search params as plain strings (`?path=/x`), as the server writes them (server/host.ts), not JSON.
     parseSearch: (s) => Object.fromEntries(new URLSearchParams(s)),

@@ -1,4 +1,4 @@
-// #/admin (site admins): every site on this server, with delete, restore and purge.
+// /admin (site admins): every site on this server, with delete, restore and purge.
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import type * as API from "../../../api-types.ts";

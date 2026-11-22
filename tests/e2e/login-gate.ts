@@ -1,5 +1,5 @@
 // Browser e2e: on a server with GitHub login, projects need a session. Logged out: the landing page only, no project
-// list or recent projects, #/p/<id> goes back to the landing page, and a template asks for the login.
+// list or recent projects, /p/<id> goes back to the landing page, and a template asks for the login.
 // Mocks GET /v1 so the dev server looks like it has GitHub login set up.
 // Run: start the server (CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev), then: cd tests/e2e && CRESSLET_ADMIN_TOKEN=e2e-admin node login-gate.ts
 import { chromium } from "@playwright/test";
@@ -41,12 +41,12 @@ try {
   console.log("logged out: landing only");
 
   // Opening a project goes back to the landing page, and comes back to it after the login.
-  await page.goto(base + "/#/p/gate1");
-  await page.waitForURL((u) => u.hash === "#/");
+  await page.goto(base + "/p/gate1");
+  await page.waitForURL((u) => u.pathname === "/");
   await page.locator("#landing").waitFor();
   if (await page.locator("#workspace").isVisible()) fail("workspace opened logged out");
-  if (await page.evaluate(() => sessionStorage.getItem("cresslet.afterLogin")) !== "#/p/gate1") fail("project not remembered for after the login");
-  console.log("logged out: #/p/<id> → landing");
+  if (await page.evaluate(() => sessionStorage.getItem("cresslet.afterLogin")) !== "/p/gate1") fail("project not remembered for after the login");
+  console.log("logged out: /p/<id> → landing");
 
   // A template asks for the login instead of making a project.
   await page.locator("#landing-templates").getByRole("button", { name: /react/ }).click();

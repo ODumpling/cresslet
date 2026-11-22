@@ -1,5 +1,6 @@
-// #/ for logged-out visitors (and, on servers without login, new visitors with no local projects): what Cresslet is,
+// / for logged-out visitors (and, on servers without login, new visitors with no local projects): what Cresslet is,
 // and the templates to start from. No sidebar.
+import { Link } from "@tanstack/react-router";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type * as API from "../../api-types.ts";
 import { meta } from "../lib/api.ts";
@@ -44,7 +45,7 @@ export function Landing() {
   return (
     <>
       <header className="site-nav" id="site-nav">
-        <a className="site-brand" href="#/"><Icon name="logo" className="brand-mark" /><span>Cresslet</span></a>
+        <Link className="site-brand" to="/"><Icon name="logo" className="brand-mark" /><span>Cresslet</span></Link>
         <nav className="site-links" aria-label="Site">
           <Ext href="https://github.com/ODumpling/cresslet#docs">Docs</Ext>
           <Ext href="https://github.com/ODumpling/cresslet-cli">CLI</Ext>
@@ -158,7 +159,7 @@ export function Landing() {
               <li><Icon name="check" />Same runtime locally, in the browser and in production</li>
               <li><Icon name="check" />Logs, database and secrets from the command line</li>
               <li><Icon name="check" />Deploy from CI with a scoped API token</li>
-              <li><Icon name="check" />Share an HTML file privately, with a link or publicly as an <a href="#/artifacts">artifact</a>: <code>npx cresslet@latest deploy report.html</code></li>
+              <li><Icon name="check" />Share an HTML file privately, with a link or publicly as an <Link to="/artifacts">artifact</Link>: <code>npx cresslet@latest deploy report.html</code></li>
             </ul>
           </div>
           <div className="term">

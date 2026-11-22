@@ -1,4 +1,4 @@
-// #/settings (logged in): the account, AI credits, API tokens (the CLI's, CI's and agents'), the defaults for new
+// /settings (logged in): the account, AI credits, API tokens (the CLI's, CI's and agents'), the defaults for new
 // artifacts, and logging this browser out.
 import { useNavigate } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useRef, useState } from "react";
@@ -23,7 +23,7 @@ export function Settings() {
   const [entered] = useState(() => !!token || sessionExpired());
   useEffect(() => {
     if (entered) return;
-    rememberAfterLogin("#/settings"); // back here once logged in (#82)
+    rememberAfterLogin("/settings"); // back here once logged in (#82)
     void navigate({ to: "/", replace: true });
   }, [entered, navigate]);
   if (!entered) return null;
@@ -40,7 +40,7 @@ function SettingsPage() {
   useEffect(() => {
     if (!account.error) return;
     if (!auth.token) {
-      rememberAfterLogin("#/settings"); // the session expired: back here once logged in again
+      rememberAfterLogin("/settings"); // the session expired: back here once logged in again
       void navigate({ to: "/" });
     }
     else toast(`Could not load account: ${account.error.message}`);

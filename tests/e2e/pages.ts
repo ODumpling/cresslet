@@ -38,7 +38,7 @@ const as = async (token: string, viewport?: { width: number; height: number }) =
 try {
   // Settings: defaults start at the server's; save link-only, kept 7 days.
   const o = await as(owner.token);
-  await o.goto(base + "/#/settings");
+  await o.goto(base + "/settings");
   await o.getByLabel("Who can open new artifacts").waitFor();
   await o.waitForFunction(() => document.getElementById("def-server")!.textContent !== "—");
   assert(await o.getByLabel("Who can open new artifacts").inputValue() === "private", "server default visibility");
@@ -52,7 +52,7 @@ try {
   await shot(o, "pages-settings");
 
   // The list, then the New artifact dialog: it starts at the account's defaults; Cancel closes it; upload a file with them.
-  await o.goto(base + "/#/pages");
+  await o.goto(base + "/pages");
   await o.getByRole("heading", { name: "Artifacts", exact: true }).waitFor();
   await o.getByText("No artifacts yet").waitFor();
   const dialog = o.getByRole("dialog", { name: "New artifact" });
@@ -65,7 +65,7 @@ try {
   await dialog.getByRole("link", { name: "Settings" }).click();
   await o.getByRole("heading", { name: "Settings", exact: true }).waitFor();
   assert(!await dialog.isVisible(), "dialog stayed open over Settings");
-  await o.goto(base + "/#/artifacts");
+  await o.goto(base + "/artifacts");
   await o.getByRole("button", { name: "New artifact" }).first().click();
   await dialog.waitFor();
   assert(await o.locator("#page-retention").inputValue() === "7", "dialog opened before the account's defaults");
@@ -148,25 +148,25 @@ try {
   const anon = await (await browser.newContext()).newPage();
   await anon.goto(report.url);
   await anon.locator("#view").getByRole("button", { name: "Log in with GitHub" }).waitFor();
-  assert(anon.url().startsWith(base + "/#/view/"), `anon at ${anon.url()}`);
-  // Logged out: the landing page links to artifacts, which ask for a login; they stay in the nav; the old #/pages
-  // address goes to #/artifacts.
+  assert(anon.url().startsWith(base + "/view/"), `anon at ${anon.url()}`);
+  // Logged out: the landing page links to artifacts, which ask for a login; they stay in the nav; the old /#/pages
+  // address (from when routes were hashes) goes to /artifacts.
   await anon.goto(base + "/");
   await anon.locator("#landing").getByRole("link", { name: "artifact", exact: true }).click();
   await anon.getByText("Log in to deploy artifacts").waitFor();
   await anon.goto(base + "/#/pages");
   await anon.getByText("Log in to deploy artifacts").waitFor();
-  assert(anon.url().endsWith("#/artifacts"), `old address at ${anon.url()}`);
+  assert(anon.url() === base + "/artifacts", `old address at ${anon.url()}`);
   assert(await anon.getByRole("link", { name: "Artifacts" }).isVisible(), "Artifacts in the nav when logged out");
   assert(!await anon.locator("#page-form").isVisible(), "no form when logged out");
   // Sharing an artifact describes what its roles can do with it, not an app's logs and secrets.
-  await o.goto(base + "/#/share/" + report.name);
+  await o.goto(base + "/share/" + report.name);
   await o.getByRole("heading", { name: /Share report/ }).waitFor();
   await o.locator("#invite-role").waitFor();
   assert(/open it, even when it's private/.test((await o.locator("#invite-role option[value=viewer]").textContent())!), "artifact viewer role text");
 
   // Replace a page with a folder: same link, all its files swapped; a missing page there is a 404, not the index.
-  await o.goto(base + "/#/pages");
+  await o.goto(base + "/pages");
   await o.getByRole("button", { name: "More actions for report" }).click();
   const [chooser] = await Promise.all([
     o.waitForEvent("filechooser"),
@@ -182,7 +182,7 @@ try {
   assert((await o.goto(report.url + "/no-such-page"))!.status() === 404, "broken link is a 404");
 
   // Delete.
-  await o.goto(base + "/#/pages");
+  await o.goto(base + "/pages");
   await o.getByRole("button", { name: "More actions for site" }).click();
   await o.getByRole("button", { name: "Delete site" }).click();
   await o.getByText("Deleted site").waitFor();
@@ -190,14 +190,14 @@ try {
 
   // Phone width: no horizontal scroll.
   const narrow = await as(owner.token, { width: 320, height: 700 });
-  await narrow.goto(base + "/#/pages");
+  await narrow.goto(base + "/pages");
   await narrow.getByRole("heading", { name: "Artifacts", exact: true }).waitFor();
   await narrow.getByLabel("Who can open report").waitFor();
-  for (const hash of ["#/", "#/pages", "#/settings"]) {
-    await narrow.goto(base + "/" + hash);
+  for (const path of ["/", "/pages", "/settings"]) {
+    await narrow.goto(base + path);
     await narrow.waitForTimeout(300);
     const over = await narrow.evaluate(() => document.documentElement.scrollWidth - innerWidth);
-    assert(over <= 0, `${hash} scrolls sideways at 320px (${over}px)`);
+    assert(over <= 0, `${path} scrolls sideways at 320px (${over}px)`);
   }
   await shot(narrow, "pages-320");
   console.log("pages e2e ok");

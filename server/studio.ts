@@ -10,7 +10,7 @@ import { serveDir } from "./static.ts";
 
 export const STUDIO_SRC = join(import.meta.dirname, "../studio");
 export const STUDIO_DIST = join(STUDIO_SRC, "dist/client");
-/** The prerendered SPA shell (TanStack Start `spa.prerender`): the document for every studio page. */
+/** The prerendered SPA shell (TanStack Start `spa.prerender`): the document for every studio page (`/`, `/p/<id>`, …). */
 const SHELL = "_shell.html";
 
 /** Cross-origin isolation is required by cresslet-container (SharedArrayBuffer). */
@@ -66,21 +66,24 @@ function builtStudio(dist: string): Studio {
     throw e;
   });
 
+  const page = async (req: Request) => {
+    let html;
+    try {
+      ({ html } = await load());
+    } catch {
+      return new Response("The studio isn't built: run npm run build.", { status: 503, headers: { "content-type": "text/plain", ...ISOLATION } });
+    }
+    return new Response(req.method === "HEAD" ? null : html, {
+      // vary: a route's path (`/settings`) is the shell for a page load, a 404 for anything else that asks for it.
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", "content-security-policy": NO_FRAMING, vary: "accept", ...ISOLATION },
+    });
+  };
+
   return {
     async serve(req) {
       const url = new URL(req.url);
       let path = url.pathname;
-      if (path === "/" || path === "/index.html") {
-        let html;
-        try {
-          ({ html } = await load());
-        } catch {
-          return new Response("The studio isn't built: run npm run build.", { status: 503, headers: { "content-type": "text/plain", ...ISOLATION } });
-        }
-        return new Response(req.method === "HEAD" ? null : html, {
-          headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", "content-security-policy": NO_FRAMING, ...ISOLATION },
-        });
-      }
+      if (path === "/" || path === "/index.html") return page(req);
       const old = VERSIONED.exec(path);
       if (old) {
         path = path.slice(old[0].length - 1);
@@ -90,7 +93,11 @@ function builtStudio(dist: string): Studio {
       }
       const res = await serveDir(path === url.pathname ? req : new Request(new URL(path + url.search, url), req), dist);
       if (res.status === 404 && /^\/assets\/.+\.js$/.test(path)) return reload(req, (await load().catch(() => ({ release: "" }))).release);
+      // Not a file: a page load of a studio route (`/artifacts`, `/p/<id>`) gets the shell, whose router shows it (or
+      // goes home, for a path that's no route). Anything else (a script, an image, fetch) gets the 404.
+      if (res.status === 404 && !old && isPageLoad(req)) return page(req);
       const h = new Headers(res.headers);
+      if (res.status === 404) h.set("vary", "accept");
       for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
       // Content-hashed: a new build never reuses the URL. The rest (stable URLs) revalidate every time.
       h.set("cache-control", (res.ok || res.status === 304) && path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache");
@@ -100,6 +107,10 @@ function builtStudio(dist: string): Studio {
     async close() {},
   };
 }
+
+/** A browser loading a page (a navigation asks for HTML), not a script, an image or a fetch asking for a file. */
+const isPageLoad = (req: Request) =>
+  (req.method === "GET" || req.method === "HEAD") && (req.headers.get("accept") ?? "").includes("text/html");
 
 function reload(req: Request, release: string): Response {
   return new Response(req.method === "HEAD" ? null : reloadModule(release), {

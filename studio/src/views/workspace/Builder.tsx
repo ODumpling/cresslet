@@ -280,7 +280,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
         <div id="builder-credits-offer" className="builder-offer" hidden={!creditsOn || !!token}>
           <p id="builder-credits-text">Log in to use AI credits: no API key needed.</p>
           <div className="row start">
-            <button className="btn primary" id="builder-login" type="button" ref={loginRef} onClick={() => void logIn(location.hash)}><Icon name="github" />Log in</button>
+            <button className="btn primary" id="builder-login" type="button" ref={loginRef} onClick={() => void logIn(location.pathname + location.search)}><Icon name="github" />Log in</button>
           </div>
           <p className="muted small or" id="builder-or">Or use your own Anthropic API key:</p>
         </div>

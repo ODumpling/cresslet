@@ -1,4 +1,4 @@
-// #/view/<page>?path=…: where a private artifact sends a visitor without a session. Asks the server for a one-time
+// /view/<page>?path=…: where a private artifact sends a visitor without a session. Asks the server for a one-time
 // sign-in link to the page (owner and collaborators only) and goes there.
 import { Link, useParams, useSearch } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -57,7 +57,7 @@ export function PrivateView() {
         </div>
       </header>
       <div className="row start" id="view-actions">
-        {!token ? <button className="btn primary" type="button" onClick={() => void logIn(location.hash)}><Icon name="github" />Log in with GitHub</button>
+        {!token ? <button className="btn primary" type="button" onClick={() => void logIn(location.pathname + location.search)}><Icon name="github" />Log in with GitHub</button>
           : state.action === "retry" ? (
             <button className="btn" type="button" onClick={() => {
               try {

@@ -41,7 +41,7 @@ export function cliLogin(store: Store) {
       return {
         deviceCode,
         userCode: `${userCode.slice(0, 4)}-${userCode.slice(4)}`,
-        verificationUri: `${root}/#/cli`,
+        verificationUri: `${root}/cli`,
         expiresIn: TTL / 1000,
         interval: INTERVAL,
       };

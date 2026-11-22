@@ -111,7 +111,7 @@ function cookies(req: Request, name: string): string[] {
 
 /** Where a private page sends a visitor without a session: the studio, which signs them in and back. */
 export function pageLoginUrl(cfg: Config, name: string, path = "/") {
-  return `${rootUrl(cfg)}/#/view/${encodeURIComponent(name)}?${new URLSearchParams({ path })}`;
+  return `${rootUrl(cfg)}/view/${encodeURIComponent(name)}?${new URLSearchParams({ path })}`;
 }
 
 function pages(cfg: Config, store: Store) {

@@ -1,4 +1,4 @@
-// #/admin-users (site admins): every account on this server; invite, make admin, disable.
+// /admin-users (site admins): every account on this server; invite, make admin, disable.
 import { Link } from "@tanstack/react-router";
 import { Fragment, type FormEvent, useState } from "react";
 import { flushSync } from "react-dom";

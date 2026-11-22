@@ -13,7 +13,7 @@ await page.addInitScript((t) => localStorage.setItem("cresslet.token", t), acct.
 try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /react/ }).click();
-  await page.waitForURL(/#\/p\//);
+  await page.waitForURL(/\/p\//);
   await page.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
   await page.locator("#deploy-btn").click();
   await page.locator("#deploy-name-status", { hasText: "is available" }).waitFor(); // keep the generated address
@@ -32,7 +32,7 @@ try {
   await home.goto(base + "/");
   const row = home.locator(".list-row", { hasText: app });
   await row.getByRole("button", { name: "Open source" }).click();
-  await home.waitForURL(/#\/p\//);
+  await home.waitForURL(/\/p\//);
   await home.getByRole("button", { name: "Code", exact: true }).click();
   await home.getByRole("button", { name: "Terminal", exact: true }).click();
   await home.locator("#tree").getByText("App.tsx").waitFor({ timeout: 30000 });

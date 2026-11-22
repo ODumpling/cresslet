@@ -1,4 +1,4 @@
-// #/admin-credits/<account id> (site admins): one account's AI credits: its ledger, and giving or taking back credits.
+// /admin-credits/<account id> (site admins): one account's AI credits: its ledger, and giving or taking back credits.
 import { Link, useParams } from "@tanstack/react-router";
 import type * as API from "../../../api-types.ts";
 import { api } from "../../lib/api.ts";

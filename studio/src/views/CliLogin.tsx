@@ -1,4 +1,4 @@
-// #/cli: where `cresslet auth login` sends the browser. The user types the code from their terminal (it isn't in the
+// /cli: where `cresslet auth login` sends the browser. The user types the code from their terminal (it isn't in the
 // link, so a link someone else sent can't log their CLI in to this account), and the CLI's poll then gets a new token
 // for this account.
 import { type FormEvent, useEffect, useRef, useState } from "react";
@@ -79,7 +79,7 @@ export function CliLogin() {
         <div className="row start"><button className="btn primary" id="cli-login-approve" type="submit" disabled={busy}>Authorize CLI</button></div>
       </form>
       <div className="row start" id="cli-login-actions">
-        {token ? null : <button className="btn primary" type="button" onClick={() => void logIn("#/cli")}><Icon name="github" />Log in with GitHub</button>}
+        {token ? null : <button className="btn primary" type="button" onClick={() => void logIn("/cli")}><Icon name="github" />Log in with GitHub</button>}
       </div>
     </main>
   );
