@@ -355,7 +355,8 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     if (!cfg.name && now && !now.name) await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...now, name: body.app.name }, null, 2) + "\n");
     log(`deployed ${body.app.name} → ${body.app.url}`);
     if (body.deploy?.warning) log(`warning: ${body.deploy.warning}`);
-    if (!body.app.claimed) log(`unclaimed: expires ${new Date(body.app.expiresAt!).toLocaleString()}. Log in to keep it.`); // unclaimed apps expire
+    // An anonymous app from before every app needed an account: it expires, and can't be kept.
+    if (!body.app.claimed && body.app.expiresAt) log(`no owner: expires ${new Date(body.app.expiresAt).toLocaleString()}`);
     opts.onDeployed?.(body);
     return body;
   }

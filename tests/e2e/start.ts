@@ -6,8 +6,15 @@
 import { chromium, type FrameLocator, type Page } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const shots = process.argv[2] ?? ".";
+// Every app belongs to an account: log the studio in as a fresh one (operator-issued; CRESSLET_ADMIN_TOKEN on the server).
+const acct = await (await fetch(base + "/v1/accounts", {
+  method: "POST",
+  headers: { authorization: `Bearer ${process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin"}`, "content-type": "application/json" },
+  body: JSON.stringify({ email: `e2e-${Date.now()}@example.com` }),
+})).json();
 const browser = await chromium.launch();
 const page = await browser.newPage();
+await page.addInitScript((t) => localStorage.setItem("cresslet.token", t), acct.token);
 const logs: string[] = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));

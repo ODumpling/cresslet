@@ -16,7 +16,7 @@ Account tokens have a **role** and optionally a list of **apps** (403 `forbidden
 - `admin`: everything on the apps (secrets, egress, domains, delete).
 - `apps`: limit the token to these apps (by id: a deleted app doesn't come back into scope if its name is reused). Without it, the token covers every app, including new ones.
 
-**Collaborators.** An app has one owner (the account that created or claimed it). The owner and the app's admins invite other accounts by email, as `admin` or `viewer`. An invite is pending until the account with that email (shown in its Settings; matched case-insensitively) accepts it with `POST /v1/me/invites/:id/accept`; no email is sent, and inviting an address with no account yet works the same, so it doesn't tell you whether one exists. Access is the collaborator's role, capped by the calling token's role and apps:
+**Collaborators.** An app has one owner (the account that created it). The owner and the app's admins invite other accounts by email, as `admin` or `viewer`. An invite is pending until the account with that email (shown in its Settings; matched case-insensitively) accepts it with `POST /v1/me/invites/:id/accept`; no email is sent, and inviting an address with no account yet works the same, so it doesn't tell you whether one exists. Access is the collaborator's role, capped by the calling token's role and apps:
 - `viewer`: what a `read` token can do (app, logs, source, secret names, egress, domains, db, `db/query`).
 - `admin`: everything on the app, including deploys, secrets, egress, domains and managing collaborators, but not deleting it (owner only).
 - Managing collaborators needs an account (a deploy key isn't one). Shared apps are listed in `GET /v1/apps` with `access: owner|admin|viewer`, can be named in a token's `apps`, and don't count toward the invitee's app limit. At most 50 collaborators and pending invites per app. Deleting the app removes them.
@@ -34,7 +34,7 @@ Account tokens have a **role** and optionally a list of **apps** (403 `forbidden
 - Site admins manage organizations but get no access to their apps unless they're members. An organization with apps (deleted ones included) can't be deleted: move them out first (a deleted one: restore it, or purge it on the Sites page). A member who holds org apps can't be removed while there's nobody (enabled) to hand them to (409 `no_successor`), and apps can't move into an organization with no enabled admin (409 `no_admin`).
 - Not covered: deploy keys stay valid when an app changes hands (whoever holds the key keeps full access to that app); collaborators stay too.
 
-Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin` over all apps. Tokens issued before named tokens, and login tokens, are `admin` over all apps. `GET /v1/me` works with any token. Deploy keys (`clv_app_…`) are unchanged: full access to their one app.
+Creating apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin` over all apps. Tokens issued before named tokens, and login tokens, are `admin` over all apps. `GET /v1/me` works with any token. Deploy keys (`clv_app_…`) are unchanged: full access to their one app.
 
 | Method | Path | Notes |
 |---|---|---|
@@ -59,7 +59,7 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | POST | `/v1/deploys` | see below |
 | POST | `/v1/apps` | full-access token: `{name}` → `{app}` (201): a new app with nothing deployed yet, its address reserved (the studio links a repository before the first deploy). Same name rules, limits and 409 as a deploy that creates one |
 | GET | `/v1/apps` | apps the account owns, collaborates on or reaches through an [organization](#organizations); each has `access: owner\|admin\|viewer` and `org: {name, title} \| null` |
-| GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 10 deploys (each with `hasSource`: the project source came with it, and `git: {sha, branch, repo, url} \| null`, `url`: the commit on GitHub), runtime status, secret names, `repo` (the linked [repository](#source-control) or null) |
+| GET | `/v1/apps/:name` | app (with the caller's `access`, null for a deploy key), last 5 deploys (each with `hasSource`: the project source came with it, and `git: {sha, branch, repo, url} \| null`, `url`: the commit on GitHub), runtime status, secret names, `repo` (the linked [repository](#source-control) or null) |
 | DELETE | `/v1/apps/:name?id=` | delete app + data (owner or deploy key; not an invited admin). `id` (optional): only if it's still that app, else 409 `conflict` |
 | PUT | `/v1/apps/:name/org` | owner (org app: an org admin), full-access token: `{org: "name" \| null}` → `{app, org}`. Into an organization you're a member of, or out of one (`null`: your personal app, within your app limit) |
 | GET | `/v1/apps/:name/collaborators` | **owner or admin**: `{owner: {id, email, github} \| null, org: {name, title} \| null, collaborators: [{id, email, github, role, createdAt}], invites: [{id, email, role, invitedBy, createdAt}]}` |
@@ -70,21 +70,20 @@ Creating apps, claiming apps and managing tokens (`/v1/me/tokens`, `/v1/me/token
 | GET | `/v1/me/invites` | token with `read` or more over the whole account (not limited to some apps): invites to this account's email (live apps) → `{invites: [{id, app, email, role, invitedBy, createdAt}]}` |
 | POST | `/v1/me/invites/:id/accept` | full-access token: become a collaborator → `{app}` (with `access`) |
 | DELETE | `/v1/me/invites/:id` | full-access token: decline |
-| POST | `/v1/apps/:name/claim` | account auth + `{deployKey}` → no expiry, net + secrets |
 | POST | `/v1/apps/:name/rollback` | `{deployId?}` (default: previous) |
 | GET | `/v1/apps/:name/source?deploy=` | `{app, deployId, files: [{path, data, encoding}]}` source uploaded with the current (or given) deploy; 404 `no_source` if none |
 | GET | `/v1/apps/:name/metrics` | the dashboard's numbers: `{since, bucketMs, totals: {requests, errors, clientErrors, avgMs, maxMs}, series: [{t, requests, errors, avgMs}], usage: {deploys, database, files, total}, database: {tables: [{name, rows}], error}, domains}`. Requests are counted in memory over the last 24 h in 5-minute buckets (`since`: when counting started, at server start); `avgMs`/`maxMs` time server routes only |
 | GET | `/v1/apps/:name/logs?n=200&follow=1` | NDJSON `{t, kind: stdout\|stderr\|system\|request, msg}`; `follow` streams |
-| GET | `/v1/apps/:name/crons` | `{crons: [{cron, paused, state: running\|queued\|null, next: [iso, …≤3], last}], runs: [{cron, at, startedAt, ms, status, ok, manual}], since}`: the current deploy's crons, the next times each fires (none while paused or unclaimed), each one's last run, and the last 50 runs, kept in memory since `since` (server start). `status` 0: the app couldn't be reached |
+| GET | `/v1/apps/:name/crons` | `{crons: [{cron, paused, state: running\|queued\|null, next: [iso, …≤3], last}], runs: [{cron, at, startedAt, ms, status, ok, manual}], since}`: the current deploy's crons, the next times each fires (none while paused), each one's last run, and the last 50 runs, kept in memory since `since` (server start). `status` 0: the app couldn't be reached |
 | POST | `/v1/apps/:name/crons/run` | `deploy`: `{cron}` (as in the config) → 202 with the view above. Queues one run behind the app's others, also of a paused cron; 409 `busy` if it's already running or queued. While it's queued, the cron's scheduled runs are skipped, as for any run still going. Claimed apps only |
 | POST | `/v1/apps/:name/crons/pause` | `deploy`: `{cron}` → the view above. Stops its scheduled runs until resumed (stored by expression: it stays paused across deploys and rollbacks that keep the expression; one without it forgets the pause) |
 | POST | `/v1/apps/:name/crons/resume` | `deploy`: `{cron}` → the view above |
 | GET | `/v1/apps/:name/secrets` | `{keys}` (values are write-only) |
-| PUT | `/v1/apps/:name/secrets` | `{KEY: "value" \| null}` merge; claimed apps only |
+| PUT | `/v1/apps/:name/secrets` | `{KEY: "value" \| null}` merge |
 | DELETE | `/v1/apps/:name/secrets/:key` | |
 | GET | `/v1/apps/:name/egress` | `{allow}`: hostnames the server may `fetch`, or `null` = any public host |
-| PUT | `/v1/apps/:name/egress` | `{allow: ["api.stripe.com", "*.openai.com"] \| null}` (≤ 50; `*.` = subdomains only); claimed apps only. Blocked requests get 403 and a log line; raw sockets are refused under an allowlist |
-| GET | `/v1/apps/:name/domains` | `{domains: [{domain, verified, dns: [{type, name, value}]}]}` (claimed apps) |
+| PUT | `/v1/apps/:name/egress` | `{allow: ["api.stripe.com", "*.openai.com"] \| null}` (≤ 50; `*.` = subdomains only). Blocked requests get 403 and a log line; raw sockets are refused under an allowlist |
+| GET | `/v1/apps/:name/domains` | `{domains: [{domain, verified, dns: [{type, name, value}]}]}` |
 | POST | `/v1/apps/:name/domains` | `{domain}` → pending (403 `custom_domains_disabled` when the server has them off: `customDomains: false` in `GET /v1`); `dns` lists the CNAME to point at the app and the TXT `_cresslet.<domain>` proving ownership. Max 10 |
 | POST | `/v1/apps/:name/domains/:domain/verify` | checks the TXT record; first app to verify a domain gets it (409 after). 403 `custom_domains_disabled` when off |
 | DELETE | `/v1/apps/:name/domains/:domain` | |
@@ -136,7 +135,7 @@ Apps can sync with a GitHub repository (when the server has it on: `git.github` 
 | DELETE | `/v1/me/git/github` | full-access token: forget the connection (and revoke the token on GitHub) |
 | GET | `/v1/git/github/repos` | `{repos: [{id, owner, name, fullName, private, defaultBranch, url, push}]}`: up to 100 the user can push to, recently updated first |
 | POST | `/v1/git/github/repos` | full-access token: `{name, owner?: org, private?: true}` → `{repo}` (201), created as the user with a first commit. 409 `repo_exists` |
-| POST | `/v1/apps/:name/git/connect` | **owner or admin**, claimed apps: `{owner, repo, subdir?, deleteBranch?: true, initialSync: push\|pull\|deploy\|none, files?, message?}` → `{repo, sha, files?}` (201). `push`: commit `files` (the workspace) to the default branch; `deploy`: commit the source stored with the live deploy instead (an app deployed before it had a repository; 409 `no_source` if it was deployed without one); `pull`: its files back; `none`: just link. 403 `git_forbidden` if you can't push to it |
+| POST | `/v1/apps/:name/git/connect` | **owner or admin**: `{owner, repo, subdir?, deleteBranch?: true, initialSync: push\|pull\|deploy\|none, files?, message?}` → `{repo, sha, files?}` (201). `push`: commit `files` (the workspace) to the default branch; `deploy`: commit the source stored with the live deploy instead (an app deployed before it had a repository; 409 `no_source` if it was deployed without one); `pull`: its files back; `none`: just link. 403 `git_forbidden` if you can't push to it |
 | DELETE | `/v1/apps/:name/git` | **owner or admin**: unlink (the repository is left alone) |
 | GET | `/v1/apps/:name/git/status` | `{repo, defaultBranch, mainSha, branches: [{name, sha, protected}]}` |
 | POST | `/v1/apps/:name/git/branches` | `deploy`: `{name, from?: sha}` → `{branch: {name, sha}}` (201), cut from the default branch's head by default. 409 `branch_exists` |
@@ -156,7 +155,7 @@ Errors: 403 `git_not_connected` (connect GitHub first), 401 `git_reauth_required
 
 An artifact is static HTML you share (called a page in the API: `/v1/pages`, `kind: "page"`, the `page` and `pages` keys): one file (`{"html": "…"}`, served as `index.html`) or a folder (`{"files": [{path, data, encoding}]}` with an `index.html` at the root; same size limits as deploys). No server, crons, secrets or domains: the `/v1/apps` endpoints for those answer 409 `is_page`. Each artifact gets an unguessable name (`pg-<20 hex>`), or the `name` you upload it with, and its own origin, `pg-….<domain>`, so its scripts can't read another artifact's or the studio's storage.
 
-App or artifact? An app is software that runs: an optional server with a database, files, secrets and crons, always public, with the last 10 deploys kept for rollback. An artifact is a finished file or folder you hand to people: who can open it and how long it's kept are up to you, and it keeps only the version it serves. The CLI's `cresslet deploy` makes one or the other: a project (`cresslet.json`) or any other folder is an app; a single `.html` file, or a folder with `--artifact` (or `--visibility` / `--keep` / `--title`), is an artifact, and deploying the same file or folder again updates it (`PUT /v1/pages/:name`). `--name` picks its address.
+App or artifact? An app is software that runs: an optional server with a database, files, secrets and crons, always public, with the last 5 deploys kept for rollback. An artifact is a finished file or folder you hand to people: who can open it and how long it's kept are up to you, and it keeps only the version it serves. The CLI's `cresslet deploy` makes one or the other: a project (`cresslet.json`) or any other folder is an app; a single `.html` file, or a folder with `--artifact` (or `--visibility` / `--keep` / `--title`), is an artifact, and deploying the same file or folder again updates it (`PUT /v1/pages/:name`). `--name` picks its address.
 
 A name you choose can be guessed: keep the generated one for a `link` artifact that only the people you send it to should open.
 
@@ -199,11 +198,10 @@ With `CRESSLET_ANTHROPIC_API_KEY` set ([self-hosting](self-hosting.md#configurat
 }
 ```
 
-- `app` omitted → random name. `app` unknown → created with that name. `app` exists → needs auth, or 409 with `"create": true` (create only).
-- Anonymous create → app expires (`expiresAt`), response includes `deployKey` (store it).
-- Logged-in create → claimed immediately.
+- `app` omitted → random name. `app` unknown → created with that name, owned by the calling account (401 without one: a deploy key only deploys its own app). `app` exists → needs auth, or 409 with `"create": true` (create only).
+- Create → response includes the new app's `deployKey` (store it, e.g. for CI).
 - `files` = built static output. `server` = single ESM bundle (or omit for static).
-- `config.crons` (optional, ≤ 5, needs `server`): cron expressions that call the server's `scheduled()` export (claimed apps; see app-format.md).
+- `config.crons` (optional, ≤ 5, needs `server`): cron expressions that call the server's `scheduled()` export (see app-format.md).
 - `sources` (optional, same shape as `files`): the project source, stored with the deploy (not served) so another client can open it. Shares the size/file limits with `files`; if it doesn't fit, the deploy succeeds without it and the response's `deploy.warning` says so. Dropped (case-insensitive): any `.env*` name containing `local` or `cresslet`, `.envrc*`, `.dev.vars*`, top-level `dist/`, any `node_modules/`, `.git/` or `.cresslet/`. Other `.env*` files keep only their `CRESSLET_PUBLIC_*` / `VITE_*` entries, fail-closed: only single-line `NAME=value` lines (non-empty unquoted, or backslash-free `'…'`/`"…"`) are understood, comments are dropped, and the first other line ends the file. The studio sends it.
 - `git` (optional): `{sha, branch?, repo?: "owner/name"}`, the commit it was built from, shown with the deploy.
 - Each deploy is immutable; activation is atomic; sandbox restarts on next request.

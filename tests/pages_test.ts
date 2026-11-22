@@ -293,7 +293,7 @@ test("pages: expired pages are gone at once and purged by the reaper; secure coo
   }
 });
 
-test("pages keep only the version they serve on disk; apps keep 10 for rollback", async () => {
+test("pages keep only the version they serve on disk; apps keep 5 for rollback", async () => {
   const t = await setup();
   try {
     const tok = await t.account("a@b.co");
@@ -379,32 +379,32 @@ test("pages keep only the version they serve on disk; apps keep 10 for rollback"
       assert.deepEqual(await onDisk(row.id), [v6]);
     }
 
-    // An app keeps its last 10 deploys (rollback), files and rows alike; the reaper leaves them alone.
-    for (let i = 0; i < 12; i++) {
+    // An app keeps its last 5 deploys (rollback), files and rows alike; the reaper leaves them alone.
+    for (let i = 0; i < 7; i++) {
       assert.equal((await t.send("POST", "/v1/deploys", tok, { app: "site", files: [{ path: "index.html", data: `a${i}` }] })).status, 201);
     }
     const site = (await store.appByName("site"))!;
     await store.db.run("UPDATE deploys SET created_at = 1 WHERE app_id = ?", site.id); // same-millisecond ties
     await t.srv.reap();
     const kept = await rows(site.id);
-    assert.equal(kept.length, 10);
+    assert.equal(kept.length, 5);
     assert.equal(kept[0], site.current_deploy_id);
     assert.deepEqual(await onDisk(site.id), [...kept].sort());
     assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, {})).status, 200);
-    assert.equal(await (await t.visit("site")).text(), "a10");
-    assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, { deployId: kept[9] })).status, 200);
+    assert.equal(await (await t.visit("site")).text(), "a5");
+    assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, { deployId: kept[4] })).status, 200);
     assert.equal(await (await t.visit("site")).text(), "a2");
     // A deploy whose removal failed can't be rolled back to (its files may be half gone); a later prune removes it.
     if (asUser) {
-      const restore = await unremovable(kept[9], site.id);
+      const restore = await unremovable(kept[4], site.id);
       const deploy = (data: string) => quiet(() => t.send("POST", "/v1/deploys", tok, { app: "site", files: [{ path: "index.html", data }] }));
-      assert.equal((await deploy("a12")).status, 201);
-      assert.ok(await store.deploy(kept[9]));
-      assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, { deployId: kept[9] })).status, 404);
+      assert.equal((await deploy("a7")).status, 201);
+      assert.ok(await store.deploy(kept[4]));
+      assert.equal((await t.send("POST", "/v1/apps/site/rollback", tok, { deployId: kept[4] })).status, 404);
       await restore();
-      await deploy("a13");
-      assert.equal(await store.deploy(kept[9]), undefined);
-      assert.equal((await rows(site.id)).length, 10);
+      await deploy("a8");
+      assert.equal(await store.deploy(kept[4]), undefined);
+      assert.equal((await rows(site.id)).length, 5);
     }
   } finally {
     await t.srv.close();
@@ -438,10 +438,10 @@ test("concurrent uploads and rollbacks: what's served always has its row and its
       assert.ok([200, 404].includes(rb.status), String(rb.status));
       assert.equal(dp.status, 201);
       await served("shop");
-      // Ten kept in all, the current one among them (even when it's the rolled-back-to oldest).
+      // Five kept in all, the current one among them (even when it's the rolled-back-to oldest).
       const app = (await store.appByName("shop"))!;
       const kept = (await store.deploys(app.id, 100)).map((d) => d.id);
-      assert.equal(kept.length, 10);
+      assert.equal(kept.length, 5);
       assert.ok(kept.includes(app.current_deploy_id!));
     }
   } finally {

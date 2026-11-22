@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
 import { instanceId, jail, prepareHost, settled } from "../server/sandbox.ts";
+import { ownerAuth } from "./owner.ts";
 
 const runsc = process.env.CRESSLET_RUNSC;
 const usable = process.platform === "linux" && process.getuid?.() === 0 && !!runsc && existsSync("/sys/fs/cgroup/cgroup.procs");
@@ -151,6 +152,7 @@ test("gVisor + per-app uid + cgroups: apps run, are capped and reaped", { skip }
   try {
     const d = await (await call("/v1/deploys", "test.local", {
       method: "POST",
+      headers: await ownerAuth(srv.store),
       body: JSON.stringify({ files: [{ path: "index.html", data: "x" }], server: SERVER }),
     })).json();
     const host = `${d.app.name}.test.local`;

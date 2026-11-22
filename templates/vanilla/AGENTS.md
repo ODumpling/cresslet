@@ -16,7 +16,7 @@ Small web app deployed on Cresslet. Client: plain TS (bundled by esbuild). Serve
 - `npx cresslet deploy` — build + deploy. Prints URL. First deploy creates the app and stores a deploy key in `.cresslet/app.json` (gitignored; keep it).
 - `npx cresslet logs [-f]` — server logs + request log of the deployed app.
 - `npx cresslet db [sql]` — inspect deployed DB (read-only).
-- `npx cresslet secrets set KEY=value` — server secrets (`secrets.get("KEY")`). Needs `npx cresslet login` + `npx cresslet claim`. Locally: `.env.cresslet`.
+- `npx cresslet secrets set KEY=value` — server secrets (`secrets.get("KEY")`). Needs `npx cresslet login`. Locally: `.env.cresslet`.
 - `npx cresslet open` — open deployed app.
 
 ## Server rules
@@ -26,7 +26,7 @@ Small web app deployed on Cresslet. Client: plain TS (bundled by esbuild). Serve
 - Files: `files.put(key, body, {contentType})`, `get(key)` → `Response|null`, `delete`, `list(prefix)`.
 - Secrets: `secrets.get("KEY")` (throws if unset), `secrets.optional("KEY")`. App: `app.name`, `app.url`.
 - Use bindings inside `fetch()` / `scheduled()` (or functions they call), never at module top level: they don't exist until a handler runs.
-- Outbound `fetch` and secrets only work on claimed apps. Unclaimed deploys expire after 72h.
+- Deploying needs `npx cresslet login`: every app belongs to an account.
 - Each request has a 30s limit; memory 256MB. Keep state in `db`/`files`, not globals.
 
 ## Verify

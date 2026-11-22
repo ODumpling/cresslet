@@ -4,7 +4,7 @@ import type { FileSystemTree } from "./vendor/cresslet-container/cresslet-contai
 import type { ProjectGitState } from "./git.ts";
 
 export type Files = Record<string, string | Uint8Array>;
-/** Where the project was last deployed. `deployKey` (anonymous apps) lives in localStorage, never in IndexedDB. */
+/** Where the project was last deployed. `deployKey` (returned when the app was created) lives in localStorage, never in IndexedDB. */
 export interface Deploy {
   name: string;
   url?: string;

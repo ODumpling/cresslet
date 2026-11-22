@@ -115,7 +115,7 @@ test("a SQLite database from before migrations upgrades in place, data kept", as
     // A release before this one: the same tables, no schema_migrations.
     let store = await Store.open(dir);
     const acct = await store.createAccount("old@b.co");
-    const { app } = await store.createApp("old", null, acct.id);
+    const { app } = await store.createApp("old", acct.id);
     await store.setSecret(app.id, "K", "v");
     await store.db.exec("DROP TABLE schema_migrations");
     await store.close();
@@ -139,7 +139,7 @@ async function fill(store: Store) {
   const guest = await store.createAccount("guest@b.co");
   const { token } = await store.issueToken(owner.id, { name: "cli" });
   await store.issueToken(owner.id, { name: "ci", role: "deploy", apps: [] });
-  const { app } = await store.createApp("shop", null, owner.id);
+  const { app } = await store.createApp("shop", owner.id);
   await store.setCurrentDeploy(app.id, "dep_1", { routes: ["/api/*"], crons: ["* * * * *"] });
   for (const [i, d] of ["dep_1", "dep_2", "dep_3"].entries()) {
     await store.addDeploy({ id: d, app_id: app.id, created_at: 1000 + i, bytes: 10, file_count: 1, has_server: 1, source: "cli", git_sha: i ? null : "a".repeat(40), git_branch: i ? null : "main", git_repo: i ? null : "own/shop" });
@@ -167,7 +167,7 @@ async function fill(store: Store) {
   const org = await store.createOrg("acme", "Acme", owner.id);
   await store.setOrgMember(org.id, owner.id, "admin");
   await store.setOrgMember(org.id, guest.id, "member");
-  const { app: orgApp } = await store.createApp("tool", null, owner.id);
+  const { app: orgApp } = await store.createApp("tool", owner.id);
   await store.setAppOrg(orgApp.id, org.id, owner.id);
   return { owner, guest, token, app, orgApp: (await store.appById(orgApp.id))! };
 }
@@ -310,7 +310,7 @@ for (const sh of shared) {
       assert.equal(took.filter(Boolean).length, 5);
       // Quota checked inside createApp: at most 3 apps, 12 creations at once.
       const made = await Promise.allSettled(Array.from({ length: 12 }, (_, i) =>
-        on(i).createApp(`app-${i}`, null, acct.id, async () => {
+        on(i).createApp(`app-${i}`, acct.id, async () => {
           if ((await on(i).appsByAccount(acct.id)).length >= 3) throw new Error("quota");
         })));
       assert.equal(made.filter((r) => r.status === "fulfilled").length, 3);
@@ -336,7 +336,7 @@ test("an invite resent while it's being cancelled is saved as a new one", async 
   const store = await Store.open(dir);
   try {
     const owner = await store.createAccount("o@b.co");
-    const { app } = await store.createApp("inv", null, owner.id);
+    const { app } = await store.createApp("inv", owner.id);
     const { invite: first } = await store.invite(app.id, "x@b.co", "viewer", owner.id);
     // The cancel lands between the resend reading the pending invite and updating it.
     const get = store.db.get.bind(store.db);

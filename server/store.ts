@@ -547,9 +547,9 @@ export class Store implements RateHits {
   /**
    * `check` runs right before the insert, in its transaction, while holding the app-creation lock: quota
    * checks can't race (also across servers sharing a Postgres database). It throws to refuse.
-   * `anonClient`: the client (ipKey) creating an anonymous app.
+   * Every new app has an owner: apps without one are only those from before anonymous deploys were removed.
    */
-  async createApp(name: string, expiresAt: number | null, accountId: string | null, check?: () => Promise<void>, anonClient?: string) {
+  async createApp(name: string, accountId: string, check?: () => Promise<void>) {
     const deployKey = id("clv_app", 24);
     const keyHash = await sha256(deployKey);
     return this.serialized("cresslet:create-app", async () => {
@@ -562,7 +562,7 @@ export class Store implements RateHits {
         current_deploy_id: null,
         config: "{}",
         egress: null,
-        expires_at: expiresAt,
+        expires_at: null,
         deleted_at: null,
         created_at: now,
         updated_at: now,
@@ -575,9 +575,9 @@ export class Store implements RateHits {
         paused_crons: null,
       };
       await this.db.run(
-        `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, expires_at, created_at, updated_at, anon_client)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        app.id, name, accountId, keyHash, "{}", expiresAt, now, now, accountId ? null : anonClient ?? null,
+        `INSERT INTO apps (id, name, account_id, deploy_key_hash, config, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        app.id, name, accountId, keyHash, "{}", now, now,
       );
       return { app, deployKey };
     });
@@ -709,10 +709,6 @@ export class Store implements RateHits {
     const row = await this.db.get<{ h: string }>("SELECT deploy_key_hash AS h FROM apps WHERE id = ?", appId);
     return !!row && row.h === await sha256(key);
   }
-  async claimApp(appId: string, accountId: string) {
-    await this.db.run("UPDATE apps SET account_id = ?, expires_at = NULL, anon_client = NULL, updated_at = ? WHERE id = ?",
-      accountId, Date.now(), appId);
-  }
   /** Paused crons the new config doesn't have are forgotten (one brought back later isn't paused). */
   async setCurrentDeploy(appId: string, deployId: string, config: unknown) {
     const crons = (config as { crons?: string[] } | null)?.crons ?? [];
@@ -731,16 +727,6 @@ export class Store implements RateHits {
   }
   async deleteApp(appId: string) {
     await this.db.run("DELETE FROM apps WHERE id = ?", appId);
-  }
-  /** Live unclaimed apps (anonymous deploys) on the instance. */
-  async anonAppCount(): Promise<number> {
-    return (await this.db.get<{ n: number }>("SELECT count(*) AS n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL"))!.n;
-  }
-  /** Live unclaimed apps one client (ipKey) created. */
-  async anonAppCountBy(client: string): Promise<number> {
-    return (await this.db.get<{ n: number }>(
-      "SELECT count(*) AS n FROM apps WHERE account_id IS NULL AND deleted_at IS NULL AND anon_client = ?", client,
-    ))!.n;
   }
   // ---- rate-limit hits (limits.ts RateLimit)
   takeRateHit(bucket: string, key: string, since: number, max: number, at: number, until: number): Promise<boolean> {

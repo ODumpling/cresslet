@@ -28,9 +28,8 @@ services:
       CRESSLET_DOMAIN: ${CRESSLET_DOMAIN:?set CRESSLET_DOMAIN}
       CRESSLET_SCHEME: ${CRESSLET_SCHEME:-https}
       CRESSLET_PUBLIC_PORT: ${CRESSLET_PUBLIC_PORT:-443}
-      # Safer defaults than the server's for a public host: no signup or anonymous deploys unless set.
+      # Safer default than the server's for a public host: no signup unless set.
       CRESSLET_OPEN_SIGNUP: ${CRESSLET_OPEN_SIGNUP:-false}
-      CRESSLET_ANON_DEPLOYS: ${CRESSLET_ANON_DEPLOYS:-false}
       CRESSLET_ADMIN_TOKEN: ${CRESSLET_ADMIN_TOKEN:-}
       CRESSLET_SITE_ADMINS: ${CRESSLET_SITE_ADMINS:-}
       # Cloudflare's proxy + the Traefik labels below route only <domain> and *.<domain>: other people's
@@ -68,11 +67,6 @@ services:
       CRESSLET_APP_DB_MB: ${CRESSLET_APP_DB_MB:-128}
       CRESSLET_APP_FILES_MB: ${CRESSLET_APP_FILES_MB:-256}
       CRESSLET_MAX_APPS_PER_ACCOUNT: ${CRESSLET_MAX_APPS_PER_ACCOUNT:-10}
-      CRESSLET_MAX_ANON_APPS: ${CRESSLET_MAX_ANON_APPS:-25}
-      CRESSLET_ANON_APPS_PER_HOUR: ${CRESSLET_ANON_APPS_PER_HOUR:-5}
-      # Per client IP: with anonymous deploys on, set CRESSLET_CLIENT_IP_HEADER (e.g. cf-connecting-ip),
-      # or every client counts as the proxy's address and they share these 3 live apps.
-      CRESSLET_MAX_ANON_APPS_PER_IP: ${CRESSLET_MAX_ANON_APPS_PER_IP:-3}
       CRESSLET_CREATES_PER_HOUR: ${CRESSLET_CREATES_PER_HOUR:-20}
       CRESSLET_DEPLOYS_PER_HOUR: ${CRESSLET_DEPLOYS_PER_HOUR:-120}
       CRESSLET_PAGE_VISIBILITY: ${CRESSLET_PAGE_VISIBILITY:-private}

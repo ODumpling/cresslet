@@ -305,8 +305,11 @@ export async function writePage(cfg: Config, store: Store, app: App, files: Depl
 export const deploysLock = (appId: string) => `cresslet:deploys:${appId}`;
 const pageLock = (appId: string) => `cresslet:page:${appId}`;
 
-/** Keep `keep`, the current deploy, and the most recent others: `keepCount` in all (10, for an app's rollback). */
-async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = 10) {
+/** Deploys an app keeps for rollback (the current one included). */
+export const KEEP_DEPLOYS = 5;
+
+/** Keep `keep`, the current deploy, and the most recent others: `keepCount` in all. */
+async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = KEEP_DEPLOYS) {
   const todo = await selectForRemoval(store, deploysLock(appId), async () => {
     const current = (await store.appById(appId, true))?.current_deploy_id; // a rollback may have swapped it meanwhile
     // Ones another prune is already removing don't count as kept.

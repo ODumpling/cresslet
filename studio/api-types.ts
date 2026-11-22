@@ -10,12 +10,10 @@ export interface Meta {
   appUrlTemplate?: string;
   previewOrigin?: string;
   customDomains?: boolean;
-  anonDeploys?: boolean;
   auth?: { github?: boolean };
   ai?: { credits?: boolean };
   /** Source control: apps can sync with GitHub. */
   git?: { github?: boolean };
-  limits?: { anonTtlMs?: number };
 }
 
 export interface Account {

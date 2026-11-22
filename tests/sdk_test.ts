@@ -41,15 +41,15 @@ test("contract cases pass in the platform sandbox (SDK imports, env argument unc
     }
   };
   try {
+    const acct = await call("/v1/accounts", { method: "POST", headers: { authorization: "Bearer adm" }, body: '{"email":"a@b.co"}' });
+    const auth = { authorization: `Bearer ${acct.body.token}` };
     const d = await call("/v1/deploys", {
       method: "POST",
+      headers: auth,
       body: JSON.stringify({ files: [{ path: "index.html", data: "hi" }], server: withSdk(CONTRACT), config: { crons: ["*/5 * * * *"] } }),
     });
     assert.equal(d.status, 201, JSON.stringify(d.body));
-    const { app, deployKey } = d.body;
-    const acct = await call("/v1/accounts", { method: "POST", headers: { authorization: "Bearer adm" }, body: '{"email":"a@b.co"}' });
-    const auth = { authorization: `Bearer ${acct.body.token}` };
-    assert.equal((await call(`/v1/apps/${app.name}/claim`, { method: "POST", headers: auth, body: JSON.stringify({ deployKey }) })).status, 200);
+    const { app } = d.body;
     const s = await call(`/v1/apps/${app.name}/secrets`, { method: "PUT", headers: auth, body: '{"CONTRACT_SECRET":"s3cret"}' });
     assert.deepEqual(s.body.keys, ["CONTRACT_SECRET"]);
     const host = `${app.name}.test.local`;

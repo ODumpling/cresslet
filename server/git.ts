@@ -880,7 +880,7 @@ export function gitRoutes(
     // Which repository it reaches is the account's to choose (an app-scoped token can't point it at another).
     accountWide(c, "admin");
     await authorize(c, a, "admin", { account: true });
-    if (!a.account_id && !a.org_id) throw new HttpError(409, `claim ${a.name} first (an anonymous app can't connect a repository)`, "unclaimed");
+    if (!a.account_id && !a.org_id) throw new HttpError(409, `${a.name} has no owner: an anonymous app can't connect a repository`, "unclaimed");
     const input = await body<{
       owner?: unknown; repo?: unknown; subdir?: unknown; deleteBranch?: unknown; initialSync?: unknown; files?: unknown; message?: unknown;
     } | null>(c, deployBodyLimit) ?? {};

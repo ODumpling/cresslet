@@ -9,6 +9,7 @@ import { serve } from "@hono/node-server";
 import { createServer } from "../server/main.ts";
 import { loadConfig, paths } from "../server/config.ts";
 import type { Cluster } from "../server/cluster.ts";
+import { ownerAuth } from "./owner.ts";
 
 const SERVER = `
 export default {
@@ -136,7 +137,7 @@ test("apps another node owns: their requests are forwarded; their crons and reap
     const useToken = srv.store.useToken.bind(srv.store);
     let late = "";
     srv.store.useToken = async (t) => {
-      if (!late) fake.remote.add(late = (await srv.store.createApp("late", null, null)).app.id);
+      if (!late) fake.remote.add(late = (await srv.store.createApp("late", (await srv.store.createAccount("late@b.co")).id)).app.id);
       return useToken(t);
     };
     const lateBody = JSON.stringify({ app: "late", files: [{ path: "index.html", data: "x" }] });
@@ -267,14 +268,14 @@ test("cluster forwarding caps oversized payloads (Content-Length and chunked) be
     // 3. Invalid JSON within cap still answers 400 cleanly.
     const badRes = await srv.handler(new Request("http://test.local/v1/deploys", {
       method: "POST",
-      headers: { host: "test.local", "content-type": "application/json" },
+      headers: { host: "test.local", "content-type": "application/json", ...await ownerAuth(srv.store) },
       body: "{not-json",
     }));
     assert.equal(badRes.status, 400);
     assert.equal((await badRes.json()).error, "bad_request");
 
     // 4. Remote app/page routes (toOwner) enforce tier caps before forwarding can buffer.
-    const { app: remoteApp } = await srv.store.createApp("remote-app", null, null);
+    const { app: remoteApp } = await srv.store.createApp("remote-app", (await srv.store.createAccount("r@b.co")).id);
     const remotePage = await srv.store.createPage("pg-remote", (await srv.store.createAccount("p@b.co")).id, { title: null, visibility: "private", retentionDays: 30 });
     fake.remote.add(remoteApp.id);
     fake.remote.add(remotePage.id);

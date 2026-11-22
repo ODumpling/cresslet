@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
 import { instanceId } from "../server/sandbox.ts";
+import { ownerAuth } from "./owner.ts";
 
 const writable = (p: string) => {
   try {
@@ -59,9 +60,11 @@ test("per-app uid and cgroup limits", { skip: !usable && "needs linux + root + c
   const call = (path: string, host = "test.local", init: RequestInit = {}) =>
     srv.handler(new Request(`http://${host}${path}`, { ...init, headers: { host, "content-type": "application/json", ...init.headers as Record<string, string> } }));
   try {
+    const auth = await ownerAuth(srv.store);
     const deploy = async () => {
       const d = await (await call("/v1/deploys", "test.local", {
         method: "POST",
+        headers: auth,
         body: JSON.stringify({ files: [{ path: "index.html", data: "x" }], server: SERVER }),
       })).json();
       return { ...d.app, key: d.deployKey };

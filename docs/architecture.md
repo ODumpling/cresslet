@@ -46,7 +46,7 @@ data/apps/<appId>/data/files/          app file storage
 - Per app: separate OS process running [workerd](https://github.com/cloudflare/workerd) (Cloudflare's open-source Workers runtime). App code sees only its bindings: no host filesystem (`node:fs` is virtual), no env, no subprocess, no native addons. V8 heap cap, request timeout → kill.
 - Data access goes through the `HOST` service binding to the control plane, over a unix socket dedicated to that app. Path-traversal checks on file keys live host-side.
 - That socket is served from a worker thread of the app's own (`serveBindings` in `server/bindings.ts`), so the app's synchronous SQLite and file index never run on the control plane's main thread: a slow query stalls only that app's bindings, not the API, the studio, or other apps. If the thread dies, its sandbox is stopped. A restarted app's next thread serves at once, but holds its file writes and deletes until the old thread has landed its accepted ones and exited. `scripts/loadtest-bindings.ts` measures control-plane latency while apps hammer their bindings (numbers in #27).
-- Unclaimed: no outbound network. Claimed: public internet only (workerd `network = (allow = ["public"])`), so loopback/private ranges — including the control plane — are unreachable.
+- Without an owner (anonymous apps from before they were removed, until they expire): no outbound network. Owned: public internet only (workerd `network = (allow = ["public"])`), so loopback/private ranges — including the control plane — are unreachable.
 - Egress allowlist (optional, claimed apps): `globalOutbound` becomes an external `style = proxy` service on a per-app unix socket in the control plane (`server/egress.ts`). It forwards only to allowlisted hostnames (no IP literals), resolves them to public addresses only (checked at connect time), and refuses raw sockets (`CONNECT`). Blocked attempts are logged.
 - Secrets: AES-256-GCM in `cresslet.db`, bound to (app, key). Key from `CRESSLET_SECRETS_KEY`, else generated once in `<dataDir>/secrets.key`. The sandbox fetches them over `HOST` at start; they're never written to the run dir.
 - OS limits (Linux, opt-in, `server/sandbox.ts`):
@@ -61,7 +61,7 @@ data/apps/<appId>/data/files/          app file storage
     - Teardown: the run dir (with `l/`) is removed only after `runsc delete` and `runsc list` confirm the sandbox is gone, off the event loop; the startup sweep reaps leftover sandboxes before it removes their run dirs, and leaves both in place (logged) if it can't confirm.
     - Residual: `l/` is a host directory the sandbox can write to (it could fill the disk under `CRESSLET_SOCK_DIR`; put that on a size-limited tmpfs such as `/run` to bound it). runsc itself and its gofer run as root on the host (gVisor's own seccomp/namespace confinement applies). A crashed control plane leaves runsc running when there are no cgroups; the next start `runsc delete`s it (with `CRESSLET_RUNSC` still set).
   - gVisor around the whole server (Docker `runtime: runsc`, as `deploy/coolify` and the public instance run): code that escapes workerd, and the control plane itself, land in the Sentry, not the host kernel. (On Coolify, `deploy/coolify/firewall.sh`, installed separately, keeps the container's network off the host and private ranges; traffic between it and other containers on the same bridge, such as Coolify's Traefik, stays allowed both ways.) Apps share that one Sentry with each other and the control plane, so per-app uids (`CRESSLET_SANDBOX_UID_BASE`) are what keep them out of each other's files; the residuals of the uid mode above apply inside the container. `CRESSLET_OUTER_GVISOR=true` tells the server it runs this way (it can't check).
-  - Multi-tenant instances (anonymous deploys, or open signup with GitHub login) should run one of the two gVisor modes: without `CRESSLET_RUNSC` or `CRESSLET_OUTER_GVISOR`, the server warns at startup (`isolationWarnings` in `server/config.ts`), and, without `CRESSLET_RUNSC`, also warns if sandboxes share one uid. It warns rather than refuses, since `CRESSLET_ANON_DEPLOYS` and `CRESSLET_OPEN_SIGNUP` default on for local dev.
+  - Multi-tenant instances (open signup with GitHub login) should run one of the two gVisor modes: without `CRESSLET_RUNSC` or `CRESSLET_OUTER_GVISOR`, the server warns at startup (`isolationWarnings` in `server/config.ts`), and, without `CRESSLET_RUNSC`, also warns if sandboxes share one uid. It warns rather than refuses, since `CRESSLET_OPEN_SIGNUP` defaults on for local dev.
   - Why gVisor, not Firecracker: Firecracker needs KVM (`/dev/kvm`, often missing on VPSes and in nested setups), a guest kernel and rootfs image per sandbox, and talks to the host over vsock, so the unix-socket model (`a.sock`/`h.sock`/`e.sock`) would need a vsock bridge. gVisor is two static binaries, runs without KVM (systrap platform), starts a sandbox in ~100 ms, and passes host unix sockets through, so it's a configuration of the same model rather than a new runtime.
 
 ## Deploy lifecycle
@@ -69,7 +69,7 @@ data/apps/<appId>/data/files/          app file storage
 1. Client builds (CLI: native esbuild; studio: esbuild-wasm in cresslet-container).
 2. `POST /v1/deploys` with files + server bundle → written to new immutable deploy dir.
 3. Pointer swap (`apps.current_deploy_id`), sandbox stopped → next request cold-starts new code (~70 ms).
-4. Last 10 deploys kept; `rollback` swaps the pointer back. A page (`PUT /v1/pages/:name`) keeps only the version it serves (a replaced one goes a minute later, so requests in flight finish, or sooner past 3 versions).
+4. Last 5 deploys kept; `rollback` swaps the pointer back. A page (`PUT /v1/pages/:name`) keeps only the version it serves (a replaced one goes a minute later, so requests in flight finish, or sooner past 3 versions).
 
 ## Source control
 
@@ -126,7 +126,7 @@ Design: app affinity. Each app has one owner node. The owner holds `data/apps/<a
 `Cluster` has three methods: `local(appId)` says whether this node owns the app, `forward(appId, req)` sends an HTTP request to the owner, and `forwardUpgrade(appId, …)` does the same for a WebSocket upgrade. The server calls them in these places:
 
 - App hosts (subdomain or verified custom domain), HTTP and WebSocket upgrades: `main.ts`, after the host name resolves to an app.
-- App-scoped API calls: `/v1/apps/:name[/…]` and `/v1/admin/sites/:name[/…]` (soft-deleted sites included, so restore and purge run where the files are). The API forwards them before auth, and the owner authorizes against the shared metadata. `POST /v1/deploys` names its app in the body, so with more than one node the API reads the body first, then forwards the request byte for byte, also before auth (or right after it, if the app appeared on another node during the token check). A single node skips that step. Deploys, rollbacks, the restarts after claim, secret and egress changes, logs (including `?follow=1`), source, the data browser, usage and purge therefore all run on the owner.
+- App-scoped API calls: `/v1/apps/:name[/…]` and `/v1/admin/sites/:name[/…]` (soft-deleted sites included, so restore and purge run where the files are). The API forwards them before auth, and the owner authorizes against the shared metadata. `POST /v1/deploys` names its app in the body, so with more than one node the API reads the body first, then forwards the request byte for byte, also before auth (or right after it, if the app appeared on another node during the token check). A single node skips that step. Deploys, rollbacks, secret and egress changes, logs (including `?follow=1`), source, the data browser, usage and purge therefore all run on the owner.
 - Crons: the scheduler only queues apps this node owns, and checks again at dispatch, since a queued run can outlive a move.
 - Reaping: only apps this node owns.
 
@@ -141,7 +141,7 @@ Left before a second node works:
   - a hop guard, so two nodes that disagree about an owner don't forward to each other forever
   - an answer when the owner is unreachable (a 502, not the generic 500 a rejected `forward` gives today)
   - moving an app, and failover
-- Node-wide state that has to be shared or made sticky: the per-IP limit on new anonymous apps, GitHub OAuth state and exchange codes, and `/v1/admin/sites` usage (it reads local disk for every site).
+- Node-wide state that has to be shared or made sticky: GitHub OAuth state and exchange codes, and `/v1/admin/sites` usage (it reads local disk for every site).
 
 ## Roadmap
 

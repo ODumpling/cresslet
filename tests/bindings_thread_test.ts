@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { bindingsSettled, createBindings, serveBindings } from "../server/bindings.ts";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
+import { ownerAuth } from "./owner.ts";
 
 /** One request to a bindings socket. */
 const call = (sock: string, path: string, method = "GET", body?: string) =>
@@ -121,7 +122,7 @@ test("a slow app query doesn't stall the control plane", async () => {
       return Response.json(await env.db.first(
         "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 10000000) SELECT count(*) n FROM c"));
     } };`;
-    const d = await call("/v1/deploys", { method: "POST", body: JSON.stringify({ files: [{ path: "index.html", data: "hi" }], server }) });
+    const d = await call("/v1/deploys", { method: "POST", headers: await ownerAuth(srv.store), body: JSON.stringify({ files: [{ path: "index.html", data: "hi" }], server }) });
     assert.equal(d.status, 201);
     const host = `${(await d.json()).app.name}.test.local`;
     assert.deepEqual(await (await call("/api/warm", { host })).json(), { x: 1 }); // sandbox and bindings up

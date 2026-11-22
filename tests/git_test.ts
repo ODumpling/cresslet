@@ -10,6 +10,7 @@ import { type Config, loadConfig } from "../server/config.ts";
 import { SecretBox } from "../server/secretbox.ts";
 import { blobSha } from "../server/git.ts";
 import { fakeGithub, type GhUser } from "./fake_github.ts";
+import { makeLegacyAnonymous } from "./owner.ts";
 
 async function setup(over: Partial<Config["git"]> = {}, extra: Partial<Config> = {}) {
   const gh = await fakeGithub({ clientId: "app-cid", clientSecret: "app-secret" });
@@ -248,8 +249,9 @@ test("link a repository and push: secrets stripped, commits authored as the user
   // A token limited to the app can't choose which repository it reaches.
   const scoped = (await t.send("POST", "/v1/me/tokens", tok, { name: "shop only", apps: ["shop"] })).body.token;
   assert.equal((await t.send("POST", "/v1/apps/shop/git/connect", scoped, { owner: "octo", repo: "shop" })).status, 403);
-  // Anonymous apps can't link.
-  const anon = await t.send("POST", "/v1/deploys", undefined, { files: [{ path: "index.html", data: "x" }] });
+  // Apps without an owner (anonymous, from before every app needed one) can't link.
+  const anon = await t.send("POST", "/v1/deploys", tok, { files: [{ path: "index.html", data: "x" }] });
+  await makeLegacyAnonymous(t.srv.store, anon.body.app.id);
   assert.equal((await t.send("POST", `/v1/apps/${anon.body.app.name}/git/connect`, tok, { owner: "octo", repo: "shop" })).status, 403);
 }));
 

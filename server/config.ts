@@ -54,8 +54,6 @@ export interface Config {
   workerdPath: string;
   /** Let any GitHub user create an account (off: only accounts the operator pre-created). */
   openSignup: boolean;
-  /** Allow deploys that create an app without an account (they expire after anonTtlMs). */
-  anonDeploys: boolean;
   /** Bearer token that may pre-create accounts / issue tokens (`POST /v1/accounts`). */
   adminToken: string | null;
   /** Emails / GitHub logins (lowercase) that are always SiteAdmin (`CRESSLET_SITE_ADMINS`, comma-separated). */
@@ -132,18 +130,11 @@ export interface Config {
     wsIdleMs: number;
     /** …and after this long in all (0 = never), so open sockets can't keep a sandbox awake forever. */
     wsMaxMs: number;
-    anonTtlMs: number;
     logLines: number;
     /** How long a site deleted by a site admin stays restorable before it's purged. */
     deletedRetentionMs: number;
     /** Live apps one account may own (site admins: no limit). */
     maxAppsPerAccount: number;
-    /** Live unclaimed (anonymous) apps on the whole instance. */
-    maxAnonApps: number;
-    /** Anonymous apps one client IP may create per hour. */
-    anonAppsPerHour: number;
-    /** Live anonymous apps one client IP (an IPv6 /64) may have. */
-    maxAnonAppsPerIp: number;
     /** New apps and pages one account may create per hour (site admins: no limit). */
     createsPerHour: number;
     /** Deploys per app per hour. */
@@ -180,7 +171,6 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     sockDir: env("CRESSLET_SOCK_DIR", "/tmp/cresslet-sock"),
     workerdPath: process.env.CRESSLET_WORKERD ?? bundledWorkerd(),
     openSignup: env("CRESSLET_OPEN_SIGNUP", "true") === "true",
-    anonDeploys: env("CRESSLET_ANON_DEPLOYS", "true") === "true",
     adminToken: process.env.CRESSLET_ADMIN_TOKEN || null,
     siteAdmins: env("CRESSLET_SITE_ADMINS", "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
     github: githubId && githubSecret
@@ -244,14 +234,10 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       maxWebSocketsPerApp: num("CRESSLET_MAX_WEBSOCKETS_PER_APP", 100),
       wsIdleMs: num("CRESSLET_WS_IDLE_MS", 10 * 60_000),
       wsMaxMs: num("CRESSLET_WS_MAX_MS", 60 * 60_000),
-      anonTtlMs: num("CRESSLET_ANON_TTL_HOURS", 72) * 3600_000,
       logLines: num("CRESSLET_LOG_LINES", 1000),
       deletedRetentionMs: num("CRESSLET_DELETED_RETENTION_DAYS", 30) * 86_400_000,
       maxAppsPerAccount: num("CRESSLET_MAX_APPS_PER_ACCOUNT", 50),
-      maxAnonApps: num("CRESSLET_MAX_ANON_APPS", 200),
       maxPagesPerAccount: num("CRESSLET_MAX_PAGES_PER_ACCOUNT", 200),
-      anonAppsPerHour: num("CRESSLET_ANON_APPS_PER_HOUR", 10),
-      maxAnonAppsPerIp: num("CRESSLET_MAX_ANON_APPS_PER_IP", 20),
       createsPerHour: num("CRESSLET_CREATES_PER_HOUR", 60),
       deploysPerHour: num("CRESSLET_DEPLOYS_PER_HOUR", 120),
       appDbBytes: num("CRESSLET_APP_DB_MB", 512) * 1024 * 1024,
@@ -361,21 +347,21 @@ export const paths = (cfg: Config, appId: string) => {
 };
 
 /**
- * Startup warnings for an instance where strangers can deploy code (open signup or anonymous
- * deploys) without the isolation that needs: gVisor (per sandbox or around the whole server), and
+ * Startup warnings for an instance where strangers can deploy code (open signup with GitHub
+ * login) without the isolation that needs: gVisor (per sandbox or around the whole server), and
  * one uid per app unless each sandbox has its own gVisor.
  */
 export function isolationWarnings(cfg: Config): string[] {
-  if (!(cfg.anonDeploys || (cfg.openSignup && cfg.github))) return [];
+  if (!(cfg.openSignup && cfg.github)) return [];
   const { runsc, outerGvisor, uidBase } = cfg.sandbox;
   const out: string[] = [];
   if (!runsc && !outerGvisor) {
-    out.push("cresslet: strangers can deploy code here (open signup or anonymous deploys) but CRESSLET_RUNSC is unset and " +
+    out.push("cresslet: strangers can deploy code here (open signup) but CRESSLET_RUNSC is unset and " +
       "CRESSLET_OUTER_GVISOR isn't true; workerd alone isn't a hardened multi-tenant boundary. Set CRESSLET_RUNSC, or run the server under gVisor " +
       "(docker --runtime=runsc) and set CRESSLET_OUTER_GVISOR=true (docs/self-hosting.md#docker-and-isolation)");
   }
   if (uidBase === null && !runsc) {
-    out.push("cresslet: strangers can deploy code here (open signup or anonymous deploys) but sandboxes share one uid: " +
+    out.push("cresslet: strangers can deploy code here (open signup) but sandboxes share one uid: " +
       "set CRESSLET_SANDBOX_UID_BASE and/or CRESSLET_RUNSC (docs/self-hosting.md#docker-and-isolation)");
   }
   return out;

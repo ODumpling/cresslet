@@ -119,8 +119,6 @@ test("collaborators: invite by email, accept, and each role gets what it allows"
     const del = await t.send("DELETE", "/v1/apps/shop", adminTok);
     assert.equal(del.status, 403);
     assert.match(del.body.message, /only the owner/);
-    // Claiming is unchanged: the app already has an owner.
-    assert.equal((await t.send("POST", "/v1/apps/shop/claim", adminTok, {})).status, 409);
 
     // The calling token still limits what a collaborator can do.
     const adminRead = (await t.send("POST", "/v1/me/tokens", adminTok, { name: "r", role: "read", apps: ["shop"] }));
@@ -134,10 +132,10 @@ test("collaborators: invite by email, accept, and each role gets what it allows"
     // Strangers and deploy keys can't see or change who has access.
     assert.equal((await t.send("GET", "/v1/apps/shop/collaborators", other)).status, 403);
     assert.equal((await t.json("/v1/apps/shop/collaborators")).status, 401);
-    const anon = await t.send("POST", "/v1/deploys", "none", { files: [{ path: "index.html", data: "hi" }] });
-    const keyed = await t.json(`/v1/apps/${anon.body.app.name}/collaborators`, {
+    const fresh = await t.send("POST", "/v1/deploys", other, { files: [{ path: "index.html", data: "hi" }] });
+    const keyed = await t.json(`/v1/apps/${fresh.body.app.name}/collaborators`, {
       method: "POST",
-      headers: { "x-cresslet-deploy-key": anon.body.deployKey },
+      headers: { "x-cresslet-deploy-key": fresh.body.deployKey },
       body: JSON.stringify({ email: "z@b.co" }),
     });
     assert.equal(keyed.status, 401);

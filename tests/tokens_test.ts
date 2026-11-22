@@ -153,7 +153,7 @@ test("scoped tokens: roles and app limits are enforced", async () => {
     assert.equal((await t.deploy(depAll, "brand-new-app")).status, 403);
     assert.equal(await st(depAll, "PUT", `/v1/apps/${two}/secrets`, { K: "v" }), 403);
 
-    // admin limited to one app: manages it, but not the account (tokens, claims) or other apps.
+    // admin limited to one app: manages it, but not the account (tokens, new apps) or other apps.
     assert.equal(await st(adm1, "PUT", `/v1/apps/${one}/secrets`, { K: "v" }), 200);
     assert.equal(await st(adm1, "PUT", `/v1/apps/${two}/secrets`, { K: "v" }), 403);
     assert.equal(await st(adm1, "GET", "/v1/me/tokens"), 403);
@@ -163,9 +163,7 @@ test("scoped tokens: roles and app limits are enforced", async () => {
       assert.equal(await st(x, "GET", "/v1/me/tokens"), 403);
       assert.equal(await st(x, "POST", "/v1/me/tokens", { name: "escalate", role: "admin" }), 403);
     }
-    const anon = await t.json("/v1/deploys", { method: "POST", body: JSON.stringify({ files: [{ path: "index.html", data: "x" }] }) });
-    assert.equal(await st(adm1, "POST", `/v1/apps/${anon.body.app.name}/claim`, { deployKey: anon.body.deployKey }), 403);
-    assert.equal(await st(root, "POST", `/v1/apps/${anon.body.app.name}/claim`, { deployKey: anon.body.deployKey }), 200);
+    assert.equal((await t.deploy(adm1)).status, 403);
     assert.equal(await st(adm1, "DELETE", `/v1/apps/${one}`), 200);
 
     // A deleted app doesn't come back into scope when its name is reused.

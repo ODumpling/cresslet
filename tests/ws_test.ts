@@ -9,6 +9,7 @@ import type { Socket } from "node:net";
 import { serve } from "@hono/node-server";
 import { createServer } from "../server/main.ts";
 import { loadConfig } from "../server/config.ts";
+import { ownerAuth } from "./owner.ts";
 
 const SERVER = `
 export default {
@@ -64,7 +65,7 @@ test("websockets reach the app server through the sandbox", async () => {
   try {
     const d = await (await srv.handler(new Request("http://test.local/v1/deploys", {
       method: "POST",
-      headers: { host: "test.local", "content-type": "application/json" },
+      headers: { host: "test.local", "content-type": "application/json", ...await ownerAuth(srv.store) },
       body: JSON.stringify({ files: [{ path: "index.html", data: "x" }], server: SERVER }),
     }))).json();
     const host = `${d.app.name}.test.local`;

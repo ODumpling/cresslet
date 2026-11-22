@@ -92,7 +92,7 @@ export function AppSecrets() {
     <>
       <p className="muted lead">Your server reads these with <code>{'secrets.get("NAME")'}</code>
         {" (import { secrets } from \"cresslet\"). Values are write-only: you can replace or delete one, never read it back."}</p>
-      {!a.claimed ? <p className="muted small">Secrets need a claimed app: run cresslet claim, or deploy it while logged in.</p>
+      {!a.claimed ? <p className="muted small">Secrets need an app with an owner (this is an anonymous app from before every app needed an account).</p>
         : !canManage(a.access) ? <p className="muted small">Only the owner and admins can change secrets.</p> : null}
       <div className={manage ? "detail-grid" : ""}>
         <div className="panel">

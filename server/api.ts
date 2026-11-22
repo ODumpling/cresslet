@@ -56,6 +56,7 @@ import {
   type DeployFile,
   type DeployInput,
   HttpError,
+  KEEP_DEPLOYS,
   randomName,
   reservedName,
   removeAppFiles,
@@ -354,7 +355,6 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   // ---- abuse limits (docs/self-hosting.md#configuration)
   const HOUR = 3600_000;
   // Persisted (rate_hits), so a restart doesn't reset them.
-  const anonApps = new RateLimit(cfg.limits.anonAppsPerHour, HOUR, { hits: store, bucket: "anon-apps" });
   const appDeploys = new RateLimit(cfg.limits.deploysPerHour, HOUR, { hits: store, bucket: "deploys" });
   const accountCreates = new RateLimit(cfg.limits.createsPerHour, HOUR, { hits: store, bucket: "creates" });
   const clientIp = (c: Context<Env>) =>
@@ -370,7 +370,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       throw new HttpError(429, `too many new apps and artifacts (${cfg.limits.createsPerHour} per hour): try later`, "rate_limited");
     }
   };
-  /** A new app (or a claimed one) for `acct` must fit its app quota. */
+  /** A new app for `acct` must fit its app quota. */
   const checkAppQuota = async (acct: Account) => {
     if (isSiteAdmin(cfg, acct)) return;
     if ((await store.appsByAccount(acct.id)).length >= cfg.limits.maxAppsPerAccount) {
@@ -405,7 +405,6 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       appUrlTemplate: appUrl(cfg, "{name}"),
       previewOrigin: previewOrigin(cfg),
       openSignup: cfg.openSignup,
-      anonDeploys: cfg.anonDeploys,
       customDomains: cfg.customDomains,
       auth: { github: !!cfg.github, cli: !!cfg.github }, // cli: browser login via the studio, which logs in with GitHub
       git: { github: !!githubSync(cfg) }, // apps can sync with GitHub repositories (docs/api.md#source-control)
@@ -610,8 +609,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   // ---- deploys
   app.post("/deploys", async (c) => {
     const acct = c.get("account");
-    if (!acct && !deployKey(c) && !cfg.anonDeploys) {
-      throw new HttpError(401, "login required to deploy here (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
+    if (!acct && !deployKey(c)) {
+      throw new HttpError(401, "login required to deploy (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
     }
     let raw: unknown;
     if (c.get("deployRead")) {
@@ -634,40 +633,20 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         throw new HttpError(429, `too many deploys of ${target.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
       }
     } else {
-      // A new app comes with a deploy key (full control of it): account-wide admin only.
-      if (acct) accountWide(c, "admin");
-      if (!acct && !cfg.anonDeploys) {
-        throw new HttpError(401, "login required to deploy here (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
-      }
+      // Every app belongs to an account. A new one comes with a deploy key (full control of it): account-wide admin only.
+      if (!acct) throw new HttpError(401, "login required to create an app (cresslet login, or set CRESSLET_TOKEN)", "unauthorized");
+      accountWide(c, "admin");
       const name = input.app ?? await uniqueName();
       if (await store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict");
       if (!validName(name, cfg)) throw new HttpError(400, `app name must be ${NAME_RULES}`, "invalid_name");
-      const client = ipKey(clientIp(c));
-      const anonCap = async () => {
-        if (await store.anonAppCountBy(client) >= cfg.limits.maxAnonAppsPerIp) {
-          throw new HttpError(429, `too many live anonymous apps from your address (${cfg.limits.maxAnonAppsPerIp}): log in, or delete or claim one`, "rate_limited");
-        }
-        if (await store.anonAppCount() >= cfg.limits.maxAnonApps) {
-          throw new HttpError(429, "too many anonymous apps on this server right now: log in to deploy (cresslet login)", "rate_limited");
-        }
-      };
-      if (acct) await checkAppQuota(acct);
-      else await anonCap();
-      const expires = acct ? null : Date.now() + cfg.limits.anonTtlMs;
+      await checkAppQuota(acct);
       // Checked again just before the insert: concurrent deploys can't share the last slot. The hourly
       // allowance is spent only there, so a request that loses the last slot doesn't use it up.
-      const created = await store.createApp(name, expires, acct?.id ?? null, async () => {
+      const created = await store.createApp(name, acct.id, async () => {
         if (await store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict"); // taken meanwhile
-        if (acct) {
-          await checkAppQuota(acct);
-          await takeCreate(acct);
-        } else {
-          await anonCap();
-          if (!await anonApps.take(client)) {
-            throw new HttpError(429, `too many new anonymous apps from your address (${cfg.limits.anonAppsPerHour} per hour): log in, or try later`, "rate_limited");
-          }
-        }
-      }, client);
+        await checkAppQuota(acct);
+        await takeCreate(acct);
+      });
       target = created.app;
       createdKey = created.deployKey;
     }
@@ -744,7 +723,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (await store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict");
     if (!validName(name, cfg)) throw new HttpError(400, `app name must be ${NAME_RULES}`, "invalid_name");
     await checkAppQuota(acct);
-    const created = await store.createApp(name, null, acct.id, async () => {
+    const created = await store.createApp(name, acct.id, async () => {
       if (await store.appByName(name, true)) throw new HttpError(409, `app name unavailable: ${name}`, "conflict");
       await checkAppQuota(acct);
       await takeCreate(acct);
@@ -767,7 +746,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const access = await authorize(c, a, "read");
     return c.json({
       app: { ...view(a, (await orgRefs(store, [a]))(a)), access: access ?? null },
-      deploys: (await store.deploys(a.id, 10)).map((d) => ({
+      deploys: (await store.deploys(a.id, KEEP_DEPLOYS)).map((d) => ({
         id: d.id,
         createdAt: new Date(d.created_at).toISOString(),
         bytes: d.bytes,
@@ -813,32 +792,6 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (only && only !== a.id) throw new HttpError(409, `${a.name} is a different app now: reload to see it`, "conflict");
     await purgeApp(cfg, store, runtime, a);
     return c.json({ deleted: a.name });
-  });
-
-  app.post("/apps/:name/claim", async (c) => {
-    if (!c.get("account")) throw new HttpError(401, "login required (cresslet login)", "unauthorized");
-    const acct = accountWide(c, "admin");
-    const a = await getApp(c.req.param("name"));
-    const { deployKey: k } = await body<{ deployKey?: string }>(c).catch((e) => {
-      if (e instanceof HttpError && e.status === 413) throw e;
-      return { deployKey: undefined };
-    });
-    const key = k ?? c.req.header("x-cresslet-deploy-key");
-    if (a.account_id === acct.id) return c.json({ app: view(a) });
-    if (a.account_id) throw new HttpError(409, "app already claimed", "conflict");
-    if (!key || !await store.checkDeployKey(a.id, key)) throw new HttpError(403, "deploy key required", "forbidden");
-    // Under the app-creation lock (quota checks can't race new apps or other claims), unclaimed still.
-    await store.serialized("cresslet:create-app", async () => {
-      const now = await store.appById(a.id);
-      if (!now) throw new HttpError(404, `app not found: ${a.name}`, "not_found");
-      if (now.account_id && now.account_id !== acct.id) throw new HttpError(409, "app already claimed", "conflict");
-      if (!now.account_id) {
-        await checkAppQuota(acct);
-        await store.claimApp(a.id, acct.id);
-      }
-    });
-    runtime.stop(a.id); // restart with network access
-    return c.json({ app: view((await store.appById(a.id))!) });
   });
 
   app.post("/apps/:name/rollback", async (c) => {
@@ -911,7 +864,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "deploy");
-    if (!a.account_id) throw new HttpError(403, "crons run in claimed apps only (cresslet claim)", "unclaimed");
+    if (!a.account_id) throw new HttpError(403, "crons need an app with an owner (anonymous apps expire)", "unclaimed");
     const { cron, app: now } = await cronParam(c, a);
     await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
     if (!scheduler) throw new HttpError(503, "crons aren't running on this server", "unavailable");
@@ -1161,7 +1114,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "admin");
-    if (!a.account_id) throw new HttpError(403, "secrets require a claimed app (cresslet claim)", "unclaimed");
+    if (!a.account_id) throw new HttpError(403, "secrets need an app with an owner (anonymous apps expire)", "unclaimed");
     const input = await body<Record<string, string | null>>(c);
     await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     for (const [k, v] of Object.entries(input)) {
@@ -1193,7 +1146,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "admin");
-    if (!a.account_id) throw new HttpError(403, "outbound network requires a claimed app (cresslet claim)", "unclaimed");
+    if (!a.account_id) throw new HttpError(403, "outbound network needs an app with an owner (anonymous apps expire)", "unclaimed");
     const { allow } = await body<{ allow?: unknown }>(c);
     await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     let list: string[] | null = null;
@@ -1231,7 +1184,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (adding && !cfg.customDomains) {
       throw new HttpError(403, `custom domains are turned off on this server: use ${appUrl(cfg, a.name)}`, "custom_domains_disabled");
     }
-    if (!a.account_id) throw new HttpError(403, "custom domains require a claimed app (cresslet claim)", "unclaimed");
+    if (!a.account_id) throw new HttpError(403, "custom domains need an app with an owner (anonymous apps expire)", "unclaimed");
     return a;
   };
 

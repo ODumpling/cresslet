@@ -107,7 +107,7 @@ async function baseline(db: Db) {
     CREATE INDEX IF NOT EXISTS rate_hits_key ON rate_hits (bucket, key, at);
     CREATE INDEX IF NOT EXISTS rate_hits_until ON rate_hits (until);
   `);
-  // The client (ipKey) that created an anonymous app, for the per-client cap; cleared on claim.
+  // The client (ipKey) that created an anonymous app, for the per-client cap. Unused since anonymous deploys were removed.
   if (!(await cols(db, "apps")).includes("anon_client")) await db.exec("ALTER TABLE apps ADD COLUMN anon_client TEXT");
   // AI credits (server/credits.ts), in millicredits. `balance`: granted credits left (can go below 0 by the last
   // request); `period_used`: this month's free allowance used (`period` = "YYYY-MM", UTC; a new month starts at 0).

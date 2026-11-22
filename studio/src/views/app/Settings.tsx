@@ -20,7 +20,7 @@ export function AppSettings() {
   const a = d.app;
   return (
     <>
-      {!a.claimed ? <p className="muted small">Domains and outbound network need a claimed app: run cresslet claim, or deploy it while logged in.</p>
+      {!a.claimed ? <p className="muted small">Domains and outbound network need an app with an owner (this is an anonymous app from before every app needed an account).</p>
         : !canManage(a.access) ? <p className="muted small">Only the owner and admins can change these settings.</p> : null}
       {a.claimed ? <Domains /> : null}
       {a.config?.server ? <Egress /> : null}
