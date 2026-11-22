@@ -84,6 +84,9 @@ const sdkPlugin = {
   },
 };
 
+// What a form can send (all another site can send into the preview, see dev's middleware).
+const FORM_TYPES = /^\s*(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)\s*(?:;|$)/i;
+
 const CONTENT_TYPES = {
   html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8",
   css: "text/css; charset=utf-8", json: "application/json", map: "application/json", txt: "text/plain; charset=utf-8",
@@ -101,11 +104,10 @@ function toBase64(bytes) {
 /**
  * @param {import("./vendor/cresslet-container/index").Container} c
  * @param {{ auth: () => { token?: string|null }, project: () => any, onDeployed?: (r: any) => void,
- *   builderRunning?: () => boolean, approveDeploy?: (target: string|null, signal: AbortSignal) => Promise<boolean>,
- *   onReload?: () => void }} opts
+ *   builderRunning?: () => boolean, approveDeploy?: (target: string|null, signal: AbortSignal) => Promise<boolean> }} opts
  *   approveDeploy: asked before `cresslet deploy` runs while the AI builder runs a command (builderRunning), or in a
  *   process it started (CRESSLET_AI_BUILDER set); without it, such deploys are refused. target: the app it deploys
- *   to, null for a new one. onReload: a TanStack Start app's preview was rebuilt (no HMR there): reload it.
+ *   to, null for a new one.
  */
 export function createCresslet(c, opts) {
   const wd = c.workdir;
@@ -173,7 +175,7 @@ export function createCresslet(c, opts) {
         const r = await builder.build();
         await c.fs.writeFile(p(".cresslet/build/server.js"), r.server);
         log(`built ${r.files.length} files + server (TanStack Start) in ${Math.round(performance.now() - t)}ms`);
-        return { files: r.files, outDir: "dist/client", server: r.server };
+        return { files: r.files, outDir: r.outDir, server: r.server };
       } finally {
         builder.close();
       }
@@ -256,7 +258,7 @@ export function createCresslet(c, opts) {
   }
 
   // ---- dev: container dev server for the client, a project Worker (on the preview origin) for the server handler.
-  // TanStack Start apps: their production build (start-build.js), rebuilt on save, static files from dist/client.
+  // TanStack Start apps: their production build (start-build.js), rebuilt on save (the preview then reloads itself).
   async function dev(ctx, port) {
     const out = (s) => ctx.stdout.write(s.replace(/\n/g, "\r\n") + "\r\n");
     const cfg = await config();
@@ -273,6 +275,11 @@ export function createCresslet(c, opts) {
       }
       : bundleServer;
     const hasServer = start ? async () => true : serverEntry;
+    // Start apps have no HMR: their pages reload when a rebuild is ready (keeping the page they're on)
+    const reloadChannel = `cresslet:${c.instanceId}:${port}`;
+    const reloads = start ? c.previewChannel(reloadChannel) : null;
+    const RELOAD_SCRIPT = `<script>new BroadcastChannel(${JSON.stringify(reloadChannel)}).onmessage = (e) => e.data?.type === "cresslet-start-reload" && location.reload();</script>`;
+    const withReload = (html) => (html.includes("</head>") ? html.replace("</head>", `${RELOAD_SCRIPT}</head>`) : html + RELOAD_SCRIPT);
     const dbPath = p(".cresslet/dev/db.sqlite");
     const filesDir = p(".cresslet/dev/files");
     let worker = null;
@@ -427,7 +434,7 @@ export function createCresslet(c, opts) {
         worker = w;
         workerError = null;
         out("\x1b[32m✔\x1b[0m server ready");
-        if (start) opts.onReload?.(); // a new client build too
+        reloads?.postMessage({ type: "cresslet-start-reload" }); // a new client build too
       } catch (e) {
         w.terminate();
         if (seq < readySeq) return; // a later save's worker serves already
@@ -438,7 +445,7 @@ export function createCresslet(c, opts) {
 
     // The preview's cookies (an app's session): responses made in its service worker can't set them and its requests
     // don't carry them, so they're kept here for this `cresslet dev` and sent with each request. One jar per preview:
-    // name → value (Path/Domain don't matter on one origin; Max-Age=0 or a past Expires removes one).
+    // name → { value, lax } (Path/Domain don't matter on one origin; Max-Age=0 or a past Expires removes one).
     const jar = new Map();
     function keepCookies(headers) {
       for (const [k, v] of headers) {
@@ -449,10 +456,11 @@ export function createCresslet(c, opts) {
         const name = pair.slice(0, i).trim();
         const gone = attrs.some((a) => {
           const [ak, av = ""] = a.split("=").map((x) => x.trim());
-          return (/^max-age$/i.test(ak) && Number(av) <= 0) || (/^expires$/i.test(ak) && Date.parse(av) <= Date.now());
+          return (/^max-age$/i.test(ak) && /^-?\d+$/.test(av) && Number(av) <= 0) || (/^expires$/i.test(ak) && Date.parse(av) <= Date.now());
         });
+        const lax = !attrs.some((a) => /^\s*samesite\s*=\s*none\s*$/i.test(a));
         if (gone) jar.delete(name);
-        else jar.set(name, pair.slice(i + 1).trim());
+        else jar.set(name, { value: pair.slice(i + 1).trim(), lax });
       }
       return headers.filter(([k]) => k.toLowerCase() !== "set-cookie");
     }
@@ -468,8 +476,12 @@ export function createCresslet(c, opts) {
       const body = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
       // after reading the body: the worker may have stopped meanwhile
       const w = worker;
-      const unavailable = () =>
-        new Response(workerError ?? "server is starting", { status: 503, headers: { "content-type": "text/plain" } });
+      const unavailable = () => {
+        const text = workerError ?? "server is starting";
+        if (!start) return new Response(text, { status: 503, headers: { "content-type": "text/plain" } });
+        const esc = text.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[ch]);
+        return new Response(withReload(`<!doctype html><pre>${esc}</pre>`), { status: 503, headers: { "content-type": "text/html; charset=utf-8" } });
+      };
       if (!w) return unavailable();
       const appUrl = new URL(path + url.search, cfg.name ? `https://${cfg.name}.preview` : location.origin);
       // A WebSocket's `req.headers` (from cresslet-container) has Upgrade and the Sec-WebSocket-* headers.
@@ -478,11 +490,16 @@ export function createCresslet(c, opts) {
       const page = c.previewOrigin ?? location.origin; // where preview pages run
       const headers = [...req.headers].map(([k, v]) => (k.toLowerCase() === "origin" && v === page ? [k, appUrl.origin] : [k, v]));
       // Other requests reach this handler as a `Request` cresslet-container made on this page, which drops the
-      // browser's Origin (and Sec-Fetch-Site, Referer). They come from preview pages: a state-changing one gets the
-      // app's Origin, as a same-origin request has deployed, so CSRF checks (TanStack Start's createCsrfMiddleware,
-      // `Origin === new URL(req.url).origin`) let the app's own forms and server functions through here too.
-      if (req.method !== "GET" && req.method !== "HEAD" && !req.headers.has("origin")) headers.push(["origin", appUrl.origin]);
-      if (jar.size && !req.headers.has("cookie")) headers.push(["cookie", [...jar].map(([k, v]) => `${k}=${v}`).join("; ")]);
+      // browser's Origin (and Sec-Fetch-Site, Referer), so where one came from is unknown. Another site can only send a
+      // form here (a top-level navigation into the preview: its fetches don't reach the preview's service worker), so a
+      // state-changing request that isn't a form's is the preview page's own: it gets the app's Origin, as it has
+      // deployed, so CSRF checks (TanStack Start's createCsrfMiddleware, `Origin === new URL(req.url).origin`) pass.
+      // Forms get no Origin and only SameSite=None cookies, as a cross-site one would.
+      const unsafe = req.method !== "GET" && req.method !== "HEAD";
+      const form = unsafe && FORM_TYPES.test(req.headers.get("content-type") ?? "");
+      if (unsafe && !form && !req.headers.has("origin")) headers.push(["origin", appUrl.origin]);
+      const cookies = [...jar].filter(([, c]) => !form || !c.lax);
+      if (cookies.length && !req.headers.has("cookie")) headers.push(["cookie", cookies.map(([k, c]) => `${k}=${c.value}`).join("; ")]);
       const res = await new Promise((resolve) => {
         waiting.set(id, { w, done: resolve });
         w.postMessage(
@@ -510,6 +527,10 @@ export function createCresslet(c, opts) {
         w.postMessage({ type: "socket", id }, [port]);
         return upgrade.response;
       }
+      if (start && res.body && /^text\/html/i.test(new Headers(res.headers).get("content-type") ?? "")) {
+        res.body = enc.encode(withReload(dec.decode(res.body)));
+        res.headers = res.headers.filter(([k]) => k.toLowerCase() !== "content-length");
+      }
       return new Response(res.status === 204 || res.status === 304 ? null : res.body, { status: res.status, headers: res.headers });
     }
 
@@ -524,7 +545,7 @@ export function createCresslet(c, opts) {
       if (rel.split("/").includes("..")) return new Response("Not found", { status: 404 });
       let bytes;
       try {
-        bytes = await c.fs.readFile(p(`dist/client${rel}`));
+        bytes = await c.fs.readFile(p(`.cresslet/start/preview${rel}`)); // start-build.js: the preview's build
       } catch {
         return new Response("Not found", { status: 404, headers: { "content-type": "text/plain" } });
       }

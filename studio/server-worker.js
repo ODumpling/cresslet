@@ -123,9 +123,11 @@ globalThis.Response = class Response extends NativeResponse {
   // would never reach the studio. Responses made here keep all their headers, Set-Cookie included, on a Headers of
   // their own (later appends too), which the studio reads.
   static json(data, init) {
+    const body = JSON.stringify(data);
+    if (body === undefined) throw new TypeError("Value is not JSON serializable");
     const headers = new Headers(init?.headers);
     if (!headers.has("content-type")) headers.set("content-type", "application/json");
-    return new this(JSON.stringify(data), { ...init, headers });
+    return new this(body, { ...init, headers });
   }
   clone() {
     return ownHeaders(super.clone(), this.headers);
@@ -134,6 +136,7 @@ globalThis.Response = class Response extends NativeResponse {
     if (init?.status !== 101) {
       super(body, init);
       const headers = new Headers(super.headers); // with the defaults the body gave (content-type)
+      headers.delete("set-cookie"); // where Response keeps them (not browsers), they're added once below
       for (const v of new Headers(init?.headers).getSetCookie()) headers.append("set-cookie", v);
       ownHeaders(this, headers);
       return;

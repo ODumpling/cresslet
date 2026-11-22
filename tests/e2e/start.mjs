@@ -71,7 +71,16 @@ try {
   console.log("SSR + hydration + /api/health");
   await page.screenshot({ path: `${shots}/start-preview.png` });
 
-  await signUpAndTodo(frame, () => page.locator("#preview-reload").click(), "preview");
+  // a real reload of the frame's page (the same route), seen through a marker the old document had
+  const reloadFrame = async () => {
+    await (await previewFrame()).evaluate(() => ((window.__old = 1), setTimeout(() => location.reload())));
+    for (let i = 0; i < 100; i++) {
+      if ((await (await previewFrame()).evaluate(() => window.__old).catch(() => 1)) === undefined) return;
+      await page.waitForTimeout(200);
+    }
+    throw new Error("the preview didn't reload");
+  };
+  await signUpAndTodo(frame, reloadFrame, "preview");
   await page.screenshot({ path: `${shots}/start-dashboard.png` });
 
   // A new file route (dev restarted: the route tree is regenerated), then an edit in the editor: a save rebuilds and
@@ -84,6 +93,12 @@ try {
   await waitTerm(/\n0\s*\n[\s\S]*server ready/, "dev restarted with the new route");
   await page.locator("#preview-path").fill("/about");
   await page.locator("#preview-path").press("Enter");
+  await frame.getByRole("heading", { name: "About this app" }).waitFor({ timeout: 30000 });
+  // reach it again in the app (the address box says /): a rebuild must reload the page the preview is on
+  await page.locator("#preview-path").fill("/");
+  await page.locator("#preview-path").press("Enter");
+  await frame.getByRole("heading", { name: "TanStack Start on Cresslet" }).waitFor({ timeout: 30000 });
+  await (await previewFrame()).evaluate(() => window.__TSR_ROUTER__.navigate({ to: "/about" }));
   await frame.getByRole("heading", { name: "About this app" }).waitFor({ timeout: 30000 });
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: /Code/ }).first().click().catch(() => {});

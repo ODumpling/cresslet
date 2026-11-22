@@ -66,15 +66,17 @@ export async function getServerFnById(id, access) {
 /**
  * AsyncLocalStorage for the preview's server worker (a browser Worker has no node:async_hooks). One store at a time:
  * the worker handles one request at a time for Start apps (server-worker.js `serial`), and the outermost store stays
- * after its callback resolves, so a streamed response's rest still sees its request.
+ * after its callback resolves (until the next request's), so a streamed response's rest still sees its request.
  */
 export const ASYNC_HOOKS_SHIM = `export class AsyncLocalStorage {
   #store;
+  #depth = 0;
   getStore() { return this.#store; }
   run(store, fn, ...args) {
     const prev = this.#store;
+    const nested = this.#depth++ > 0;
     this.#store = store;
-    const restore = () => { if (prev !== undefined) this.#store = prev; };
+    const restore = () => { this.#depth--; if (nested) this.#store = prev; };
     try {
       const r = fn(...args);
       if (r && typeof r.then === "function") return Promise.resolve(r).finally(restore);
@@ -217,7 +219,12 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
     if (r.errors?.length) throw new Error(r.errors.map((e) => e.text).join("\n"));
     const out = r.outputFiles.find((f) => f.path.endsWith(".cjs")) ?? r.outputFiles[0];
     await c.fs.writeFile(p(".cresslet/start/service.cjs"), out.text ?? dec.decode(out.contents));
+    if (closed) throw new Error("TanStack Start build closed");
     const proc = await c.spawn("node", [p(".cresslet/start/service.cjs")], { cwd: wd });
+    if (closed) {
+      proc.kill(); // closed while it started
+      throw new Error("TanStack Start build closed");
+    }
     const me = { proc, pending: new Map(), nextId: 0, input: proc.input.getWriter(), log: "" };
     let resolveReady, rejectReady;
     me.ready = new Promise((res, rej) => ((resolveReady = res), (rejectReady = rej)));
@@ -256,6 +263,7 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
   }
 
   let starting = null;
+  let closed = false;
   async function rpc(msg) {
     if (!svc) {
       starting ??= startService().finally(() => (starting = null));
@@ -284,14 +292,16 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
 
   /**
    * One build. `preview`: for the studio's server worker (node:async_hooks shimmed, see ASYNC_HOOKS_SHIM), else for
-   * deploying (node:* left to the platform). → { files: absolute paths under dist/client, server: code, warnings }
+   * deploying (node:* left to the platform). Static files go to dist/client, or for the preview to their own
+   * directory (a deploy's build doesn't touch what the preview serves). → { files: absolute paths, outDir, server, entry }
    */
   async function build({ preview = false } = {}) {
+    const outDir = preview ? ".cresslet/start/preview" : "dist/client";
     const { clientRouteTree } = await rpc({ op: "routes" }); // also writes src/routeTree.gen.ts if routes changed
     const routeTreeFile = p("src/routeTree.gen.ts");
     const serverFns = {};
     const assetUrls = new Map(); // absolute file → its /assets URL (`?url` imports, the same in both builds)
-    const outFiles = new Map(); // absolute path under dist/client → bytes
+    const outFiles = new Map(); // absolute path under outDir → bytes
     const defines = startDefines();
     const startEntry = await firstFile("src/start.ts", "src/start.tsx", "src/start.js");
     const routerEntry = await firstFile("src/router.tsx", "src/router.ts", "src/router.js");
@@ -308,12 +318,12 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
         if (r.errors?.length) throw new Error(r.errors.map((e) => e.text).join("\n"));
         for (const f of r.outputFiles) {
           if (f.path.endsWith(".css")) bytes = f.contents ?? enc.encode(f.text);
-          else outFiles.set(p(`dist/client/assets/${f.path.split("/").pop()}`), f.contents);
+          else outFiles.set(p(`${outDir}/assets/${f.path.split("/").pop()}`), f.contents);
         }
       } else bytes = await c.fs.readFile(file);
       if (typeof bytes === "string") bytes = enc.encode(bytes);
       const url = `/assets/${name}-${await hash8(bytes)}.${ext}`;
-      outFiles.set(p(`dist/client${url}`), bytes);
+      outFiles.set(p(`${outDir}${url}`), bytes);
       assetUrls.set(file, url);
       return url;
     }
@@ -411,7 +421,7 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
       entryPoints: { client: "tss:client-entry" },
       platform: "browser",
       define: { ...defines, "process.env": "{}" }, // other process.env reads in client code: undefined, not a crash
-      outdir: p("dist/client/assets"),
+      outdir: p(`${outDir}/assets`),
       entryNames: "[name]-[hash]",
       assetNames: "[name]-[hash]",
       publicPath: "/assets",
@@ -434,22 +444,24 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
     const css = [];
     for (const f of client.outputFiles) {
       outFiles.set(f.path, f.contents ?? enc.encode(f.text));
-      const url = f.path.slice(p("dist/client").length);
+      const url = f.path.slice(p(outDir).length);
       const meta = client.metafile?.outputs?.[Object.keys(client.metafile.outputs).find((k) => f.path.endsWith(k)) ?? ""];
       if (meta?.entryPoint) entry = url;
       if (f.path.endsWith(".css")) css.push(url);
     }
-    entry ??= [...outFiles.keys()].map((f) => f.slice(p("dist/client").length)).find((u) => /^\/assets\/client-[^/]*\.js$/.test(u));
+    entry ??= [...outFiles.keys()].map((f) => f.slice(p(outDir).length)).find((u) => /^\/assets\/client-[^/]*\.js$/.test(u));
     if (!entry) throw new Error("client build: no entry chunk");
 
     // ---- server: its compile may find server functions only the server calls; then once more with those in the resolver
     let server;
-    for (let pass = 0; pass < 3; pass++) {
+    const serverEntry = await firstFile("src/server.ts", "src/server.tsx", "src/server.js");
+    for (let pass = 0; ; pass++) {
+      if (pass === 5) throw new Error("server build: server functions still changing after 5 passes");
       const known = JSON.stringify(Object.keys(serverFns).sort());
       const fnsNow = { ...serverFns };
       const virtuals = {
-        "tss:server-entry": (await firstFile("src/server.ts", "src/server.tsx", "src/server.js"))
-          ? `export { default } from ${JSON.stringify(await firstFile("src/server.ts", "src/server.tsx", "src/server.js"))};`
+        "tss:server-entry": serverEntry
+          ? `export { default } from ${JSON.stringify(serverEntry)};`
           : `export { default } from "@tanstack/react-start/server-entry";`,
         "tanstack-start-manifest:v": manifestModule({ entry, css }),
         "#tanstack-start-server-fn-resolver": () => serverFnResolverModule(fnsNow),
@@ -472,8 +484,8 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       if (JSON.stringify(Object.keys(serverFns).sort()) === known) break;
     }
 
-    // ---- dist/client: public/ files, then the bundles
-    await c.fs.rm(p("dist"), { recursive: true, force: true });
+    // ---- outDir: public/ files, then the bundles; then files of earlier builds go (written first: the preview keeps
+    // serving while this runs)
     const files = [];
     const copyPublic = async (dir) => {
       let entries;
@@ -486,7 +498,7 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
         const rel = `${dir}/${e.name}`;
         if (e.isDirectory()) await copyPublic(rel);
         else {
-          const to = p(`dist/client/${rel.slice("public/".length)}`);
+          const to = p(`${outDir}/${rel.slice("public/".length)}`);
           await c.fs.writeFile(to, await c.fs.readFile(p(rel)));
           files.push(to);
         }
@@ -497,10 +509,26 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       await c.fs.writeFile(f, bytes);
       files.push(f);
     }
-    return { files, server, entry };
+    const keep = new Set(files);
+    const prune = async (dir) => {
+      let entries;
+      try {
+        entries = await c.fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        const f = `${dir}/${e.name}`;
+        if (e.isDirectory()) await prune(f);
+        else if (!keep.has(f)) await c.fs.rm(f, { force: true });
+      }
+    };
+    await prune(p(outDir));
+    return { files, outDir, server, entry };
   }
 
   function close() {
+    closed = true;
     const me = svc;
     svc = null;
     me?.proc.kill();

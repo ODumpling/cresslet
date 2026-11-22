@@ -3081,7 +3081,6 @@ async function openProject(id, gen) {
     // `cresslet deploy` in a command the AI builder started: the user says yes first.
     builderRunning: () => builder.running(),
     approveDeploy: (target, signal) => builder.approve(`Claude wants to deploy ${target ? `to ${target}` : "this project as a new app"}. It goes live at once.`, signal),
-    onReload: () => loadPreview(), // a TanStack Start app rebuilt (it has no HMR)
   });
 
   // editor

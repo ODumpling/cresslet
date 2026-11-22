@@ -79,6 +79,14 @@ test("start build: the preview's AsyncLocalStorage shim", async () => {
   assert.equal(r, "done");
   // the outermost store stays after its callback: a streamed response's rest still runs with it
   assert.equal(als.getStore(), "outer");
-  assert.throws(() => als.run("x", () => { throw new Error("boom"); }), /boom/);
-  assert.equal(als.getStore(), "outer");
+  // the next request's, too (not the previous request's, restored over it)
+  await als.run("request 2", async () => {
+    await als.run("nested", async () => {});
+    assert.equal(als.getStore(), "request 2");
+  });
+  assert.equal(als.getStore(), "request 2");
+  await new Promise((res) => setTimeout(res, 5)); // its body streams on
+  assert.equal(als.getStore(), "request 2");
+  assert.throws(() => als.run("outer 3", () => als.run("x", () => { throw new Error("boom"); })), /boom/);
+  assert.equal(als.getStore(), "outer 3");
 });
