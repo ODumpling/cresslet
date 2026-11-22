@@ -93,6 +93,7 @@ export function SettingsTokens() {
       newValue.current?.select();
     } catch (err) {
       if (alive.current) setError(`Could not create token: ${errorMessage(err)}`);
+      else toast(`Could not create token: ${errorMessage(err)}`); // another tab is open: the form's error would be lost
     } finally {
       flushSync(() => setBusy(false));
       if (alive.current && document.activeElement === document.body) createBtn.current?.focus(); // disabling it dropped focus

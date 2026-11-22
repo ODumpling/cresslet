@@ -57,7 +57,7 @@ export function SettingsArtifacts() {
       }}>
         <div className="field">
           <label htmlFor="def-visibility">Who can open new artifacts</label>
-          <select className="input" id="def-visibility" aria-describedby="vis-hint-def" value={vis} onChange={(e) => setVis(e.target.value)}>
+          <select className="input" id="def-visibility" aria-describedby="vis-hint-def" disabled={!settings} value={vis} onChange={(e) => setVis(e.target.value)}>
             <option value="private">Private</option>
             <option value="link">Anyone with the link</option>
             <option value="public">Public</option>
@@ -66,7 +66,7 @@ export function SettingsArtifacts() {
         </div>
         <div className="field">
           <label htmlFor="def-retention">Keep new artifacts for</label>
-          <select className="input" id="def-retention" aria-describedby="def-hint" value={keep} onChange={(e) => setKeep(e.target.value)}>
+          <select className="input" id="def-retention" aria-describedby="def-hint" disabled={!settings} value={keep} onChange={(e) => setKeep(e.target.value)}>
             {options.map((v) => <option key={v} value={v}>{keepText(keepParse(v))}</option>)}
           </select>
           <p className="muted small" id="def-hint">Server default: <span id="def-server">{d

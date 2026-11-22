@@ -135,7 +135,7 @@ function Browse({ sel, tables }: { sel: Table; tables: API.DbTables }) {
     setOffset(to);
   };
 
-  const p = page.data;
+  const p = page.error ? undefined : page.data; // a failed page: no pager (Refresh retries), as before useLoad kept data
   const last = p ? Math.min(p.offset + p.rows.length, sel.count) : 0;
   return (
     <div className="panel">
@@ -151,7 +151,7 @@ function Browse({ sel, tables }: { sel: Table; tables: API.DbTables }) {
       </div>
       <div className="row start pager">
         <span className="muted small" role="status">
-          {p && !page.error ? (sel.count ? `Rows ${(p.offset + 1).toLocaleString()}–${last.toLocaleString()} of ${sel.count.toLocaleString()}` : "No rows") : ""}
+          {p ? (sel.count ? `Rows ${(p.offset + 1).toLocaleString()}–${last.toLocaleString()} of ${sel.count.toLocaleString()}` : "No rows") : ""}
         </span>
         {p ? (
           <>
