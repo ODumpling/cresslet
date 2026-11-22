@@ -56,7 +56,8 @@ function attemptCost(model: string | undefined, u: Usage): number {
   let w5 = n(u.cache_creation?.ephemeral_5m_input_tokens), w1 = n(u.cache_creation?.ephemeral_1h_input_tokens);
   w5 += Math.max(0, written - w5 - w1); // TTL not broken down: the 5-minute rate
   const prompt = n(u.input_tokens) + read + w5 + w1;
-  const base = (model && PRICES[model]) || MAX_PRICE;
+  // A reply may name the dated snapshot of the alias asked for (claude-haiku-4-5-20251001): priced as the alias.
+  const base = (model && (PRICES[model] ?? PRICES[model.replace(/-\d{8}$/, "")])) || MAX_PRICE;
   const p = base.long && prompt > base.long.above ? base.long : base;
   return n(u.input_tokens) * p.input + n(u.output_tokens) * p.output + read * p.cacheRead + w5 * p.input * 1.25 + w1 * p.input * 2;
 }

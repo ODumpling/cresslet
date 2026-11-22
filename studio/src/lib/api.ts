@@ -41,7 +41,10 @@ export const json = (method: string, body: unknown): Init => ({ method, body: JS
 
 let metaReq: Promise<API.Meta> | undefined;
 /** GET /v1: this server's settings (`{}` if it fails: everything may be missing). Asked once per page. */
-export const meta = (): Promise<API.Meta> => metaReq ??= fetch("/v1").then((r) => r.json()).catch(() => ({}));
+export const meta = (): Promise<API.Meta> => metaReq ??= fetch("/v1").then((r) => r.json()).catch(() => {
+  metaReq = undefined; // a failure isn't kept: the next call asks again
+  return {};
+});
 /** Projects need a session when this server offers login; without login set up the studio stays usable logged out. */
 export const loginRequired = () => meta().then((m) => !!m.auth?.github);
 export const mustLogIn = async () => !auth.token && await loginRequired();

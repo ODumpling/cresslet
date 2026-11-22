@@ -391,3 +391,9 @@ test("AI credits admin view: off without AI credits", async () => {
     await t.close();
   }
 });
+
+test("a reply naming the dated snapshot of a model is priced as that model, not the ceiling", () => {
+  const u = { input_tokens: 1000, output_tokens: 1000 };
+  assert.equal(usageCost("claude-haiku-4-5-20251001", u), usageCost("claude-haiku-4-5", u));
+  assert.ok(usageCost("claude-unknown-20251001", u) > usageCost("claude-haiku-4-5", u), "unknown: still the ceiling");
+});

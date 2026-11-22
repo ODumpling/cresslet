@@ -655,3 +655,91 @@ test("JSON request body cap over real HTTP/1.1 chunked transfer encoding rejects
     await t.done();
   }
 });
+
+test("JSON bodies that aren't objects are 400s, not 500s; secrets are all checked before any is written", async () => {
+  const t = await setup({});
+  try {
+    const a = t.bearer(await t.account("a@b.co"));
+    assert.equal((await t.deploy(a, "shop")).status, 201);
+    for (const [method, path] of [["POST", "/v1/apps/shop/rollback"], ["PUT", "/v1/apps/shop/secrets"],
+      ["PUT", "/v1/apps/shop/egress"], ["POST", "/v1/apps/shop/db/query"], ["POST", "/v1/accounts"]]) {
+      const r = await t.json(path, { method, headers: path === "/v1/accounts" ? t.bearer("adm") : a, body: "null" });
+      assert.ok(r.status < 500, `${method} ${path}: ${r.status}`);
+    }
+    const num = await t.json("/v1/deploys", { method: "POST", headers: a, body: JSON.stringify({ app: 5, files: [{ path: "index.html", data: "hi" }] }) });
+    assert.equal(num.status, 400);
+
+    const bad = await t.json("/v1/apps/shop/secrets", { method: "PUT", headers: a, body: JSON.stringify({ GOOD: "x", bad: "y" }) });
+    assert.equal(bad.status, 400);
+    const big = await t.json("/v1/apps/shop/secrets", { method: "PUT", headers: a, body: JSON.stringify({ GOOD: "x", OTHER: 5 }) });
+    assert.equal(big.status, 400);
+    assert.deepEqual((await t.json("/v1/apps/shop/secrets", { headers: a })).body.keys, [], "nothing written by a refused PUT");
+  } finally {
+    await t.done();
+  }
+});
+
+test("rollback without a deployId: the deploy before the one served, never a newer one", async () => {
+  const t = await setup({});
+  try {
+    const a = t.bearer(await t.account("a@b.co"));
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      assert.equal((await t.deploy(a, "shop")).status, 201);
+      ids.push((await t.json("/v1/apps/shop", { headers: a })).body.app.currentDeployId);
+    }
+    const rb = (b: object) => t.json("/v1/apps/shop/rollback", { method: "POST", headers: a, body: JSON.stringify(b) });
+    assert.equal((await rb({})).body.app.currentDeployId, ids[1]);
+    assert.equal((await rb({})).body.app.currentDeployId, ids[0]);
+    assert.equal((await rb({})).status, 404, "nothing older: not a roll forward");
+    assert.equal((await rb({ deployId: ids[2] })).body.app.currentDeployId, ids[2]);
+  } finally {
+    await t.done();
+  }
+});
+
+test("file keys: a trailing slash is refused (it'd share a blob); list prefixes are case-sensitive; db bodies are capped", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cresslet-keys-"));
+  const b = createBindings(dir, { maxFileBytes: 100 });
+  try {
+    const put = (key: string) => b.fetch(new Request(`http://h/files?key=${encodeURIComponent(key)}`, { method: "PUT", body: "x" }));
+    assert.equal((await put("a/")).status, 400);
+    assert.equal((await put("bob/secret.txt")).status, 204);
+    assert.equal((await put("Bob/x.txt")).status, 204);
+    assert.equal((await put("a_b")).status, 204);
+    const list = async (prefix: string) =>
+      ((await (await b.fetch(new Request(`http://h/files/list?prefix=${encodeURIComponent(prefix)}`))).json()) as { key: string }[]).map((f) => f.key);
+    assert.deepEqual(await list("Bob/"), ["Bob/x.txt"]);
+    assert.deepEqual(await list("a_"), ["a_b"]);
+    assert.deepEqual(await list("a%"), []);
+    const q = (sql: string) => b.fetch(new Request("http://h/db/query", { method: "POST", body: JSON.stringify({ sql }) }));
+    assert.equal((await q("SELECT 1")).status, 200);
+    assert.equal((await q(`SELECT '${"x".repeat(300)}'`)).status, 413);
+  } finally {
+    await b.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a slow request doesn't hold up the app's other requests", async () => {
+  const t = await setup({});
+  try {
+    const a = t.bearer(await t.account("a@b.co"));
+    const server = `export default { async fetch(req) {
+      if (new URL(req.url).pathname === "/api/slow") await new Promise((r) => setTimeout(r, 1500));
+      return new Response("done");
+    } };`;
+    const d = await t.json("/v1/deploys", { method: "POST", headers: a, body: JSON.stringify({ app: "shop", files: [{ path: "index.html", data: "hi" }], server }) });
+    assert.equal(d.status, 201, JSON.stringify(d.body));
+    const call = (path: string) => t.srv.handler(new Request(`http://shop.test.local${path}`, { headers: { host: "shop.test.local" } })).then((r) => r.text());
+    assert.equal(await call("/api/fast"), "done"); // warm
+    const slow = call("/api/slow");
+    await new Promise((r) => setTimeout(r, 100));
+    const t0 = Date.now();
+    assert.equal(await call("/api/fast"), "done");
+    assert.ok(Date.now() - t0 < 1000, `fast waited ${Date.now() - t0}ms behind slow`);
+    assert.equal(await slow, "done");
+  } finally {
+    await t.done();
+  }
+});

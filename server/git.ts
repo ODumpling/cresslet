@@ -9,7 +9,7 @@ import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
-import { type DeployFile, deploySource, DOTENV, HttpError, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
+import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -294,9 +294,20 @@ export class GitHub implements SourceControlProvider {
       if (b?.sha === blobSha(data) && b.mode !== "120000") continue;
       // A dotenv file the studio only ever saw cut to its public entries: unchanged if those are, so the
       // repository's own copy (whatever else it holds) stays.
-      if (b && b.mode !== "120000" && DOTENV.test(path) &&
-          Buffer.from(publicDotenv(await this.#blob(r, b.sha))).equals(Buffer.from(data))) continue;
-      changes.push({ path, mode: b && b.mode !== "120000" ? b.mode : "100644", data });
+      let out = data;
+      if (b && b.mode !== "120000" && DOTENV.test(path)) {
+        const theirs = await this.#blob(r, b.sha);
+        if (Buffer.from(publicDotenv(theirs)).equals(Buffer.from(data))) continue;
+        // Changed: its public entries replaced, its private lines (never sent to the studio) kept.
+        const dec = new TextDecoder();
+        const merged = mergeDotenvText(dec.decode(theirs), dec.decode(data));
+        if (merged === null) {
+          const rel = path.slice(prefix.length);
+          throw Object.assign(new HttpError(409, `${rel} can't be updated without losing the lines of it the studio doesn't show: edit it on GitHub`, "dotenv_unmergeable"), { extra: { paths: [rel] } });
+        }
+        out = new TextEncoder().encode(merged);
+      }
+      changes.push({ path, mode: b && b.mode !== "120000" ? b.mode : "100644", data: out });
     }
     // Under subdir, files the studio was never sent stay: never-source ones, symlinks, names it can't hold.
     const gone = [...base.values()].filter((e) => e.path.startsWith(prefix) && !want.has(e.path) && sourceEntries([e], input.subdir).length &&

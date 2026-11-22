@@ -4,7 +4,16 @@ import { resolveTxt } from "node:dns/promises";
 import { join, resolve } from "node:path";
 
 const env = (k: string, d: string) => process.env[k] ?? d;
-const num = (k: string, d: number) => Number(process.env[k] ?? d);
+/** Settings `num` read that aren't a number, 0 or more: refused once loadConfig's own checks (with their messages) pass. */
+const badNums = new Map<string, string>();
+/** A blank value (`KEY=` in an env file) means the default (a typo like `512MB` would be NaN, which every `>` check
+ * reads as "no limit": refused at the end of loadConfig). */
+const num = (k: string, d: number) => {
+  const v = process.env[k];
+  const n = v === undefined || v.trim() === "" ? d : Number(v);
+  if (!Number.isFinite(n) || n < 0) badNums.set(k, v!);
+  return n;
+};
 
 /** workerd binary from the `workerd` npm package (platform-specific optional dependency). */
 const bundledWorkerd = (): string => createRequire(import.meta.url)("workerd").default;
@@ -149,6 +158,7 @@ export interface Config {
 }
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
+  badNums.clear();
   const port = num("PORT", 8787);
   const dataDir = resolve(env("CRESSLET_DATA_DIR", "data"));
   const githubId = process.env.CRESSLET_GITHUB_CLIENT_ID, githubSecret = process.env.CRESSLET_GITHUB_CLIENT_SECRET;
@@ -298,6 +308,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   if (database.url && process.env.CRESSLET_TEST_SCHEMA_PER_DATA_DIR === "1" && !overrides.database?.schema) {
     database.schema = "t_" + createHash("sha256").update(merged.dataDir).digest("hex").slice(0, 16);
   }
+  for (const [k, v] of badNums) throw new Error(`${k} must be a number, 0 or more (got ${JSON.stringify(v)})`);
   const git = { ...base.git, ...overrides.git };
   return {
     ...merged,

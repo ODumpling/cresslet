@@ -33,8 +33,11 @@ export function serverRoute(routes: string[] | null | undefined, p: string) {
 export function parseDotenv(text: string) {
   const out: Record<string, string> = {};
   for (const line of text.split(/\r?\n/)) {
-    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (m) out[m[1]!] = /^(['"]).*\1$/.test(m[2]!) ? m[2]!.slice(1, -1) : m[2]!; // both groups always match
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!m) continue;
+    // Both groups always match. Quoted: what's between the quotes; unquoted: up to a ` # comment`, as dotenv reads it.
+    const q = /^(['"])(.*?)\1(?:\s+#.*)?$/.exec(m[2]!);
+    out[m[1]!] = q ? q[2]! : m[2]!.replace(/\s+#.*$/, "");
   }
   return out;
 }
@@ -341,11 +344,12 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       ...(git ? { git } : {}),
     };
     let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload), signal });
-    let body: DeployResult & { error?: string; message?: string } = await res.json();
+    // An error from a proxy in front of the server may not be JSON: then the status says it.
+    let body: DeployResult & { error?: string; message?: string } = await res.json().catch(() => ({}));
     if (res.status === 413 && body?.error === "body_too_large" && sources.length) {
       log("warning: project source omitted (request exceeded server upload limit)");
       res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }), signal });
-      body = await res.json();
+      body = await res.json().catch(() => ({}));
     }
     if (!res.ok) throw new Error(body.message ?? `deploy failed (${res.status})`);
     if (git) log(`built from ${git.repo} ${git.branch} @ ${git.sha.slice(0, 7)}`);
@@ -736,7 +740,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         res.body = enc.encode(withReload(dec.decode(res.body)));
         res.headers = res.headers.filter(([k]) => k.toLowerCase() !== "content-length");
       }
-      return new Response(res.status === 204 || res.status === 304 ? null : res.body, { status: res.status, headers: res.headers });
+      return new Response([204, 205, 304].includes(res.status) ? null : res.body, { status: res.status, headers: res.headers }); // null-body statuses
     }
 
     // Start apps: what isn't a server route is a file of the client build (or public/).

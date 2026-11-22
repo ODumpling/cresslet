@@ -4,6 +4,8 @@ export interface LogLine {
   msg: string;
 }
 
+export const MAX_LINE = 16_384;
+
 /** In-memory ring buffer of recent log lines per app, with live subscribers. */
 export class Logs {
   #lines = new Map<string, LogLine[]>();
@@ -16,6 +18,8 @@ export class Logs {
   }
 
   push(appId: string, kind: LogLine["kind"], msg: string) {
+    // Kept in memory (CRESSLET_LOG_LINES per app): one huge console.log mustn't cost the control plane its size.
+    if (msg.length > MAX_LINE) msg = msg.slice(0, MAX_LINE) + ` … [${msg.length - MAX_LINE} more characters]`;
     const line = { t: Date.now(), kind, msg };
     let arr = this.#lines.get(appId);
     if (!arr) this.#lines.set(appId, arr = []);

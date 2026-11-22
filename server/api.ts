@@ -418,8 +418,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   // or issue a token for it.
   app.post("/accounts", async (c) => {
     if (!isAdmin(c.get("bearer"))) throw new HttpError(403, "log in with GitHub", "forbidden");
-    const { email } = await body<{ email?: string }>(c);
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
+    const { email } = await body<{ email?: unknown } | null>(c) ?? {};
+    if (typeof email !== "string" || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
     if (await store.disabledAccount({ emails: [email] })) throw new HttpError(409, `${email} belongs to a disabled account: enable it first`, "account_disabled");
     const account = await store.accountByEmail(email) ?? await store.createAccount(email);
     const { token } = await store.issueToken(account.id, { name: "Operator-issued" });
@@ -519,7 +519,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     });
 
     app.post("/auth/exchange", async (c) => {
-      const { code } = await body<{ code?: string }>(c);
+      const { code } = await body<{ code?: unknown } | null>(c) ?? {};
       const l = gh.exchange(String(code ?? ""));
       return c.json({ account: accountView(l.account), token: l.token });
     });
@@ -528,8 +528,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     app.post("/auth/github/device", async (c) => c.json(await gh.deviceStart()));
 
     app.post("/auth/github/device/token", async (c) => {
-      const { deviceCode } = await body<{ deviceCode?: string }>(c);
-      if (!deviceCode) throw new HttpError(400, "deviceCode required");
+      const { deviceCode } = await body<{ deviceCode?: unknown } | null>(c) ?? {};
+      if (!deviceCode || typeof deviceCode !== "string") throw new HttpError(400, "deviceCode required");
       const r = await gh.devicePoll(deviceCode);
       if ("token" in r) return c.json({ status: "complete", account: accountView(r.account), token: r.token });
       return c.json(r);
@@ -540,7 +540,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const cliStarts = new RateLimit(20, 10 * 60_000);
     const cliApproves = new RateLimit(10, 10 * 60_000);
     app.post("/auth/cli", async (c) => {
-      if (!await cliStarts.take(clientIp(c))) throw new HttpError(429, "too many logins, try again in a few minutes", "rate_limited");
+      if (!await cliStarts.take(ipKey(clientIp(c)))) throw new HttpError(429, "too many logins, try again in a few minutes", "rate_limited");
       return c.json(cli.start(rootUrl(cfg)));
     });
 
@@ -621,6 +621,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     }
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new HttpError(400, "invalid JSON body", "bad_request");
     const input = raw as DeployInput & { app?: string; create?: boolean };
+    if (input.app !== undefined && typeof input.app !== "string") throw new HttpError(400, `app name must be ${NAME_RULES}`, "invalid_name");
     let target = input.app ? await store.appByName(input.app) : undefined;
     // `create`: a new app only (the studio's address picker), never a deploy over one that took the name meanwhile.
     if (target && input.create === true) throw new HttpError(409, `app name unavailable: ${target.name}`, "conflict");
@@ -798,9 +799,16 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "deploy");
-    const { deployId } = await body<{ deployId?: string }>(c);
+    const { deployId } = await body<{ deployId?: unknown } | null>(c) ?? {};
     await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
-    const d = deployId ? await store.deploy(deployId) : (await store.deploys(a.id, 2))[1];
+    if (deployId !== undefined && typeof deployId !== "string") throw new HttpError(400, "deployId must be a string");
+    // Default: the deploy before the one served (not the second newest: after a rollback that'd roll forward).
+    const previous = async () => {
+      const list = await store.deploys(a.id);
+      const i = list.findIndex((x) => x.id === a.current_deploy_id);
+      return i < 0 ? list[1] : list[i + 1];
+    };
+    const d = deployId ? await store.deploy(deployId) : await previous();
     if (!d || d.app_id !== a.id || beingRemoved(d.id)) throw new HttpError(404, "deploy not found", "not_found");
     const file = join(paths(cfg, a.id).deploy(d.id), "deploy.json");
     const json = await readFile(file, "utf8").catch((e) => {
@@ -1115,13 +1123,18 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     notPage(a);
     await authorize(c, a, "admin");
     if (!a.account_id) throw new HttpError(403, "secrets need an app with an owner (anonymous apps expire)", "unclaimed");
-    const input = await body<Record<string, string | null>>(c);
+    const input = await body<Record<string, unknown> | null>(c);
     await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
-    for (const [k, v] of Object.entries(input)) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new HttpError(400, "expected an object of secrets");
+    // All checked before any is written: a 400 leaves the secrets as they were.
+    const entries = Object.entries(input);
+    for (const [k, v] of entries) {
       if (!SECRET_KEY_RE.test(k)) throw new HttpError(400, `invalid secret name: ${k} (use UPPER_SNAKE)`);
+      if (v !== null && (typeof v !== "string" || v.length > 32_768)) throw new HttpError(400, `invalid value for ${k}`);
+    }
+    for (const [k, v] of entries) {
       if (v === null) await store.deleteSecret(a.id, k);
-      else if (typeof v === "string" && v.length <= 32_768) await store.setSecret(a.id, k, v);
-      else throw new HttpError(400, `invalid value for ${k}`);
+      else await store.setSecret(a.id, k, v as string);
     }
     runtime.stop(a.id);
     return c.json({ keys: await store.secretKeys(a.id) });
@@ -1147,7 +1160,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     notPage(a);
     await authorize(c, a, "admin");
     if (!a.account_id) throw new HttpError(403, "outbound network needs an app with an owner (anonymous apps expire)", "unclaimed");
-    const { allow } = await body<{ allow?: unknown }>(c);
+    const { allow } = await body<{ allow?: unknown } | null>(c) ?? {};
     await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     let list: string[] | null = null;
     if (allow !== null) {
@@ -1448,7 +1461,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.post("/apps/:name/db/query", async (c) => {
     const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
-    const { sql, params = [] } = await body<{ sql?: string; params?: unknown[] }>(c);
+    const { sql, params = [] } = await body<{ sql?: unknown; params?: unknown } | null>(c) ?? {};
     await authorize(c, a, "read"); // again: access may have changed while the body arrived
     if (!sql) throw new HttpError(400, "sql required");
     if (typeof sql !== "string" || !Array.isArray(params)) throw new HttpError(400, "sql must be a string, params an array");

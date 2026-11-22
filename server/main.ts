@@ -178,8 +178,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.log(`cresslet listening on ${rootUrl(srv.cfg)}  (apps: *.${srv.cfg.domain})`));
   http.on("upgrade", srv.upgrade);
   const shutdown = async () => {
+    // Stop taking requests first and let those in flight finish (bounded: a long poll or a WebSocket never
+    // does), then close the sandboxes and the database they use.
+    const drained = new Promise((r) => http.close(r));
+    if ("closeIdleConnections" in http) http.closeIdleConnections();
+    await Promise.race([drained, new Promise((r) => setTimeout(r, 5000).unref())]);
     await srv.close().catch((e) => console.error("cresslet: closing the database:", e));
-    http.close();
     await sandboxSettled(); // cgroup kills on older kernels finish on timers
     // Bindings threads finish the file writes they accepted (bounded: a runaway query never yields).
     await Promise.race([bindingsSettled(), new Promise((r) => setTimeout(r, 5000).unref())]);
