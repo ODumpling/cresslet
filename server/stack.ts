@@ -720,7 +720,10 @@ async function dropLanded(ctx: Ctx, stackId: string, keep: string | undefined, e
     try {
       let p = next.pr_number ? await ctx.provider.getPull(ctx.r, next.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e))) : null;
       if (!p || p.head !== next.branch || p.state !== "open") p = await ctx.provider.findPull(ctx.r, next.branch) ?? p;
-      if (p?.state === "open") held.add(p.base);
+      if (p?.state === "open") {
+        held.add(p.base);
+        if (p.base !== ctx.repo.default_branch) errors.push({ change: next.id, position: next.position, error: `pull request #${p.number} is still on ${p.base}, which is kept until it's on ${ctx.repo.default_branch} (land again, or submit the stack)` });
+      }
     } catch (e) {
       unknown = true;
       errors.push({ change: next.id, position: next.position, error: `${next.branch}'s pull request couldn't be read (${why(e)}): the stack's branches are kept for now` });
