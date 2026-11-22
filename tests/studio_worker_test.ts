@@ -51,6 +51,7 @@ async function startWorker(code: string, { serial = false } = {}) {
   const w = new Worker(file);
   const files = new Map<string, { bytes: Uint8Array; contentType: string; updatedAt: number }>();
   const responses = new Map<number, (m: { status: number; body: ArrayBuffer }) => void>();
+  const scripts = new Map<number, (m: { result?: unknown; error?: string }) => void>();
   let snapshot: Uint8Array | null = null;
   let lastSeen: Uint8Array | null = null;
   let ready!: () => void;
@@ -61,6 +62,7 @@ async function startWorker(code: string, { serial = false } = {}) {
     else if (m.type === "fatal") fatal(new Error(m.message));
     else if (m.type === "db") snapshot = m.bytes;
     else if (m.type === "response") responses.get(m.id)?.(m);
+    else if (m.type === "sql-result") scripts.get(m.id)?.(m);
     else if (m.type === "files") {
       // the studio keeps these in the project's VFS (cresslet-plugin.ts fileOp); a Map does here
       const r: Record<string, unknown> = { type: "files-result", id: m.id };
@@ -90,6 +92,13 @@ async function startWorker(code: string, { serial = false } = {}) {
       });
       w.postMessage({ type: "request", id: n, url: `https://app.preview${path}`, method: "GET", headers: [], body: null });
     });
+  /** A Database view script (the `sql` message): its result, or `{ error }`. */
+  const sql = (text: string) =>
+    new Promise<any>((resolve) => {
+      const n = ++id;
+      scripts.set(n, (m) => resolve(m.error !== undefined ? { error: m.error } : m.result));
+      w.postMessage({ type: "sql", id: n, sql: text });
+    });
   w.postMessage({
     type: "init",
     code,
@@ -105,6 +114,7 @@ async function startWorker(code: string, { serial = false } = {}) {
   }>)();
   return {
     get,
+    sql,
     /**
      * The database the studio would reload from, once pending saves (300 ms debounce) have run. Each call needs a new
      * save since the last one: what was just done must have scheduled it.
@@ -279,5 +289,34 @@ export default {
     } finally {
       await w.close();
     }
+  }
+});
+
+// The workspace's Database view runs scripts on the app's own connection: the app sees them, and they're saved.
+test("studio preview worker: Database view scripts read and write the app's database", async () => {
+  const w = await startWorker(withSdk(`import { db } from "cresslet";
+export default { async fetch() { return Response.json(await db.query("SELECT v FROM t ORDER BY v")); } };`));
+  try {
+    const made = await w.sql("CREATE TABLE t (v, b); INSERT INTO t VALUES (1, x'0102'), (2, NULL) RETURNING v; -- done");
+    assert.deepEqual(made, { columns: ["v"], rows: [[1], [2]], truncated: false, changes: 2, statements: 2 });
+    assert.deepEqual((await w.get("/")).json, [{ v: 1 }, { v: 2 }], "the app sees the view's writes");
+    assert.deepEqual((await w.saved()).exec("SELECT count(*) FROM t")[0].values, [[2]], "and they're saved");
+    // blobs as their size, unsafe integers as digits, an empty result keeps its columns
+    assert.deepEqual(await w.sql("SELECT b, 9007199254740993 AS big FROM t WHERE v = 1"), {
+      columns: ["b", "big"], rows: [[{ blob: 2 }, "9007199254740993"]], truncated: false, changes: 0, statements: 1,
+    });
+    assert.deepEqual((await w.sql("SELECT v FROM t WHERE 0")).columns, ["v"]);
+    assert.equal(w.saving(), false, "reads don't ask for a save");
+    // at most 1,000 rows
+    const many = await w.sql("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1500) SELECT i FROM n");
+    assert.equal(many.rows.length, 1000);
+    assert.equal(many.truncated, true);
+    // a failing statement stops the script: what ran before it stays done
+    const bad = await w.sql("DELETE FROM t WHERE v = 2; SELECT nope FROM t; DELETE FROM t");
+    assert.match(bad.error, /no such column: nope/);
+    assert.deepEqual((await w.get("/")).json, [{ v: 1 }]);
+    assert.deepEqual((await w.saved()).exec("SELECT v FROM t")[0].values, [[1]]);
+  } finally {
+    await w.close();
   }
 });

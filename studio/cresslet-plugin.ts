@@ -4,7 +4,7 @@ import { createStartBuilder, isStartApp } from "./start-build.js";
 import { staticUrl } from "./static-url.js";
 import type { CommandContext, Container, FileSystemTree, ProjectWorker } from "./vendor/cresslet-container/cresslet-container.js";
 import type { Plugin } from "./vendor/cresslet-container/types/vendor/esbuild-wasm.js";
-import type { FileItem, FileOp, FileResult, FileResults, FromWorker, HeaderList, ResponseMessage, ToWorker } from "./server-worker-protocol.ts";
+import type { FileItem, FileOp, FileResult, FileResults, FromWorker, HeaderList, ResponseMessage, SqlResult, ToWorker } from "./server-worker-protocol.ts";
 import type { Project } from "./store.js";
 
 const enc = new TextEncoder();
@@ -361,6 +361,14 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     return body;
   }
 
+  /** The running `cresslet dev`'s database runner (the workspace's Database view), while one runs. */
+  let devSql: ((sql: string) => Promise<SqlResult>) | null = null;
+  /** Runs a script on the preview's database: the one its server worker has open (studio/server-worker.ts). */
+  async function sql(script: string): Promise<SqlResult> {
+    if (!devSql) throw new Error("the dev server isn't running: start it in the terminal with `cresslet dev`");
+    return devSql(script);
+  }
+
   // ---- dev: container dev server for the client, a project Worker (on the preview origin) for the server handler.
   // TanStack Start apps: their production build (start-build.ts), rebuilt on save (the preview then reloads itself).
   async function dev(ctx: CommandContext, port: number) {
@@ -401,6 +409,18 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     /** A worker's response, or the 503 `retire` makes; `body` may be swapped for one made here. */
     type Res = Omit<ResponseMessage, "type" | "id" | "body"> & { body: ArrayBuffer | Uint8Array<ArrayBuffer> | null };
     const waiting = new Map<number, { w: ProjectWorker; done: (m: Res) => void }>(); // request id → { w, done }
+    // Database view scripts sent to a worker, by id (the same counter as requests)
+    const scripts = new Map<number, { w: ProjectWorker; resolve: (r: SqlResult) => void; reject: (e: Error) => void }>();
+    const runSql = async (script: string) => {
+      const w = worker;
+      if (!w) throw new Error(workerError ?? ((await hasServer()) ? "the server is starting" : "this project has no server (server/index.ts), so no database"));
+      const id = ++reqId;
+      return new Promise<SqlResult>((resolve, reject) => {
+        scripts.set(id, { w, resolve, reject });
+        w.postMessage({ type: "sql", id, sql: script } satisfies ToWorker);
+      });
+    };
+    devSql = runSql; // the latest `cresslet dev` (one per project, normally)
 
     async function fileOp(m: FileOp & { key?: unknown }): Promise<FileResult> {
       const indexPath = `${filesDir}/index.json`;
@@ -474,6 +494,9 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       for (const [id, r] of waiting) {
         if (r.w === w) (waiting.delete(id), r.done({ status: 503, headers: [["content-type", "text/plain"]], body: body() }));
       }
+      for (const [id, r] of scripts) {
+        if (r.w === w) (scripts.delete(id), r.reject(new Error(message)));
+      }
       w.terminate();
     }
 
@@ -525,6 +548,11 @@ export function createCresslet(c: Container, opts: CressletOptions) {
           else if (m.type === "response") {
             waiting.get(m.id)?.done(m);
             waiting.delete(m.id);
+          } else if (m.type === "sql-result") {
+            const r = scripts.get(m.id);
+            scripts.delete(m.id);
+            if ("error" in m) r?.reject(new Error(m.error));
+            else r?.resolve(m.result);
           } else if (m.type === "files") {
             try {
               const r = await fileOp(m);
@@ -696,6 +724,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     }
     await aborted;
     stopped = true;
+    if (devSql === runSql) devSql = null;
     clearTimeout(timer);
     for (const w of watchers) w.close();
     for (const w of initializing) w.terminate();
@@ -741,5 +770,5 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     }
   });
 
-  return { build, deploy, config };
+  return { build, deploy, config, sql };
 }

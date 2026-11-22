@@ -1,5 +1,5 @@
-// /p/<id>: a project. Chat first: the AI builder beside the app's preview, the code (files + editor) when asked for,
-// and the terminal and deploy log in a drawer under them. What was last shown is remembered in this browser.
+// /p/<id>: a project. Chat first: the AI builder beside the app's preview, the code (files + editor) or the preview's
+// database when asked for, and the terminal and deploy log in a drawer under them. What was last shown is remembered in this browser.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
@@ -16,6 +16,7 @@ import { rememberAfterLogin, session, useSession } from "../../lib/session.ts";
 import { toast } from "../../lib/toast.tsx";
 import { ExtLink, Icon, SrOnly } from "../../ui/icons.tsx";
 import { Builder, type BuilderHandle } from "./Builder.tsx";
+import { DatabaseView, type RunSql } from "./DatabaseView.tsx";
 import { DeployDialog, type DeployDialogHandle } from "./DeployDialog.tsx";
 import { GitDialog, type GitDialogHandle } from "./GitDialog.tsx";
 import { Engine, type TreeItem } from "./engine.ts";
@@ -65,6 +66,8 @@ const saveLayout = (p: LayoutPrefs) => {
     localStorage.setItem(LAYOUT, JSON.stringify({ ...layoutPrefs(), ...p }));
   } catch { /* storage blocked: not remembered */ }
 };
+const VIEWS = ["preview", "code", "database"] as const;
+type View = (typeof VIEWS)[number];
 const TABS = ["terminal", "deploy-log"] as const;
 type Tab = (typeof TABS)[number];
 
@@ -74,7 +77,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   useLayoutEffect(viewShown, []);
   const [status, setStatus] = useState({ text: "Idle", state: "idle" });
   const [prefs] = useState(layoutPrefs);
-  const [view, setViewState] = useState(prefs.view === "code" ? "code" : "preview");
+  const [view, setViewState] = useState<View>(VIEWS.find((v) => v === prefs.view) ?? "preview");
   const [drawer, setDrawerState] = useState(prefs.drawer === true);
   const [chat, setChat] = useState(prefs.chat !== false);
   const [tab, setTab] = useState<Tab>("terminal");
@@ -101,6 +104,13 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const previewBase = useRef<string | null>(null);
   const navigate = useNavigate();
   const { token } = useSession();
+  // The preview's database, through the running `cresslet dev` (null until the container is up).
+  const runSql = useCallback<RunSql>(async (sql) => {
+    const c = engine.current?.cresslet;
+    if (!c) throw new Error("the project isn't running");
+    return c.sql(sql);
+  }, []);
+  const sqlRunner = container && !locked ? runSql : null;
 
   // Logged out (or the session expired) on a server where projects need it: back to the landing page.
   useEffect(() => {
@@ -234,7 +244,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     return () => el.removeEventListener("change", change);
   }, [project]);
 
-  function setView(v: string) {
+  function setView(v: View) {
     flushSync(() => setViewState(v));
     saveLayout({ view: v });
     if (v === "code") engine.current?.measureEditor();
@@ -368,10 +378,11 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           <input id="project-name" ref={nameEl} aria-label="Project name" spellCheck={false} autoComplete="off" defaultValue={project.name} />
           <span className="status" id="status" data-state={status.state} role="status"><span className="status-dot" aria-hidden="true" /><span id="status-text">{status.text}</span></span>
         </div>
-        {/* What the main area shows next to the chat: the running app, or its code. */}
+        {/* What the main area shows next to the chat: the running app, its code, or its database. */}
         <div className="view-switch" id="view-switch" role="group" aria-label="Show">
           <button type="button" id="view-preview" data-view="preview" aria-pressed={view === "preview"} onClick={() => setView("preview")}><Icon name="window" />Preview</button>
           <button type="button" id="view-code" data-view="code" aria-pressed={view === "code"} onClick={() => setView("code")}><Icon name="code" />Code</button>
+          <button type="button" id="view-database" data-view="database" aria-pressed={view === "database"} onClick={() => setView("database")}><Icon name="database" />Database</button>
         </div>
         <div className="spacer" />
         {deploy?.url ? (
@@ -466,6 +477,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             </div>
           </div>
         </section>
+        <DatabaseView run={sqlRunner} shown={view === "database"} />
         <section className="pane bottom-pane" id="drawer" aria-label="Output" hidden={!drawer} ref={drawerEl}>
           <div className="pane-head drawer-head">
             <div className="tabs" role="tablist" aria-label="Output">

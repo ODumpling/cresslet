@@ -10,12 +10,15 @@ declare module "https://esm.sh/sql.js@1.13.0" {
     step(): boolean;
     get(params: SqlValue[] | null, config?: { useBigInt?: boolean }): SqlValue[];
     getColumnNames(): string[];
+    getSQL(): string;
     free(): boolean;
   }
   export interface Database {
     exec(sql: string): QueryExecResult[];
     run(sql: string, params?: SqlValue[]): Database;
     prepare(sql: string): Statement;
+    /** Each statement of a script in turn, prepared when reached (the previous one is freed then). */
+    iterateStatements(sql: string): Iterable<Statement>;
     export(): Uint8Array<ArrayBuffer>;
     getRowsModified(): number;
   }

@@ -4,19 +4,20 @@
 //        serial: one request at a time (each to its whole response body): the app's AsyncLocalStorage is a one-store
 //        shim here (TanStack Start, start-build.ts)
 //   in:  {type:"request", id, url, method, headers, body}        → out: {type:"response", id, status, headers, body}
+//   in:  {type:"sql", id, sql} (the studio's Database view)       → out: {type:"sql-result", id, result | error}
 //   out: {type:"log", level, msg}  {type:"db", bytes}  {type:"files", id, op, ...} ← in: {type:"files-result", id, ...}
 //   WebSockets: a 101 response is {type:"response", id, status: 101, headers, body: null, protocol}; then
 //   in:  {type:"socket", id} + a MessagePort to the preview's socket (no port: the preview gave up)
 import initSqlJs from "https://esm.sh/sql.js@1.13.0";
 import type { Database, SqlJsStatic, SqlValue } from "https://esm.sh/sql.js@1.13.0";
-import type { AppInfo, FileItem, FileOp, FileResult, FileResults, FromWorker, ToWorker } from "./server-worker-protocol.ts";
+import type { AppInfo, FileItem, FileOp, FileResult, FileResults, FromWorker, SqlCell, SqlResult, ToWorker } from "./server-worker-protocol.ts";
 
 /** This worker's postMessage, typed to the protocol (the global one). */
 declare function postMessage(message: FromWorker, transfer?: Transferable[]): void;
 
 /** The app's `env` (docs/app-format.md), as this preview implements it. */
 interface Env {
-  db: ReturnType<typeof createDb>;
+  db: ReturnType<typeof createDb>["binding"];
   files: {
     put(key: string, body: BodyInit | null, opts?: { contentType?: string }): Promise<void>;
     get(key: string): Promise<Response | null>;
@@ -32,6 +33,7 @@ type Handler = (req: Request, env: Env, ctx: { waitUntil(p: unknown): void }) =>
 const SQL_WASM = "https://cdn.jsdelivr.net/npm/sql.js@1.13.0/dist/sql-wasm.wasm";
 let handler: Handler | undefined;
 let env: Env;
+let studioSql: ((sql: string) => SqlResult) | undefined; // the Database view's runner (init sets it)
 let serial: Promise<unknown> | null = null; // with init's `serial`: the request being handled (a promise), the next one waits for it
 // Where the `cresslet` SDK (`import { db } from "cresslet"`, cresslet-cli sdk/index.js) finds the env: published once
 // the app's module has loaded (bindings exist only once a handler runs). Contract: runtime/cresslet-runtime.ts.
@@ -230,6 +232,7 @@ const READ_PRAGMAS_WITH_ARG = new Set([
 /** What apps bind: JS values sql.js can store (bigints within ±2^53, undefined as null). */
 type Param = SqlValue | undefined;
 type Row = Record<string, SqlValue>;
+const SQL_MAX_ROWS = 1000; // a Database view result's rows (protocol: SqlResult)
 
 function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
   const db: Database = bytes ? new SQL.Database(bytes) : new SQL.Database();
@@ -368,7 +371,41 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
       if (one("SELECT total_changes()") !== before || mayWrite(sql)) persist();
     }
   };
-  return {
+  // The studio's Database view: each statement of a script in turn, on this same connection (so the app sees the
+  // change at once and it's saved as the app's own writes are). Its result: the last statement with columns, its
+  // first SQL_MAX_ROWS rows. A statement that fails stops the script (those before it stay done, as in sqlite3).
+  const studio = (sql: string): SqlResult => {
+    const changesBefore = one("SELECT total_changes()");
+    let out: Pick<SqlResult, "columns" | "rows" | "truncated"> = { columns: [], rows: [], truncated: false };
+    let statements = 0, written = false;
+    const cell = (v: SqlValue): SqlCell =>
+      v instanceof Uint8Array ? { blob: v.byteLength }
+        : typeof v === "bigint" ? (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(Number.MIN_SAFE_INTEGER) ? String(v) : Number(v))
+        : v;
+    try {
+      // (A failing statement leaves the iterator's copy of the script in the wasm heap: sql.js's finalize() isn't
+      // exported. Bytes per failed run, and the worker is replaced on every server change.)
+      for (const stmt of db.iterateStatements(sql)) {
+        statements++;
+        written ||= mayWrite(stmt.getSQL());
+        const columns = stmt.getColumnNames();
+        const rows: SqlCell[][] = [];
+        let truncated = false;
+        while (stmt.step()) {
+          if (rows.length === SQL_MAX_ROWS) {
+            truncated = true;
+            break;
+          }
+          rows.push(stmt.get(null, { useBigInt: true }).map(cell));
+        }
+        if (columns.length) out = { columns, rows, truncated };
+      }
+    } finally {
+      if (one("SELECT total_changes()") !== changesBefore || written) persist();
+    }
+    return { ...out, changes: Number(one("SELECT total_changes()")) - Number(changesBefore), statements };
+  };
+  const binding = {
     batch: async (statements: { sql: string; params?: Param[] }[]) => batch(statements),
     query: async (sql: string, ...params: Param[]) => reading(sql, params),
     first: async (sql: string, ...params: Param[]) => reading(sql, params, 1)[0] ?? null,
@@ -389,6 +426,7 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
       }
     },
   };
+  return { binding, studio };
 }
 
 onmessage = async ({ data: m, ports }: MessageEvent<ToWorker>) => {
@@ -400,8 +438,10 @@ onmessage = async ({ data: m, ports }: MessageEvent<ToWorker>) => {
   if (m.type === "init") {
     try {
       const SQL = await initSqlJs({ locateFile: () => SQL_WASM });
+      const database = createDb(SQL, m.db);
+      studioSql = database.studio;
       env = {
-        db: createDb(SQL, m.db),
+        db: database.binding,
         files: {
           async put(key, body, opts = {}) {
             const bytes = new Uint8Array(await new Response(body).arrayBuffer());
@@ -439,6 +479,16 @@ onmessage = async ({ data: m, ports }: MessageEvent<ToWorker>) => {
       postMessage({ type: "ready" });
     } catch (e) {
       postMessage({ type: "fatal", message: (e as { stack?: string } | null)?.stack ?? String(e) });
+    }
+    return;
+  }
+  if (m.type === "sql") {
+    // Synchronous: no request's code runs in between (a request awaiting something sees the change after).
+    try {
+      if (!studioSql) throw new Error("the server isn't ready");
+      postMessage({ type: "sql-result", id: m.id, result: studioSql(String(m.sql)) });
+    } catch (e) {
+      postMessage({ type: "sql-result", id: m.id, error: (e as { message?: string } | null)?.message ?? String(e) });
     }
     return;
   }
