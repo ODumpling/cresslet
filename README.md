@@ -51,7 +51,7 @@ npm run dev       # watch mode
 npm test          # integration tests (spawn real sandboxes)
 npm run check     # tsc
 npm run vendor    # refresh studio/vendor/cresslet-container (../cresslet-container or GitHub)
-# browser e2e: see tests/e2e/studio.mjs
+# browser e2e: see tests/e2e/studio.ts
 ```
 
 MIT

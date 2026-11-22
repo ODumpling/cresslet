@@ -1,5 +1,5 @@
 // Browser e2e: studio deploy uploads the project source; "Open source" on the home page restores it.
-// Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node source.mjs
+// Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node source.ts
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const acct = await (await fetch(`${base}/v1/accounts`, {
@@ -19,10 +19,10 @@ try {
   await page.locator("#deploy-name-status", { hasText: "is available" }).waitFor(); // keep the generated address
   await page.locator("#deploy-confirm").click();
   await page.locator("#deploy-link").waitFor({ state: "visible", timeout: 60000 });
-  const app = new URL(await page.locator("#deploy-link").getAttribute("href")).hostname.split(".")[0];
+  const app = new URL((await page.locator("#deploy-link").getAttribute("href"))!).hostname.split(".")[0]; // visible: it has one
   console.log("deployed", app);
   const src = await (await fetch(`${base}/v1/apps/${app}/source`, { headers: { authorization: `Bearer ${acct.token}` } })).json();
-  const paths = src.files.map((f) => f.path);
+  const paths: string[] = src.files.map((f: { path: string }) => f.path);
   if (!paths.includes("src/App.tsx") || paths.some((p) => p.startsWith("node_modules/") || p.startsWith("dist/"))) {
     throw new Error("unexpected source files: " + paths.join(", "));
   }
@@ -66,7 +66,7 @@ try {
   console.log("opened deployed source in a new project; preview runs");
 } catch (e) {
   process.exitCode = 1;
-  console.log("FAIL", e.message);
+  console.log("FAIL", (e as Error).message);
   await page.screenshot({ path: "source-fail.png" });
 } finally {
   await browser.close();

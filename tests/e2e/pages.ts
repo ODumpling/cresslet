@@ -2,21 +2,21 @@
 // and a folder (its own address; defaults prefilled, overridable);
 // change a page's visibility and retention in its row; replace a page with a folder (its row's menu); a private page opens through the studio's sign-in hop,
 // and a stranger is told they have no access. No 320px horizontal scroll.
-// Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node pages.mjs
+// Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node pages.ts
 // SHOTS=<dir> also saves screenshots.
-import { chromium } from "@playwright/test";
+import { chromium, type Page } from "@playwright/test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const admin = process.env.CRESSLET_ADMIN_TOKEN ?? "adm";
-const call = async (path, token, body, method = body ? "POST" : "GET") => (await fetch(base + path, {
+const call = async (path: string, token: string, body?: object, method = body ? "POST" : "GET") => (await fetch(base + path, {
   method,
   headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
   body: body && JSON.stringify(body),
 })).json();
-const assert = (ok, msg) => { if (!ok) throw new Error(msg); };
-const shot = (page, name) => process.env.SHOTS && page.screenshot({ path: `${process.env.SHOTS}/${name}.png`, fullPage: true });
+const assert = (ok: unknown, msg: string) => { if (!ok) throw new Error(msg); };
+const shot = (page: Page, name: string) => process.env.SHOTS && page.screenshot({ path: `${process.env.SHOTS}/${name}.png`, fullPage: true });
 const run = Date.now();
 const owner = await call("/v1/accounts", admin, { email: `pages-${run}@example.com` });
 const stranger = await call("/v1/accounts", admin, { email: `stranger-${run}@example.com` });
@@ -28,7 +28,7 @@ await writeFile(join(dir, "site/img/dot.svg"), '<svg xmlns="http://www.w3.org/20
 await writeFile(join(dir, "site/.DS_Store"), "junk");
 
 const browser = await chromium.launch();
-const as = async (token, viewport) => {
+const as = async (token: string, viewport?: { width: number; height: number }) => {
   const ctx = await browser.newContext(viewport ? { viewport } : {});
   await ctx.addInitScript((t) => localStorage.setItem("cresslet.token", t), token);
   const page = await ctx.newPage();
@@ -40,7 +40,7 @@ try {
   const o = await as(owner.token);
   await o.goto(base + "/#/settings");
   await o.getByLabel("Who can open new artifacts").waitFor();
-  await o.waitForFunction(() => document.getElementById("def-server").textContent !== "—");
+  await o.waitForFunction(() => document.getElementById("def-server")!.textContent !== "—");
   assert(await o.getByLabel("Who can open new artifacts").inputValue() === "private", "server default visibility");
   assert(await o.getByLabel("Keep new artifacts for").inputValue() === "30", "server default retention");
   await o.getByLabel("Who can open new artifacts").selectOption("link");
@@ -111,7 +111,7 @@ try {
   await o.getByRole("button", { name: "Deploy" }).click();
   await o.getByText(/^Deployed site:/).waitFor();
   pages = (await call("/v1/pages", owner.token)).pages;
-  const site = pages.find((p) => p.title === "site");
+  const site = pages.find((p: { title: string | null }) => p.title === "site");
   assert(site?.name === custom && site.url.includes(`//${custom}.`), `custom page name ${JSON.stringify(site)}`);
   assert(site && site.visibility === "public" && site.retentionDays === null && site.files === 2, `upload 2 ${JSON.stringify(site)}`);
   assert((await fetch(site.url + "/img/dot.svg")).status === 200, "folder asset serves");
@@ -163,7 +163,7 @@ try {
   await o.goto(base + "/#/share/" + report.name);
   await o.getByRole("heading", { name: /Share report/ }).waitFor();
   await o.locator("#invite-role").waitFor();
-  assert(/open it, even when it's private/.test(await o.locator("#invite-role option[value=viewer]").textContent()), "artifact viewer role text");
+  assert(/open it, even when it's private/.test((await o.locator("#invite-role option[value=viewer]").textContent())!), "artifact viewer role text");
 
   // Replace a page with a folder: same link, all its files swapped; a missing page there is a 404, not the index.
   await o.goto(base + "/#/pages");
@@ -179,7 +179,7 @@ try {
   await o.goto(report.url + "/img/dot.svg");
   await o.goto(report.url + "/");
   await o.getByRole("heading", { name: "Folder site" }).waitFor();
-  assert((await o.goto(report.url + "/no-such-page")).status() === 404, "broken link is a 404");
+  assert((await o.goto(report.url + "/no-such-page"))!.status() === 404, "broken link is a 404");
 
   // Delete.
   await o.goto(base + "/#/pages");

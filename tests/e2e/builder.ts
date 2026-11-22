@@ -1,24 +1,25 @@
 // Browser e2e for the AI builder: save a key, ask for a change, Claude's tool calls edit the project (the preview
 // updates), run a command and deploy through `cresslet deploy` once the user approves; then Forget key. api.anthropic.com is replaced by a
 // scripted stream (page.route), so no key or network is needed; the requests the studio sends are checked.
-// Run with the server up (npm run dev): cd tests/e2e && npm i && node builder.mjs [outdir]
+// Run with the server up (npm run dev): cd tests/e2e && npm i && node builder.ts [outdir]
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const out = process.argv[2] ?? ".";
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
-const logs = [];
+const logs: string[] = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 
 /** One streamed Messages API reply (server-sent events), from content blocks. */
-function sse(content, stopReason) {
-  const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: object };
+function sse(content: Block[], stopReason: string) {
+  const ev = (type: string, data: object) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
   let s = ev("message_start", { message: { id: `msg_${Math.random().toString(36).slice(2)}`, type: "message", role: "assistant", model: "claude-opus-5-5", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } });
   content.forEach((b, index) => {
     if (b.type === "text") {
       s += ev("content_block_start", { index, content_block: { type: "text", text: "" } });
-      for (const part of b.text.match(/.{1,8}/gs)) s += ev("content_block_delta", { index, delta: { type: "text_delta", text: part } });
+      for (const part of b.text.match(/.{1,8}/gs)!) s += ev("content_block_delta", { index, delta: { type: "text_delta", text: part } }); // every reply here has text
     } else {
       s += ev("content_block_start", { index, content_block: { type: "tool_use", id: b.id, name: b.name, input: {} } });
       const json = JSON.stringify(b.input);
@@ -28,7 +29,7 @@ function sse(content, stopReason) {
   });
   return s + ev("message_delta", { delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: 20 } }) + ev("message_stop", {});
 }
-const replies = [
+const replies: [Block[], string][] = [
   [[{ type: "text", text: "I'll rename the heading." }, { type: "tool_use", id: "t1", name: "edit_file", input: { path: "src/App.tsx", old_text: "<h1>Todos</h1>", new_text: "<h1>Tasks</h1>" } }], "tool_use"],
   [[{ type: "tool_use", id: "t2", name: "run_command", input: { command: "ls src" } }, { type: "tool_use", id: "t3", name: "read_file", input: { path: ".env.cresslet" } }], "tool_use"],
   // clearing the marker variable doesn't skip the approval
@@ -38,7 +39,12 @@ const replies = [
   // second chat: Stop after an approved deploy
   [[{ type: "tool_use", id: "t6", name: "run_command", input: { command: "cresslet deploy && sleep 30" } }], "tool_use"],
 ];
-const requests = [];
+/** The Messages API requests the page made (their JSON body: the parts checked below). */
+const requests: {
+  url: string;
+  headers: Record<string, string>;
+  body: { model: string; stream: boolean; tools: unknown[]; messages: { content: { content: string; is_error?: boolean }[] }[] };
+}[] = [];
 const cors = { "access-control-allow-origin": base, "access-control-allow-headers": "*", "access-control-allow-methods": "POST, OPTIONS" };
 await page.route("https://api.anthropic.com/**", async (route) => {
   const req = route.request();
@@ -50,7 +56,7 @@ await page.route("https://api.anthropic.com/**", async (route) => {
   return route.fulfill({ status: 200, headers: { ...cors, "content-type": "text/event-stream" }, body: sse(...r) });
 });
 
-const fail = (m) => { throw new Error(m); };
+const fail = (m: string): never => { throw new Error(m); };
 try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /react/ }).click();
@@ -87,7 +93,7 @@ try {
   const approveBtn = page.getByRole("button", { name: "Approve deploy" });
   await approveBtn.waitFor({ timeout: 90000 });
   if (await approveBtn.evaluate((e) => e === document.activeElement)) fail("approval took focus");
-  if (!(await page.locator("#builder-status").textContent()).includes("Claude wants to deploy")) fail("approval not announced");
+  if (!(await page.locator("#builder-status").textContent())!.includes("Claude wants to deploy")) fail("approval not announced");
   await page.screenshot({ path: `${out}/builder-approve.png` });
   await approveBtn.click();
   await page.locator(".msg.assistant", { hasText: "Renamed the heading to Tasks and deployed it." }).waitFor({ timeout: 90000 });
@@ -108,7 +114,7 @@ try {
   if (r1.headers["anthropic-dangerous-direct-browser-access"] !== "true") fail("not a browser request");
   if (r1.body.model !== "claude-opus-5-5" || !r1.body.stream || r1.body.tools.length !== 7) fail(`request: ${JSON.stringify(r1.body).slice(0, 300)}`);
   if (!/server-side-fallback-2026-07-01/.test(r1.headers["anthropic-beta"] ?? "")) fail("fallback beta header missing");
-  const results = (r) => r.body.messages.at(-1).content;
+  const results = (r: (typeof requests)[number]) => r.body.messages.at(-1)!.content;
   if (results(r2)[0].content !== "edited src/App.tsx") fail(`edit result: ${JSON.stringify(results(r2))}`);
   const [ls, secret] = results(r3);
   if (!/exit code 0\n[\s\S]*App\.tsx/.test(ls.content)) fail(`ls result: ${ls.content}`);
@@ -138,7 +144,7 @@ try {
   await page.waitForTimeout(2000); // the deploy finishes; `sleep` keeps the command running
   await page.getByRole("button", { name: "Stop" }).click();
   await page.locator(".notice", { hasText: "may still go live" }).waitFor({ timeout: 10000 });
-  if (!(await page.locator("#builder-status").textContent()).includes("may still go live")) fail(`not announced: ${await page.locator("#builder-status").textContent()}`);
+  if (!(await page.locator("#builder-status").textContent())!.includes("may still go live")) fail(`not announced: ${await page.locator("#builder-status").textContent()}`);
   if (!(await page.locator("#builder-working").isHidden())) fail("working indicator stuck");
   console.log("stop after an approved deploy: warned");
   await page.getByRole("button", { name: "New chat" }).click();
@@ -164,7 +170,7 @@ try {
   console.log("PASS");
 } catch (e) {
   process.exitCode = 1;
-  console.log("FAIL", e.message);
+  console.log("FAIL", (e as Error).message);
   await page.screenshot({ path: `${out}/builder-fail.png` });
   console.log(await page.locator("#builder-log").innerText().catch(() => ""));
 } finally {

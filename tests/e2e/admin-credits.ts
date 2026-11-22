@@ -2,16 +2,16 @@
 // credits, one account's ledger. Anthropic is a stub this script starts on port 8799, so run the server against it:
 //   CRESSLET_ANTHROPIC_API_KEY=sk-e2e CRESSLET_ANTHROPIC_BASE_URL=http://127.0.0.1:8799 CRESSLET_AI_MONTHLY_CREDITS=1 \
 //   CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev
-// then: cd tests/e2e && npm i && node admin-credits.mjs [outdir]
+// then: cd tests/e2e && npm i && node admin-credits.ts [outdir]
 import { createServer } from "node:http";
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const admin = process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin";
 const out = process.argv[2] ?? ".";
-const fail = (m) => { throw new Error(m); };
+const fail = (m: string): never => { throw new Error(m); };
 
 // Each reply: 100 × $4 + 2000 × $20 per MTok = $0.0404 = 4.04 credits.
-const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+const ev = (type: string, data: object) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 const reply = ev("message_start", { message: { id: "msg_e2e", type: "message", role: "assistant", model: "claude-opus-5-5", content: [], stop_reason: null, usage: { input_tokens: 100, output_tokens: 1 } } }) +
   ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } }) +
   ev("content_block_delta", { index: 0, delta: { type: "text_delta", text: "hi" } }) +
@@ -22,9 +22,9 @@ const stub = createServer(async (req, res) => {
   res.writeHead(200, { "content-type": "text/event-stream" });
   res.end(reply);
 });
-await new Promise((r) => stub.listen(8799, "127.0.0.1", r));
+await new Promise<void>((r) => stub.listen(8799, "127.0.0.1", r));
 
-const call = async (path, token, body, method = body ? "POST" : "GET") => {
+const call = async (path: string, token: string, body?: object, method = body ? "POST" : "GET") => {
   const r = await fetch(base + path, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body && JSON.stringify(body) });
   return r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
 };
@@ -39,7 +39,7 @@ await call("/v1/ai/v1/messages", u.token, { model: "claude-opus-5-5", max_tokens
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-const logs = [];
+const logs: string[] = [];
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 page.on("dialog", (d) => d.accept());
 try {
@@ -116,7 +116,7 @@ try {
   console.log("PASS");
 } catch (e) {
   process.exitCode = 1;
-  console.log("FAIL", e.message);
+  console.log("FAIL", (e as Error).message);
   await page.screenshot({ path: `${out}/admin-credits-fail.png`, fullPage: true });
 } finally {
   console.log(logs.join("\n"));

@@ -1,32 +1,33 @@
-// Browser e2e: the TanStack Start template in the studio (studio/start-build.js): New project → in-browser npm install →
+// Browser e2e: the TanStack Start template in the studio (studio/start-build.ts): New project → in-browser npm install →
 // SSR preview → sign up (server functions, db, kv session cookie) → todos → a new file route → an edit reloads the
 // preview → Deploy → the same flow on the deployed app.
 // Run: start the server (CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev), then:
-//   cd tests/e2e && npm i && npx playwright install chromium && node start.mjs [screenshot dir]
-import { chromium } from "@playwright/test";
+//   cd tests/e2e && npm i && npx playwright install chromium && node start.ts [screenshot dir]
+import { chromium, type FrameLocator, type Page } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const shots = process.argv[2] ?? ".";
 const browser = await chromium.launch();
 const page = await browser.newPage();
-const logs = [];
+const logs: string[] = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 page.on("response", async (r) => {
   if (r.status() >= 400) logs.push(`[${r.status()}] ${r.request().method()} ${r.url()} ${JSON.stringify(await r.request().allHeaders())} → ${(await r.text().catch(() => "")).slice(0, 300)}`);
 });
 const term = page.locator(".xterm-rows");
-const waitTerm = async (re, what, tries = 600) => {
+const waitTerm = async (re: RegExp, what: string, tries = 600) => {
   for (let i = 0; !re.test(await term.innerText()); i++) {
     if (i > tries) throw new Error(`terminal never showed ${what}:\n${await term.innerText()}`);
     await page.waitForTimeout(200);
   }
 };
 const frame = page.frameLocator("#preview");
-const previewFrame = async () => (await page.locator("#preview").elementHandle()).contentFrame();
+// (the preview iframe: once it's shown it has a frame)
+const previewFrame = async () => (await (await page.locator("#preview").elementHandle())!.contentFrame())!;
 const user = { name: "Ada", email: `ada-${Date.now()}@example.com`, password: "correct horse battery" };
 
 /** Sign up, add a todo, reload: the session (kv cookie) and the todo (db) are still there. */
-async function signUpAndTodo(f, reload, what) {
+async function signUpAndTodo(f: Page | FrameLocator, reload: () => Promise<unknown>, what: string) {
   await f.getByRole("link", { name: "Create an account" }).first().click();
   await f.getByRole("heading", { name: "Create an account" }).waitFor({ timeout: 30000 });
   await f.getByLabel("Name").fill(user.name);
@@ -57,8 +58,8 @@ try {
   const js = /src="(\/assets\/client-[^"]+\.js)"/.exec(html)?.[1];
   if (!css || !js) throw new Error(`no client assets in the page:\n${html.slice(0, 800)}`);
   for (const [u, type] of [[css, "text/css"], [js, "text/javascript"]]) {
-    const r = await f.evaluate((u) => fetch(u).then((r) => [r.status, r.headers.get("content-type")]), u);
-    if (r[0] !== 200 || !r[1].startsWith(type)) throw new Error(`${u}: ${r}`);
+    const r = await f.evaluate((u) => fetch(u).then((r) => [r.status, r.headers.get("content-type")] as const), u);
+    if (r[0] !== 200 || !r[1]!.startsWith(type)) throw new Error(`${u}: ${r}`);
   }
   const health = await f.evaluate(() => fetch("/api/health").then((r) => r.json()));
   if (!health.ok || !health.sqlite) throw new Error(`/api/health: ${JSON.stringify(health)}`);
@@ -83,7 +84,7 @@ try {
   await signUpAndTodo(frame, reloadFrame, "preview");
   // The page's own POSTs pass the template's CSRF check (it runs before a server function is looked up) whatever their
   // body type; a navigation's (a form another page submits into the preview) doesn't.
-  const csrf = (init) => previewFrame().then((f) => f.evaluate((i) => fetch("/_serverFn/nope", { method: "POST", ...i, body: i.body === "form" ? new FormData() : i.body }).then((r) => r.status), init));
+  const csrf = (init: { body: string; headers?: Record<string, string> }) => previewFrame().then((f) => f.evaluate((i) => fetch("/_serverFn/nope", { method: "POST", ...i, body: i.body === "form" ? new FormData() : i.body }).then((r) => r.status), init));
   for (const body of ["x", "form"]) {
     const st = await csrf({ body });
     if (st === 403) throw new Error(`a same-origin POST (${body}) was refused as cross-site`);
@@ -124,7 +125,7 @@ try {
   await page.locator("#deploy-name-status", { hasText: "is available" }).waitFor({ timeout: 15000 });
   await page.locator("#deploy-confirm").click();
   await page.locator("#deploy-link").waitFor({ state: "visible", timeout: 180000 });
-  const url = await page.locator("#deploy-link").getAttribute("href");
+  const url = (await page.locator("#deploy-link").getAttribute("href"))!; // visible: it has one
   console.log("deployed", url);
   console.log(await page.locator("#deploy-log").textContent());
   const p2 = await browser.newPage();
@@ -140,7 +141,7 @@ try {
   console.log("deployed app works");
 } catch (e) {
   process.exitCode = 1;
-  console.log("FAIL", e.message);
+  console.log("FAIL", (e as Error).message);
   await page.screenshot({ path: `${shots}/start-fail.png` });
   console.log(await term.innerText().catch(() => ""));
 } finally {

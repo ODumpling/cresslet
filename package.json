@@ -9,7 +9,7 @@
     "dev": "node --watch-path=server --watch-path=runtime server/main.ts",
     "start": "node server/main.ts",
     "test": "node --test --test-concurrency=1 \"tests/*_test.ts\"",
-    "check": "tsc --noEmit && tsc -p studio && tsc -p studio/tsconfig.worker.json && tsc -p studio/tsconfig.service.json && tsc -p runtime",
+    "check": "tsc --noEmit && tsc -p studio && tsc -p studio/tsconfig.worker.json && tsc -p studio/tsconfig.service.json && tsc -p runtime && tsc -p tests/e2e",
     "vendor": "node scripts/vendor-container.ts",
     "test:pg": "CRESSLET_TEST_SCHEMA_PER_DATA_DIR=1 node --test --test-concurrency=1 \"tests/*_test.ts\"",
     "vendor:sdk": "node scripts/vendor-sdk.ts"
@@ -22,6 +22,7 @@
     "workerd": "^1.20261119.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "sql.js": "1.13.0",

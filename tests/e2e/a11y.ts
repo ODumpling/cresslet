@@ -1,17 +1,17 @@
 // Browser e2e: keyboard and focus behavior of the studio (no trap in the terminal or editor, focus survives
 // Deploy, Revoke and admin actions, tabs follow the ARIA pattern, no page-level horizontal scroll at 320px).
-// Run with the server up (CRESSLET_ADMIN_TOKEN=e2e-admin CRESSLET_SITE_ADMINS=admin@example.com npm run dev): node a11y.mjs
-import { chromium } from "@playwright/test";
+// Run with the server up (CRESSLET_ADMIN_TOKEN=e2e-admin CRESSLET_SITE_ADMINS=admin@example.com npm run dev): node a11y.ts
+import { chromium, type Page } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const admin = process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin";
-const call = async (path, token, body) => (await fetch(base + path, {
+const call = async (path: string, token: string, body?: object) => (await fetch(base + path, {
   method: body ? "POST" : "GET",
   headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
   body: body && JSON.stringify(body),
 })).json();
-const assert = (ok, msg) => { if (!ok) throw new Error(msg); };
-const focused = (page) => page.evaluate(() => {
-  const a = document.activeElement;
+const assert = (ok: unknown, msg: string) => { if (!ok) throw new Error(msg); };
+const focused = (page: Page) => page.evaluate(() => {
+  const a = document.activeElement!; // the body at least
   return a === document.body ? "body" : a.id || a.getAttribute("aria-label") || a.className || a.tagName;
 });
 const browser = await chromium.launch();
@@ -51,12 +51,12 @@ try {
   narrow.on("dialog", (d) => d.accept());
   await narrow.getByRole("button", { name: "Log out" }).focus();
   await narrow.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
-  await narrow.getByRole("button", { name: `Revoke ${yName}` }).evaluate((b) => b.click()); // leaves no fixture behind
+  await narrow.getByRole("button", { name: `Revoke ${yName}` }).evaluate((b: HTMLElement) => b.click()); // leaves no fixture behind
   await narrow.getByRole("button", { name: `Revoke ${yName}` }).waitFor({ state: "detached" });
   await narrow.waitForTimeout(300);
   const covered = await narrow.evaluate(() => {
-    const a = document.activeElement.getBoundingClientRect(), t = document.getElementById("toast").getBoundingClientRect();
-    return document.getElementById("toast").dataset.open === "true" && a.bottom > t.top && a.top < t.bottom && a.right > t.left && a.left < t.right;
+    const a = document.activeElement!.getBoundingClientRect(), t = document.getElementById("toast")!.getBoundingClientRect();
+    return document.getElementById("toast")!.dataset.open === "true" && a.bottom > t.top && a.top < t.bottom && a.right > t.left && a.left < t.right;
   });
   assert(await focused(narrow) === "logout-btn", "revoking another token moved focus");
   assert(!covered, "the toast covers the focused control");
@@ -66,7 +66,7 @@ try {
   assert((await narrow.locator("#toast").getAttribute("data-open")) === "false", "clicking × on a top toast didn't close it");
   // A toast that stepped aside (transparent) becomes visible when Tab reaches it.
   await narrow.getByRole("button", { name: "Log out" }).focus();
-  await narrow.locator("#token-copy").evaluate((b) => b.click()); // a toast, focus stays on Log out
+  await narrow.locator("#token-copy").evaluate((b: HTMLElement) => b.click()); // a toast, focus stays on Log out
   await narrow.locator('#toast[data-open="true"]').waitFor({ state: "attached" }); // copying is async
   await narrow.locator("#toast").evaluate((t) => (t.dataset.top = "hide"));
   await narrow.locator("#toast-close").focus();
@@ -103,7 +103,7 @@ try {
   await page.unroute("**/v1/admin/sites/*");
   await page.getByRole("button", { name: "Refresh" }).click();
   await page.waitForTimeout(500);
-  assert((await page.evaluate(() => document.activeElement.textContent.trim())) === "Refresh", "Refresh lost focus");
+  assert((await page.evaluate(() => document.activeElement!.textContent!.trim())) === "Refresh", "Refresh lost focus");
   console.log("admin focus ok");
 
   // Settings: after Revoke, focus lands on the list heading.
@@ -154,7 +154,7 @@ try {
     return d && getComputedStyle(d).color;
   });
   assert(dim, "no dim terminal output to check");
-  assert(!/rgba/.test(dim), `dim terminal text is translucent: ${dim}`);
+  assert(!/rgba/.test(dim!), `dim terminal text is translucent: ${dim}`);
   await page.getByRole("tab", { name: "Terminal" }).focus();
   await page.keyboard.press("ArrowRight");
   assert(await focused(page) === "tab-deploy-log", "ArrowRight didn't move to the Deploy log tab");
@@ -164,13 +164,13 @@ try {
   await page.locator(".xterm").click();
   await page.keyboard.press("Escape");
   await page.keyboard.press("Tab");
-  assert(!(await page.evaluate(() => !!document.activeElement.closest(".xterm"))), "Esc, Tab didn't leave the terminal");
+  assert(!(await page.evaluate(() => !!document.activeElement!.closest(".xterm"))), "Esc, Tab didn't leave the terminal");
   const codeBtn = page.getByRole("button", { name: "Code", exact: true });
   await codeBtn.click();
   assert(await codeBtn.getAttribute("aria-pressed") === "true" && await page.locator("#preview-pane").isHidden(), "Code didn't replace the preview");
   // The editor's focus ring must be painted (CodeMirror's layers can cover it): the editor's bottom-left
   // edge (gutter, away from the active line) looks different focused and unfocused.
-  const box = await page.locator("#editor").boundingBox();
+  const box = (await page.locator("#editor").boundingBox())!; // visible
   const edge = { x: box.x, y: box.y + box.height - 24, width: 3, height: 20 };
   const unfocused = await page.screenshot({ clip: edge });
   await page.locator(".cm-content").click();
@@ -179,7 +179,7 @@ try {
   assert(await page.locator("#editor-help").isVisible(), "editor exit hint not shown while the editor has focus");
   await page.keyboard.press("Escape");
   await page.keyboard.press("Tab");
-  assert(!(await page.evaluate(() => !!document.activeElement.closest(".cm-editor"))), "Esc, Tab didn't leave the editor");
+  assert(!(await page.evaluate(() => !!document.activeElement!.closest(".cm-editor"))), "Esc, Tab didn't leave the editor");
   await page.getByRole("button", { name: "Preview", exact: true }).click();
   await page.locator("#preview-path").fill("");
   await page.locator("#preview-path").pressSequentially("/abc");
@@ -204,7 +204,7 @@ try {
 
   // Short viewport: preview, chat and editor keep usable height (the drawer is open since Deploy).
   await page.setViewportSize({ width: 1000, height: 300 });
-  const tall = (id) => page.evaluate((i) => document.getElementById(i).getBoundingClientRect().height, id);
+  const tall = (id: string) => page.evaluate((i) => document.getElementById(i)!.getBoundingClientRect().height, id);
   const h = [await tall("preview"), await tall("builder")];
   await page.getByRole("button", { name: "Code", exact: true }).click();
   h.push(await tall("editor"));
@@ -220,7 +220,7 @@ try {
   console.log("focus after leaving the workspace ok");
 } catch (e) {
   process.exitCode = 1;
-  console.log("FAIL", e.message);
+  console.log("FAIL", (e as Error).message);
 } finally {
   await browser.close();
 }

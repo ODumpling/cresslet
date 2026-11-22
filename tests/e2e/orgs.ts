@@ -1,14 +1,14 @@
 // Browser e2e for account management (#/admin-users), organizations (#/admin-orgs, #/orgs/<name>) and moving an
 // app into one (its Share page). Run the server with an admin token:
 //   CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev
-// then: cd tests/e2e && npm i && node orgs.mjs [outdir]
+// then: cd tests/e2e && npm i && node orgs.ts [outdir]
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const admin = process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin";
 const out = process.argv[2] ?? ".";
-const fail = (m) => { throw new Error(m); };
+const fail = (m: string): never => { throw new Error(m); };
 
-const call = async (path, token, body, method = body ? "POST" : "GET") => {
+const call = async (path: string, token: string, body?: object, method = body ? "POST" : "GET") => {
   const r = await fetch(base + path, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body && JSON.stringify(body) });
   return r.json();
 };
@@ -22,8 +22,8 @@ await call("/v1/deploys", dev.token, { app, files: [{ path: "index.html", data: 
 
 const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-const logs = [];
-const open = async (token) => {
+const logs: string[] = [];
+const open = async (token: string) => {
   const page = await ctx.newPage();
   page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
   page.on("dialog", (d) => d.accept());
@@ -39,7 +39,7 @@ try {
   await page.getByRole("heading", { name: "Users", level: 1 }).waitFor();
   if ((await page.getByRole("link", { name: "Users" }).getAttribute("aria-current")) !== "page") fail("Users nav link not current");
   const table = page.getByRole("region", { name: "Accounts table" });
-  const row = (email) => table.locator("tbody tr", { hasText: email });
+  const row = (email: string) => table.locator("tbody tr", { hasText: email });
   await row(devEmail).waitFor();
   await page.locator("main:not([hidden])").getByLabel("Email").fill(newEmail);
   await page.getByRole("button", { name: "Invite", exact: true }).click();

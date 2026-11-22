@@ -1,12 +1,12 @@
 // Browser e2e: template → in-browser npm install → preview → API → Deploy (pick the address) → live app; Settings → API tokens.
 // SHOTS=<dir> also saves screenshots of the address picker.
 // Run: start the server (CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev), then:
-//   cd tests/e2e && npm i && npx playwright install chromium && CRESSLET_ADMIN_TOKEN=e2e-admin node studio.mjs
+//   cd tests/e2e && npm i && npx playwright install chromium && CRESSLET_ADMIN_TOKEN=e2e-admin node studio.ts
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const browser = await chromium.launch();
 const page = await browser.newPage();
-const logs = [];
+const logs: string[] = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 try {
@@ -19,9 +19,9 @@ try {
   // Previews run on their own origin: preview code can't read the studio's storage (API token).
   const { previewOrigin } = await (await fetch(base + "/v1")).json();
   const src = await page.locator("#preview").getAttribute("src");
-  if (!previewOrigin || !src.startsWith(previewOrigin)) throw new Error(`preview not on the preview origin: ${src}`);
+  if (!previewOrigin || !src!.startsWith(previewOrigin)) throw new Error(`preview not on the preview origin: ${src}`);
   await page.evaluate(() => localStorage.setItem("cresslet.token", "clv_acct_studio_secret"));
-  const pf = await (await page.locator("#preview").elementHandle()).contentFrame();
+  const pf = (await (await page.locator("#preview").elementHandle())!.contentFrame())!; // the preview frame (shown)
   const [origin, seen] = await pf.evaluate(() => [location.origin, localStorage.getItem("cresslet.token")]);
   if (origin !== previewOrigin) throw new Error(`preview frame origin ${origin} ≠ ${previewOrigin}`);
   if (seen !== null) throw new Error("preview could read the studio's token");
@@ -29,7 +29,7 @@ try {
   const before = page.url();
   const [topNav, popup] = await pf.evaluate(() => {
     let t = "blocked";
-    try { top.location.href = "/"; t = "tried"; } catch { /* blocked */ }
+    try { top!.location.href = "/"; t = "tried"; } catch { /* blocked */ }
     let p = "blocked";
     try { if (window.open("/")) p = "opened"; } catch { /* blocked */ }
     return [t, p];
@@ -42,7 +42,7 @@ try {
   if (await page.locator("#preview-open").count()) throw new Error("raw new-tab preview link is back");
   // A studio-origin blob: URL can't be loaded into the preview frame with the studio's origin (Chromium
   // partitions blob URLs by storage key). App workers run on the preview origin, so they can't mint one anyway.
-  const leaked = page.evaluate(() => new Promise((r) => {
+  const leaked = page.evaluate(() => new Promise<string | null>((r) => {
     addEventListener("message", (e) => typeof e.data === "string" && e.data.startsWith("token=") && r(e.data));
     setTimeout(() => r(null), 3000);
   }));
@@ -81,7 +81,7 @@ try {
   await nameInput.fill(taken);
   await page.locator("#deploy-name-status", { hasText: `${taken} is taken` }).waitFor();
   await page.locator("#deploy-confirm").click();
-  if (!(await page.locator("#deploy-dialog").evaluate((d) => d.open))) throw new Error("deployed to a taken name");
+  if (!(await page.locator("#deploy-dialog").evaluate((d: HTMLDialogElement) => d.open))) throw new Error("deployed to a taken name");
   if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/deploy-taken.png` });
   await nameInput.fill("Bad--Name");
   await page.locator("#deploy-name-status", { hasText: "single dashes" }).waitFor();
@@ -91,7 +91,7 @@ try {
   if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/deploy-custom.png` });
   await page.locator("#deploy-confirm").click();
   await page.locator("#deploy-link").waitFor({ state: "visible", timeout: 60000 });
-  const url = await page.locator("#deploy-link").getAttribute("href");
+  const url = (await page.locator("#deploy-link").getAttribute("href"))!; // visible: it has one
   if (!url.includes(`//${mine}.`)) throw new Error(`deployed to ${url}, not ${mine}`);
   if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/deploy-done.png` });
   console.log("deployed", url);
@@ -106,12 +106,12 @@ try {
   // App server code and `node` run on the preview origin too; the server survives its own background errors. neither can open the studio's IndexedDB (every
   // local project's files, including .env.cresslet). Probe from a node script, then from the app's server route.
   const term = page.locator(".xterm-rows");
-  const waitTerm = async (re, what) => {
+  const waitTerm = async (re: RegExp, what: string) => {
     for (let i = 0; !re.test(await term.innerText()); i++) {
       if (i > 150) throw new Error(`terminal never showed ${what}:\n${await term.innerText()}`);
       await page.waitForTimeout(200);
     }
-    return re.exec(await term.innerText());
+    return re.exec(await term.innerText())!; // it just matched
   };
   await page.getByRole("tab", { name: "Terminal" }).click();
   await page.locator(".xterm").click();
@@ -127,7 +127,7 @@ try {
   await waitTerm(/server ready[\s\S]*dev server on port/, "the restarted dev server");
   await waitTerm(/\[server\] 42/, "the server's own background error, logged");
   const probe = async () => {
-    const f = await (await page.locator("#preview").elementHandle()).contentFrame();
+    const f = (await (await page.locator("#preview").elementHandle())!.contentFrame())!; // the preview frame (shown)
     return f.evaluate(() => fetch("/api/probe").then((r) => r.json())).catch(() => null);
   };
   let served = null;
@@ -137,11 +137,11 @@ try {
   console.log("server code runs on", served.origin, "and sees databases", JSON.stringify(served.dbs));
   // A relay reload takes its workers with it: API requests then fail fast (503), they don't hang.
   await page.evaluate(() => {
-    const relay = document.querySelector('iframe[title="cresslet preview relay"]');
+    const relay = document.querySelector<HTMLIFrameElement>('iframe[title="cresslet preview relay"]')!;
     relay.src = relay.src;
   });
   const stopped = async () => {
-    const f = await (await page.locator("#preview").elementHandle()).contentFrame();
+    const f = (await (await page.locator("#preview").elementHandle())!.contentFrame())!; // the preview frame (shown)
     return f.evaluate(() => fetch("/api/probe", { signal: AbortSignal.timeout(5000) }).then(async (r) => `${r.status} ${await r.text()}`).catch((e) => e.name)).catch(() => "");
   };
   let afterReload = "";
@@ -152,7 +152,7 @@ try {
   await settings();
 } catch (e) {
   process.exitCode = 1;
-  console.log("FAIL", e.message);
+  console.log("FAIL", (e as Error).message);
   await page.screenshot({ path: (process.argv[2] ?? ".") + "/studio-fail.png" });
   console.log(await page.locator(".xterm-rows").innerText().catch(() => ""));
 } finally {
@@ -164,7 +164,7 @@ try {
 async function settings() {
   const admin = process.env.CRESSLET_ADMIN_TOKEN;
   if (!admin) throw new Error("set CRESSLET_ADMIN_TOKEN (same as the server's) for the Settings check");
-  const call = async (path, token, body) => {
+  const call = async (path: string, token: string, body?: object) => {
     const r = await fetch(base + path, {
       method: body ? "POST" : "GET",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -198,7 +198,7 @@ async function settings() {
   await row.getByText(`deploy · ${appName}`).waitFor();
   await s.screenshot({ path: (process.argv[2] ?? ".") + "/settings.png", fullPage: true });
 
-  const st = async (path, body) => (await call(path, secret, body)).status;
+  const st = async (path: string, body?: object) => (await call(path, secret, body)).status;
   if (await st("/v1/deploys", { app: appName, files }) !== 201) throw new Error("scoped token can't deploy its app");
   if (await st("/v1/deploys", { files }) !== 403) throw new Error("app-scoped token created a new app");
   if (await st("/v1/me/tokens") !== 403) throw new Error("deploy token can list tokens");

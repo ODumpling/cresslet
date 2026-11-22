@@ -1,17 +1,17 @@
 // Browser e2e: the owner invites an account from the app's Share page; the invitee accepts on the home page,
 // then gets what the role allows (admins: Share; viewers: no Share, can Leave). No 320px horizontal scroll.
-// Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node share.mjs
+// Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node share.ts
 // SHOTS=<dir> also saves screenshots.
-import { chromium } from "@playwright/test";
+import { chromium, type Page } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const admin = process.env.CRESSLET_ADMIN_TOKEN ?? "adm";
-const call = async (path, token, body) => (await fetch(base + path, {
+const call = async (path: string, token: string, body?: object) => (await fetch(base + path, {
   method: body ? "POST" : "GET",
   headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
   body: body && JSON.stringify(body),
 })).json();
-const assert = (ok, msg) => { if (!ok) throw new Error(msg); };
-const shot = (page, name) => process.env.SHOTS && page.screenshot({ path: `${process.env.SHOTS}/${name}.png`, fullPage: true });
+const assert = (ok: unknown, msg: string) => { if (!ok) throw new Error(msg); };
+const shot = (page: Page, name: string) => process.env.SHOTS && page.screenshot({ path: `${process.env.SHOTS}/${name}.png`, fullPage: true });
 const run = Date.now();
 const owner = await call("/v1/accounts", admin, { email: `owner-${run}@example.com` });
 const invitee = await call("/v1/accounts", admin, { email: `invitee-${run}@example.com` });
@@ -19,7 +19,7 @@ const app = `share-${run}`;
 await call("/v1/deploys", owner.token, { app, files: [{ path: "index.html", data: "shared" }] });
 
 const browser = await chromium.launch();
-const as = async (token, viewport) => {
+const as = async (token: string, viewport?: { width: number; height: number }) => {
   const page = await browser.newPage(viewport ? { viewport } : {});
   await page.addInitScript((t) => localStorage.setItem("cresslet.token", t), token);
   page.on("dialog", (d) => d.accept());

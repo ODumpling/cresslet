@@ -1,11 +1,11 @@
 // Browser e2e: an app's WebSocket server (WebSocketPair) in the studio preview. Origin, text, binary, subprotocol, closes
 // both ways, a refused upgrade; saving a server file closes open sockets (1012), even with the old server stuck in a
 // loop, fails its pending requests (503), and clients can reconnect.
-// Run: start the server (npm run dev), then: cd tests/e2e && node websocket.mjs [screenshot dir]
+// Run: start the server (npm run dev), then: cd tests/e2e && node websocket.ts [screenshot dir]
 import { chromium } from "@playwright/test";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
-const assert = (ok, msg) => { if (!ok) throw new Error(msg); };
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const assert = (ok: unknown, msg: string) => { if (!ok) throw new Error(msg); };
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 const APP = `// A WebSocket echo server.
 const boot = crypto.randomUUID().slice(0, 8);
@@ -56,11 +56,11 @@ export default {
 
 const browser = await chromium.launch();
 const page = await browser.newPage();
-const logs = [];
+const logs: string[] = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 const term = page.locator(".xterm-rows");
-const waitFor = async (fn, what, tries = 150) => {
+const waitFor = async <T>(fn: () => Promise<T>, what: string, tries = 150): Promise<T> => {
   for (let i = 0; ; i++) {
     const v = await fn().catch(() => null);
     if (v) return v;
@@ -69,10 +69,11 @@ const waitFor = async (fn, what, tries = 150) => {
   }
 };
 // Socket waits in the preview fail after 20 s rather than hang.
-const within = (p, what) => Promise.race([p, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out: ${what}`)), 20000).unref())]);
-const frame = async () => (await page.locator("#preview").elementHandle()).contentFrame();
+const within = <T>(p: Promise<T>, what: string) => Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`timed out: ${what}`)), 20000).unref())]);
+// (the preview iframe: once it's shown it has a frame)
+const frame = async () => (await (await page.locator("#preview").elementHandle())!.contentFrame())!;
 // Replaces (or appends to) server/index.ts in the editor; the dev server restarts the app's server.
-const editServer = async (text, append = false) => {
+const editServer = async (text: string, append = false) => {
   await page.getByRole("button", { name: "Code", exact: true }).click(); // the preview keeps running, hidden
   await page.locator('#tree button[data-path="server/index.ts"]').click();
   await page.locator("#editor .cm-content").click();
@@ -95,7 +96,7 @@ try {
   // Round trip: subprotocol, text, binary (ArrayBuffer and Blob), server-initiated close.
   const f = await frame();
   const roundTrip = await within(f.evaluate(() => new Promise((resolve, reject) => {
-    const events = [];
+    const events: unknown[] = [];
     const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/ws?room=1`, ["chat", "other"]);
     ws.binaryType = "arraybuffer";
     ws.onerror = () => reject(new Error("socket error"));
@@ -132,7 +133,7 @@ try {
 
   // A refused upgrade (no WebSocketPair): error, then close 1006, like a browser.
   const refused = await within(f.evaluate(() => new Promise((resolve) => {
-    const events = [];
+    const events: string[] = [];
     const ws = new WebSocket("/api/nope");
     ws.onopen = () => events.push("open");
     ws.onerror = () => events.push("error");
@@ -143,7 +144,7 @@ try {
 
   // Worker restart, with the old server stuck in a loop: an open socket gets close 1012, the stuck request a 503,
   // and reconnecting reaches the new server.
-  await within(f.evaluate(() => new Promise((resolve) => {
+  await within(f.evaluate(() => new Promise<void>((resolve) => {
     const ws = (window.__ws = new WebSocket("/api/ws"));
     window.__closed = null;
     ws.onmessage = (e) => ((window.__welcome = e.data), resolve());
@@ -157,7 +158,7 @@ try {
   const spin = await f.evaluate(() => window.__spin);
   assert(spin === "503 server restarted", `stuck request: ${spin}`);
   assert(same(closed, { code: 1012, reason: "server restarting", wasClean: true }), `restart close: ${JSON.stringify(closed)}`);
-  const welcome2 = await within(f.evaluate(() => new Promise((resolve, reject) => {
+  const welcome2 = await within(f.evaluate(() => new Promise<string>((resolve, reject) => {
     const ws = new WebSocket("/api/ws");
     ws.onerror = () => reject(new Error("reconnect failed"));
     ws.onmessage = (e) => (ws.close(), resolve(e.data));
@@ -170,7 +171,7 @@ try {
   console.log("PASS");
 } catch (e) {
   process.exitCode = 1;
-  console.log("FAIL", e.message);
+  console.log("FAIL", (e as Error).message);
   await page.screenshot({ path: (process.argv[2] ?? ".") + "/websocket-fail.png" });
   console.log(await term.innerText().catch(() => ""));
 } finally {
