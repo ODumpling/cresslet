@@ -196,12 +196,15 @@ const stackChanged = () => new HttpError(409, "the stack changed meanwhile (in a
  * aside (their branches kept), so it's the top and the next change goes on it. `now`: the ones this set aside;
  * `setAside`: all the stack's, earlier ones too.
  */
-export function goBack(ctx: Ctx, changeId: string, sha?: string): Promise<{ change: ChangeView; stack: { id: string; name: string }; now: string[]; setAside: ChangeView[] }> {
+export function goBack(ctx: Ctx, changeId: string, sha?: string, top?: { id: string; sha: string }): Promise<{ change: ChangeView; stack: { id: string; name: string }; now: string[]; setAside: ChangeView[] }> {
   return locked(ctx.appId, async () => {
     const open = await ctx.store.openStackChanges(ctx.appId);
     const c = open.find((x) => x.id === changeId);
     if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
     if (sha && c.sha !== sha) throw stackChanged();
+    // `top`: the stack's top the caller expects (undoing a restore: nothing added on it since).
+    const was = byStack(open.filter((x) => x.stack_id === c.stack_id))[0]!.at(-1)!;
+    if (top && (was.id !== top.id || was.sha !== top.sha)) throw stackChanged();
     const now = open.filter((x) => x.stack_id === c.stack_id && x.position > c.position).map((x) => x.id);
     await ctx.store.setAsideAbove(ctx.appId, c.stack_id, c.position);
     const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).filter((x) => x.stack_id === c.stack_id);
@@ -220,7 +223,12 @@ export function restore(ctx: Ctx, stackId: string, opts: { only?: string[]; top?
     const before = byStack((await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId))[0];
     if (!before) throw new HttpError(409, "nothing to restore: that stack isn't open any more", "nothing_set_aside");
     let aside = (await ctx.store.setAsideStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId);
-    if (opts.only) aside = aside.filter((c) => opts.only!.includes(c.id));
+    if (opts.only) {
+      // The bottom ones only: the stack stays a straight line (nothing open above one still set aside).
+      const want = aside.slice(0, opts.only.length);
+      if (want.length !== opts.only.length || want.some((c) => !opts.only!.includes(c.id))) throw stackChanged();
+      aside = want;
+    }
     if (!aside.length) throw new HttpError(409, "nothing to restore: a change was built where they were, or they're back already", "nothing_set_aside");
     const top = aside.at(-1)!;
     if (opts.top && (top.id !== opts.top.id || top.sha !== opts.top.sha)) throw stackChanged();

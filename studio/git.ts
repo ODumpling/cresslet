@@ -359,7 +359,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
           r = await post("/stack/restore", { stack, top: top.id, sha: top.sha });
           // Edited while the server restored them: set them aside again (the workspace is still below them), keep the edit.
           if (revision() !== rev) {
-            await post("/stack/back", { change: r.below.id, sha: r.below.sha }).catch(() => {
+            await post("/stack/back", { change: r.below.id, sha: r.below.sha, top: r.change.id, topSha: r.change.sha }).catch(() => {
               throw Object.assign(new Error("the workspace changed while restoring, and the stack couldn't be put back: load its top change"), { code: "changed" });
             });
           }

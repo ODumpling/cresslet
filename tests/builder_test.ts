@@ -620,7 +620,7 @@ test("git: going back to a change commits changes here first, then loads its com
   re.state.activeBranch = "feat/s/1-one";
   await assert.rejects(re.git.restore("stk_1", top), /changed while/);
   assert.deepEqual(re.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/tree", "/stack/restore", "/stack/back"]);
-  assert.deepEqual(re.calls[2].body, { change: "chg_1", sha: "1".repeat(40) });
+  assert.deepEqual(re.calls[2].body, { change: "chg_1", sha: "1".repeat(40), top: "chg_3", topSha: "3".repeat(40) });
   assert.deepEqual([re.state.activeBranch, re.hydrated], ["feat/s/1-one", []]);
   // The workspace is waited on by a request sent meanwhile.
   await r.git.idle();

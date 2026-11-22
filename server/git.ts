@@ -1048,9 +1048,11 @@ export function gitRoutes(
   // Going back to a change (the ones above it set aside), and putting them back.
   app.post("/apps/:name/git/stack/back", async (c) => {
     const { a, r, repo, client } = await linked(c, "deploy");
-    const input = await body<{ change?: unknown; sha?: unknown } | null>(c) ?? {};
+    const input = await body<{ change?: unknown; sha?: unknown; top?: unknown; topSha?: unknown } | null>(c) ?? {};
     if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
-    return c.json(await goBack({ provider: client, store, appId: a.id, repo, r }, input.change, input.sha != null ? shaOf(input.sha, "sha") : undefined));
+    if (input.top != null && typeof input.top !== "string") throw new HttpError(400, "top must be a change's id");
+    const top = typeof input.top === "string" ? { id: input.top, sha: shaOf(input.topSha, "topSha") } : undefined;
+    return c.json(await goBack({ provider: client, store, appId: a.id, repo, r }, input.change, input.sha != null ? shaOf(input.sha, "sha") : undefined, top));
   });
   app.post("/apps/:name/git/stack/restore", async (c) => {
     const { a, r, repo, client } = await linked(c, "deploy");

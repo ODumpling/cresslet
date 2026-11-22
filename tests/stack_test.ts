@@ -323,6 +323,15 @@ test("stack: go back and restore check the commit the caller saw; an undo restor
   assert.deepEqual([undo.change.id, undo.below.id], [c2.change.id, c1.change.id]);
   let [s] = await readStacks(t.ctx);
   assert.deepEqual([s.changes.map((c) => c.title), s.setAside.map((c) => c.title)], [["One", "Two"], ["Three"]]);
+  // `only` restores from the bottom of the ones set aside, never one above another left aside.
+  await goBack(t.ctx, c1.change.id); // 2 set aside below 3
+  await assert.rejects(restore(t.ctx, s.id, { only: [c3.change.id] }), (e) => code(e) === "conflict");
+  await restore(t.ctx, s.id, { only: [c2.change.id] });
+  // Undoing a restore names the top it expects: one added since stops it.
+  await assert.rejects(goBack(t.ctx, c1.change.id, c1.sha, { id: c3.change.id, sha: c3.sha }), (e) => code(e) === "conflict");
+  await goBack(t.ctx, c1.change.id, c1.sha, { id: c2.change.id, sha: c2.sha });
+  await restore(t.ctx, s.id, { only: [c2.change.id] });
+  [s] = await readStacks(t.ctx);
   // Restore names the top it'll load: another one (or another commit) is refused.
   await assert.rejects(restore(t.ctx, s.id, { top: { id: c2.change.id, sha: c2.sha } }), (e) => code(e) === "conflict");
   await assert.rejects(restore(t.ctx, s.id, { top: { id: c3.change.id, sha: "e".repeat(40) } }), (e) => code(e) === "conflict");
