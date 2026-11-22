@@ -51,6 +51,7 @@ export declare class Terminal {
   writeln(data: string | Uint8Array, callback?: () => void): void;
   onData(listener: (data: string) => void): IDisposable;
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void;
+  dispose(): void;
 }
 
 export declare class FitAddon implements ITerminalAddon {

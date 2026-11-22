@@ -7,6 +7,21 @@ export function focusView({ scroll = false } = {}) {
   if (scroll) h?.scrollIntoView({ block: "nearest" });
 }
 
+let navigatedAt = 0;
+/** In-app navigation (the layout): the new view's heading gets focus once it's in the page. */
+export function navigated() {
+  navigatedAt = Date.now();
+  requestAnimationFrame(() => focusView());
+}
+/**
+ * A view that appears only once something loaded (after the navigation's focus move ran): if that navigation was just
+ * now and focus fell back to the page, it goes to this view's heading. The first page load keeps the browser's focus.
+ */
+export function viewShown() {
+  const a = document.activeElement;
+  if (Date.now() - navigatedAt < 5000 && (!a || a === document.body)) focusView();
+}
+
 // The last focused control, as a selector that still finds it after a re-render rebuilt it.
 // (Per-item controls get unique ids, e.g. revoke-<token id>: labels like "Revoke Studio (GitHub login)" repeat.)
 let lastFocusKey: string | null = null, lastFocusEl: Element | null = null;

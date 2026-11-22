@@ -3,7 +3,7 @@ import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-route
 import { useCallback, useEffect, useRef, useState } from "react";
 import { projects, type StoredProject } from "../../store.ts";
 import { meta, mustLogIn } from "../lib/api.ts";
-import { focusView } from "../lib/focus.ts";
+import { focusView, navigated } from "../lib/focus.ts";
 import { ViewContext, type ViewInfo } from "../lib/hooks.ts";
 import { onProjectsChanged } from "../lib/projects.ts";
 import { finishLogin, logIn, refreshAccount, useSession } from "../lib/session.ts";
@@ -65,7 +65,7 @@ export function Layout() {
       return;
     }
     scrollTo(0, 0);
-    requestAnimationFrame(() => focusView());
+    navigated();
   }, [href]);
 
   const nav = view.nav;

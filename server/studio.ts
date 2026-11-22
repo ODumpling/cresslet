@@ -48,17 +48,17 @@ export interface Studio {
   close(): Promise<void>;
 }
 
-/** `dev`: serve through Vite (needs the devDependencies). */
-export async function studio({ dev = false } = {}): Promise<Studio> {
-  return dev ? devStudio() : builtStudio();
+/** `dev`: serve through Vite (needs the devDependencies); else the build in `dist`. */
+export async function studio({ dev = false, dist = STUDIO_DIST } = {}): Promise<Studio> {
+  return dev ? devStudio() : builtStudio(dist);
 }
 
-function builtStudio(): Studio {
-  if (!existsSync(join(STUDIO_DIST, SHELL))) {
-    console.warn(`cresslet: the studio isn't built (no ${join(STUDIO_DIST, SHELL)}): run npm run build, or npm run dev`);
+function builtStudio(dist: string): Studio {
+  if (!existsSync(join(dist, SHELL))) {
+    console.warn(`cresslet: the studio isn't built (no ${join(dist, SHELL)}): run npm run build, or npm run dev`);
   }
   let shell: Promise<{ html: string; release: string }> | undefined;
-  const load = () => shell ??= readFile(join(STUDIO_DIST, SHELL), "utf8").then((html) => ({
+  const load = () => shell ??= readFile(join(dist, SHELL), "utf8").then((html) => ({
     html,
     release: createHash("sha256").update(html).digest("hex").slice(0, 12),
   }), (e) => {
@@ -88,7 +88,7 @@ function builtStudio(): Studio {
         // workers and vendored files lazily) is served from this release if it's still at that URL.
         if (path === "/app.js") return reload(req, (await load().catch(() => ({ release: "" }))).release);
       }
-      const res = await serveDir(path === url.pathname ? req : new Request(new URL(path + url.search, url), req), STUDIO_DIST);
+      const res = await serveDir(path === url.pathname ? req : new Request(new URL(path + url.search, url), req), dist);
       if (res.status === 404 && /^\/assets\/.+\.js$/.test(path)) return reload(req, (await load().catch(() => ({ release: "" }))).release);
       const h = new Headers(res.headers);
       for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
@@ -116,7 +116,8 @@ async function devStudio(): Promise<Studio> {
     root: STUDIO_SRC,
     // HMR on Vite's own WebSocket port (CRESSLET_HMR_PORT, default 24678), not this server's; a cache per port, so
     // two dev servers (say, two checkouts' e2e runs) don't share one.
-    server: { middlewareMode: true, hmr: { port: hmrPort } },
+    // Files Vite may serve (/@fs/…): the studio's own and its dependencies, never the data dir or the server.
+    server: { middlewareMode: true, hmr: { port: hmrPort }, fs: { strict: true, allow: [STUDIO_SRC, join(STUDIO_SRC, "../node_modules")] } },
     cacheDir: join(STUDIO_SRC, `../node_modules/.vite/studio-${hmrPort}`),
     appType: "custom",
   });

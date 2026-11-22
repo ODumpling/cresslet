@@ -11,10 +11,11 @@ export const ALLOW_JS: [RegExp, string][] = [
   [/^studio\/vendor\/cresslet-sdk\.js$/, "the cresslet SDK, vendored from cresslet-cli by npm run vendor:sdk"],
   [/^tests\/fixtures\/sdk-contract\.js$/, "the SDK's shared contract cases, vendored from cresslet-cli by npm run vendor:sdk"],
   [/^templates\//, "starter apps users get (their own code, whatever they write it in)"],
+  [/^studio\/dist\//, "the studio's build output (npm run build; not committed)"],
 ];
 
-/** Not our code to police: vendored type declarations and the templates. */
-const FOREIGN_TS = [/^studio\/vendor\/cresslet-container\//, /^templates\//];
+/** Not our code to police: vendored type declarations, the templates, and the generated route tree (TanStack's). */
+const FOREIGN_TS = [/^studio\/vendor\/cresslet-container\//, /^templates\//, /^studio\/src\/routeTree\.gen\.ts$/];
 
 const JS = /\.(?:js|mjs|cjs|jsx)$/;
 const TS = /\.(?:ts|tsx|mts|cts)$/;

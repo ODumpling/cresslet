@@ -9,7 +9,7 @@ const STUDIO = join(import.meta.dirname, "../studio");
 const TREE = join(STUDIO, "src/routeTree.gen.ts");
 const before = await readFile(TREE, "utf8").catch(() => "");
 // Creating the dev server runs the generator (it writes the tree once its routes are crawled).
-const vite = await createServer({ configFile: join(STUDIO, "vite.config.ts"), root: STUDIO, logLevel: "warn", server: { middlewareMode: true, hmr: false, watch: null } });
+const vite = await createServer({ configFile: join(STUDIO, "vite.config.ts"), root: STUDIO, logLevel: "warn", server: { middlewareMode: true, hmr: false, ws: false, watch: null } });
 await vite.environments.client.pluginContainer.buildStart({});
 await vite.close();
 const after = await readFile(TREE, "utf8");

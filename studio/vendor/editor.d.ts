@@ -42,6 +42,7 @@ export declare class EditorView {
   readonly contentDOM: HTMLElement;
   dispatch(...specs: TransactionSpec[]): void;
   requestMeasure(): void;
+  destroy(): void;
   static readonly contentAttributes: Facet<Record<string, string>>;
   static readonly updateListener: Facet<(update: ViewUpdate) => void>;
 }

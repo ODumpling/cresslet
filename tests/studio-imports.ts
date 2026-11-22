@@ -1,5 +1,5 @@
-// Studio modules import each other by the names they're served under (`./start-build.js`: server/static.ts serves
-// start-build.ts as JavaScript). Tests that load them under Node import this first: such an import then resolves to
+// Studio modules import each other as `./x.js` (Vite resolves that to x.ts; so did the server before the studio had a
+// build). Tests that load them under Node import this first: such an import then resolves to
 // the .ts beside it (only in studio/, and only when there's no .js of that name).
 import { existsSync } from "node:fs";
 import { registerHooks } from "node:module";

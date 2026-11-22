@@ -1,6 +1,7 @@
 // studio/start-build.ts: the TanStack Start build's pure parts (the browser build itself: tests/e2e/start.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import "./studio-imports.ts"; // studio modules' ./x.js imports → x.ts
 
 const mod = "../studio/start-build.ts"; // browser module: typed by studio/tsconfig.json, not this program
 const { exportsTarget, CONDITIONS, serverFnResolverModule, manifestModule, startDefines, ASYNC_HOOKS_SHIM } = await import(mod);

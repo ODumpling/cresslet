@@ -1,9 +1,8 @@
 // Minimal static file serving: content types, ETag/304, HEAD, single byte ranges.
 import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { extname, join, posix, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
-import { stripTypes } from "./strip.ts";
 
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -84,37 +83,8 @@ export async function serveFile(req: Request, path: string): Promise<Response> {
   return new Response(head ? null : body(path), { status: 200, headers });
 }
 
-const stripped = new Map<string, { key: string; code: Promise<string> }>();
-
-/**
- * `path` (a .ts file) as the JavaScript a `.js` URL names: types stripped (server/strip.ts), once per version of
- * the file (size + mtime, as the ETag). No ranges: browsers only ask for whole scripts.
- */
-async function serveStripped(req: Request, path: string): Promise<Response> {
-  const info = await stat(path);
-  const key = `${info.size.toString(16)}-${info.mtimeMs.toString(16)}`;
-  let hit = stripped.get(path);
-  if (hit?.key !== key) {
-    const fresh = hit = { key, code: readFile(path, "utf8").then(stripTypes) };
-    fresh.code.catch(() => stripped.get(path) === fresh && stripped.delete(path)); // (the request reports it)
-    stripped.set(path, fresh);
-  }
-  const code = await hit.code;
-  const headers = new Headers({
-    "content-type": TYPES[".js"],
-    etag: `W/"${key}"`,
-    "last-modified": info.mtime.toUTCString(),
-  });
-  if (req.headers.get("if-none-match") === `W/"${key}"`) return new Response(null, { status: 304, headers });
-  headers.set("content-length", String(Buffer.byteLength(code)));
-  return new Response(req.method === "HEAD" ? null : code, { status: 200, headers });
-}
-
-/**
- * Serve `fsRoot` by URL path; directories serve their index.html. `stripTs`: a `.js` path with no such file but a
- * `.ts` beside it serves that, as JavaScript (the studio's sources are TypeScript; their URLs and imports say .js).
- */
-export async function serveDir(req: Request, fsRoot: string, opts: { stripTs?: boolean } = {}): Promise<Response> {
+/** Serve `fsRoot` by URL path; directories serve their index.html. */
+export async function serveDir(req: Request, fsRoot: string): Promise<Response> {
   const root = resolve(fsRoot);
   let rel: string;
   try {
@@ -126,12 +96,6 @@ export async function serveDir(req: Request, fsRoot: string, opts: { stripTs?: b
   if (path !== root && !path.startsWith(root + sep)) return new Response("Not Found", { status: 404 });
   try {
     if ((await stat(path)).isDirectory()) path = join(path, "index.html");
-  } catch {
-    if (opts.stripTs && path.endsWith(".js")) {
-      const ts = path.slice(0, -3) + ".ts";
-      if (await stat(ts).then((i) => i.isFile(), () => false)) return serveStripped(req, ts);
-    }
-    /* otherwise serveFile 404s */
-  }
+  } catch { /* serveFile 404s */ }
   return serveFile(req, path);
 }

@@ -4,7 +4,7 @@
 // cresslet-container (its workers resolve beside it), the SDK source, and the preview server worker and Start
 // compiler service (their types stripped, nothing else). See STATIC below.
 import { readdir, readFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
@@ -12,6 +12,7 @@ import { stripTypes } from "../server/strip.ts";
 
 const ROOT = import.meta.dirname;
 const CONTAINER = "vendor/cresslet-container";
+const CONTAINER_URL = `/${CONTAINER}/cresslet-container.js`;
 
 /** A file served as is at a stable URL (`url`), from `src` (types stripped if it's TypeScript). */
 interface StaticFile {
@@ -37,18 +38,11 @@ const TYPES: Record<string, string> = { js: "text/javascript", map: "application
 
 /**
  * The stable-URL files: served before Vite's own middleware in dev (so it doesn't rewrite them), emitted as is into
- * the client build. The page imports cresslet-container by that URL (external), so it isn't bundled either: one copy,
- * whose `new URL("./node-worker.js", import.meta.url)` finds its worker.
+ * the client build.
  */
 function studioStatic(): Plugin {
   return {
     name: "cresslet-studio-static",
-    resolveId(id, importer) {
-      if (!importer || !id.endsWith("/cresslet-container.js")) return null;
-      const abs = join(importer, "..", id);
-      if (relative(ROOT, abs) !== `${CONTAINER}/cresslet-container.js`) return null;
-      return { id: `/${CONTAINER}/cresslet-container.js`, external: true };
-    },
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         const path = new URL(req.url ?? "/", "http://x").pathname;
@@ -81,5 +75,16 @@ export default defineConfig({
     tanstackStart({ spa: { enabled: true }, vite: { installDevServerMiddleware: true } }),
     react(),
   ],
-  build: { chunkSizeWarningLimit: 4096 }, // the editor and terminal bundles
+  resolve: {
+    // The page imports cresslet-container by its stable URL, so it isn't bundled either: one copy, whose
+    // `new URL("./node-worker.js", import.meta.url)` finds its worker.
+    alias: [{ find: /^(?:\.\.?\/)+vendor\/cresslet-container\/cresslet-container\.js$/, replacement: CONTAINER_URL }],
+  },
+  // Start prerenders the shell through a preview server it fetches by its URL: an address, not `localhost`, which
+  // some hosts (Docker) resolve to ::1 for one and 127.0.0.1 for the other.
+  preview: { host: "127.0.0.1" },
+  build: {
+    chunkSizeWarningLimit: 4096, // the editor and terminal bundles
+    rolldownOptions: { external: [CONTAINER_URL] },
+  },
 });

@@ -2,7 +2,7 @@
 // credits (`/v1/ai`, server/credits.ts: the operator's key, metered) or straight from this browser with the user's own
 // Anthropic API key. Its tools act on the same things the user does: the project's files in the container, the
 // in-browser shell, and `cresslet deploy` (the same control-plane API the CLI uses).
-// No DOM here (app.ts renders): the loop and the tools also run under node for tests/builder_test.ts.
+// No DOM here (src/views/workspace/Builder.tsx renders): the loop and the tools also run under node for tests/builder_test.ts.
 import type { Container } from "./vendor/cresslet-container/cresslet-container.js";
 import type { Anthropic, ContentBlockParam, MessageParam, MessageStream, StopReason, Tool, ToolResultBlockParam } from "./vendor/anthropic.js";
 

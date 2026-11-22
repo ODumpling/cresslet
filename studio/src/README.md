@@ -11,7 +11,8 @@ from `views/`. Code that isn't UI stays in the plain modules beside `src/` (`sto
   have no sidebar), the sidebar link marked current (`nav`, defaults to `view`) and `document.title`
   (`"<title> · Cresslet Studio"`; `""` for the bare name; `null` leaves it alone).
 - **A `<main>` with an `<h1 tabIndex={-1}>`**: on in-app navigation the layout scrolls to the top and focuses the
-  visible view's `h1` (screen readers hear where they are). The first page load keeps the browser's focus.
+  visible view's `h1` (screen readers hear where they are). The first page load keeps the browser's focus. A view
+  that only appears once something loaded calls `viewShown()` (`lib/focus.ts`) when it mounts.
 - **`useLoad(load, deps)`**: loads on mount and when `deps` change; only the latest result is shown, and nothing that
   resolves after the view is gone. `reload()` resolves `true` once the new data is in the page (it commits with
   `flushSync`), so a caller can move focus right after.

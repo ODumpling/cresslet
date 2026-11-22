@@ -54,7 +54,14 @@ export function logOut() {
   auth.email = null;
   set({ token: null, email: null, accountId: null, siteAdmin: false, orgs: [] });
 }
+let expired = false;
+/**
+ * The server refused this page's token (revoked elsewhere) since the page loaded: a view opened meanwhile may still
+ * show (Settings: it checks the account itself, as the old studio did).
+ */
+export const sessionExpired = () => expired;
 setOnExpired(() => {
+  expired = true;
   logOut();
   toast("Your session expired. Log in again.");
 });

@@ -4,3 +4,4 @@ tests
 .git
 *.png
 deploy
+studio/dist

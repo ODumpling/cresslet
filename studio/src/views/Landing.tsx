@@ -1,8 +1,9 @@
 // #/ for logged-out visitors (and, on servers without login, new visitors with no local projects): what Cresslet is,
 // and the templates to start from. No sidebar.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type * as API from "../../api-types.ts";
 import { meta } from "../lib/api.ts";
+import { viewShown } from "../lib/focus.ts";
 import { useView } from "../lib/hooks.ts";
 import { logIn } from "../lib/session.ts";
 import { Icon, SrOnly } from "../ui/icons.tsx";
@@ -14,6 +15,7 @@ const Ext = ({ href, children, className }: { href: string; children: React.Reac
 
 export function Landing() {
   useView("landing", null);
+  useLayoutEffect(viewShown, []);
   useEffect(() => void (document.title = "Cresslet: build it in the browser, ship it in a second"), []);
   const [m, setMeta] = useState<API.Meta>({});
   useEffect(() => void meta().then(setMeta), []);

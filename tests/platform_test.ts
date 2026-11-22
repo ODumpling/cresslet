@@ -1,11 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { type Config, loadConfig } from "../server/config.ts";
-import { stripTypes } from "../server/strip.ts";
 import "./studio-imports.ts"; // studio modules' ./x.js imports → x.ts
 
 const SERVER = `
@@ -265,30 +264,23 @@ test("studio is cross-origin isolated", withServer(async (t) => {
   assert.deepEqual(r.headers.get("cross-origin-embedder-policy"), "require-corp");
   assert.equal(r.headers.get("content-security-policy"), "frame-ancestors 'none'"); // apps can't overlay it
   assert.match(await r.text(), /Cresslet Studio/);
-  const js = await t.call("/app.js");
-  await js.body?.cancel();
-  assert.equal(js.headers.get("cache-control"), "no-cache");
-  // Assets load from a per-release path, so a CDN-cached copy from an older release can't be used.
+  // The build (npm run build): content-hashed assets are immutable; a page from before the build reloads into it.
   const html = await (await t.call("/")).text();
-  const src = html.match(/<script type="module" src="(\/_v\/[0-9a-f]{12}\/app\.js)"/)?.[1];
-  assert.ok(src, "versioned app.js");
-  assert.match(html, /href="\/_v\/[0-9a-f]{12}\/styles\.css"/);
-  const versioned = await t.call(src);
-  assert.equal(versioned.status, 200);
-  assert.equal(await versioned.text(), await (await t.call("/app.js")).text());
-  assert.equal((await t.call(src.replace("app.js", "vendor/editor.js"))).status, 200);
-  // The studio's modules are TypeScript, served as the JavaScript their URLs name: types stripped, lines kept.
-  const mod = await t.call(src.replace("app.js", "store.js"));
-  assert.equal(mod.headers.get("content-type"), "text/javascript; charset=utf-8");
-  assert.equal(await mod.text(), stripTypes(await readFile(join(import.meta.dirname, "../studio/store.ts"), "utf8")));
-  const etag = mod.headers.get("etag");
-  assert.ok(etag);
-  const again = await t.call("/store.js", { headers: { "if-none-match": etag } });
-  assert.equal(again.status, 304);
-  assert.equal((await t.call("/no-such-module.js")).status, 404);
-  const copy = await t.call(src.replace("app.js", "index.html")); // the studio by another path: still unframeable
-  await copy.body?.cancel();
-  assert.equal(copy.headers.get("content-security-policy"), "frame-ancestors 'none'");
+  const src = html.match(/<script type="module"[^>]* src="(\/assets\/[^"]+\.js)"/)?.[1];
+  assert.ok(src, "the shell loads a hashed entry");
+  const js = await t.call(src);
+  await js.body?.cancel();
+  assert.equal(js.status, 200);
+  assert.equal(js.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.equal(js.headers.get("cross-origin-embedder-policy"), "require-corp");
+  const old = await t.call("/_v/0123456789ab/app.js");
+  assert.match(await old.text(), /location\.replace/);
+  for (const path of ["/server-worker.js", "/start-service.js", "/vendor/cresslet-sdk.js", "/vendor/cresslet-container/node-worker.js"]) {
+    const f = await t.call(path);
+    await f.body?.cancel();
+    assert.equal(f.status, 200, path);
+    assert.equal(f.headers.get("cache-control"), "no-cache", path);
+  }
   const llms = await t.call("/llms.txt");
   assert.match(await llms.text(), /POST \/v1\/deploys/);
 }));

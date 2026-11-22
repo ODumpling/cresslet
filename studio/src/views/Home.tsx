@@ -1,12 +1,12 @@
 // #/ with a session (or local projects on a server without login): templates, local projects, invitations and the
 // deployed apps you can see.
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { projects, type StoredProject } from "../../store.ts";
 import type * as API from "../../api-types.ts";
 import { api, errorMessage } from "../lib/api.ts";
-import { refocus, refocusId } from "../lib/focus.ts";
+import { refocus, refocusId, viewShown } from "../lib/focus.ts";
 import { ACCESS_LABEL, bareUrl } from "../lib/format.ts";
 import { useLoad, useView } from "../lib/hooks.ts";
 import { onProjectsChanged, openDeployed, projectsChanged } from "../lib/projects.ts";
@@ -18,6 +18,7 @@ import { copyCommand, TEMPLATE_ICONS, Templates } from "../ui/templates.tsx";
 
 export function Home() {
   useView("home", "");
+  useLayoutEffect(viewShown, []);
   const { token } = useSession();
   const cliCmd = useRef<HTMLElement>(null);
   return (
