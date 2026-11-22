@@ -136,7 +136,7 @@ Apps can sync with a GitHub repository (when the server has it on: `git.github` 
 | DELETE | `/v1/me/git/github` | full-access token: forget the connection (and revoke the token on GitHub) |
 | GET | `/v1/git/github/repos` | `{repos: [{id, owner, name, fullName, private, defaultBranch, url, push}]}`: up to 100 the user can push to, recently updated first |
 | POST | `/v1/git/github/repos` | full-access token: `{name, owner?: org, private?: true}` → `{repo}` (201), created as the user with a first commit. 409 `repo_exists` |
-| POST | `/v1/apps/:name/git/connect` | **owner or admin**, claimed apps: `{owner, repo, subdir?, deleteBranch?: true, initialSync: push\|pull\|none, files?, message?}` → `{repo, sha, files?}` (201). `push`: commit `files` (the workspace) to the default branch; `pull`: its files back; `none`: just link. 403 `git_forbidden` if you can't push to it |
+| POST | `/v1/apps/:name/git/connect` | **owner or admin**, claimed apps: `{owner, repo, subdir?, deleteBranch?: true, initialSync: push\|pull\|deploy\|none, files?, message?}` → `{repo, sha, files?}` (201). `push`: commit `files` (the workspace) to the default branch; `deploy`: commit the source stored with the live deploy instead (an app deployed before it had a repository; 409 `no_source` if it was deployed without one); `pull`: its files back; `none`: just link. 403 `git_forbidden` if you can't push to it |
 | DELETE | `/v1/apps/:name/git` | **owner or admin**: unlink (the repository is left alone) |
 | GET | `/v1/apps/:name/git/status` | `{repo, defaultBranch, mainSha, branches: [{name, sha, protected}]}` |
 | POST | `/v1/apps/:name/git/branches` | `deploy`: `{name, from?: sha}` → `{branch: {name, sha}}` (201), cut from the default branch's head by default. 409 `branch_exists` |

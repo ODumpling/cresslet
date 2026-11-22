@@ -1,5 +1,5 @@
-// An app's Settings tab: custom domains, outbound network (egress) and deleting the app. Owners and admins change the
-// first two; only the owner deletes it.
+// An app's Settings tab: custom domains, outbound network (egress), its repository (source control) and deleting the
+// app. Owners and admins change the first three; only the owner deletes it.
 import { useNavigate } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
@@ -10,7 +10,8 @@ import { canManage } from "../../lib/format.ts";
 import { useAlive, useLoad } from "../../lib/hooks.ts";
 import { toast } from "../../lib/toast.tsx";
 import { DataTable, FormError } from "../../ui/bits.tsx";
-import { Icon } from "../../ui/icons.tsx";
+import { ExtLink, Icon } from "../../ui/icons.tsx";
+import { connectGithub } from "../workspace/GitDialog.tsx";
 import { appPath, TabError, useApp, useTabReload } from "./AppLayout.tsx";
 
 export function AppSettings() {
@@ -22,6 +23,7 @@ export function AppSettings() {
         : !canManage(a.access) ? <p className="muted small">Only the owner and admins can change these settings.</p> : null}
       {a.claimed ? <Domains /> : null}
       {a.config?.server ? <Egress /> : null}
+      {a.claimed && canManage(a.access) ? <Repository key={`repo:${a.id}`} /> : null}
       {/* by id: a different app under this name (after a Refresh) needs its own confirmation */}
       {a.access === "owner" ? <Delete key={a.id} /> : null}
     </>
@@ -227,6 +229,146 @@ function Egress() {
         </div>
       ) : null}
     </form>
+  );
+}
+
+/**
+ * Links the app to a GitHub repository without opening it in a workspace: a new repository, or one the user has,
+ * starting from the source uploaded with its live deploy (or, for one the user has, its own files). The studio's
+ * workspace then loads it (Source control → Load).
+ */
+function Repository() {
+  const { name, d, refresh } = useApp();
+  const alive = useAlive();
+  const me = useLoad(() => api<API.MeGit>("/v1/me/git"), []);
+  const g = me.data, active = !!g?.connected && g.status === "active", linked = d.repo ?? null;
+  const repos = useLoad(() => active && !linked ? api<{ repos: API.GitRepo[] }>("/v1/git/github/repos").then((r) => r.repos) : Promise.resolve(null), [active, !!linked]);
+  const deployed = !!d.app.currentDeployId;
+  const [mode, setMode] = useState<"create" | "link">(deployed ? "create" : "link");
+  const [repoName, setRepoName] = useState(name);
+  const [priv, setPriv] = useState(true);
+  const [picked, setPicked] = useState("");
+  const [initial, setInitial] = useState<"deploy" | "none" | null>(null);
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const pick = picked || repos.data?.[0]?.fullName || "";
+
+  // Back from connecting GitHub (server/git.ts puts the outcome in the hash).
+  useEffect(() => {
+    const h = new URLSearchParams(location.hash.slice(1));
+    const ok = h.get("cresslet_git"), e = h.get("cresslet_git_error");
+    if (!ok && !e) return;
+    history.replaceState(null, "", location.pathname + location.search);
+    toast(e ? `GitHub didn't connect: ${e}` : "GitHub connected", 8000);
+  }, []);
+
+  async function run(label: string, fn: () => Promise<string | void>) {
+    setErr("");
+    setBusy(label);
+    try {
+      const done = await fn();
+      if (done) toast(done);
+      if (alive.current) await refresh();
+    } catch (e) {
+      if (alive.current) setErr(errorMessage(e));
+    }
+    if (alive.current) setBusy("");
+  }
+
+  const link = (e: FormEvent) => {
+    e.preventDefault();
+    const sync = mode === "create" ? "deploy" : initial;
+    if (!sync) return setErr("Choose what the repository starts with.");
+    if (mode === "link" && sync === "deploy" && !confirm(`Push ${name}'s live source to ${pick}? Its default branch then holds exactly these files: others there are deleted.`)) return;
+    void run(mode === "create" ? "Creating the repository…" : "Linking…", async () => {
+      let owner: string, repo: string;
+      if (mode === "create") {
+        const r = await api<{ repo: API.GitRepo }>("/v1/git/github/repos", json("POST", { name: repoName.trim(), private: priv }));
+        [owner, repo] = [r.repo.owner, r.repo.name];
+      } else {
+        [owner, repo] = pick.split("/") as [string, string];
+      }
+      const r = await api<{ repo: API.AppRepo }>(appPath(name, "/git/connect"), json("POST", {
+        owner, repo, initialSync: sync, ...(sync === "deploy" ? { message: `Add ${name} from Cresslet` } : {}),
+      }));
+      return `Linked to ${r.repo.fullName}`;
+    });
+  };
+
+  if (!g?.available) return null;
+  return (
+    <section className="panel form mt" aria-labelledby="repo-title">
+      <h2 id="repo-title">Source control</h2>
+      {linked ? (
+        <>
+          <p id="repo-linked">{"Linked to "}<ExtLink href={linked.url}>{linked.fullName}</ExtLink>{` (${linked.defaultBranch}). To work on it in the studio: Open source, then Source control → Load ${linked.defaultBranch}.`}</p>
+          <div className="row start">
+            <button className="btn danger sm" type="button" id="repo-unlink" disabled={!!busy} onClick={() => {
+              if (!confirm(`Unlink ${name} from ${linked.fullName}? The repository is left as it is.`)) return;
+              void run("Unlinking…", async () => {
+                await api(appPath(name, "/git"), { method: "DELETE" });
+                return "Unlinked";
+              });
+            }}>Unlink repository</button>
+          </div>
+        </>
+      ) : !active ? (
+        <>
+          <p className="muted small">{g.status === "expired"
+            ? `GitHub access for ${g.login} expired or was revoked: connect again to link ${name} to a repository.`
+            : `Keep ${name} in a GitHub repository: connect your GitHub account first. Cresslet commits as you; your token stays on the server.`}</p>
+          <div className="row start">
+            <button className="btn primary" type="button" id="repo-connect-github" disabled={!!busy} onClick={() => void run("Opening GitHub…", () => connectGithub())}>
+              <Icon name="github" />{g.status === "expired" ? "Reconnect GitHub" : "Connect GitHub"}
+            </button>
+          </div>
+        </>
+      ) : (
+        <form className="form" id="repo-form" onSubmit={link}>
+          <p className="muted small">{deployed
+            ? `Starts from the source uploaded with ${name}'s live deploy (never local secrets: .env.local, .dev.vars and the like).`
+            : `Nothing is deployed yet: link a repository you have, or deploy ${name} first.`}</p>
+          <fieldset className="field">
+            <legend>Repository</legend>
+            <label className="check"><input type="radio" name="repo-mode" checked={mode === "create"} disabled={!deployed} onChange={() => setMode("create")} /><span>Create a new repository</span></label>
+            <label className="check"><input type="radio" name="repo-mode" checked={mode === "link"} disabled={!repos.data?.length} onChange={() => setMode("link")} /><span>Link a repository you have</span></label>
+          </fieldset>
+          {mode === "create" ? (
+            <>
+              <div className="field">
+                <label htmlFor="repo-name">Name (under {g.login})</label>
+                <input id="repo-name" className="input" required pattern="[\w.\-]{1,100}" value={repoName} onChange={(e) => setRepoName(e.target.value)} />
+              </div>
+              <label className="check"><input type="checkbox" checked={priv} onChange={(e) => setPriv(e.target.checked)} /><span>Private</span></label>
+            </>
+          ) : (
+            <>
+              <div className="field">
+                <label htmlFor="repo-pick">Repository</label>
+                <select id="repo-pick" className="input" value={pick} onChange={(e) => setPicked(e.target.value)}>
+                  {repos.data?.map((r) => <option key={r.id} value={r.fullName}>{r.fullName}{r.private ? " (private)" : ""}</option>)}
+                </select>
+              </div>
+              <fieldset className="field">
+                <legend>First sync</legend>
+                <label className="check"><input type="radio" name="repo-initial" checked={initial === "deploy"} disabled={!deployed} onChange={() => setInitial("deploy")} /><span>Push the live deploy's source: its default branch then holds exactly these files (others there are deleted)</span></label>
+                <label className="check"><input type="radio" name="repo-initial" checked={initial === "none"} onChange={() => setInitial("none")} /><span>Keep the repository's files: the studio loads them when you open the app there</span></label>
+              </fieldset>
+            </>
+          )}
+          {g.installUrl ? <p className="muted small">Missing a repository? <ExtLink href={g.installUrl}>Choose which repositories Cresslet can reach</ExtLink>.</p> : null}
+          {repos.error ? <p className="error small">{repos.error.message}</p> : null}
+          <div className="row start">
+            <button className="btn primary" type="submit" id="repo-link" disabled={!!busy || (mode === "create" ? !deployed : !initial || !pick)}>
+              <Icon name="github" />{mode === "create" ? "Create and push" : "Link"}
+            </button>
+          </div>
+        </form>
+      )}
+      <FormError text={err} />
+      <p className="sr-only" role="status">{busy}</p>
+      {busy ? <p className="muted small" aria-hidden="true"><span className="spinner" /> {busy}</p> : null}
+    </section>
   );
 }
 
