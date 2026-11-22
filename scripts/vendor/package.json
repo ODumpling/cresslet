@@ -1,7 +1,7 @@
 {
   "private": true,
   "type": "module",
-  "description": "Builds studio/vendor/{editor,terminal,anthropic}.js. Run: npm install && node build.mjs [name…]",
+  "description": "Builds studio/vendor/{editor,terminal,anthropic}.js. Run: npm install && node build.ts [name…]",
   "dependencies": {
     "@anthropic-ai/sdk": "1.6.0",
     "@codemirror/lang-css": "6.3.1",

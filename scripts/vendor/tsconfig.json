@@ -1,0 +1,7 @@
+{
+  // The vendor bundles' build (own package.json): checked after `npm install` here, with `npx tsc -p scripts/vendor`
+  // (not by `npm run check`: CI doesn't install these packages).
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "typeRoots": ["../../node_modules/@types"] },
+  "include": ["*.ts"]
+}
