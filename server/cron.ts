@@ -88,15 +88,15 @@ export interface CronRun {
   manual: boolean;
 }
 
-const upcomingCache = new Map<string, { from: number; until: number; runs: number[] }>();
+const upcomingCache = new Map<string, { from: number; until: number; runs: readonly number[] }>();
 /**
  * `nextRuns(parseCron(expr), now, 3)`, remembered until the first of them passes (one that rarely or never fires
  * takes milliseconds to work out, and the studio asks every few seconds).
  */
-export function upcoming(expr: string, now = Date.now()): number[] {
+export function upcoming(expr: string, now = Date.now()): readonly number[] {
   const hit = upcomingCache.get(expr);
   if (hit && now >= hit.from && now < hit.until) return hit.runs;
-  const runs = nextRuns(parseCron(expr), now, 3);
+  const runs = Object.freeze(nextRuns(parseCron(expr), now, 3));
   if (upcomingCache.size >= 1000) upcomingCache.clear();
   upcomingCache.set(expr, { from: now, until: runs[0] ?? Infinity, runs });
   return runs;

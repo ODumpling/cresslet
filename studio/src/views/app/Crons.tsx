@@ -112,11 +112,11 @@ function Body({ v: loaded, onChange }: { v: API.Crons; onChange: () => Promise<b
                   {x.paused ? <span className="badge">paused</span> : null}
                   {x.state ? <span className="badge">{x.state}</span> : null}
                 </td>
-                <td>
+                <td className="wrap">
                   {x.paused ? <span className="muted">Paused</span>
                     : !a.claimed ? <span className="muted">Not while unclaimed</span>
                     : x.next[0] ? <><time dateTime={x.next[0]} title={new Date(x.next[0]).toLocaleString()}>{ago(x.next[0])}</time>
-                      <span className="sub" title={`Next: ${x.next.map(at).join(", ")}`}>{at(x.next[0])}</span></>
+                      <span className="sub">{at(x.next[0])}{x.next[1] ? `, then ${at(x.next[1])}` : ""}</span></>
                     : <span className="muted">Never (no such date)</span>}
                 </td>
                 <td>

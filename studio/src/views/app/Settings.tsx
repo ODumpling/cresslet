@@ -78,7 +78,6 @@ function Domains() {
     if (!alive.current) return;
     flushSync(() => mark("+", false));
     refocusId("domain-input"); // if the disabled Add button had it
-
   }
 
   async function verify(domain: string) {
