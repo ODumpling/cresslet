@@ -295,7 +295,11 @@ export default {
 // The workspace's Database view runs scripts on the app's own connection: the app sees them, and they're saved.
 test("studio preview worker: Database view scripts read and write the app's database", async () => {
   const w = await startWorker(withSdk(`import { db } from "cresslet";
-export default { async fetch() { return Response.json(await db.query("SELECT v FROM t ORDER BY v")); } };`));
+export default { async fetch(req) {
+  const p = new URL(req.url).pathname;
+  if (p === "/begin" || p === "/rollback") return Response.json(await db.exec(p === "/begin" ? "BEGIN" : "ROLLBACK") ?? null);
+  return Response.json(await db.query("SELECT v FROM t ORDER BY v"));
+} };`));
   try {
     const made = await w.sql("CREATE TABLE t (v, b); INSERT INTO t VALUES (1, x'0102'), (2, NULL) RETURNING v; -- done");
     assert.deepEqual(made, { columns: ["v"], rows: [[1], [2]], truncated: false, changes: 2, statements: 2, transaction: false });
@@ -312,6 +316,9 @@ export default { async fetch() { return Response.json(await db.query("SELECT v F
     assert.equal(endless.rows.length, 1000);
     assert.equal(endless.truncated, true);
     assert.equal(w.saving(), false, "reads don't ask for a save");
+    const quoted = await w.sql(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT i AS "update" FROM n`);
+    assert.equal(quoted.rows.length, 1000, "a read that looks like a write stops too");
+    await w.saved(); // (it looks like one to the save check too: saved)
     // at most 1,000 rows
     const many = await w.sql("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1500) SELECT i FROM n");
     assert.equal(many.rows.length, 1000);
@@ -339,6 +346,11 @@ export default { async fetch() { return Response.json(await db.query("SELECT v F
     assert.match(rolled.error, /no such column: nope.*rolled back/);
     assert.deepEqual((await w.sql("SELECT v FROM t ORDER BY v")).rows, [[1], [5]]);
     assert.equal((await w.sql("INSERT INTO t VALUES (7, NULL)")).transaction, false, "no transaction left open");
+    // the app's own transaction (a request mid-way): scripts wait for it, its ROLLBACK can't undo theirs
+    await w.get("/begin");
+    assert.match((await w.sql("INSERT INTO t VALUES (8, NULL)")).error, /the app has a transaction open/);
+    await w.get("/rollback");
+    assert.equal((await w.sql("INSERT INTO t VALUES (8, NULL)")).changes, 1);
   } finally {
     await w.close();
   }

@@ -392,12 +392,21 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
   // fails stops the script: those before it stay done, as in sqlite3, unless they opened a transaction (rolled back
   // then: one left open would hold every later save).
   let viewTransaction = false; // a view script left a transaction open (until one ends with none)
+  // Whether a statement writes to a table: its program opens one for writing (a recursive CTE's queue is an
+  // ephemeral table, opened otherwise). Not sure (it won't EXPLAIN): no.
+  const writesTables = (sql: string) => {
+    try {
+      return db.exec(`EXPLAIN ${sql}`)[0]?.values.some((op) => op[1] === "OpenWrite" || op[1] === "VUpdate") ?? false;
+    } catch {
+      return false;
+    }
+  };
   const studio = (sql: string): SqlResult => {
     const changesBefore = one("SELECT total_changes()");
-    // The probe (BEGIN; COMMIT) ends per-transaction settings (defer_foreign_keys): only when the script may open a
-    // transaction, or one the view opened may still be.
-    const mayOpen = /\b(?:begin|savepoint)\b/i.test(sql);
-    const openBefore = mayOpen && inTransaction(); // the app's own (exec("BEGIN") across awaits): left alone
+    const openBefore = inTransaction();
+    // The app's own (exec("BEGIN") across awaits, a request mid-way): the script would join it, and its ROLLBACK
+    // would undo the script's writes too.
+    if (openBefore && !viewTransaction) throw new Error("the app has a transaction open (a request is mid-way): try again in a moment");
     let out: Pick<SqlResult, "columns" | "rows" | "truncated"> = { columns: [], rows: [], truncated: false };
     let statements = 0, written = false, changes = 0;
     const cell = (v: SqlValue): SqlCell =>
@@ -410,14 +419,18 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
       for (const stmt of db.iterateStatements(sql)) {
         try {
           statements++;
-          const writes = mayWrite(stmt.getSQL());
-          written ||= writes;
+          written ||= mayWrite(stmt.getSQL());
           const columns = stmt.getColumnNames();
           const rows: SqlCell[][] = [];
           let truncated = false;
           while (stmt.step()) {
             if (rows.length < SQL_MAX_ROWS) rows.push(stmt.get(null, { useBigInt: true }).map(cell));
-            else if (((truncated = true), !writes)) break; // a read stops there (an endless one too)
+            else {
+              truncated = true;
+              // A read stops there (an endless one too); a write … RETURNING runs to its end, where its errors (a
+              // deferred foreign key) are.
+              if (!writesTables(stmt.getSQL())) break;
+            }
           }
           if (columns.length) out = { columns, rows, truncated };
         } finally {
@@ -426,14 +439,14 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
       }
     } catch (e) {
       const msg = (e as { message?: string } | null)?.message ?? String(e);
-      if (mayOpen && !openBefore && inTransaction()) {
+      if (!openBefore && inTransaction()) {
         db.exec("ROLLBACK");
         throw new Error(`${msg} (the transaction the script began was rolled back)`);
       }
       if (viewTransaction && inTransaction()) throw new Error(`${msg} (a transaction is still open: nothing is saved until COMMIT or ROLLBACK)`);
       throw e;
     } finally {
-      if (mayOpen || viewTransaction) viewTransaction = inTransaction();
+      viewTransaction = inTransaction(); // (one open before was the view's: above)
       changes = Number(one("SELECT total_changes()")) - Number(changesBefore); // before a save (it reopens: total 0)
       if (changes || written) persist(true);
     }
