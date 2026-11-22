@@ -151,7 +151,7 @@ function Browse({ sel, tables }: { sel: Table; tables: API.DbTables }) {
       </div>
       <div className="row start pager">
         <span className="muted small" role="status">
-          {p ? (sel.count ? `Rows ${(p.offset + 1).toLocaleString()}–${last.toLocaleString()} of ${sel.count.toLocaleString()}` : "No rows") : ""}
+          {p && !page.error ? (sel.count ? `Rows ${(p.offset + 1).toLocaleString()}–${last.toLocaleString()} of ${sel.count.toLocaleString()}` : "No rows") : ""}
         </span>
         {p ? (
           <>

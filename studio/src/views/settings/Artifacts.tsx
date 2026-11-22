@@ -75,8 +75,8 @@ export function SettingsArtifacts() {
         </div>
         <FormError id="page-defaults-error" text={error} />
         <div className="row start">
-          <button className="btn primary" id="page-defaults-save" type="submit" disabled={busy}>Save defaults</button>
-          <button className="btn" id="page-defaults-reset" type="button" disabled={busy} onClick={() => void save(null, "Using the server's artifact defaults")}>Use server defaults</button>
+          <button className="btn primary" id="page-defaults-save" type="submit" disabled={busy || !settings}>Save defaults</button>
+          <button className="btn" id="page-defaults-reset" type="button" disabled={busy || !settings} onClick={() => void save(null, "Using the server's artifact defaults")}>Use server defaults</button>
         </div>
       </form>
     </section>

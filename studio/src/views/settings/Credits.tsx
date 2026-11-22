@@ -40,6 +40,16 @@ export function SettingsCredits() {
     setWant({ offset, upTo });
   };
 
+  // Retry: once the page is in, focus goes back to the pager (Retry is gone), not the page heading.
+  const retry = () => {
+    moved.current = null;
+    void c.reload().then((ok) => {
+      if (!ok) return;
+      const b = ["credits-next", "credits-prev"].map((id) => document.getElementById(id) as HTMLButtonElement | null).find((x) => x && !x.disabled);
+      refocus(b);
+    });
+  };
+
   const r = shown?.r;
   const num = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
   const tokens = new Intl.NumberFormat();
@@ -86,7 +96,7 @@ export function SettingsCredits() {
       {c.error ? (
         <div className="row start pager" role="alert">
           <p className="error small">Could not load AI credits: {c.error.message}</p>
-          <button className="btn sm" type="button" id="credits-retry" onClick={() => void c.reload().then((ok) => ok && refocus())}><Icon name="refresh" />Retry</button>
+          <button className="btn sm" type="button" id="credits-retry" onClick={retry}><Icon name="refresh" />Retry</button>
         </div>
       ) : null}
       {r?.enabled && (r.historyTotal > PAGE || at > 0) ? (
