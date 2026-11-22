@@ -1180,6 +1180,12 @@ export class Store implements RateHits {
     );
     return { ...c, state: "open", landed_sha: null, pr_number: null, created_at: now, updated_at: now };
   }
+  /** The open or set-aside change on `branch` (one read: its state with it). */
+  stackChangeByBranch(appId: string, branch: string): Promise<StackChange | undefined> {
+    return this.db.get<StackChange>(
+      "SELECT * FROM stack_changes WHERE app_id = ? AND branch = ? AND state IN ('open', 'set_aside') ORDER BY created_at DESC LIMIT 1", appId, branch,
+    );
+  }
   /** A change's pull request. */
   async setStackChangePull(id: string, number: number | null) {
     await this.db.run("UPDATE stack_changes SET pr_number = ?, updated_at = ? WHERE id = ?", number, Date.now(), id);

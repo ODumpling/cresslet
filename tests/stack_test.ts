@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Pull, Repo, SourceControlProvider } from "../server/git.ts";
-import { assertNotBelowTop, commitChange, type Ctx, followed, goBack, landed, readStacks, restore, slug, stackPulls, submitStack } from "../server/stack.ts";
+import { assertNotBelowTop, changePull, commitChange, type Ctx, followed, goBack, landed, readStacks, restore, slug, stackPulls, submitStack } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
 /** Branches and commits in memory: a commit is its files and its parent. */
@@ -442,8 +442,17 @@ test("stack: a pull request merged by hand is said, not opened again; a reused o
   const again = await submitStack(t.ctx, c1.stack.id);
   assert.deepEqual(again.pulls.map((x) => [x.number, !!x.merged, x.error]), [[2, true, undefined], [1, false, undefined]]);
   assert.equal(t.provider.pulls.length, 2);
-  // The change above one merged already is based where that one was (the default branch).
-  assert.equal(t.provider.pulls[0].base, "main");
+  // The change above one merged already: its base is left as it was (landing part of a stack is a later step).
+  assert.equal(t.provider.pulls[0].base, c1.branch);
+  // Source control's view of a change: a merged one is shown (not offered again), a closed one isn't, a set-aside
+  // one has none, another branch isn't a change.
+  assert.equal((await changePull(t.ctx, c1.branch, false))?.pull?.number, 2);
+  t.provider.pulls[0].state = "closed";
+  assert.equal((await changePull(t.ctx, c2.branch, false))?.pull, null);
+  await goBack(t.ctx, c1.change.id);
+  assert.deepEqual(await changePull(t.ctx, c2.branch, false), { pull: null });
+  await assert.rejects(changePull(t.ctx, c2.branch, true), (e) => (e as HttpError).code === "set_aside");
+  assert.equal(await changePull(t.ctx, "feat/other", false), null);
 });
 
 test("stack: going back closes the set-aside changes' pull requests; restore reopens them", async () => {

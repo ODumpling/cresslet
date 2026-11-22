@@ -248,7 +248,7 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
                     <button className="btn sm" type="button" id="git-open-pr" disabled={!!busy} onClick={() => void run("Opening a pull request…", async () => {
                       const pr = await git!.openPullRequest();
                       onPull();
-                      return `Pull request #${pr.number} opened${pr.stackErrors?.length ? `; not opened for ${pr.stackErrors.map((x) => `change ${x.position} (${x.error})`).join(", ")}` : ""}`;
+                      return `Pull request #${pr.number} opened${pr.stackErrors?.length ? `; problems in its stack: ${pr.stackErrors.map((x) => `change ${x.position}: ${x.error}`).join("; ")}` : ""}`;
                     })}>Open a pull request</button>
                     <span className="muted small">For a {s.defaultBranch} that needs reviews or checks: merge it on GitHub, then pull {s.defaultBranch} and deploy.</span>
                   </div>

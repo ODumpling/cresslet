@@ -333,7 +333,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       const pr = await g.openPullRequest();
       setGitTick((n) => n + 1);
       toast(<span>{`Pull request #${pr.number}: `}<ExtLink href={pr.url}>{pr.title}</ExtLink>
-        {pr.stackErrors?.length ? ` (the stack's other pull requests: not for ${pr.stackErrors.map((x) => `change ${x.position}: ${x.error}`).join("; ")})` : null}</span>, 15000);
+        {pr.stackErrors?.length ? ` (problems in its stack: ${pr.stackErrors.map((x) => `change ${x.position}: ${x.error}`).join("; ")})` : null}</span>, 15000);
     } catch (e) {
       toast(`Couldn't open a pull request: ${errorMessage(e)}`, 10000);
     }

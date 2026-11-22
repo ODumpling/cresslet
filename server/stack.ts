@@ -366,11 +366,8 @@ export function submitStack(ctx: Ctx, stackId: string): Promise<{ pulls: Submitt
     if (!s) throw new HttpError(404, "no such stack open", "not_found");
     const { provider, r } = ctx;
     const out: Submitted[] = [], pulls = new Map<string, Pull>();
-    // The branch below: a change merged already (by hand) passes its own base up.
-    let base = ctx.repo.default_branch;
-    for (const c of s) {
-      const below = base;
-      base = c.branch;
+    for (const [i, c] of s.entries()) {
+      const below = i ? s[i - 1].branch : ctx.repo.default_branch;
       try {
         let p: Pull | null = c.pr_number
           ? await provider.getPull(r, c.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e)))
@@ -378,14 +375,15 @@ export function submitStack(ctx: Ctx, stackId: string): Promise<{ pulls: Submitt
         // Merged on GitHub already (by hand): nothing more to open for it.
         if (p && p.head === c.branch && p.merged) {
           out.push({ change: c.id, position: c.position, number: p.number, url: p.url, merged: true });
-          base = below;
           continue;
         }
         if (p && p.head !== c.branch) p = null;
         p ??= await provider.findPull(r, c.branch);
         let created = false;
         if (p && p.state === "closed") p = await provider.updatePull(r, p.number, { state: "open" });
-        if (p && p.base !== below) p = await provider.updatePull(r, p.number, { base: below });
+        // Above one merged by hand, its base is left as it is (landing part of a stack is #122's).
+        const belowMerged = i > 0 && out.some((o) => o.change === s[i - 1].id && o.merged);
+        if (p && p.base !== below && !belowMerged) p = await provider.updatePull(r, p.number, { base: below });
         if (!p) {
           p = await provider.createPull(r, { head: c.branch, base: below, title: c.title, body: pullBody(c, s, new Map(), ctx.repo.default_branch) });
           created = true;
@@ -418,25 +416,25 @@ export function submitStack(ctx: Ctx, stackId: string): Promise<{ pulls: Submitt
  * default branch's: the stack's, never a second one into the default branch). `open`: submits its stack first.
  */
 export async function changePull(ctx: Ctx, branch: string, open: boolean): Promise<{ pull: PullInfo | null; created?: boolean; errors?: Submitted[] } | null> {
-  const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).find((x) => x.branch === branch);
-  if (aside) {
-    if (open) throw setAside(aside);
+  // One read: the change and its state (a go back between two reads can't slip it past).
+  const c = await ctx.store.stackChangeByBranch(ctx.appId, branch);
+  if (!c) return null;
+  if (c.state === "set_aside") {
+    if (open) throw setAside(c);
     return { pull: null };
   }
-  const c = (await ctx.store.openStackChanges(ctx.appId)).find((x) => x.branch === branch);
-  if (!c) return null;
   if (open) {
     const sub = (await submitStack(ctx, c.stack_id)).pulls;
     const x = sub.find((p) => p.change === c.id);
     if (!x?.number) throw new HttpError(422, x?.error ?? "GitHub wouldn't open its pull request", "pull_invalid");
-    // The rest of the chain: what GitHub refused there is said with it.
-    const errors = sub.filter((p) => p.error && p.change !== c.id);
+    // Every problem along the chain (this one's description too) is said with it.
+    const errors = sub.filter((p) => p.error);
     return { pull: await ctx.provider.pullStatus(ctx.r, x.number), created: !!x.created, ...(errors.length ? { errors } : {}) };
   }
   if (!c.pr_number) return { pull: null };
-  // Closed (or gone) on GitHub: none open, so Source control offers to open it again.
+  // Closed unmerged (or gone) on GitHub: none, so Source control offers to open it again. Merged: shown.
   const p = await ctx.provider.getPull(ctx.r, c.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e)));
-  return { pull: p && p.state === "open" && !p.merged ? await ctx.provider.pullStatus(ctx.r, c.pr_number) : null };
+  return { pull: p && (p.state === "open" || p.merged) ? await ctx.provider.pullStatus(ctx.r, c.pr_number) : null };
 }
 
 /** The review and checks of a stack's pull requests, by change id. */
