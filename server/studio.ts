@@ -117,7 +117,8 @@ async function devStudio(): Promise<Studio> {
     // HMR on Vite's own WebSocket port (CRESSLET_HMR_PORT, default 24678), not this server's; a cache per port, so
     // two dev servers (say, two checkouts' e2e runs) don't share one.
     // Files Vite may serve (/@fs/…): the studio's own and its dependencies, never the data dir or the server.
-    server: { middlewareMode: true, hmr: { port: hmrPort }, fs: { strict: true, allow: [STUDIO_SRC, join(STUDIO_SRC, "../node_modules")] } },
+    // Any Host: the server only lets the configured studio host get this far (others redirect to it).
+    server: { middlewareMode: true, allowedHosts: true, hmr: { port: hmrPort }, fs: { strict: true, allow: [STUDIO_SRC, join(STUDIO_SRC, "../node_modules")] } },
     cacheDir: join(STUDIO_SRC, `../node_modules/.vite/studio-${hmrPort}`),
     appType: "custom",
   });

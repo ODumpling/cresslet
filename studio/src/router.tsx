@@ -17,6 +17,21 @@ export function getRouter() {
       u.searchParams.delete("_r");
       history.replaceState(history.state, "", u.pathname + u.search + u.hash);
     }
+    // A chunk this page loads later (a route, the AI builder's SDK) that a newer release replaced: the server answers
+    // with a reload module, but an import that needs its exports fails before that runs. Load the current release
+    // (once a minute at most, so a chunk that's really broken doesn't reload forever).
+    addEventListener("vite:preloadError", (e) => {
+      try {
+        if (Date.now() - Number(sessionStorage.getItem("cresslet.reloadedAt") ?? 0) < 60_000) return;
+        sessionStorage.setItem("cresslet.reloadedAt", String(Date.now()));
+      } catch {
+        return; // storage blocked: no guard against a loop, so no reload
+      }
+      e.preventDefault();
+      const r = new URL(location.href);
+      r.searchParams.set("_r", String(Date.now()));
+      location.replace(r.pathname + r.search + r.hash);
+    });
   }
   return createRouter({
     routeTree,

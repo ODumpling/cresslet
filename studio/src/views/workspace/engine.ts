@@ -71,6 +71,8 @@ export class Engine {
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private treeTimer: ReturnType<typeof setTimeout> | undefined;
   private saving: Promise<void> | null = null;
+  /** A file changed (a command, the AI builder) and the save that follows hasn't started yet. */
+  private dirty = false;
   private input: WritableStreamDefaultWriter<string> | null = null;
   /** An untrusted project's shell takes no input until "Run it" (a command could run its code). */
   locked: boolean;
@@ -227,6 +229,7 @@ export class Engine {
     // keep the tree in sync with terminal changes
     const watcher = c.fs.watch(wd, { recursive: true }, (_e, filename) => {
       if (filename && ignored(filename.replace(`${wd}/`, ""))) return;
+      this.dirty = true; // saved below, or when the view goes before that
       clearTimeout(this.treeTimer);
       this.treeTimer = setTimeout(() => {
         void this.renderTree();
@@ -279,6 +282,7 @@ export class Engine {
     if (!c) return Promise.resolve();
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
+    this.dirty = false;
     const run = (async () => {
       const tree = await c.export(c.workdir, { excludes: ["node_modules/**", "dist/**", ".cresslet/**"] });
       this.project.files = Object.fromEntries(Object.entries(fromTree(tree)).filter(([p]) => !ignored(p)));
@@ -359,7 +363,7 @@ export class Engine {
   /** Stops everything: its edits saved first (an in-app navigation away), then the container, terminal and editor. */
   dispose() {
     if (this.disposed) return;
-    const pending = this.saveTimer !== undefined ? this.saveNow() : this.saving;
+    const pending = this.saveTimer !== undefined || this.dirty ? this.saveNow() : this.saving;
     this.disposed = true;
     clearTimeout(this.treeTimer);
     for (const f of this.cleanups.splice(0)) {

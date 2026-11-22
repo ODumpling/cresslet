@@ -53,8 +53,12 @@ if (typeof window !== "undefined") {
   addEventListener("popstate", sync);
 }
 
-/** Stores a login (`token`) or what /v1/me said about the current one. */
-export function setAccount(r: { token?: string; account: API.Account }) {
+/**
+ * Stores a login (`token`) or what /v1/me said about the current one; `sentWith`: the token that /v1/me call sent (an
+ * answer about an account this tab has since left is dropped).
+ */
+export function setAccount(r: { token?: string; account: API.Account }, sentWith?: string | null) {
+  if (sentWith !== undefined && sentWith !== auth.token) return;
   if (r.token) auth.token = r.token;
   auth.email = r.account.github ?? r.account.email;
   const changed = state.token !== auth.token;
@@ -81,8 +85,9 @@ setOnExpired(() => {
 
 /** Role can change server-side: refresh it (shows the admin links to site admins). */
 export function refreshAccount() {
-  if (!auth.token) return Promise.resolve(null);
-  return api<{ account: API.Account }>("/v1/me").then((r) => (setAccount(r), r.account), () => null);
+  const sent = auth.token;
+  if (!sent) return Promise.resolve(null);
+  return api<{ account: API.Account }>("/v1/me").then((r) => (setAccount(r, sent), r.account), () => null);
 }
 
 export async function loadMyOrgs() {

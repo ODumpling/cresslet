@@ -16,11 +16,13 @@ type Init = Omit<RequestInit, "headers"> & { headers?: Record<string, string> };
 /** A JSON API call; `T`: the response's shape (api-types.ts). Throws an ApiError when it isn't ok. */
 export async function api<T = unknown>(path: string, init: Init = {}): Promise<T> {
   const headers: Record<string, string> = { "content-type": "application/json", ...init.headers };
-  if (auth.token) headers.authorization = `Bearer ${auth.token}`;
+  const sent = auth.token;
+  if (sent) headers.authorization = `Bearer ${sent}`;
   const res = await fetch(path, { ...init, headers });
-  if (res.status === 401 && headers.authorization && auth.token) {
-    // Token revoked (e.g. regenerated elsewhere): drop it and retry logged out.
-    onExpired();
+  if (res.status === 401 && sent) {
+    // Token revoked (e.g. regenerated elsewhere): drop it and retry logged out. If the session changed meanwhile
+    // (another account logged in), the refusal was for the old token: just retry with the current one.
+    if (auth.token === sent) onExpired();
     return api<T>(path, init);
   }
   const body = await res.json().catch(() => ({}));

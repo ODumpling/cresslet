@@ -96,6 +96,12 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
     setCredits({ text: `${fmt.format(left)} ${unit}`, title: `${fmt.format(left)} AI ${unit} left`, low: left <= 0 });
   }
   useEffect(() => void refreshCredits(), [source, token]);
+  // Leaving the project: the conversation stops with it (no more requests, tools or credits spent), and a deploy
+  // waiting for approval is declined.
+  useEffect(() => () => {
+    r.agent?.stop();
+    for (const decline of r.approvals) decline();
+  }, [r]);
 
   // Stick to the bottom when new output arrives and the log was already there.
   const nearBottom = () => {

@@ -9,7 +9,7 @@ import { api, errorMessage, json, meta } from "../lib/api.ts";
 import { refocus } from "../lib/focus.ts";
 import { keepOptions, keepParse, keepText, keepValue, VIS_LABEL, when } from "../lib/format.ts";
 import { useAlive, useLoad, useView } from "../lib/hooks.ts";
-import { logOut, sessionExpired, setAccount, useSession } from "../lib/session.ts";
+import { logOut, session, sessionExpired, setAccount, useSession } from "../lib/session.ts";
 import { toast } from "../lib/toast.tsx";
 import { FormError } from "../ui/bits.tsx";
 import { Icon } from "../ui/icons.tsx";
@@ -31,7 +31,10 @@ export function Settings() {
 /** One account's settings (keyed on the token: another account's never stay shown). */
 function SettingsPage() {
   const navigate = useNavigate();
-  const account = useLoad(() => api<{ account: API.Account }>("/v1/me").then((r) => (setAccount(r), r.account)), []);
+  const account = useLoad(() => {
+    const sent = session().token;
+    return api<{ account: API.Account }>("/v1/me").then((r) => (setAccount(r, sent), r.account));
+  }, []);
   useEffect(() => {
     if (!account.error) return;
     if (!auth.token) void navigate({ to: "/" }); // the session expired
