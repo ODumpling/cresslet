@@ -32,7 +32,7 @@ export function StackPanel({ stack, state, busy, onContinue, onBack, onRestore }
             {aside ? <span className="sr-only"> (set aside)</span> : null}
             {here ? <span className="pill" data-s="here">workspace</span> : null}
             {c.github !== "ok" ? <span className="pill" data-s="warn">{c.github === "gone" ? "gone on GitHub" : "moved on GitHub"}</span> : null}
-            {!aside && c !== top ? (
+            {!aside && on && c !== top ? (
               <button className="btn sm stack-back" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button>
             ) : null}
           </span>
@@ -53,7 +53,7 @@ export function StackPanel({ stack, state, busy, onContinue, onBack, onRestore }
       ) : null}
       {aside.length ? (
         <div className="stack-note small">
-          <span className="muted">{`${aside.length} ${aside.length === 1 ? "change" : "changes"} set aside (kept on GitHub). The next request starts a new change on ${top.position} and drops ${aside.length === 1 ? "it" : "them"}.`}</span>
+          <span className="muted">{`${aside.length} ${aside.length === 1 ? "change" : "changes"} set aside (kept on GitHub). Anything committed on ${top.position} drops ${aside.length === 1 ? "it" : "them"}.`}</span>
           <button className="btn sm" type="button" id="stack-restore" disabled={busy} onClick={onRestore}>Restore</button>
         </div>
       ) : null}

@@ -147,11 +147,14 @@ export function commitChange(ctx: Ctx, input: {
     let c: StackChange;
     try {
       // Built on a change that was gone back to: the ones set aside above it can't come back (their branches stay).
-      if (below) await store.detachSetAside(appId, below.stack_id, id("stk"));
-      c = await store.addStackChange({
+      // Moved out first (their positions are the new change's), in the same transaction: a failed insert keeps them.
+      c = await store.db.tx(async () => {
+        if (below) await store.detachSetAside(appId, below.stack_id, id("stk"));
+        return store.addStackChange({
         id: id("chg"), app_id: appId, stack_id: below?.stack_id ?? id("stk"), stack_name: name, position, branch,
         sha: out.sha, base_sha: input.baseSha, title: input.title.slice(0, 200), prompt: input.prompt.slice(0, 5000),
         author: input.author.name, created_by: input.by,
+        });
       });
     } catch (e) {
       // Another server put a change there first: this one isn't recorded, so its branch goes.
@@ -191,20 +194,36 @@ export function goBack(ctx: Ctx, changeId: string): Promise<{ change: ChangeView
     const open = await ctx.store.openStackChanges(ctx.appId);
     const c = open.find((x) => x.id === changeId);
     if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
-    const above = open.filter((x) => x.stack_id === c.stack_id && x.position > c.position).sort((x, y) => x.position - y.position);
     await ctx.store.setAsideAbove(ctx.appId, c.stack_id, c.position);
-    return { change: { ...view(c), github: "ok" }, stack: { id: c.stack_id, name: c.stack_name }, setAside: above.map((x) => ({ ...view(x), github: "ok" as const })) };
+    // All the stack's changes set aside, from this time and earlier ones.
+    const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).filter((x) => x.stack_id === c.stack_id);
+    return { change: { ...view(c), github: "ok" }, stack: { id: c.stack_id, name: c.stack_name }, setAside: aside.map((x) => ({ ...view(x), github: "ok" as const })) };
   });
 }
 
 /** Puts a stack's changes set aside back on it (while nothing was built where they were). Resolves to its top change. */
 export function restore(ctx: Ctx, stackId: string): Promise<{ change: ChangeView; stack: { id: string; name: string }; restored: number }> {
   return locked(ctx.appId, async () => {
+    // A stack that landed (or was forgotten) meanwhile: its changes set aside have no stack to go back on.
+    if (!(await ctx.store.openStackChanges(ctx.appId)).some((c) => c.stack_id === stackId)) {
+      throw new HttpError(409, "nothing to restore: that stack isn't open any more", "nothing_set_aside");
+    }
     const n = await ctx.store.restoreSetAside(ctx.appId, stackId);
     if (!n) throw new HttpError(409, "nothing to restore: a change was built where they were, or they're back already", "nothing_set_aside");
     const top = byStack((await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId))[0]!.at(-1)!;
     return { change: { ...view(top), github: "ok" }, stack: { id: top.stack_id, name: top.stack_name }, restored: n };
   });
+}
+
+/**
+ * A commit Cresslet made onto `branch` from `from` to `to` (a hand edit pushed, a merge resolved): if that's an open
+ * stack's top change at `from`, the change follows it. That builds on it: changes set aside above it (it was gone back
+ * to) can't come back, since they don't hold the new commit.
+ */
+export async function followed(ctx: Ctx, branch: string, from: string, to: string) {
+  if (!await ctx.store.followStackTop(ctx.appId, branch, from, to)) return;
+  const c = (await ctx.store.openStackChanges(ctx.appId)).find((x) => x.branch === branch && x.sha === to);
+  if (c) await ctx.store.detachSetAside(ctx.appId, c.stack_id, id("stk"));
 }
 
 /**

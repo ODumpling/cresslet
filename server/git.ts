@@ -10,7 +10,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
-import { assertNotBelowTop, commitChange, goBack, landed, locked, readStacks, restore } from "./stack.ts";
+import { assertNotBelowTop, commitChange, followed, goBack, landed, locked, readStacks, restore } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -1032,7 +1032,7 @@ export function gitRoutes(
       const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
       if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
       // Onto a stack's top change from where it's recorded (a hand edit pushed, a merge resolved): the change follows.
-      else if (out.changed) await store.followStackTop(a.id, branch, baseSha, out.sha).catch((e) => console.error(e));
+      else if (out.changed) await followed({ provider: client, store, appId: a.id, repo, r }, branch, baseSha, out.sha).catch((e) => console.error(e));
       return out;
     });
     return c.json({ branch, ...out });

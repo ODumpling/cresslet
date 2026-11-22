@@ -897,10 +897,18 @@ test("stack: go back to a change (later ones set aside, branches kept), restore 
   s = await read();
   assert.deepEqual([s.changes.length, s.setAside.length], [2, 0]);
 
-  // Back again and build on change 1: a new change 2 from it; the old one can't be restored.
+  // Back, then a hand edit pushed onto change 1: that's building on it too; nothing to restore.
   await t.send("POST", "/v1/apps/shop/git/stack/back", tok, { change: c1.change.id });
-  const n2 = await add(c1.branch, c1.sha, "Other two", "2b");
-  assert.deepEqual(t.gh.commit(n2.sha).parents, [c1.sha]);
+  const pushed = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c1.branch, baseSha: c1.sha, files: files("1b") });
+  assert.equal(pushed.status, 200, JSON.stringify(pushed.body));
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/stack/restore", tok, { stack: s.id })).body.error, "nothing_set_aside");
+  s = await read();
+  assert.deepEqual([s.changes.map((c: { sha: string }) => c.sha), s.setAside], [[pushed.body.sha], []]);
+  const c1b = { ...c1, sha: pushed.body.sha };
+
+  // Back again and build on change 1: a new change 2 from it; the old one can't be restored.
+  const n2 = await add(c1b.branch, c1b.sha, "Other two", "2b");
+  assert.deepEqual(t.gh.commit(n2.sha).parents, [c1b.sha]);
   assert.equal((await t.send("POST", "/v1/apps/shop/git/stack/restore", tok, { stack: s.id })).body.error, "nothing_set_aside");
   s = await read();
   assert.deepEqual([s.changes.map((c: { title: string }) => c.title), s.setAside], [["One", "Other two"], []]);

@@ -240,6 +240,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
     r.prompt = text;
     r.cmdRev = commandRev();
     try {
+      await r.git?.idle(); // a source control step under way (going back, say): on the workspace it leaves
       await r.agent.send(text);
       await commitTurn(text);
     } finally {

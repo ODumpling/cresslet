@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Repo, SourceControlProvider } from "../server/git.ts";
-import { assertNotBelowTop, commitChange, type Ctx, goBack, landed, readStacks, restore, slug } from "../server/stack.ts";
+import { assertNotBelowTop, commitChange, type Ctx, followed, goBack, landed, readStacks, restore, slug } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
 /** Branches and commits in memory: a commit is its files and its parent. */
@@ -276,6 +276,35 @@ test("stack: going back sets the changes above aside; restore puts them back; bu
   await assert.rejects(restore(t.ctx, s.id), (e) => code(e) === "nothing_set_aside");
   assert.equal(t.provider.refs.get(c2.branch), c2.sha); // still on GitHub
   await assert.rejects(goBack(t.ctx, c3.change.id), (e) => code(e) === "not_found"); // not open
+});
+
+test("stack: after going back, a commit onto the change (a pushed edit) builds on it too; a landed stack restores nothing", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  const code = (e: unknown) => (e as HttpError).code;
+  // Going back twice: every change set aside is listed (the AI builder is told of them all).
+  await goBack(t.ctx, c2.change.id);
+  assert.deepEqual((await goBack(t.ctx, c1.change.id)).setAside.map((c) => c.title), ["Two", "Three"]);
+  // A hand edit pushed onto change 1: it follows, and the ones set aside can't come back (they don't hold it).
+  const pushed = t.provider.push(c1.branch, { "x.txt": "hand" });
+  await followed(t.ctx, c1.branch, c1.sha, pushed);
+  let [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes.map((c) => c.sha), s.setAside], [[pushed], []]);
+  await assert.rejects(restore(t.ctx, s.id), (e) => code(e) === "nothing_set_aside");
+  void c3;
+
+  // Gone back to 1 of 2, then 1 landed: nothing to restore onto.
+  const d1 = ok(await t.change("main", main, "Four", "4"));
+  const d2 = ok(await t.change(d1.branch, d1.sha, "Five", "5"));
+  await goBack(t.ctx, d1.change.id);
+  await landed(t.ctx, { branch: d1.branch, headSha: d1.sha, mergedSha: d1.sha, deleteBelow: true });
+  const stackId = d2.stack.id;
+  await assert.rejects(restore(t.ctx, stackId), (e) => code(e) === "nothing_set_aside" && /isn't open/.test((e as Error).message));
+  [s] = await readStacks(t.ctx);
+  assert.notEqual(s?.id, stackId);
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {
