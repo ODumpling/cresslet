@@ -266,11 +266,14 @@ export function createCresslet(c, opts) {
     const serverCode = start
       ? () => {
         const t = performance.now();
-        const run = building.catch(() => {}).then(() => builder.build({ preview: true }));
+        // the serving worker's pages load its build's bundles: they stay until another worker serves
+        const run = building.catch(() => {}).then(() => builder.build({ preview: true, keep: activeBundles }));
         building = run;
-        return run.then((r) => (out(`\x1b[2mbuilt in ${Math.round(performance.now() - t)}ms\x1b[0m`), r.server));
+        return run.then((r) => (out(`\x1b[2mbuilt in ${Math.round(performance.now() - t)}ms\x1b[0m`), (lastBundles = r.bundles), r.server));
       }
       : bundleServer;
+    let activeBundles = new Set(); // Start: the bundles of the build the serving worker runs
+    let lastBundles = new Set();
     const hasServer = start ? async () => true : serverEntry;
     // Start apps have no HMR: their pages reload when a rebuild is ready (keeping the page they're on)
     const reloadChannel = `cresslet:${c.instanceId}:${port}`;
@@ -373,6 +376,7 @@ export function createCresslet(c, opts) {
         return;
       }
       if (!code) return;
+      const bundles = lastBundles;
       let db = null;
       try {
         db = await c.fs.readFile(dbPath);
@@ -383,6 +387,7 @@ export function createCresslet(c, opts) {
       let w;
       try {
         w = await c.projectWorker(new URL("./server-worker.js", import.meta.url), { name: "cresslet-server" });
+        if (stopped) return w.terminate(); // dev ended meanwhile
       } catch (e) {
         workerError = `server failed to start:\n${e.message}`;
         out(`\x1b[31m${workerError}\x1b[0m`);
@@ -433,6 +438,7 @@ export function createCresslet(c, opts) {
         readySeq = seq;
         retire(worker, 1012, "server restarting", "server restarted");
         worker = w;
+        activeBundles = bundles;
         workerError = null;
         out("\x1b[32m✔\x1b[0m server ready");
         reloads?.postMessage({ type: "cresslet-start-reload" }); // a new client build too
@@ -500,7 +506,6 @@ export function createCresslet(c, opts) {
       const unsafe = req.method !== "GET" && req.method !== "HEAD";
       const navigation = unsafe && /^\s*text\/html/i.test(req.headers.get("accept") ?? "");
       if (unsafe && !navigation && !req.headers.has("origin")) headers.push(["origin", appUrl.origin]);
-      if (navigation) out(`\x1b[33m${req.method} ${path}: a form submission; in this preview it has no Origin and only SameSite=None cookies (CSRF checks refuse it). Send it with fetch, as server functions do.\x1b[0m`);
       const cookies = [...jar].filter(([, c]) => !navigation || c.none);
       if (cookies.length && !req.headers.has("cookie")) headers.push(["cookie", cookies.map(([k, c]) => `${k}=${c.value}`).join("; ")]);
       const res = await new Promise((resolve) => {
@@ -511,6 +516,7 @@ export function createCresslet(c, opts) {
         );
       });
       out(`\x1b[2m${req.method} ${path} ${res.status}\x1b[0m`);
+      if (navigation && res.status >= 400) out(`\x1b[33m${req.method} ${path}: a form submission; in this preview it has no Origin and only SameSite=None cookies (CSRF checks refuse it). Send it with fetch, as server functions do.\x1b[0m`);
       res.headers = keepCookies(res.headers);
       if (res.status === 101) {
         // The app accepted a WebSocket (WebSocketPair): connect the preview's socket to the worker that holds its end.

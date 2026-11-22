@@ -270,7 +270,6 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
   let starting = null;
   let booting = null; // the service's process until it's ready
   let closed = false;
-  let lastBundles = new Set(); // the last preview build's bundles and assets (its pages may still be served)
   async function rpc(msg) {
     if (!svc) {
       starting ??= startService().finally(() => (starting = null));
@@ -300,9 +299,10 @@ export function createStartBuilder(c, { sdkPlugin, serviceUrl = new URL("./start
   /**
    * One build. `preview`: for the studio's server worker (node:async_hooks shimmed, see ASYNC_HOOKS_SHIM), else for
    * deploying (node:* left to the platform). Static files go to dist/client, or for the preview to their own
-   * directory (a deploy's build doesn't touch what the preview serves). → { files: absolute paths, outDir, server, entry }
+   * directory (a deploy's build doesn't touch what the preview serves). `keep`: files of an earlier build to leave
+   * (the bundles a preview's pages still load). → { files: absolute paths, outDir, server, entry, bundles }
    */
-  async function build({ preview = false } = {}) {
+  async function build({ preview = false, keep: alsoKeep = new Set() } = {}) {
     const outDir = preview ? ".cresslet/start/preview" : "dist/client";
     const { clientRouteTree } = await rpc({ op: "routes" }); // also writes src/routeTree.gen.ts if routes changed
     const routeTreeFile = p("src/routeTree.gen.ts");
@@ -515,7 +515,7 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
       await c.fs.writeFile(f, bytes);
       files.push(f);
     }
-    const keep = new Set([...files, ...(preview ? lastBundles : [])]);
+    const keep = new Set([...files, ...alsoKeep]);
     const prune = async (dir) => {
       let entries;
       try {
@@ -529,10 +529,8 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
         else if (!keep.has(f)) await c.fs.rm(f, { force: true });
       }
     };
-    // (the preview keeps the last build's bundles: its worker serves that build's pages until a new one is ready)
     await prune(p(outDir));
-    if (preview) lastBundles = new Set(outFiles.keys());
-    return { files, outDir, server, entry };
+    return { files, outDir, server, entry, bundles: new Set(outFiles.keys()) };
   }
 
   function close() {
