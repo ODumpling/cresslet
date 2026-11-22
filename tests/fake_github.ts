@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 export type GhUser = { id: number; login: string; email: string };
 type Entry = { mode: string; sha: string };
 type Commit = { tree: Map<string, Entry>; parents: string[]; message: string; author: { name: string; email: string } | null; by: string };
-type Pull = { number: number; head: string; base: string; title: string; body: string; state: "open" | "closed"; reviews: { user: { login: string }; state: string }[] };
+type Pull = { number: number; head: string; base: string; title: string; body: string; state: "open" | "closed"; merged?: boolean; reviews: { user: { login: string }; state: string }[] };
 type Repo = {
   id: number; owner: string; name: string; private: boolean; default_branch: string; push: Set<string>; refs: Map<string, string>;
   protected: Set<string>; rulesets?: boolean; pulls: Pull[];
@@ -184,6 +184,18 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       const prefix = decodeURIComponent(x[1]);
       return json(200, [...r.refs].filter(([b]) => b.startsWith(prefix)).map(([b, sha]) => ({ ref: `refs/heads/${b}`, object: { sha, type: "commit" } })));
     }
+    if ((x = /^\/branches\/(.+)\/protection$/.exec(rest))) {
+      // Readable by admins (here: the owner); protection that needs status checks.
+      if (u.login !== r.owner) return json(404, { message: "Not Found" });
+      return r.protected.has(decodeURIComponent(x[1])) ? json(200, { required_status_checks: { strict: false, contexts: ["ci"] } }) : json(404, { message: "Branch not protected" });
+    }
+    if ((x = /^\/branches\/(.+)$/.exec(rest))) {
+      const name = decodeURIComponent(x[1]);
+      return r.refs.has(name) ? json(200, { name, commit: { sha: r.refs.get(name) }, protected: r.protected.has(name) }) : json(404, { message: "Branch not found" });
+    }
+    if ((x = /^\/rules\/branches\/(.+)$/.exec(rest))) {
+      return json(200, r.rulesets && decodeURIComponent(x[1]) === r.default_branch ? [{ type: "pull_request" }] : []);
+    }
     if (rest.startsWith("/branches")) {
       return json(200, [...r.refs].map(([name, sha]) => ({ name, commit: { sha }, protected: r.protected.has(name) })));
     }
@@ -211,6 +223,8 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       if (!cur) return json(422, { message: "Reference does not exist" });
       if (!body.force && !ancestors(body.sha).has(cur)) return json(422, { message: "Update is not a fast forward" });
       r.refs.set(name, body.sha);
+      // A pull request whose base now holds its head is merged (GitHub: #117's spike).
+      for (const pr of r.pulls) if (pr.state === "open" && pr.base === name && r.refs.has(pr.head) && ancestors(body.sha).has(r.refs.get(pr.head)!)) Object.assign(pr, { state: "closed", merged: true });
       return json(200, { object: { sha: body.sha } });
     }
     if ((x = /^\/git\/commits\/([0-9a-f]+)$/.exec(rest))) {
@@ -276,11 +290,12 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       }
       const sha = commit(out, [ours, theirs], body.commit_message, null, u.login);
       r.refs.set(body.base, sha);
+      for (const pr of r.pulls) if (pr.state === "open" && pr.base === body.base && r.refs.has(pr.head) && ancestors(sha).has(r.refs.get(pr.head)!)) Object.assign(pr, { state: "closed", merged: true });
       return json(201, { sha, commit: { tree: { sha: treeId(out) } } });
     }
     const pullJson = (pr: Pull) => ({
       number: pr.number, html_url: `https://github.example/${r.owner}/${r.name}/pull/${pr.number}`, title: pr.title, body: pr.body, draft: false,
-      state: pr.state, merged: false, head: { sha: r.refs.get(pr.head) ?? "", ref: pr.head }, base: { ref: pr.base },
+      state: pr.state, merged: !!pr.merged, head: { sha: r.refs.get(pr.head) ?? "", ref: pr.head }, base: { ref: pr.base },
     });
     if (rest === "/pulls" && req.method === "GET") {
       const head = url.searchParams.get("head")?.split(":")[1], base = url.searchParams.get("base");

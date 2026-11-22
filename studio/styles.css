@@ -504,7 +504,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .stack-branch { font-size: 11.5px; color: var(--text-2); overflow-wrap: anywhere; }
 .stack-row[data-aside] .stack-dot { background: var(--line-strong); }
 .stack-row[data-aside] .stack-title > span:first-child { color: var(--text-2); text-decoration: line-through; }
-.stack-back { margin-left: auto; min-height: 24px; padding-block: 0; }
+.stack-actions { margin-left: auto; display: inline-flex; gap: 4px; }
+.stack-actions .btn { min-height: 24px; padding-block: 0; }
 .stack-pull { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .git-aside { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .git-aside li { justify-content: space-between; gap: 8px; }

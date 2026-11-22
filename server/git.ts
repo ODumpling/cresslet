@@ -11,7 +11,7 @@ import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, commitChange, deleteSetAside, followed, goBack, landed, locked, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, followed, goBack, landed, landUpTo, locked, pullIn, readStacks, restore,
   setAsideBranches, stackPulls, submitStack,
 } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
@@ -86,6 +86,14 @@ export interface SourceControlProvider {
   updatePull(r: Repo, number: number, input: { base?: string; title?: string; body?: string; state?: "open" | "closed" }): Promise<Pull>;
   /** Its review decision and its head's checks. */
   pullStatus(r: Repo, number: number): Promise<PullInfo>;
+  /**
+   * Why `branch` takes no direct moves (branch protection, or a ruleset needing pull requests, checks…), or null.
+   * Checked by Cresslet before moving the default branch: GitHub lets an admin through when protection isn't enforced
+   * for admins.
+   */
+  branchProtection(r: Repo, branch: string): Promise<string | null>;
+  /** Moves `branch` from `from` to `to`, a fast-forward (never forced). Moved meanwhile: 409 `conflict`. */
+  moveBranch(r: Repo, branch: string, from: string, to: string): Promise<void>;
 }
 export interface Pull {
   number: number;
@@ -402,13 +410,8 @@ export class GitHub implements SourceControlProvider {
     // Already in: nothing to merge, but `into` has more than head.
     if (cmp.status === "behind") return { mergedSha: intoSha, headSha, fastForward: false, treeChanged: true };
     if (cmp.status === "ahead") {
-      const res = await this.req<{ message?: string }>("PATCH", this.#path(r, `/git/refs/heads/${this.#ref(input.into)}`), { sha: headSha, force: false });
-      if (res.status === 200) return { mergedSha: headSha, headSha, fastForward: true, treeChanged: false };
-      const now = await this.branchHead(r, input.into).catch(() => null);
-      if (!isProtected(res.body?.message) && ((now && now !== intoSha) || notFastForward(res.status, res.body?.message))) {
-        throw conflict(`${input.into} moved on GitHub meanwhile: try again`);
-      }
-      throw refError(res.status, res.body?.message, input.into);
+      await this.moveBranch(r, input.into, intoSha, headSha);
+      return { mergedSha: headSha, headSha, fastForward: true, treeChanged: false };
     }
     // Read before merging: once it's merged, nothing that can fail stands between the merge and its result.
     const head = await this.ok<{ tree: { sha: string } }>("GET", this.#path(r, `/git/commits/${headSha}`));
@@ -546,6 +549,40 @@ export class GitHub implements SourceControlProvider {
     const res = await this.req<GhPull & { message?: string; errors?: { message?: string }[] }>("PATCH", this.#path(r, `/pulls/${number}`), input);
     if (res.status !== 200) throw this.#pullError(res);
     return this.#pull(res.body);
+  }
+
+  async branchProtection(r: Repo, branch: string): Promise<string | null> {
+    const [b, rules] = await Promise.all([
+      this.ok<{ protected?: boolean }>("GET", this.#path(r, `/branches/${this.#ref(branch)}`)),
+      // Rulesets (repository or organization): those that stand between a push and the branch. Not read: refused.
+      this.req<{ type: string }[]>("GET", this.#path(r, `/rules/branches/${this.#ref(branch)}`)),
+    ]);
+    if (rules.status !== 200 || !Array.isArray(rules.body)) return `${branch}'s rules on GitHub couldn't be read`;
+    const blocking = rules.body.map((x) => x.type).filter((t) => ["update", "pull_request", "required_status_checks", "required_deployments", "merge_queue", "required_signatures"].includes(t));
+    if (blocking.length) return `${branch} has rules on GitHub (${[...new Set(blocking)].join(", ")})`;
+    if (!b.protected) return null;
+    // Classic protection: only what stands between a fast-forward and the branch (not force pushes or deletion).
+    const p = await this.req<{
+      required_pull_request_reviews?: unknown; required_status_checks?: unknown; restrictions?: unknown; required_signatures?: { enabled?: boolean };
+      lock_branch?: { enabled?: boolean };
+    }>("GET", this.#path(r, `/branches/${this.#ref(branch)}/protection`));
+    // Not readable (only admins can read it; and some users may bypass it): never moved on a guess.
+    if (p.status !== 200) return `${branch} is protected on GitHub`;
+    const needs = [
+      p.body.required_pull_request_reviews && "reviews", p.body.required_status_checks && "status checks", p.body.restrictions && "push restrictions",
+      p.body.required_signatures?.enabled && "signed commits", p.body.lock_branch?.enabled && "locked",
+    ].filter(Boolean);
+    return needs.length ? `${branch} is protected on GitHub (${needs.join(", ")})` : null;
+  }
+
+  async moveBranch(r: Repo, branch: string, from: string, to: string) {
+    const res = await this.req<{ message?: string }>("PATCH", this.#path(r, `/git/refs/heads/${this.#ref(branch)}`), { sha: to, force: false });
+    if (res.status === 200) return;
+    const now = await this.branchHead(r, branch).catch(() => null);
+    if (!isProtected(res.body?.message) && ((now && now !== from) || notFastForward(res.status, res.body?.message))) {
+      throw conflict(`${branch} moved on GitHub meanwhile: try again`);
+    }
+    throw refError(res.status, res.body?.message, branch);
   }
 
   async pullStatus(r: Repo, number: number) {
@@ -1151,6 +1188,15 @@ export function gitRoutes(
     if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
     return c.json(await deleteSetAside({ provider: client, store, appId: a.id, repo, r }, input.change));
   });
+  // Landing a stack up to a change (the default branch moved to it, change by change).
+  app.post("/apps/:name/git/stack/land", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ change?: unknown } | null>(c) ?? {};
+    if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
+    const out = await landUpTo({ provider: client, store, appId: a.id, repo, r }, input.change);
+    await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha }).catch((e) => console.error(e));
+    return c.json(out);
+  });
   // Going back to a change (the ones above it set aside), and putting them back.
   app.post("/apps/:name/git/stack/back", async (c) => {
     const { a, r, repo, client } = await linked(c, "deploy");
@@ -1202,7 +1248,24 @@ export function gitRoutes(
     const expect = input.headSha != null ? shaOf(input.headSha, "headSha") : undefined;
     const ctx = { provider: client, store, appId: a.id, repo, r };
     if (into === repo.default_branch) await assertNotBelowTop(ctx, branch);
-    const m = await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
+    // A stack's top into the default branch: landed change by change when it can (its pull requests merged, each with
+    // its own turn); when it can't (the default branch moved, a change pushed to), merged as before.
+    let m: MergeResult | undefined, stackLanded: { stack: string; changes: number; deleted: string[]; pullErrors?: PullError[] } | undefined;
+    const top = into === repo.default_branch ? (await store.openStackChanges(a.id)).find((x) => x.branch === branch) : undefined;
+    if (top) {
+      try {
+        const l = await landUpTo(ctx, top.id, expect);
+        m = { mergedSha: l.sha, headSha: l.sha, fastForward: true, treeChanged: false };
+        stackLanded = { stack: l.stack, changes: l.landed.length, deleted: l.deleted, ...(l.pullErrors ? { pullErrors: l.pullErrors } : {}) };
+      } catch (e) {
+        // A protected default branch is refused (Cresslet checks it first: GitHub lets an admin, or a user allowed to
+        // bypass it, through), and a change gone on GitHub. The rest merge as before: the default branch moved, a change
+        // pushed to, a commit other than the one synced (the merge checks it against GitHub).
+        const asBefore = ["default_moved", "moved", "not_synced"].includes((e as HttpError).code);
+        if (!(e instanceof HttpError) || !asBefore) throw e;
+      }
+    }
+    m ??= await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
     if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha, upstream: m.mergedSha }).catch((e) => console.error(e));
     // The merge happened: from here on it's reported, whatever else fails. Its files (when they differ from the
     // branch's) before the branch goes, so a failure to load them leaves the branch to retry from.
@@ -1216,17 +1279,19 @@ export function gitRoutes(
     }
     // A stack's top change merged: the stack is in. Its lower branches go with the top's (not when the files didn't
     // load: the branch is kept to retry from).
-    const stack = into === repo.default_branch
+    const stack = stackLanded ?? (into === repo.default_branch
       ? await landed(ctx, { branch, headSha: m.headSha, mergedSha: m.mergedSha, deleteBelow: !filesError }).catch((e) => (console.error(e), null))
-      : null;
-    let deletedBranch = false;
+      : null);
+    // A stack's own cleanup decided about its branches (the merged one too: not under a pull request still open).
+    let deletedBranch = !!stack?.deleted.includes(branch);
     // Only while it's still the commit that was merged: a push since then keeps it. (GitHub can't delete a ref
     // conditionally, so a push in between this check and the delete isn't excluded, only unlikely.)
-    if (!filesError && repo.delete_branch && branch !== into && branch !== repo.default_branch && await client.branchHead(r, branch).catch(() => null) === m.headSha) {
+    if (!stack && !filesError && repo.delete_branch && branch !== into && branch !== repo.default_branch && await client.branchHead(r, branch).catch(() => null) === m.headSha) {
       deletedBranch = await client.deleteBranch(r, branch).catch(() => false);
     }
     const { headSha: _, ...out } = m;
-    return c.json({ ...out, branch: into, deletedBranch, ...(stack ? { landed: stack } : {}), ...(files ? { files } : {}), ...(filesError ? { filesError } : {}) });
+    const landedOut = stack ? { stack: stack.stack, changes: stack.changes, ...(stack.pullErrors ? { pullErrors: stack.pullErrors } : {}) } : null;
+    return c.json({ ...out, branch: into, deletedBranch, ...(landedOut ? { landed: landedOut } : {}), ...(files ? { files } : {}), ...(filesError ? { filesError } : {}) });
   });
 
   // The default branch merged into `branch`, conflicts marked, for the workspace to resolve (then sync with

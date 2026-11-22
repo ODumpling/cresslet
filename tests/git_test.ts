@@ -998,3 +998,64 @@ test("stack: a change pushed to on GitHub is pulled in or carried on from; chang
   assert.equal((await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c1.branch, baseSha: again, files: files("3"), title: "Three" })).body.error, "not_on_stack");
   assert.equal((await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c1.branch, baseSha: again, files: files("3") })).status, 200);
 }));
+
+test("stack: land up to a change (each pull request merged with its own turn); deploy lands the rest the same way", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];
+  const add = async (from: string, baseSha: string, title: string, x: string) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: files(x), title })).body;
+  const c1 = await add("main", linked.sha, "One", "1");
+  const c2 = await add(c1.branch, c1.sha, "Two", "2");
+  const c3 = await add(c2.branch, c2.sha, "Three", "3");
+  await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: c1.stack.id });
+  const repo = t.gh.repo("octo/shop"), pulls = repo.pulls;
+
+  // Protected: refused, nothing moved (Land, and Deploy's merge of the top too).
+  repo.protected.add("main");
+  const refused = await t.send("POST", "/v1/apps/shop/git/stack/land", tok, { change: c2.change.id });
+  assert.deepEqual([refused.status, refused.body.error], [422, "branch_protected"]);
+  const deploy = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: c3.branch, headSha: c3.sha });
+  assert.deepEqual([deploy.status, deploy.body.error], [422, "branch_protected"]);
+  assert.equal(repo.refs.get("main"), linked.sha);
+  repo.protected.delete("main");
+
+  const l = await t.send("POST", "/v1/apps/shop/git/stack/land", tok, { change: c2.change.id });
+  assert.equal(l.status, 200, JSON.stringify(l.body));
+  assert.deepEqual([l.body.sha, repo.refs.get("main")], [c2.sha, c2.sha]);
+  assert.deepEqual(pulls.map((p) => [p.state, !!p.merged, p.base]), [["closed", true, "main"], ["closed", true, "main"], ["open", false, "main"]]);
+  assert.equal(repo.refs.has(c1.branch) || repo.refs.has(c2.branch), false);
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.repo.upstreamSha, c2.sha);
+
+  // Deploy's merge of the top: landed the same way, its pull request merged too.
+  const m = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: c3.branch, headSha: c3.sha });
+  assert.equal(m.status, 200, JSON.stringify(m.body));
+  assert.deepEqual([m.body.mergedSha, m.body.fastForward, m.body.landed, m.body.deletedBranch], [c3.sha, true, { stack: "one", changes: 1 }, true]);
+  assert.equal(pulls[2].merged, true);
+  assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks, []);
+
+  // main moved to a top outside Cresslet, its pull request still open: Deploy lands it on record but keeps its branch.
+  const o1 = await add("main", c3.sha, "Outside", "o1");
+  await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: o1.stack.id });
+  repo.refs.set("main", o1.sha);
+  const out = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: o1.branch, headSha: o1.sha });
+  assert.equal(out.status, 200, JSON.stringify(out.body));
+  assert.deepEqual([out.body.deletedBranch, out.body.landed.pullErrors.length, repo.refs.get(o1.branch)], [false, 1, o1.sha]);
+  const o1pr = pulls.find((p) => p.head === o1.branch)!;
+  assert.equal(o1pr.state, "open");
+  o1pr.state = "closed";
+
+  // A change's branch gone on GitHub: Deploy doesn't merge past it either.
+  const g1 = await add("main", o1.sha, "Gone", "g1");
+  const g2 = await add(g1.branch, g1.sha, "Gone 2", "g2");
+  repo.refs.delete(g1.branch);
+  const gone = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: g2.branch, headSha: g2.sha });
+  assert.deepEqual([gone.status, gone.body.error, repo.refs.get("main")], [404, "branch_not_found", o1.sha]);
+
+  // A default branch that moved: nothing landed (deploy still merges, as before).
+  const d1 = await add("main", o1.sha, "Four", "4");
+  t.gh.write(repo, "main", { "TEAM.md": "teammate" });
+  const moved = await t.send("POST", "/v1/apps/shop/git/stack/land", tok, { change: d1.change.id });
+  assert.deepEqual([moved.status, moved.body.error], [409, "default_moved"]);
+  const merged = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: d1.branch, headSha: d1.sha });
+  assert.deepEqual([merged.status, merged.body.fastForward, merged.body.landed], [200, false, { stack: "four", changes: 1 }]);
+}));

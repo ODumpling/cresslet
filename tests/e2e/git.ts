@@ -117,8 +117,6 @@ try {
   if (Object.keys(pushed).some((p) => /^\.env\.cresslet$|node_modules|^dist\//.test(p))) fail(`local files pushed: ${Object.keys(pushed)}`);
   console.log("linked and pushed:", Object.keys(pushed).length, "files");
 
-  // Someone commits to main on GitHub meanwhile.
-  gh.write(gh.repo(full), "main", { "NOTES.md": "from GitHub\n" }, "Add notes", "teammate");
 
   // Two AI builder requests: two changes, each on a branch of its own cut from the one below, shown as a stack.
   const input = page.getByLabel("Message to Claude");
@@ -207,9 +205,22 @@ try {
   await movedRow.getByRole("button", { name: /Pull in change 2/ }).click();
   await toast(/Pulled in/, 60000);
   await page.locator('#tree button[data-path="OUTSIDE.md"]').waitFor({ state: "attached", timeout: 30000 });
-  if (await movedRow.getByRole("button", { name: /Pull in change 2/ }).count()) fail("still shown as changed on GitHub");
+  await movedRow.getByRole("button", { name: /Pull in change 2/ }).waitFor({ state: "detached", timeout: 30000 }); // read again after it
   void outside;
   console.log("pulled in the push from outside");
+
+  // Land change 1: main moves to it (its pull request merged); change 2 is the bottom now, its pull request on main.
+  await page.locator("#stack-panel .stack-row", { hasText: "1 · Add due dates to tasks" }).getByRole("button", { name: /Land change 1/ }).click();
+  await toast(/Landed 1 change in main/, 60000);
+  if (gh.repo(full).refs.get("main") !== c1) fail("main isn't at change 1");
+  const pr1 = gh.repo(full).pulls[0], pr3 = gh.repo(full).pulls.find((p) => p.head === DARKER);
+  if (!pr1.merged || pr3?.base !== "main" || pr3.state !== "open") fail(`pull requests after landing: ${JSON.stringify(gh.repo(full).pulls.map((p) => [p.number, p.base, p.state, p.merged]))}`);
+  await page.locator("#stack-panel .stack-row", { hasText: "1 · Add due dates to tasks" }).waitFor({ state: "detached", timeout: 30000 });
+  await page.locator("#stack-panel").screenshot({ path: `${out}/git-stack-landed.png` });
+  console.log("landed change 1");
+
+  // Someone commits to main on GitHub meanwhile.
+  gh.write(gh.repo(full), "main", { "NOTES.md": "from GitHub\n" }, "Add notes", "teammate");
 
   // A hand edit after them: it goes into the top change (pushed with the deploy).
   await page.locator("#view-code").click();
