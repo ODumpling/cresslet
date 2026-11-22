@@ -279,6 +279,10 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       builder.current?.prefill(`Merging ${s.defaultBranch} into ${s.activeBranch} conflicts in ${paths.join(", ")}. Each of those files holds both versions between <<<<<<< ${s.activeBranch}, ======= and >>>>>>> ${s.defaultBranch} lines. Resolve them: keep what both sides meant, remove the marker lines, and check the dev server builds. Then I'll deploy.`);
       toast(`Conflicts in ${paths.join(", ")}: resolve them (the AI builder can), then deploy`, 10000);
     } catch (e) {
+      // Loaded, but npm install failed (not because of a conflicted package.json): resolve, then fix the install.
+      if ((e as { filesWritten?: boolean }).filesWritten && g.state?.conflicts?.length) {
+        builder.current?.prefill(`Merging ${g.state.defaultBranch} into ${g.state.activeBranch} conflicts in ${g.state.conflicts.join(", ")}: resolve them (remove the conflict markers). npm install also failed: check the terminal.`);
+      }
       toast(`Couldn't load the merge: ${errorMessage(e)}`, 10000);
     }
   }
@@ -388,7 +392,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             <button className="btn" id="git-btn" type="button" onClick={() => gitDialog.current?.open()}><Icon name="branch" />Connect Git</button>
           )
         ) : null}
-        {pull ? (
+        {pull && gitOn && token && container && !locked ? (
           <ExtLink className="btn git-pr" id="git-pr-link" href={pull.url} title={pull.title}>
             {`PR #${pull.number}`}<span className="muted small">{` · ${pull.review.replace("_", " ")} · checks ${pull.checks}`}</span>
           </ExtLink>
@@ -489,7 +493,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       </main>
       <DeployDialog ref={dialog} />
       <GitDialog ref={gitDialog} git={engine.current?.git ?? null} app={deploy?.name}
-        files={() => engine.current!.sources()} hydrate={(f) => engine.current!.hydrate(f)} reserve={reserveApp} />
+        files={() => engine.current!.sources()} hydrate={(f) => engine.current!.hydrate(f)} reserve={reserveApp}
+        onPull={() => setGitTick((n) => n + 1)} />
     </>
   );
 }

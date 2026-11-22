@@ -20,7 +20,7 @@ export async function connectGithub(returnTo = location.pathname) {
 
 type Load = { me: API.MeGit; status: API.GitStatus | null; repos: API.GitRepo[] | null; linked: API.AppRepo | null; pull?: PullRequest | null; error?: string };
 
-export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
+export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () => {} }: {
   ref: Ref<GitDialogHandle>;
   git: GitWorkspace | null;
   /** The project's app, once deployed (a repository links to an app). */
@@ -29,6 +29,8 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
   hydrate: (files: GitFile[]) => Promise<void>;
   /** Picks and reserves the app's address (nothing deployed); resolves to its name, or null if cancelled. */
   reserve: () => Promise<string | null>;
+  /** A pull request was opened here (the workspace's topbar shows it). */
+  onPull?: () => void;
 }) {
   const dlg = useRef<HTMLDialogElement>(null);
   const [load, setLoad] = useState<Load | null>(null);
@@ -228,6 +230,7 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve }: {
                   <div className="row start">
                     <button className="btn sm" type="button" id="git-open-pr" disabled={!!busy} onClick={() => void run("Opening a pull request…", async () => {
                       const pr = await git!.openPullRequest();
+                      onPull();
                       return `Pull request #${pr.number} opened`;
                     })}>Open a pull request</button>
                     <span className="muted small">For a {s.defaultBranch} that needs reviews or checks: merge it on GitHub, then pull {s.defaultBranch} and deploy.</span>

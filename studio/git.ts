@@ -241,8 +241,11 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       try {
         await o.hydrate(r.files);
       } catch (e) {
-        // A conflicted package.json fails npm install: the merge is still loaded, to resolve.
         if (!(e as { filesWritten?: boolean }).filesWritten) throw e;
+        await merging(); // its files are in: the merge is loaded either way
+        // A conflicted package.json can't install until it's resolved: expected. Anything else is said.
+        if (!r.conflicts.some((p) => /(?:^|\/)package(?:-lock)?\.json$/.test(p))) throw e;
+        return r.conflicts;
       }
       await merging();
       return r.conflicts;

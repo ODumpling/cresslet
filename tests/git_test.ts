@@ -676,3 +676,32 @@ test("conflicts in a subfolder app: the resolved merge keeps the default branch'
   assert.deepEqual(un.body.paths, ["other/x.txt"]);
   assert.equal((await t.send("GET", "/v1/apps/shop/git/conflicts?branch=main", tok)).status, 400);
 }));
+
+test("conflict resolution: a .env edited meanwhile, and binary files (NUL bytes) both sides changed, are refused", withServer(async (t) => {
+  const tok = await t.account("octo@b.co");
+  await t.deploy(tok, "shop");
+  await t.connect(tok, t.gh.user("octo"));
+  t.gh.addRepo("octo", "shop", ["octo"]);
+  const repo = t.gh.repo("octo/shop");
+  t.gh.write(repo, "main", { "a.txt": "a\n", ".env": "VITE_A=1\n", "img.bin": "x\u0000y" });
+  const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "pull" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/e" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/e", baseSha: linked.body.sha, files: linked.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "mine\n" } : f)),
+  });
+  const theirs = t.gh.write(repo, "main", { "a.txt": "theirs\n" });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/e", tok);
+  assert.deepEqual(cf.body.conflicts, ["a.txt"]);
+  const edited = cf.body.files.map((f: { path: string }) => (f.path === "a.txt" ? { ...f, data: "both\n" } : f.path === ".env" ? { ...f, data: "VITE_A=9\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/e", baseSha: mine.body.sha, files: edited, mergeParent: theirs });
+  assert.equal(s.status, 409);
+  assert.equal(s.body.error, "merge_dotenv_changed");
+
+  // A binary file both sides changed: no markers, refused.
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/b" });
+  t.gh.write(repo, "feat/b", { "img.bin": "x\u0000mine" });
+  t.gh.write(repo, "main", { "img.bin": "x\u0000theirs" });
+  const bin = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/b", tok);
+  assert.equal(bin.body.error, "merge_unresolvable");
+  assert.deepEqual(bin.body.paths, ["img.bin"]);
+}));

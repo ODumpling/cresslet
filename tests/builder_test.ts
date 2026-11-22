@@ -734,8 +734,8 @@ test("pull requests from the active branch: pushed first, then opened", async ()
   assert.equal(await g.git.pullRequest(), null);
 });
 
-test("merge conflicts: a conflicted package.json whose npm install fails still leaves the merge loaded to resolve", async () => {
+test("merge conflicts: npm install failing after the merge's files are in still leaves the merge loaded (and says so unless package.json conflicted)", async () => {
   const g = fakeGit({ onDefault: false, hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
-  assert.deepEqual(await g.git.resolveConflicts(), ["app.txt"]);
-  assert.equal(g.state.mergeParent, "f".repeat(40));
+  await assert.rejects(g.git.resolveConflicts(), /npm install failed/); // app.txt conflicted, not package.json: said
+  assert.equal(g.state.mergeParent, "f".repeat(40)); // but loaded
 });

@@ -217,13 +217,17 @@ export class GitHub implements SourceControlProvider {
   #mergeOutside(subdir: string, base: Map<string, GhEntry>, ours: Map<string, GhEntry>, theirs: Map<string, GhEntry>) {
     const same = (x?: GhEntry, y?: GhEntry) => x?.sha === y?.sha && x?.mode === y?.mode;
     const take: { path: string; mode: string; type: string; sha: string | null }[] = [], both: string[] = [];
+    // Held only if it's a file the studio holds on every side that has it (a regular file turned symlink isn't).
+    const outside = new Set<string>();
     for (const path of new Set([...base.keys(), ...ours.keys(), ...theirs.keys()])) {
       const [b, o, t] = [base.get(path), ours.get(path), theirs.get(path)];
-      if (studioHolds(path, o ?? t ?? b!, subdir) || same(o, t) || same(t, b)) continue;
+      if ([b, o, t].every((e) => !e || studioHolds(path, e, subdir))) continue;
+      outside.add(path);
+      if (same(o, t) || same(t, b)) continue;
       if (same(o, b)) take.push(t ? { path, mode: t.mode, type: t.type, sha: t.sha } : { path, mode: o!.mode, type: o!.type, sha: null });
       else both.push(path);
     }
-    return { take, both: both.sort() };
+    return { take, both: both.sort(), outside };
   }
 
   async readTree(r: Repo, sha: string, subdir: string): Promise<DeployFile[]> {
@@ -252,14 +256,29 @@ export class GitHub implements SourceControlProvider {
     // A merge (`mergeParent`): the studio's files are the resolution of what it holds; everything else (outside
     // subdir, dotenv files…) is merged here, and both sides changing one of those stops it.
     let outside: { path: string; mode: string; type: string; sha: string | null }[] = [];
+    let notHeld = new Set<string>();
     if (input.mergeParent) {
       const cmp = await this.ok<{ merge_base_commit: { sha: string } }>("GET", this.#path(r, `/compare/${input.mergeParent}...${input.baseSha}`));
       const [b, t] = await Promise.all([this.#entries(r, cmp.merge_base_commit.sha), this.#entries(r, input.mergeParent)]);
-      const m = this.#mergeOutside(input.subdir, b, new Map(entries.filter((e) => e.type !== "tree").map((e) => [e.path, e])), t);
+      const ours = new Map(entries.filter((e) => e.type !== "tree").map((e) => [e.path, e]));
+      const m = this.#mergeOutside(input.subdir, b, ours, t);
       if (m.both.length) throw unresolvable(m.both);
       outside = m.take;
+      notHeld = m.outside;
+      // Dotenv files are merged here: the studio's copy must be the merged one's public entries (an edit made while
+      // resolving would be lost otherwise: commit it afterwards).
+      const taken = new Map(m.take.map((x) => [x.path, x]));
+      for (const [p, d] of input.files) {
+        const path = prefix + p;
+        if (!DOTENV.test(path)) continue;
+        const e = taken.has(path) ? taken.get(path)! : ours.get(path);
+        const merged = e?.sha ? publicDotenv(await this.#blob(r, e.sha)) : null;
+        if (!merged || !Buffer.from(merged).equals(Buffer.from(d))) {
+          throw Object.assign(new HttpError(409, `${p} was changed while merging: commit the merge first, then that change`, "merge_dotenv_changed"), { extra: { paths: [p] } });
+        }
+      }
     }
-    const held = (path: string) => !input.mergeParent || !DOTENV.test(path);
+    const held = (path: string) => !input.mergeParent || (!DOTENV.test(path) && !notHeld.has(path));
     const want = new Map(input.files.map(([p, d]) => [prefix + p, d] as const).filter(([p]) => held(p)));
     const changes: { path: string; mode: string; data: Uint8Array }[] = [];
     for (const [path, data] of want) {
@@ -359,7 +378,8 @@ export class GitHub implements SourceControlProvider {
   /**
    * `head` merged with `into` (where it would go), for resolving their conflicts on `head`: every file of the
    * result under `subdir`, as the workspace holds them. A file both changed since they split is a conflict: text
-   * gets both versions between `<<<<<<<` / `=======` / `>>>>>>>` lines, binary keeps `head`'s. Committed with `into`'s
+   * gets both versions between `<<<<<<<` / `=======` / `>>>>>>>` lines; binary ones, and anything the studio doesn't
+   * hold, can't be resolved here (409 merge_unresolvable). Committed with `into`'s
    * head as a second parent, `head` then merges into `into` as a fast-forward.
    */
   async conflicts(r: Repo, input: { into: string; head: string; subdir: string }) {
@@ -371,10 +391,11 @@ export class GitHub implements SourceControlProvider {
     const outside = this.#mergeOutside(input.subdir, full[0], full[1], full[2]);
     if (outside.both.length) throw unresolvable(outside.both);
     const prefix = input.subdir ? input.subdir + "/" : "";
-    const [base, ours, theirs] = full.map((m) => new Map([...m.values()].filter((e) => studioHolds(e.path, e, input.subdir)).map((e) => [e.path.slice(prefix.length), { ...e, rel: e.path.slice(prefix.length) }])));
+    const [base, ours, theirs] = full.map((m) => new Map([...m.values()].filter((e) => !outside.outside.has(e.path) && studioHolds(e.path, e, input.subdir)).map((e) => [e.path.slice(prefix.length), { ...e, rel: e.path.slice(prefix.length) }])));
     const out = new Map<string, Uint8Array>(), conflicts: string[] = [];
     const read = (e: GhEntry) => this.#blob(r, e.sha).then((d) => (DOTENV.test(e.path) ? publicDotenv(d) : d));
     const text = (d: Uint8Array) => {
+      if (d.includes(0)) return null; // binary, even if it decodes
       try {
         return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(d);
       } catch {
@@ -383,7 +404,26 @@ export class GitHub implements SourceControlProvider {
     };
     const paths = [...new Set([...base.keys(), ...ours.keys(), ...theirs.keys()])];
     if (paths.length > this.limits.files) throw new HttpError(413, `the repository has more than ${this.limits.files} files`, "too_large");
-    const size = paths.reduce((n, p) => n + (ours.get(p)?.size ?? 0) + (theirs.get(p)?.size ?? 0), 0);
+    // Dotenv files (merged by mergeOutside): the result's, read below for their public entries.
+    const taken = new Map(outside.take.map((x) => [x.path, x]));
+    for (const [path, e] of full[1]) if (!taken.has(path) && path.startsWith(prefix) && DOTENV.test(path)) taken.set(path, { path, mode: e.mode, type: e.type, sha: e.sha });
+    const envs = [...taken.values()].filter((x) => {
+      const rel = x.path.slice(prefix.length);
+      if (!x.sha || !x.path.startsWith(prefix) || !DOTENV.test(x.path) || NOT_SOURCE.test(rel) || x.type !== "blob" || x.mode === "120000") return false;
+      try {
+        return safePath(rel) === rel;
+      } catch {
+        return false;
+      }
+    });
+    const sizeOf = (sha: string) => [...full[1].values(), ...full[2].values()].find((e) => e.sha === sha)?.size ?? 0;
+    // What's read: one side of a file only one side changed, both of a conflict, and the dotenv files.
+    const size = paths.reduce((n, p) => {
+      const [b, o, t] = [base.get(p), ours.get(p), theirs.get(p)];
+      if (o?.sha === t?.sha || t?.sha === b?.sha) return n + (o?.size ?? 0);
+      if (o?.sha === b?.sha) return n + (t?.size ?? 0);
+      return n + (o?.size ?? 0) + (t?.size ?? 0);
+    }, envs.reduce((n, x) => n + sizeOf(x.sha!), 0));
     if (size > this.limits.bytes) throw new HttpError(413, `the merge's files exceed ${this.limits.bytes} bytes`, "too_large");
     // Binary files both sides changed: no markers to resolve them with.
     const binary: string[] = [];
@@ -405,16 +445,8 @@ export class GitHub implements SourceControlProvider {
       out.set(p, new TextEncoder().encode(`<<<<<<< ${input.head}\n${nl(ot)}=======\n${nl(tt)}>>>>>>> ${input.into}\n`));
     });
     if (binary.length) throw unresolvable(binary.map((p) => prefix + p));
-    // Dotenv files (merged above, outside the studio's part): the result's public entries, as the workspace holds them.
-    const taken = new Map(outside.take.map((x) => [x.path, x]));
-    for (const [path, e] of full[1]) if (!taken.has(path) && path.startsWith(prefix) && DOTENV.test(path) && e.mode !== "120000") taken.set(path, { path, mode: e.mode, type: e.type, sha: e.sha });
-    for (const x of taken.values()) {
-      const rel = x.path.slice(prefix.length);
-      if (!x.sha || !x.path.startsWith(prefix) || !DOTENV.test(x.path) || NOT_SOURCE.test(rel) || x.type !== "blob") continue;
-      try {
-        if (safePath(rel) === rel) out.set(rel, publicDotenv(await this.#blob(r, x.sha)));
-      } catch { /* not a path the workspace can hold */ }
-    }
+    // Dotenv files (merged outside the studio's part): the result's public entries, as the workspace holds them.
+    for (const x of envs) out.set(x.path.slice(prefix.length), publicDotenv(await this.#blob(r, x.sha!)));
     const files: DeployFile[] = [...out].sort(([x], [y]) => (x < y ? -1 : 1)).map(([path, d]) => {
       const t = text(d);
       return t === null ? { path, data: Buffer.from(d).toString("base64"), encoding: "base64" } : { path, data: t, encoding: "utf8" };
