@@ -253,8 +253,8 @@ function Repository() {
   const [initial, setInitial] = useState<"deploy" | "none" | null>(null);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
-  // The one the select shows (a reload may have dropped the one picked).
-  const pick = repos.data?.some((r) => r.fullName === picked) ? picked : repos.data?.[0]?.fullName ?? "";
+  // The one picked, or the first by default; none when a reload dropped the one picked (chosen again, never swapped).
+  const pick = picked ? (repos.data?.some((r) => r.fullName === picked) ? picked : "") : repos.data?.[0]?.fullName ?? "";
   // Back from choosing which repositories Cresslet reaches (another tab): the list may have changed.
   const reloadRepos = repos.reload;
   useEffect(() => {
@@ -316,7 +316,7 @@ function Repository() {
         if (alive.current) {
           setMode("link");
           setPicked(created);
-          setInitial("deploy");
+          setInitial(null); // chosen again, as the repository may be (the list may not show it yet)
         }
         throw Object.assign(new Error(`Created ${created}, but couldn't link it: ${errorMessage(e)}. Link it below to try again.`), { code: gitCode(e) });
       }
@@ -375,6 +375,7 @@ function Repository() {
               <div className="field">
                 <label htmlFor="repo-pick">Repository</label>
                 <select id="repo-pick" className="input" value={pick} onChange={(e) => setPicked(e.target.value)}>
+                  {!pick ? <option value="" disabled>Choose a repository</option> : null}
                   {repos.data?.map((r) => <option key={r.id} value={r.fullName}>{r.fullName}{r.private ? " (private)" : ""}</option>)}
                 </select>
               </div>
