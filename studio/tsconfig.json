@@ -1,20 +1,23 @@
 {
-  // The studio's page modules, served to browsers with their types stripped (server/static.ts).
-  // server-worker.ts and start-service.ts run elsewhere: tsconfig.worker.json, tsconfig.service.json.
+  // The studio's page: src/ (the React app: routes and views) and the modules it uses (*.ts here), bundled by Vite.
+  // server-worker.ts and start-service.ts run elsewhere: tsconfig.worker.json, tsconfig.service.json; the build config
+  // runs in Node: tsconfig.node.json.
   "compilerOptions": {
     "target": "es2023",
     "module": "esnext",
     "moduleResolution": "bundler",
     "lib": ["es2024", "dom", "dom.iterable", "dom.asynciterable"],
-    "types": [],
+    "types": ["vite/client"],
+    "jsx": "react-jsx",
     "strict": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "noEmit": true,
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true
   },
-  "include": ["*.ts", "vendor/*.d.ts"],
-  "exclude": ["server-worker.ts", "start-service.ts"]
+  "include": ["*.ts", "vendor/*.d.ts", "src"],
+  "exclude": ["server-worker.ts", "start-service.ts", "vite.config.ts"]
 }
