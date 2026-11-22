@@ -89,7 +89,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, ref }: {
   const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
   async function refreshCredits() {
     if (sourceRef.current !== "credits") return;
-    const x = await api<API.MyCredits>("/v1/me/credits").catch(() => null);
+    const x = await api<API.MyCredits>("/v1/me/credits?limit=1").catch(() => null);
     if (!x) return;
     if (!x.enabled) return setCreditsOn(false);
     const left = Math.max(0, x.available);

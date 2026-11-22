@@ -146,7 +146,7 @@ export async function finishLogin(): Promise<string | null> {
   }
   // Back to what needed the login (a private page, a project, the CLI login, artifacts).
   const after = takeAfterLogin();
-  if (after?.startsWith("/view/") || after?.startsWith("/p/") || after === "/cli" || after === "/artifacts" || after === "/settings") return after;
+  if (after?.startsWith("/view/") || after?.startsWith("/p/") || after === "/cli" || after === "/artifacts" || after === "/settings" || after?.startsWith("/settings/")) return after;
   toast(`Logged in as ${auth.email}`);
   return null;
 }

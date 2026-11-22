@@ -67,6 +67,10 @@ export interface MyCredits {
   balance: number;
   monthly: { allowance: number; remaining: number; resetsAt: string };
   history: LedgerEntry[];
+  /** Every ledger entry up to `historyUpTo` (`history` is one page of them). */
+  historyTotal: number;
+  /** The newest entry counted: pass it back as `upTo` to page through the same entries while new ones are added. */
+  historyUpTo: number;
 }
 
 export interface OrgRef {

@@ -192,9 +192,35 @@ test("AI credits: proxied with the operator's key, charged from the monthly allo
     // 1250 µ$ → 0.125 credits
     assert.equal((await t.json("/v1/me/credits", { headers: t.bearer(tok) })).body.balance, 8.935);
 
+    // The history a page at a time, newest first; bad paging values fall back or clamp.
+    const page = async (q: string) => (await t.json(`/v1/me/credits${q}`, { headers: t.bearer(tok) })).body;
+    const all = await page("");
+    assert.ok(all.historyTotal >= 3);
+    assert.equal(all.history.length, all.historyTotal);
+    assert.deepEqual((await page("?limit=1")).history, all.history.slice(0, 1));
+    assert.deepEqual((await page("?offset=1&limit=2")).history, all.history.slice(1, 3));
+    assert.equal((await page("?offset=1&limit=2")).historyTotal, all.historyTotal);
+    assert.deepEqual((await page(`?offset=${all.historyTotal}`)).history, []);
+    assert.deepEqual((await page("?offset=-5&limit=x")).history, all.history);
+    assert.deepEqual((await page("?offset=&limit=&upTo=")).history, all.history);
+    assert.deepEqual((await page("?upTo=x")).history, all.history);
+    assert.equal((await page("?limit=0")).history.length, 1);
+    // Paging from the same newest entry: a grant made meanwhile doesn't shift the next page.
+    assert.equal(typeof all.historyUpTo, "number");
+    await grant("adm", { email: "a@b.co", credits: 1, note: "meanwhile" });
+    const later = await page(`?offset=1&limit=2&upTo=${all.historyUpTo}`);
+    assert.deepEqual(later.history, all.history.slice(1, 3));
+    assert.equal(later.historyTotal, all.historyTotal);
+    assert.equal(later.historyUpTo, all.historyUpTo);
+    const fresh = await page("?limit=1");
+    assert.equal(fresh.history[0].note, "meanwhile");
+    assert.equal(fresh.historyTotal, all.historyTotal + 1);
+    assert.ok(fresh.historyUpTo > all.historyUpTo);
+
     // Another account's wallet is its own.
     const other = await t.account("o@b.co");
     assert.equal((await t.json("/v1/me/credits", { headers: t.bearer(other) })).body.available, 1);
+    assert.deepEqual((await t.json("/v1/me/credits", { headers: t.bearer(other) })).body.historyTotal, 0);
   } finally {
     await t.close();
   }

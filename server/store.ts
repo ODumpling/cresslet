@@ -1009,11 +1009,20 @@ export class Store implements RateHits {
     });
   }
 
-  /** The account's latest ledger rows, newest first. */
-  aiLedger(accountId: string, limit = 50): Promise<AiLedgerRow[]> {
+  /** The account's ledger rows up to row `upTo` (all: null), newest first: `limit` of them after skipping `offset`. */
+  aiLedger(accountId: string, limit = 50, offset = 0, upTo: number | null = null): Promise<AiLedgerRow[]> {
     return this.db.all<AiLedgerRow>(
-      "SELECT created_at, kind, amount, detail FROM ai_ledger WHERE account_id = ? ORDER BY id DESC LIMIT ?", accountId, limit,
+      "SELECT created_at, kind, amount, detail FROM ai_ledger WHERE account_id = ? AND id <= ? ORDER BY id DESC LIMIT ? OFFSET ?",
+      accountId, upTo ?? Number.MAX_SAFE_INTEGER, limit, offset,
     );
+  }
+
+  /** The account's newest ledger row (0: none yet), and how many rows it has up to `upTo` (all: null). */
+  async aiLedgerCount(accountId: string, upTo: number | null = null): Promise<{ last: number; count: number }> {
+    const r = (await this.db.get<{ last: number | null; n: number }>(
+      "SELECT MAX(id) AS last, COUNT(*) AS n FROM ai_ledger WHERE account_id = ? AND id <= ?", accountId, upTo ?? Number.MAX_SAFE_INTEGER,
+    ))!;
+    return { last: Number(r.last ?? 0), count: Number(r.n) };
   }
 
   /**

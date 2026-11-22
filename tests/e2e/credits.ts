@@ -72,13 +72,32 @@ try {
   if (await page.locator("#builder-chat button", { hasText: /own key/i }).count()) fail("own key button shown with credits");
   console.log("builder on credits ok");
 
-  // Settings: what's left and the use.
+  // Settings: what's left and the use, on its own tab.
   await page.goto(base + "/settings");
+  await page.locator("#settings-tab-credits").click();
   await page.locator("#credits-section").waitFor();
   await page.locator("#credits-history", { hasText: "AI builder (claude-opus-5-5)" }).waitFor();
   const avail = await page.locator("#credits-available").textContent();
   if (avail !== "0 credits") fail(`available: ${avail}`);
   await page.locator("#credits-section").screenshot({ path: `${out}/credits-settings.png` });
+
+  // The history a page at a time: 12 grants plus the use = 13 entries, 10 a page.
+  for (let i = 0; i < 12; i++) {
+    await fetch(`${base}/v1/admin/accounts/credits`, {
+      method: "POST", headers: { authorization: `Bearer ${admin}`, "content-type": "application/json" }, body: JSON.stringify({ email: acct.account.email, credits: 1, note: `grant ${i}` }),
+    });
+  }
+  await page.reload();
+  const pager = page.locator("#credits-pager [role=status]");
+  await pager.filter({ hasText: "Entries 1–10 of 13" }).waitFor();
+  if (await page.locator("#credits-history .list-row").count() !== 10) fail("first page isn't 10 entries");
+  await page.locator("#credits-next").click();
+  await pager.filter({ hasText: "Entries 11–13 of 13" }).waitFor();
+  await page.locator("#credits-history", { hasText: "AI builder (claude-opus-5-5)" }).waitFor();
+  if (!(await page.locator("#credits-next").isDisabled())) fail("Older enabled on the last page");
+  if (await page.evaluate(() => document.activeElement?.id) !== "credits-prev") fail("focus didn't move to Newer on the last page");
+  await page.locator("#credits-prev").click();
+  await pager.filter({ hasText: "Entries 1–10 of 13" }).waitFor();
   console.log("PASS");
 } catch (e) {
   process.exitCode = 1;

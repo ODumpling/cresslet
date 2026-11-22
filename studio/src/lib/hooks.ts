@@ -34,7 +34,8 @@ export interface Loaded<T> {
 /**
  * `load` when the view mounts and whenever `deps` change; only the latest load's result is shown (an older, slower
  * one is dropped, as is anything that resolves after the view is gone). `keep`: keep the old data while reloading
- * after a deps change (otherwise it's cleared, so another app's or account's data isn't shown meanwhile).
+ * after a deps change, and beside the error if that fails (otherwise it's cleared, so another app's or account's
+ * data isn't shown meanwhile).
  */
 export function useLoad<T>(load: () => Promise<T>, deps: DependencyList, { keep = false } = {}): Loaded<T> {
   const [state, setState] = useState<{ data?: T; error?: ApiError; loading: boolean }>({ loading: true });
@@ -48,10 +49,10 @@ export function useLoad<T>(load: () => Promise<T>, deps: DependencyList, { keep 
       flushSync(() => setState({ data, loading: false }));
     } catch (e) {
       if (my !== gen.current) return false;
-      flushSync(() => setState({ error: e as ApiError, loading: false }));
+      flushSync(() => setState((s) => ({ ...(keep ? { data: s.data } : {}), error: e as ApiError, loading: false })));
     }
     return true;
-  }, [run]);
+  }, [run, keep]);
   useEffect(() => {
     setState((s) => (keep ? { ...s, loading: true } : { loading: true }));
     void reload();

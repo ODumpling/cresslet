@@ -24,7 +24,7 @@ try {
   // Reflow: no horizontal page scroll at 320 CSS px.
   const narrow = await browser.newPage({ viewport: { width: 320, height: 640 } });
   await narrow.addInitScript((t) => localStorage.setItem("cresslet.token", t), token);
-  for (const r of ["/", "/settings", "/admin", "/admin-credits"]) {
+  for (const r of ["/", "/settings", "/settings/tokens", "/settings/artifacts", "/admin", "/admin-credits"]) {
     await narrow.goto(base + r);
     await narrow.waitForTimeout(600);
     const w = await narrow.evaluate(() => document.documentElement.scrollWidth);
@@ -32,7 +32,7 @@ try {
   }
   // A 40-character app name in the token form's app picker wraps too.
   await narrow.route("**/v1/apps", (r) => r.fulfill({ json: { apps: [{ name: "a".repeat(40), url: "http://x.localhost", updatedAt: new Date().toISOString() }] } }));
-  await narrow.goto(base + "/settings");
+  await narrow.goto(base + "/settings/tokens");
   await narrow.getByLabel("Only these apps").check();
   await narrow.getByLabel("a".repeat(40)).waitFor();
   const pw = await narrow.evaluate(() => document.documentElement.scrollWidth);
@@ -49,7 +49,7 @@ try {
   // A toast never covers the focused control (WCAG 2.4.11): focus the last control (bottom of the page), then
   // revoke the long-named token without moving focus: its wide "Revoked …" toast would sit right over it.
   narrow.on("dialog", (d) => d.accept());
-  await narrow.getByRole("button", { name: "Log out" }).focus();
+  await narrow.getByRole("button", { name: "Create token" }).focus();
   await narrow.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
   await narrow.getByRole("button", { name: `Revoke ${yName}` }).evaluate((b: HTMLElement) => b.click()); // leaves no fixture behind
   await narrow.getByRole("button", { name: `Revoke ${yName}` }).waitFor({ state: "detached" });
@@ -58,15 +58,15 @@ try {
     const a = document.activeElement!.getBoundingClientRect(), t = document.getElementById("toast")!.getBoundingClientRect();
     return document.getElementById("toast")!.dataset.open === "true" && a.bottom > t.top && a.top < t.bottom && a.right > t.left && a.left < t.right;
   });
-  assert(await focused(narrow) === "logout-btn", "revoking another token moved focus");
+  assert(await focused(narrow) === "token-create", "revoking another token moved focus");
   assert(!covered, "the toast covers the focused control");
   // A toast that moved to the top still takes a mouse click on its × (focusing × mustn't move it back down).
   if ((await narrow.locator("#toast").getAttribute("data-top")) !== "true") throw new Error("toast didn't move to the top");
   await narrow.locator("#toast-close").click();
   assert((await narrow.locator("#toast").getAttribute("data-open")) === "false", "clicking × on a top toast didn't close it");
   // A toast that stepped aside (transparent) becomes visible when Tab reaches it.
-  await narrow.getByRole("button", { name: "Log out" }).focus();
-  await narrow.locator("#token-copy").evaluate((b: HTMLElement) => b.click()); // a toast, focus stays on Log out
+  await narrow.getByRole("button", { name: "Create token" }).focus();
+  await narrow.locator("#token-copy").evaluate((b: HTMLElement) => b.click()); // a toast, focus stays on Create token
   await narrow.locator('#toast[data-open="true"]').waitFor({ state: "attached" }); // copying is async
   await narrow.locator("#toast").evaluate((t) => (t.dataset.top = "hide"));
   await narrow.locator("#toast-close").focus();
@@ -108,7 +108,7 @@ try {
   console.log("admin focus ok");
 
   // Settings: after Revoke, focus lands on the list heading.
-  await page.goto(base + "/settings");
+  await page.goto(base + "/settings/tokens");
   await page.getByLabel("Name", { exact: true }).fill("a11y temp");
   // A validation error stays beside the form (not a toast that times out) until the form changes.
   await page.getByLabel("Only these apps").check();
@@ -131,7 +131,7 @@ try {
   await dup.route("**/v1/me/tokens", (r) => r.fulfill({ json: { tokens: toks } }));
   await dup.route("**/v1/me/tokens/*", (r) => (toks = toks.filter((t) => !r.request().url().endsWith(`/${t.id}`)), r.fulfill({ json: {} })));
   await dup.addInitScript(() => localStorage.setItem("cresslet.token", "clv_mocked"));
-  await dup.goto(base + "/settings");
+  await dup.goto(base + "/settings/tokens");
   await dup.locator("#revoke-t1").focus();
   await dup.keyboard.press("Enter");
   await dup.locator("#revoke-t1").waitFor({ state: "detached" });
