@@ -9,6 +9,7 @@ test("check-ts: flags JavaScript outside the allowlist and opt-out comments, not
     "server/x.ts": `// fine\nconst a = 1;\n// ${opt}\n`,
     "studio/y.ts": "// @ts-expect-error: a reason\n",
     "studio/w.ts": `x;\n/* @ts-${"expect-error"} */\n/** @ts-${"expect-error"} */\n/*\n * @ts-${"expect-error"}\n */\n/*\n  @ts-${"expect-error"} */\n/* @ts-${"expect-error"} */ export {};\n`,
+    "studio/crlf.ts": `x;\r\n/* @ts-${"expect-error"} */\r\n/*\r\n  @ts-${"expect-error"} */ x;\r\n`,
     "templates/react/src/z.ts": `// ${opt}\n`,
   };
   const files = ["studio/new.js", "studio/vendor/hand-written.js", "tests/e2e/x.mjs", "studio/vendor/editor.js", "tests/fixtures/sdk-contract.js",
@@ -23,5 +24,7 @@ test("check-ts: flags JavaScript outside the allowlist and opt-out comments, not
     "studio/w.ts:5: @ts-expect-error needs a reason after it",
     "studio/w.ts:8: @ts-expect-error needs a reason after it",
     "studio/w.ts:9: @ts-expect-error needs a reason after it",
+    "studio/crlf.ts:2: @ts-expect-error needs a reason after it",
+    "studio/crlf.ts:4: @ts-expect-error needs a reason after it",
   ]);
 });

@@ -31,7 +31,7 @@ export function check(files: string[], read: (path: string) => string): string[]
     if (f.split("/").includes("node_modules")) continue;
     if (JS.test(f) && !ALLOW_JS.some(([re]) => re.test(f))) problems.push(`${f}: JavaScript; write it in TypeScript (or allow it in scripts/check-ts.ts, with why)`);
     if (TS.test(f) && !FOREIGN_TS.some((re) => re.test(f))) {
-      const lines = read(f).split("\n");
+      const lines = read(f).split(/\r?\n/);
       lines.forEach((l, i) => {
         if (OPT_OUT.test(l)) problems.push(`${f}:${i + 1}: ${OPT_OUT.exec(l)![0]}; fix the type error, or use @ts-expect-error with a reason`);
         if (BARE_EXPECT_ERROR.test(l)) problems.push(`${f}:${i + 1}: @ts-expect-error needs a reason after it`);
