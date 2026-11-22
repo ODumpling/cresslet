@@ -1,9 +1,8 @@
-import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Http2Bindings, type HttpBindings, serve } from "@hono/node-server";
-import { serveDir, serveFile } from "./static.ts";
+import { serveFile } from "./static.ts";
+import { ISOLATION, STUDIO_DIST, STUDIO_SRC, studio } from "./studio.ts";
 import { type Config, isolationWarnings, loadConfig, previewAppName, rootUrl } from "./config.ts";
 import { type App, Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
@@ -11,7 +10,8 @@ import { Logs } from "./logs.ts";
 import { api, normDomain } from "./api.ts";
 import { host, scheduled, upgrader } from "./host.ts";
 import { Scheduler } from "./cron.ts";
-import type { IncomingMessage } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
 import type { Duplex } from "node:stream";
 import { purgeApp } from "./admin.ts";
 import { pruneOldPageVersions } from "./deploys.ts";
@@ -19,7 +19,6 @@ import { settled as sandboxSettled } from "./sandbox.ts";
 import { bindingsSettled } from "./bindings.ts";
 import { type Cluster, singleNode } from "./cluster.ts";
 
-const STUDIO = join(import.meta.dirname, "../studio");
 const RETIRE_SW = `self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil((async () => {
   await self.registration.unregister();
@@ -28,36 +27,6 @@ self.addEventListener("activate", (e) => e.waitUntil((async () => {
 `;
 /** Files cresslet-container needs at the preview origin's root. */
 const PREVIEW_FILES = new Set(["cresslet-sw.js", "cresslet-relay.html", "cresslet-relay.js"]);
-
-/**
- * Studio files aren't content-hashed, and a CDN can cache them past the origin's `no-cache`
- * (Cloudflare's Browser Cache TTL rewrites it to `max-age=14400`): new HTML then runs stale JS.
- * So index.html loads them from `/_v/<hash of the studio>/` and app.js imports relatively: each
- * release's modules (and workers, via import.meta.url) have URLs no earlier release used.
- */
-async function studioRelease(): Promise<string> {
-  const hash = createHash("sha256");
-  const walk = async (dir: string): Promise<void> => {
-    const entries = await readdir(dir, { withFileTypes: true });
-    for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      const p = join(dir, e.name);
-      if (e.isDirectory()) await walk(p);
-      else if (e.isFile()) hash.update(relative(STUDIO, p)).update("\0").update(await readFile(p)).update("\0");
-    }
-  };
-  await walk(STUDIO);
-  const version = hash.digest("hex").slice(0, 12);
-  return (await readFile(join(STUDIO, "index.html"), "utf8"))
-    .replace(/\b(src|href)="\/([^"?#]+\.(?:js|css|svg))(?:\?[^"]*)?"/g, `$1="/_v/${version}/$2"`);
-}
-const VERSIONED = /^\/_v\/[0-9a-f]+(?=\/)/;
-
-/** Cross-origin isolation is required by cresslet-container (SharedArrayBuffer). */
-const ISOLATION = {
-  "cross-origin-opener-policy": "same-origin",
-  "cross-origin-embedder-policy": "require-corp",
-  "cross-origin-resource-policy": "same-origin",
-};
 
 /** `cluster`: which apps this node owns (docs/architecture.md#scaling-out); by default all of them. */
 export async function createServer(cfg: Config = loadConfig(), cluster: Cluster = singleNode) {
@@ -78,7 +47,9 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
   if ((shadowed && await store.appByName(shadowed)) || await store.appByDomain(cfg.previewHost)) {
     console.warn(`cresslet: ${cfg.previewHost} is the studio preview host; the app using that name/domain is no longer reachable`);
   }
-  let studioHtml: Promise<string> | undefined;
+  // The studio's pages: its build, or Vite in dev (CRESSLET_STUDIO_DEV=1, npm run dev).
+  const studioDev = process.env.CRESSLET_STUDIO_DEV === "1";
+  const ui = await studio({ dev: studioDev, host: new URL(rootUrl(cfg)).hostname });
   // Each app's crons fire on the node that owns it (checked again at dispatch: runs queue).
   const run = scheduled(cfg, store, runtime);
   const scheduler = new Scheduler(
@@ -124,7 +95,8 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
       h.set("content-type", "text/plain");
       return new Response("Not Found", { status: 404, headers: h });
     }
-    const res = await serveFile(req, join(STUDIO, "vendor/cresslet-container", name));
+    // As built (copied as is), or the vendored files themselves under Vite.
+    const res = await serveFile(req, join(studioDev ? STUDIO_SRC : STUDIO_DIST, "vendor/cresslet-container", name));
     res.headers.forEach((v, k) => h.has(k) || h.set(k, v));
     if (name === "cresslet-sw.js") h.set("service-worker-allowed", "/");
     // Only the studio may frame the relay (it bridges the SW to the studio's container).
@@ -160,27 +132,8 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
     if (reqHost !== pub.host) {
       return Response.redirect(pub.origin + url.pathname + url.search, 302);
     }
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      const html = await (studioHtml ??= studioRelease());
-      return new Response(req.method === "HEAD" ? null : html, {
-        // Nothing frames the studio: an app's page could otherwise overlay it (e.g. its CLI login).
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-cache",
-          "content-security-policy": "frame-ancestors 'none'",
-          ...ISOLATION,
-        },
-      });
-    }
-    const path = url.pathname.replace(VERSIONED, "");
-    const res = await serveDir(path === url.pathname ? req : new Request(new URL(path + url.search, url), req), STUDIO, { stripTs: true });
-    const h = new Headers(res.headers);
-    for (const [k, v] of Object.entries(ISOLATION)) h.set(k, v);
-    // Studio files aren't content-hashed: always revalidate (ETag), or a CDN/browser can pair new HTML
-    // with stale JS.
-    h.set("cache-control", "no-cache");
-    if (h.get("content-type")?.startsWith("text/html")) h.set("content-security-policy", "frame-ancestors 'none'");
-    return new Response(res.body, { status: res.status, headers: h });
+    const res = await ui.serve(req, env && "outgoing" in env ? { incoming: env.incoming as IncomingMessage, outgoing: env.outgoing as ServerResponse } : undefined);
+    return res ?? RESPONSE_ALREADY_SENT;
   }
 
   /** `upgrade` event of the HTTP server: WebSockets to app servers. */
@@ -210,6 +163,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
     handler,
     async close() {
       clearInterval(reaper);
+      await ui.close();
       scheduler.stop();
       runtime.close();
       await store.close();

@@ -19,6 +19,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm run build
       - run: npm test
 
   # The same tests with the metadata on Postgres (docs/database.md), plus its migration and copy tests.
@@ -40,6 +41,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run build
       - run: npm run test:pg
 
   # The Linux-only isolation tests (per-app uids, cgroups, gVisor) need root and a writable cgroup2

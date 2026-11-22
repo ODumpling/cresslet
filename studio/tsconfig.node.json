@@ -1,0 +1,11 @@
+{
+  // vite.config.ts: the studio's build, run by Vite in Node (npm run build, and the dev server in server/studio.ts).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2024"],
+    "types": ["node"],
+    "typeRoots": ["../node_modules/@types"]
+  },
+  "include": ["vite.config.ts"],
+  "exclude": []
+}

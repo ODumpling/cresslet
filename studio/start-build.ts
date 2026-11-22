@@ -6,6 +6,7 @@
 // Covers Start apps like templates/tanstack-start: no Vite plugins beyond Start's and React's, one client bundle
 // (no route code splitting), stylesheets through `?url` imports or imported CSS. No HMR: a save rebuilds and reloads.
 import type { BundleResult, Container, ContainerProcess } from "./vendor/cresslet-container/cresslet-container.js";
+import { staticUrl } from "./static-url.js";
 import type { BuildOptions, Loader, Message, Metafile, OnLoadResult, Plugin } from "./vendor/cresslet-container/types/vendor/esbuild-wasm.js";
 
 const enc = new TextEncoder();
@@ -224,7 +225,7 @@ export interface StartBuild {
 }
 
 /** `sdkPlugin`: `cresslet` in server code (cresslet-plugin.ts). */
-export function createStartBuilder(c: Container, { sdkPlugin, serviceUrl = new URL("./start-service.js", import.meta.url) }: { sdkPlugin: Plugin; serviceUrl?: URL }) {
+export function createStartBuilder(c: Container, { sdkPlugin, serviceUrl = staticUrl("start-service.js") }: { sdkPlugin: Plugin; serviceUrl?: URL }) {
   const wd = c.workdir;
   const p = (rel: string) => `${wd}/${rel}`;
   let svc: Service | null = null;

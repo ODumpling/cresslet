@@ -1,6 +1,7 @@
 // Registers the `cresslet` command inside cresslet-container so `cresslet dev|build|deploy`
 // behave like the real CLI, entirely in the browser.
 import { createStartBuilder, isStartApp } from "./start-build.js";
+import { staticUrl } from "./static-url.js";
 import type { CommandContext, Container, FileSystemTree, ProjectWorker } from "./vendor/cresslet-container/cresslet-container.js";
 import type { Plugin } from "./vendor/cresslet-container/types/vendor/esbuild-wasm.js";
 import type { FileItem, FileOp, FileResult, FileResults, FromWorker, HeaderList, ResponseMessage, ToWorker } from "./server-worker-protocol.ts";
@@ -74,7 +75,7 @@ const sdkPlugin: Plugin = {
   setup(b) {
     b.onResolve({ filter: /^cresslet$/ }, () => ({ path: "cresslet", namespace: "cresslet-sdk" }));
     b.onLoad({ filter: /.*/, namespace: "cresslet-sdk" }, async () => {
-      sdkSource ??= fetch(new URL("./vendor/cresslet-sdk.js", import.meta.url)).then((r) => {
+      sdkSource ??= fetch(staticUrl("vendor/cresslet-sdk.js")).then((r) => {
         if (!r.ok) throw new Error(`cresslet SDK: ${r.status}`);
         return r.text();
       });
@@ -423,7 +424,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       // studio's IndexedDB (every local project's files).
       let w: ProjectWorker;
       try {
-        w = await c.projectWorker(new URL("./server-worker.js", import.meta.url), { name: "cresslet-server" });
+        w = await c.projectWorker(staticUrl("server-worker.js"), { name: "cresslet-server" });
         if (stopped) return w.terminate(); // dev ended meanwhile
       } catch (e) {
         workerError = `server failed to start:\n${(e as Error).message}`;

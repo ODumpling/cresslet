@@ -1,6 +1,7 @@
 # Self-hosting
 
 ```sh
+npm ci && npm run build    # the studio (studio/dist); the Docker image does this in a build stage
 CRESSLET_DOMAIN=cresslet.example.com CRESSLET_SCHEME=https CRESSLET_PUBLIC_PORT=443 \
 CRESSLET_DATA_DIR=/var/lib/cresslet npm start
 ```

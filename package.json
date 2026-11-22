@@ -6,13 +6,14 @@
     "node": ">=24.12"
   },
   "scripts": {
-    "dev": "node --watch-path=server --watch-path=runtime server/main.ts",
+    "dev": "CRESSLET_STUDIO_DEV=1 node --watch-path=server --watch-path=runtime server/main.ts",
     "start": "node server/main.ts",
     "test": "node --test --test-concurrency=1 \"tests/*_test.ts\"",
-    "check": "tsc --noEmit && tsc -p studio && tsc -p studio/tsconfig.worker.json && tsc -p studio/tsconfig.service.json && tsc -p runtime && tsc -p tests/e2e && node scripts/check-ts.ts",
+    "check": "node scripts/routes.ts --check && tsc --noEmit && tsc -p studio && tsc -p studio/tsconfig.node.json && tsc -p studio/tsconfig.worker.json && tsc -p studio/tsconfig.service.json && tsc -p runtime && tsc -p tests/e2e && node scripts/check-ts.ts",
     "vendor": "node scripts/vendor-container.ts",
     "test:pg": "CRESSLET_TEST_SCHEMA_PER_DATA_DIR=1 node --test --test-concurrency=1 \"tests/*_test.ts\"",
-    "vendor:sdk": "node scripts/vendor-sdk.ts"
+    "vendor:sdk": "node scripts/vendor-sdk.ts",
+    "build": "cd studio && vite build"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.9",
@@ -23,9 +24,17 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",
+    "@tanstack/react-router": "1.170.46",
+    "@tanstack/react-start": "1.169.4",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "sql.js": "1.13.0",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vite": "8.3.5"
   }
 }

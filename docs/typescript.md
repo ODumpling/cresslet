@@ -1,14 +1,17 @@
 # TypeScript
 
-The code in this repo is TypeScript, type-checked strictly. There is no build step: everything runs from the `.ts`
-sources, with types removed by Node's built-in type stripping where it runs, and by the server where it doesn't.
+The code in this repo is TypeScript, type-checked strictly. The server, runtime, scripts and tests have no build step:
+they run from the `.ts` sources, with types removed by Node's built-in type stripping where it runs, and by the server
+where it doesn't. The studio is the one part with a build: Vite bundles it (`npm run build`, or Vite itself under
+`npm run dev`).
 
 ## How each part runs
 
 | Code | Runs in | How it gets JavaScript |
 | --- | --- | --- |
 | `server/`, `scripts/*.ts`, `tests/*_test.ts`, `tests/e2e/*.ts` | Node 24 | Node's type stripping (`node server/main.ts`) |
-| `studio/*.ts` | the browser (the page; `server-worker.ts` in a preview worker; `start-service.ts` in a container `node` process) | served stripped: a request for `studio/x.js` with no such file serves `x.ts` with its types removed, as `text/javascript` ([`server/static.ts`](../server/static.ts)) |
+| `studio/src/` (the React app) and the modules it imports (`studio/*.ts`) | the browser (the page) | bundled by Vite ([`studio/vite.config.ts`](../studio/vite.config.ts)) into `studio/dist/client`: a prerendered shell (`_shell.html`) and content-hashed assets under `/assets/` |
+| `studio/server-worker.ts`, `studio/start-service.ts` | a preview worker; a container `node` process | types stripped at build time and served as they are at a stable URL (`/server-worker.js`, `/start-service.js`); likewise `vendor/cresslet-sdk.js` and cresslet-container's dist (`/vendor/cresslet-container/…`, whose workers resolve beside it) |
 | `runtime/*.ts` | workerd (each app's sandbox) | stripped when [`server/runtime.ts`](../server/runtime.ts) writes `worker.js` and `cresslet-runtime.js` into a run dir |
 | `scripts/vendor/*.ts` | Node, esbuild | Node runs `build.ts`; esbuild bundles the entry files |
 
@@ -18,11 +21,25 @@ handles erasable syntax (no `enum`, `namespace`, parameter properties): every ts
 prints a one-time ExperimentalWarning for that function; `stripTypes` drops exactly that warning (no `--disable-warning`
 flags anywhere).
 
-The studio's URLs and imports keep their `.js` names (`/app.js` in index.html, `import … from "./store.js"`,
-`new URL("./server-worker.js", import.meta.url)`): that's what browsers, cached pages from earlier releases and
-cresslet-container ask for. Stripped files are cached per file version (size + mtime, also the ETag), and the
-`/_v/<hash>/` release hash covers the `.ts` sources. Tests that load studio modules under Node import
-[`tests/studio-imports.ts`](../tests/studio-imports.ts), which resolves those `./x.js` imports to `x.ts`.
+## The studio's build
+
+The studio is a TanStack Start app in SPA mode with hash routes (`#/p/<id>`): `studio/src/routes/` are the routes
+(`src/routeTree.gen.ts` is generated from them; `npm run check` fails if it's stale), `studio/src/README.md` the
+conventions its views follow. Nothing renders on a server: Start prerenders the shell once at build time, and the
+Hono `/v1` API stays the only backend.
+
+- **`npm run build`** writes `studio/dist/client`, which the server serves ([`server/studio.ts`](../server/studio.ts)):
+  the shell for `/` with `no-cache`, `/assets/*` as `immutable`, the stable-URL files with `no-cache` (ETag), and
+  cross-origin isolation (COOP/COEP/CORP) on everything, `frame-ancestors 'none'` on HTML. `npm start` needs it; the
+  Docker image builds it in a build stage.
+- **`npm run dev`** runs Vite in middleware mode inside the server (`CRESSLET_STUDIO_DEV=1`), so `/v1`, the app hosts
+  and the preview host stay where they are; its hot-reload socket listens on `CRESSLET_HMR_PORT` (24678).
+- **Earlier releases:** a CDN can keep a page past `no-cache`. A script that's gone (the old `/_v/<hash>/app.js` entry,
+  or a hashed asset a later build replaced) answers with a module that reloads into `/?_r=<release>`, a URL no cached
+  page has; the app drops `_r` again.
+
+Tests that load studio modules under Node import [`tests/studio-imports.ts`](../tests/studio-imports.ts), which resolves
+their `./x.js` imports to `x.ts`.
 
 ## tsconfigs
 
@@ -31,7 +48,8 @@ cresslet-container ask for. Stripped files are cached per file version (size + m
 | Config | Covers | Environment |
 | --- | --- | --- |
 | `tsconfig.json` | `server/`, `tests/*.ts`, `scripts/*.ts` | Node types |
-| `studio/tsconfig.json` | the studio page modules, `vendor/*.d.ts` | DOM, no Node |
+| `studio/tsconfig.json` | the studio's page: `src/` (React, `jsx: react-jsx`) and the modules it imports, `vendor/*.d.ts` | DOM, `vite/client`, no Node |
+| `studio/tsconfig.node.json` | `vite.config.ts` (the studio's build) | Node types |
 | `studio/tsconfig.worker.json` | `server-worker.ts` | webworker lib |
 | `studio/tsconfig.service.json` | `start-service.ts` | Node types; `types/tanstack.d.ts` |
 | `runtime/tsconfig.json` | the sandbox entry | webworker lib + `runtime/workerd.d.ts` |
@@ -55,6 +73,7 @@ outside its allowlist:
   cresslet-cli's `sdk/index.ts`, or copied from an older `sdk/index.js`).
 - `tests/fixtures/sdk-contract.js`: the SDK contract cases, vendored from cresslet-cli.
 - `templates/**`: the starter apps users get (their code; not checked here).
+- `studio/dist/**`: the studio's build output (not committed).
 
 ## Rules
 
@@ -64,23 +83,26 @@ outside its allowlist:
 - No `@ts-ignore` or `@ts-nocheck` (the guard fails on them); `@ts-expect-error` only with a reason.
 - `!` only where an invariant guarantees the value (say which, briefly). In e2e scripts, `!` on a Playwright lookup the
   test expects to find is fine: a null fails the test as it did before.
-- `as` on DOM lookups through the typed helper (`$<HTMLInputElement>("id")` in app.ts), on JSON at the edge, and on
-  `catch` values (`errorMessage(e)`); otherwise prefer types to casts.
+- `as` on JSON at the edge and on `catch` values (`errorMessage(e)`); otherwise prefer types to casts (React refs
+  are typed: `useRef<HTMLInputElement>(null)`).
 - New fields must not change runtime behavior: a class field without an initializer is a real field in JavaScript; use
   `declare` for one that only exists for the types.
 
 ## Adding a file
 
 - Server, scripts, tests: `foo.ts`, imported as `./foo.ts`.
-- Studio: `studio/foo.ts`, imported as `./foo.js` and referenced by that URL; add it to the tsconfig for where it runs if
-  it isn't the page.
+- Studio UI: `studio/src/…/Foo.tsx` (a route in `studio/src/routes/`, a view in `studio/src/views/`), imported with its
+  `.ts`/`.tsx` extension. A module that isn't UI: `studio/foo.ts`, imported as `./foo.js` by its neighbours. A file
+  loaded by URL at runtime (not bundled): add it to `staticFiles` in `studio/vite.config.ts` and reference it with
+  `staticUrl()` (`studio/static-url.ts`); add it to the tsconfig for where it runs if it isn't the page.
 - A new environment: its own tsconfig, added to `npm run check`.
 - Something that must stay JavaScript: add it to `ALLOW_JS` in `scripts/check-ts.ts`, with the reason.
 
 ## Commands
 
 ```sh
-npm run check                # every tsconfig + scripts/check-ts.ts
+npm run check                # the route tree, every tsconfig, scripts/check-ts.ts
+npm run build                # the studio (studio/dist)
 npm test                     # includes tests/check_ts_test.ts
 npx tsc -p studio            # one project
 npx tsc -p scripts/vendor    # after npm install in scripts/vendor

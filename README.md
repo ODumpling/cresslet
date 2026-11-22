@@ -48,13 +48,15 @@ Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`
 ## Develop
 
 ```sh
-npm run dev       # watch mode
+npm run dev       # watch mode; the studio through Vite (hot reload)
+npm run build     # the studio's production build (studio/dist), which npm start serves
 npm test          # integration tests (spawn real sandboxes)
-npm run check     # tsc (every project) + the TypeScript-only check
+npm run check     # tsc (every project) + the route tree + the TypeScript-only check
 npm run vendor    # refresh studio/vendor/cresslet-container (../cresslet-container or GitHub)
 # browser e2e: see tests/e2e/studio.ts
 ```
 
-Everything is TypeScript, run without a build step: [docs/typescript.md](docs/typescript.md).
+Everything is TypeScript. The server runs from its `.ts` files with no build step; the studio (React on TanStack Start)
+is built by Vite: [docs/typescript.md](docs/typescript.md).
 
 MIT
