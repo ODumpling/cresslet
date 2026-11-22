@@ -34,6 +34,7 @@ const SQL_WASM = "https://cdn.jsdelivr.net/npm/sql.js@1.13.0/dist/sql-wasm.wasm"
 let handler: Handler | undefined;
 let env: Env;
 let studioSql: ((sql: string) => SqlResult) | undefined; // the Database view's runner (init sets it)
+let snapshotsPosted = 0; // database snapshots posted (a Database view result says whether it posted one)
 let serial: Promise<unknown> | null = null; // with init's `serial`: the request being handled (a promise), the next one waits for it
 // Where the `cresslet` SDK (`import { db } from "cresslet"`, cresslet-cli sdk/index.js) finds the env: published once
 // the app's module has loaded (bindings exist only once a handler runs). Contract: runtime/cresslet-runtime.ts.
@@ -240,8 +241,11 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
   let savedRowid = 0;
   let reopened = false;
   const inTransaction = () => {
+    // (an empty transaction's COMMIT ends defer_foreign_keys: set again as the app left it, for its next one)
+    const defer = one("PRAGMA defer_foreign_keys");
     try {
       db.exec("BEGIN; COMMIT;");
+      if (defer) db.exec("PRAGMA defer_foreign_keys = ON;");
       return false;
     } catch {
       return true;
@@ -258,6 +262,7 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
     reopened = true; // last_insert_rowid() is 0 on the new connection until its next insert
     db.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"};`); // as the app left it
     postMessage({ type: "db", bytes: out }, [out.buffer]);
+    snapshotsPosted++;
     return true;
   };
   // One save at a time, 300 ms after the first change that asked for it: later changes don't push it back (steady
@@ -425,7 +430,7 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
           let truncated = false;
           while (stmt.step()) {
             if (rows.length < SQL_MAX_ROWS) rows.push(stmt.get(null, { useBigInt: true }).map(cell));
-            else {
+            else if (!truncated) {
               truncated = true;
               // A read stops there (an endless one too); a write … RETURNING runs to its end, where its errors (a
               // deferred foreign key) are.
@@ -531,11 +536,13 @@ onmessage = async ({ data: m, ports }: MessageEvent<ToWorker>) => {
   }
   if (m.type === "sql") {
     // Synchronous: no request's code runs in between (a request awaiting something sees the change after).
+    const posted = snapshotsPosted;
     try {
       if (!studioSql) throw new Error("the server isn't ready");
-      postMessage({ type: "sql-result", id: m.id, result: studioSql(String(m.sql)) });
+      const result = studioSql(String(m.sql));
+      postMessage({ type: "sql-result", id: m.id, snapshot: snapshotsPosted !== posted, result });
     } catch (e) {
-      postMessage({ type: "sql-result", id: m.id, error: (e as { message?: string } | null)?.message ?? String(e) });
+      postMessage({ type: "sql-result", id: m.id, snapshot: snapshotsPosted !== posted, error: (e as { message?: string } | null)?.message ?? String(e) });
     }
     return;
   }

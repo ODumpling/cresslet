@@ -89,5 +89,6 @@ export type FromWorker =
   | { type: "log"; level: "log" | "info" | "warn" | "error" | "debug"; msg: string }
   | { type: "db"; bytes: Uint8Array }
   | ResponseMessage
-  | ({ type: "sql-result"; id: number } & ({ result: SqlResult } | { error: string }))
+  /** `snapshot`: the script's writes were posted as a `db` snapshot (just before this). */
+  | ({ type: "sql-result"; id: number; snapshot: boolean } & ({ result: SqlResult } | { error: string }))
   | ({ type: "files"; id: number } & FileOp);

@@ -346,7 +346,7 @@ export default { async fetch(req) {
     assert.match(rolled.error, /no such column: nope.*rolled back/);
     assert.deepEqual((await w.sql("SELECT v FROM t ORDER BY v")).rows, [[1], [5]]);
     assert.equal((await w.sql("INSERT INTO t VALUES (7, NULL)")).transaction, false, "no transaction left open");
-    // the app's own transaction (a request mid-way): scripts wait for it, its ROLLBACK can't undo theirs
+    // the app's own transaction (a request mid-way): scripts are refused, so its ROLLBACK can't undo theirs
     await w.get("/begin");
     assert.match((await w.sql("INSERT INTO t VALUES (8, NULL)")).error, /the app has a transaction open/);
     await w.get("/rollback");
