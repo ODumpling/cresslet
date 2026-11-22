@@ -73,7 +73,7 @@ export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
   };
 }
 
-/** One cron invocation: an internal request the sandbox entry routes to `scheduled()` (runtime/worker.js). */
+/** One cron invocation: an internal request the sandbox entry routes to `scheduled()` (runtime/worker.ts). */
 export function scheduled(cfg: Config, store: Store, runtime: Runtime) {
   return async (appId: string, cron: string, at: Date) => {
     const app = await store.appById(appId);

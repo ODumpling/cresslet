@@ -3,21 +3,38 @@
 //   HOST     service binding to the control plane, which owns the app's db and files
 //   (secrets are fetched once from HOST /secrets, so they never sit on disk in plaintext)
 //   APP      json binding { id, name, url, deployId }
-// The env is also published for the `cresslet` SDK (cresslet-runtime.js, imported before the app).
+// The env is also published for the `cresslet` SDK (cresslet-runtime.ts, imported before the app).
 import { Buffer } from "node:buffer";
 import { runtime } from "cresslet-runtime";
 import * as mod from "app";
 
-const exp = mod.default ?? mod;
-const handler = typeof exp === "function"
+/** The app's fetch and scheduled handlers (docs/app-format.md). */
+type Fetch = (req: Request, env: Env, ctx: ExecutionContext) => unknown;
+type Scheduled = (event: { type: "scheduled"; cron: string; scheduledTime: number }, env: Env, ctx: Pick<ExecutionContext, "waitUntil" | "passThroughOnException">) => unknown;
+/** workerd's per-request context. */
+interface ExecutionContext {
+  waitUntil(p: unknown): void;
+  passThroughOnException?(): void;
+}
+/** This worker's bindings (server/runtime.ts workerdConfig). */
+interface Bindings {
+  HOST: { fetch(url: string, init?: RequestInit): Promise<Response> };
+  APP: { id: string; name: string; url: string; deployId: string };
+}
+type Env = Awaited<ReturnType<typeof makeEnv>>;
+/** A bound SQL value, or what a query returns (bigints and blobs tagged on the wire). */
+type SqlValue = string | number | bigint | boolean | null | Uint8Array | ArrayBuffer;
+
+const exp = (mod.default ?? mod) as ((Fetch | object) & { fetch?: unknown; scheduled?: unknown }) | null | undefined; // the app's exports
+const handler: Fetch | undefined = typeof exp === "function"
   ? exp
   : typeof exp?.fetch === "function"
-  ? exp.fetch.bind(exp)
+  ? exp.fetch.bind(exp) as Fetch
   : undefined;
-const scheduled = typeof exp?.scheduled === "function" ? exp.scheduled.bind(exp) : undefined;
+const scheduled = typeof exp?.scheduled === "function" ? exp.scheduled.bind(exp) as Scheduled : undefined;
 
 // SQL values cross the binding as JSON; bigints and blobs are tagged.
-const replacer = (_k, v) =>
+const replacer = (_k: string, v: unknown) =>
   typeof v === "bigint"
     ? { $bigint: String(v) }
     : v instanceof Uint8Array
@@ -25,37 +42,37 @@ const replacer = (_k, v) =>
     : v instanceof ArrayBuffer
     ? { $bytes: Buffer.from(v).toString("base64") }
     : v;
-const reviver = (_k, v) =>
-  v && typeof v === "object" && typeof v.$bytes === "string"
-    ? new Uint8Array(Buffer.from(v.$bytes, "base64"))
+const reviver = (_k: string, v: unknown) =>
+  v && typeof v === "object" && typeof (v as { $bytes?: unknown }).$bytes === "string"
+    ? new Uint8Array(Buffer.from((v as { $bytes: string }).$bytes, "base64"))
     : v;
 
-let appEnv;
-async function makeEnv(bindings) {
+let appEnv: Promise<Env> | undefined;
+async function makeEnv(bindings: Bindings) {
   const host = bindings.HOST;
-  const check = async (r) => {
+  const check = async (r: Response) => {
     if (r.ok) return r;
     const msg = await r.text();
     throw new Error(msg || `binding error ${r.status}`);
   };
-  const db = async (op, body) => {
+  const db = async (op: string, body: unknown): Promise<unknown> => {
     const r = await check(
       await host.fetch(`http://host/db/${op}`, { method: "POST", body: JSON.stringify(body, replacer) }),
     );
     return JSON.parse(await r.text(), reviver);
   };
-  const secrets = await (await check(await host.fetch("http://host/secrets"))).json();
-  const fileUrl = (key) => `http://host/files?key=${encodeURIComponent(key)}`;
+  const secrets: Record<string, string> = await (await check(await host.fetch("http://host/secrets"))).json();
+  const fileUrl = (key: string) => `http://host/files?key=${encodeURIComponent(key)}`;
   return {
     db: {
-      query: (sql, ...params) => db("query", { sql, params }),
-      first: (sql, ...params) => db("first", { sql, params }),
-      run: (sql, ...params) => db("run", { sql, params }),
-      exec: async (sql) => void (await db("exec", { sql })),
-      batch: (statements) => db("batch", { statements }),
+      query: (sql: string, ...params: SqlValue[]) => db("query", { sql, params }),
+      first: (sql: string, ...params: SqlValue[]) => db("first", { sql, params }),
+      run: (sql: string, ...params: SqlValue[]) => db("run", { sql, params }),
+      exec: async (sql: string) => void (await db("exec", { sql })),
+      batch: (statements: { sql: string; params?: SqlValue[] }[]) => db("batch", { statements }),
     },
     files: {
-      async put(key, body, opts = {}) {
+      async put(key: string, body: BodyInit | null, opts: { contentType?: string } = {}) {
         const type = opts.contentType ?? (body instanceof Blob && body.type) ?? "application/octet-stream";
         await check(
           await host.fetch(fileUrl(key), {
@@ -65,18 +82,19 @@ async function makeEnv(bindings) {
           }),
         );
       },
-      async get(key) {
+      async get(key: string) {
         const r = await host.fetch(fileUrl(key));
         if (r.status === 404) return null;
         await check(r);
         return new Response(r.body, {
-          headers: { "content-type": r.headers.get("content-type"), "content-length": r.headers.get("content-length") },
+          // (a missing one is the string "null", as before)
+          headers: { "content-type": String(r.headers.get("content-type")), "content-length": String(r.headers.get("content-length")) },
         });
       },
-      async delete(key) {
+      async delete(key: string) {
         await check(await host.fetch(fileUrl(key), { method: "DELETE" }));
       },
-      async list(prefix = "") {
+      async list(prefix = ""): Promise<unknown> {
         const r = await check(await host.fetch(`http://host/files/list?prefix=${encodeURIComponent(prefix)}`));
         return r.json();
       },
@@ -86,7 +104,7 @@ async function makeEnv(bindings) {
   };
 }
 
-async function runScheduled({ cron, scheduledTime }, bindings, ctx) {
+async function runScheduled({ cron, scheduledTime }: { cron: string; scheduledTime: number }, bindings: Bindings, ctx: ExecutionContext) {
   if (!scheduled) {
     console.error(`cron "${cron}": server/index has no scheduled() export`);
     return new Response(null, { status: 501 });
@@ -96,20 +114,20 @@ async function runScheduled({ cron, scheduledTime }, bindings, ctx) {
     env = runtime.env = await (appEnv ??= makeEnv(bindings));
   } catch (err) {
     appEnv = undefined;
-    console.error(`failed to load secrets: ${err.message}`);
+    console.error(`failed to load secrets: ${(err as Error).message}`);
     return new Response(null, { status: 500 });
   }
   // The run counts as done (and failed) including work handed to ctx.waitUntil().
-  const pending = [];
-  const sctx = { waitUntil: (p) => void pending.push(Promise.resolve(p)), passThroughOnException: () => ctx.passThroughOnException?.() };
+  const pending: Promise<unknown>[] = [];
+  const sctx = { waitUntil: (p: unknown) => void pending.push(Promise.resolve(p)), passThroughOnException: () => ctx.passThroughOnException?.() };
   // Drain until empty: waitUntil work may register more waitUntil work.
   const drain = async () => {
-    const results = [];
+    const results: PromiseSettledResult<unknown>[] = [];
     while (pending.length) results.push(...(await Promise.allSettled(pending.splice(0))));
     return results;
   };
   try {
-    let results;
+    let results: PromiseSettledResult<unknown>[];
     try {
       await scheduled({ type: "scheduled", cron, scheduledTime }, env, sctx);
     } finally {
@@ -124,7 +142,7 @@ async function runScheduled({ cron, scheduledTime }, bindings, ctx) {
 }
 
 export default {
-  async fetch(raw, bindings, ctx) {
+  async fetch(raw: Request, bindings: Bindings, ctx: ExecutionContext) {
     // Readiness probe from the control plane (clients can't send x-cresslet-* headers).
     if (raw.headers.get("x-cresslet-probe")) return new Response(null, { status: 204 });
     // Only the control plane can set this (server/runtime.ts strips x-cresslet-* from clients).
@@ -140,7 +158,7 @@ export default {
       env = runtime.env = await appEnv;
     } catch (err) {
       appEnv = undefined;
-      console.error(`failed to load secrets: ${err.message}`);
+      console.error(`failed to load secrets: ${(err as Error).message}`);
       return new Response("Internal Server Error", { status: 500 });
     }
     const url = raw.headers.get("x-cresslet-url") ?? raw.url;

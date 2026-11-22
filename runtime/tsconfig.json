@@ -1,0 +1,20 @@
+{
+  // The sandbox entry, run by workerd: server/runtime.ts strips the types when it copies these into a run dir
+  // (worker.js, cresslet-runtime.js). Web globals (webworker lib) plus workerd's own (workerd.d.ts).
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2024", "webworker", "webworker.iterable", "webworker.asynciterable"],
+    "types": [],
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "paths": { "cresslet-runtime": ["./cresslet-runtime.ts"] }
+  },
+  "include": ["*.ts"]
+}

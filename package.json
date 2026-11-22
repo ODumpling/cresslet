@@ -9,7 +9,7 @@
     "dev": "node --watch-path=server --watch-path=runtime server/main.ts",
     "start": "node server/main.ts",
     "test": "node --test --test-concurrency=1 \"tests/*_test.ts\"",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p runtime",
     "vendor": "node scripts/vendor-container.ts",
     "test:pg": "CRESSLET_TEST_SCHEMA_PER_DATA_DIR=1 node --test --test-concurrency=1 \"tests/*_test.ts\"",
     "vendor:sdk": "node scripts/vendor-sdk.ts"
