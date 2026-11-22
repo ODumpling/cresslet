@@ -870,3 +870,39 @@ test("stack: an older branch named like the stack (feat/<name>) moves it to the 
   const own = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: "feat/dark-mode", baseSha: linked.sha, files: [...linked.files, { path: "b", data: "1" }], title: "Go on" });
   assert.deepEqual([own.status, own.body.branch, own.body.change.baseSha], [201, "feat/go-on/1-go-on", linked.sha]);
 }));
+
+test("stack: go back to a change (later ones set aside, branches kept), restore them, or build on it", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];
+  const add = async (from: string, baseSha: string, title: string, x: string) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: files(x), title })).body;
+  const c1 = await add("main", linked.sha, "One", "1");
+  const c2 = await add(c1.branch, c1.sha, "Two", "2");
+  const read = async () => (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
+
+  const back = await t.send("POST", "/v1/apps/shop/git/stack/back", tok, { change: c1.change.id });
+  assert.equal(back.status, 200, JSON.stringify(back.body));
+  assert.deepEqual([back.body.change.sha, back.body.setAside.map((c: { title: string }) => c.title)], [c1.sha, ["Two"]]);
+  let s = await read();
+  assert.deepEqual([s.changes.map((c: { title: string }) => c.title), s.setAside.map((c: { title: string; github: string }) => [c.title, c.github])], [["One"], [["Two", "ok"]]]);
+  assert.equal(t.gh.repo("octo/shop").refs.get(c2.branch), c2.sha);
+  // The change set aside takes no commit, sync or merge.
+  for (const [path, input] of [["/git/stack", { from: c2.branch, baseSha: c2.sha, files: files("x"), title: "X" }], ["/git/sync", { branch: c2.branch, baseSha: c2.sha, files: files("x") }], ["/git/merge", { branch: c2.branch }]] as const) {
+    const r = await t.send("POST", `/v1/apps/shop${path}`, tok, input);
+    assert.deepEqual([r.status, r.body.error], [409, "set_aside"], path);
+  }
+
+  const restored = await t.send("POST", "/v1/apps/shop/git/stack/restore", tok, { stack: s.id });
+  assert.deepEqual([restored.status, restored.body.change.branch, restored.body.restored], [200, c2.branch, 1]);
+  s = await read();
+  assert.deepEqual([s.changes.length, s.setAside.length], [2, 0]);
+
+  // Back again and build on change 1: a new change 2 from it; the old one can't be restored.
+  await t.send("POST", "/v1/apps/shop/git/stack/back", tok, { change: c1.change.id });
+  const n2 = await add(c1.branch, c1.sha, "Other two", "2b");
+  assert.deepEqual(t.gh.commit(n2.sha).parents, [c1.sha]);
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/stack/restore", tok, { stack: s.id })).body.error, "nothing_set_aside");
+  s = await read();
+  assert.deepEqual([s.changes.map((c: { title: string }) => c.title), s.setAside], [["One", "Other two"], []]);
+  assert.equal((await t.send("POST", "/v1/apps/shop/git/stack/back", tok, { change: "chg_nope" })).status, 404);
+}));

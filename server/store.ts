@@ -1178,6 +1178,31 @@ export class Store implements RateHits {
     );
     return { ...c, state: "open", landed_sha: null, pr_number: null, created_at: now, updated_at: now };
   }
+  /** The app's changes set aside (gone back from), by stack, bottom first. */
+  setAsideStackChanges(appId: string): Promise<StackChange[]> {
+    return this.db.all<StackChange>("SELECT * FROM stack_changes WHERE app_id = ? AND state = 'set_aside' ORDER BY stack_id, position", appId);
+  }
+  /** Gone back to the change at `position`: the open ones above it are set aside. */
+  async setAsideAbove(appId: string, stackId: string, position: number): Promise<number> {
+    return (await this.db.run(
+      "UPDATE stack_changes SET state = 'set_aside', updated_at = ? WHERE app_id = ? AND stack_id = ? AND state = 'open' AND position > ?",
+      Date.now(), appId, stackId, position,
+    )).changes;
+  }
+  /** A stack's changes set aside, back on it. */
+  async restoreSetAside(appId: string, stackId: string): Promise<number> {
+    return (await this.db.run(
+      "UPDATE stack_changes SET state = 'open', updated_at = ? WHERE app_id = ? AND stack_id = ? AND state = 'set_aside'",
+      Date.now(), appId, stackId,
+    )).changes;
+  }
+  /** A new change was built where they were: a stack's changes set aside leave it (for good; their branches stay). */
+  async detachSetAside(appId: string, stackId: string, to: string): Promise<number> {
+    return (await this.db.run(
+      "UPDATE stack_changes SET stack_id = ?, updated_at = ? WHERE app_id = ? AND stack_id = ? AND state = 'set_aside'",
+      to, Date.now(), appId, stackId,
+    )).changes;
+  }
   /** A commit onto the top change's branch from its recorded commit (a hand edit pushed, a merge resolved): it follows. */
   async followStackTop(appId: string, branch: string, from: string, to: string): Promise<boolean> {
     return (await this.db.run(

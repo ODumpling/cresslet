@@ -220,7 +220,8 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
       on,
       context: () => {
         const s = r.git?.connected ? r.git.state : undefined;
-        return s ? `[Source control: this project is linked to the GitHub repository ${s.owner}/${s.repo}. The workspace is on branch ${s.activeBranch} (default branch: ${s.defaultBranch})${s.dirty ? ", with changes not committed yet" : ""}.]` : null;
+        const back = s?.back ? ` The user went back to change ${s.back.position} ("${s.back.title}"): the later changes (${s.back.setAside.map((t) => `"${t}"`).join(", ") || "none"}) are set aside, so their code isn't in the workspace; your changes go on top of change ${s.back.position}.` : "";
+        return s ? `[Source control: this project is linked to the GitHub repository ${s.owner}/${s.repo}. The workspace is on branch ${s.activeBranch} (default branch: ${s.defaultBranch})${s.dirty ? ", with changes not committed yet" : ""}.${back}]` : null;
       },
     });
     r.stick = true;

@@ -446,6 +446,33 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 if (!confirm(`Load ${branch} (the top of ${stack.name}) into this workspace?${gitState.dirty ? " Changes not pushed yet are pushed first." : ""}`)) return;
                 setStackBusy(true);
                 void g.switchTo(branch).then(() => toast(`On ${branch}`), (e) => toast(`Couldn't load ${branch}: ${errorMessage(e)}`, 10000)).finally(() => setStackBusy(false));
+              }}
+              onBack={(change) => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                const above = stack.changes.filter((c) => c.position > change.position);
+                if (!confirm(`Go back to change ${change.position}, "${change.title}"?\n\n` +
+                  `${above.length} later ${above.length === 1 ? "change is" : "changes are"} set aside: kept on GitHub, and you can restore them until you build on change ${change.position}.` +
+                  `${gitState.dirty ? " Changes not pushed yet are committed first, as a change set aside with them." : ""}\n\n` +
+                  "The preview's database isn't taken back: tables and rows from later changes stay.")) return;
+                setStackBusy(true);
+                void g.goBack(change).then(
+                  () => toast(`Back on change ${change.position}. The next request starts a new change from here.`, 8000),
+                  (e) => toast(`Couldn't go back: ${errorMessage(e)}`, 10000),
+                ).finally(() => setStackBusy(false));
+              }}
+              onRestore={() => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                const discard = gitState.dirty;
+                if (discard && !confirm("This workspace has changes not pushed yet. Restoring loads the top change and drops them. Restore anyway?")) return;
+                setStackBusy(true);
+                void g.restore(stack.id, discard).then(
+                  (r) => toast(`Restored ${r.restored} ${r.restored === 1 ? "change" : "changes"}: on change ${r.change.position}`, 8000),
+                  (e) => toast(`Couldn't restore: ${errorMessage(e)}`, 10000),
+                ).finally(() => setStackBusy(false));
               }} />
             ) : null}
             devLog={() => engine.current?.termOut ?? ""}

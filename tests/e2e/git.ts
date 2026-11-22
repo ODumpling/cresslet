@@ -64,6 +64,8 @@ const replies: [Block[], string][] = [
   [[{ type: "text", text: "Added due dates." }], "end_turn"],
   [[{ type: "tool_use", id: "d2", name: "write_file", input: { path: "src/dark.css", content: "body { background: #111; }\n" } }], "tool_use"],
   [[{ type: "text", text: "Added dark mode." }], "end_turn"],
+  [[{ type: "tool_use", id: "d3", name: "write_file", input: { path: "src/dark.css", content: "body { background: #000; }\n" } }], "tool_use"],
+  [[{ type: "text", text: "Made it darker." }], "end_turn"],
   [[{ type: "tool_use", id: "r1", name: "write_file", input: { path: "src/App.tsx", content: RESOLVED } }], "tool_use"],
   [[{ type: "text", text: "Resolved the conflict." }], "end_turn"],
 ];
@@ -138,6 +140,40 @@ try {
   await page.screenshot({ path: `${out}/git-stack-workspace.png` });
   console.log("two changes stacked:", `${STACK}/1…`, `${STACK}/2…`);
 
+  // Go back to change 1: change 2 is set aside (struck through, its branch kept), the workspace holds change 1's files.
+  const DARK = `${STACK}/2-dark-mode`;
+  await page.locator("#stack-panel .stack-row", { hasText: "1 · Add due dates to tasks" }).getByRole("button", { name: /Go back/ }).click();
+  await toast(/Back on change 1/, 60000);
+  await page.locator("#stack-panel .stack-row[data-aside]", { hasText: "2 · Dark mode" }).waitFor();
+  await page.locator("#stack-panel .stack-row[data-here]", { hasText: "1 · Add due dates to tasks" }).waitFor();
+  await page.locator("#git-btn-branch", { hasText: `${STACK}/1-add-due-dates-to-tasks` }).waitFor();
+  await page.locator('#tree button[data-path="src/dark.css"]').waitFor({ state: "detached", timeout: 30000 });
+  if (gh.repo(full).refs.get(DARK) !== c2) fail("the change set aside lost its branch");
+  await page.locator("#stack-panel").screenshot({ path: `${out}/git-stack-back.png` });
+  console.log("went back to change 1; change 2 set aside");
+
+  // Restore: change 2 is back, and the workspace on it.
+  await page.locator("#stack-restore").click();
+  await toast(/Restored 1 change/, 60000);
+  await page.locator("#stack-panel .stack-row[data-here]", { hasText: "2 · Dark mode" }).waitFor();
+  await page.locator('#tree button[data-path="src/dark.css"]').waitFor({ state: "attached", timeout: 30000 });
+  console.log("restored change 2");
+
+  // Back again, and a new request: it's a new change 2 on change 1 (Claude is told where the workspace is), and the
+  // one set aside is dropped.
+  await page.locator("#stack-panel .stack-row", { hasText: "1 · Add due dates to tasks" }).getByRole("button", { name: /Go back/ }).click();
+  await page.locator("#stack-panel .stack-row[data-aside]", { hasText: "2 · Dark mode" }).waitFor({ timeout: 60000 });
+  await page.locator("#stack-panel .stack-row[data-here]", { hasText: "1 · Add due dates to tasks" }).waitFor();
+  await input.fill("Dark mode, darker");
+  await input.press("Enter");
+  await page.locator("#builder-log .notice", { hasText: "Committed as change 2 of the stack" }).nth(1).waitFor({ timeout: 60000 });
+  if (!claudeAsked.at(-2)?.includes("went back to change 1")) fail(`Claude wasn't told about going back: ${claudeAsked.at(-2)}`);
+  const DARKER = `${STACK}/2-dark-mode-darker`;
+  if (gh.commit(gh.repo(full).refs.get(DARKER)!).parents[0] !== c1) fail("the new change isn't on change 1");
+  await page.locator("#stack-panel .stack-row[data-here]", { hasText: "2 · Dark mode, darker" }).waitFor({ timeout: 30000 });
+  if (await page.locator("#stack-panel .stack-row[data-aside]").count()) fail("the change set aside is still shown");
+  console.log("built a new change 2 on change 1");
+
   // A hand edit after them: it goes into the top change (pushed with the deploy).
   await page.locator("#view-code").click();
   await page.locator('#tree button[data-path="src/App.tsx"]').click();
@@ -152,11 +188,11 @@ try {
   await page.locator("#deploy-btn").click();
   await toast("Deployed:", 180000);
   const log = (await deployLog())!;
-  for (const want of [`merging ${STACK}/2-dark-mode into main`, "main had commits of its own", `built from ${full} main @`]) {
+  for (const want of [`merging ${DARKER} into main`, "main had commits of its own", `built from ${full} main @`]) {
     if (!log.includes(want)) fail(`deploy log lacks "${want}":\n${log}`);
   }
-  if ([...gh.repo(full).refs.keys()].some((b) => b.startsWith(STACK + "/"))) fail(`landed stack's branches not deleted: ${[...gh.repo(full).refs.keys()]}`);
-  if (!gh.files(full)["src/due.ts"] || !gh.files(full)["src/dark.css"]) fail("the stack's changes aren't on main");
+  if ([`${STACK}/1-add-due-dates-to-tasks`, DARKER].some((b) => gh.repo(full).refs.has(b))) fail(`landed stack's branches not deleted: ${[...gh.repo(full).refs.keys()]}`);
+  if (!gh.files(full)["src/due.ts"] || gh.files(full)["src/dark.css"] !== "body { background: #000; }\n") fail("the stack's changes aren't on main");
   await page.locator("#stack-panel").waitFor({ state: "detached", timeout: 30000 });
   const mainSha = gh.repo(full).refs.get("main")!;
   const after = await call(`/v1/apps/${app}`, token);

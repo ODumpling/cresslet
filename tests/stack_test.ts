@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Repo, SourceControlProvider } from "../server/git.ts";
-import { assertNotBelowTop, commitChange, type Ctx, landed, readStacks, slug } from "../server/stack.ts";
+import { assertNotBelowTop, commitChange, type Ctx, goBack, landed, readStacks, restore, slug } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
 /** Branches and commits in memory: a commit is its files and its parent. */
@@ -239,6 +239,43 @@ test("stack: a change below its stack's top can't be merged on its own", async (
   await assert.rejects(assertNotBelowTop(t.ctx, c1.branch), (e) => (e as HttpError).code === "not_on_top");
   await assertNotBelowTop(t.ctx, c2.branch);
   await assertNotBelowTop(t.ctx, "feat/anything");
+});
+
+test("stack: going back sets the changes above aside; restore puts them back; building on it drops them for good", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  const code = (e: unknown) => (e as HttpError).code;
+
+  const back = await goBack(t.ctx, c1.change.id);
+  assert.deepEqual([back.change.sha, back.setAside.map((c) => c.title)], [c1.sha, ["Two", "Three"]]);
+  let [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes.map((c) => c.title), s.setAside.map((c) => c.title)], [["One"], ["Two", "Three"]]);
+  assert.equal(t.provider.refs.get(c3.branch), c3.sha); // branches kept
+  // Change 1 is the top now: a change set aside takes nothing, and can't be committed to or merged.
+  await assert.rejects(t.change(c3.branch, c3.sha, "Four", "4"), (e) => code(e) === "set_aside");
+  await assert.rejects(assertNotBelowTop(t.ctx, c2.branch), (e) => code(e) === "set_aside");
+  await assertNotBelowTop(t.ctx, c1.branch);
+
+  // Restore: back as they were.
+  assert.equal((await restore(t.ctx, s.id)).change.id, c3.change.id);
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes.map((c) => c.title), s.setAside], [["One", "Two", "Three"], []]);
+  await assert.rejects(restore(t.ctx, s.id), (e) => code(e) === "nothing_set_aside");
+
+  // Back again, then a new change on 1: it's change 2 (its name taken by the one set aside, so -2), and the ones set
+  // aside can't come back.
+  await goBack(t.ctx, c1.change.id);
+  const n2 = ok(await t.change(c1.branch, c1.sha, "Two", "2b"));
+  assert.deepEqual([n2.change.position, n2.branch], [2, "feat/one/2-two-2"]);
+  assert.equal(t.provider.commits.get(n2.sha)!.parent, c1.sha);
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes.map((c) => c.title), s.setAside], [["One", "Two"], []]);
+  await assert.rejects(restore(t.ctx, s.id), (e) => code(e) === "nothing_set_aside");
+  assert.equal(t.provider.refs.get(c2.branch), c2.sha); // still on GitHub
+  await assert.rejects(goBack(t.ctx, c3.change.id), (e) => code(e) === "not_found"); // not open
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {

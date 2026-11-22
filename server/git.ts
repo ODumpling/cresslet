@@ -10,7 +10,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
-import { assertNotBelowTop, commitChange, landed, locked, readStacks } from "./stack.ts";
+import { assertNotBelowTop, commitChange, goBack, landed, locked, readStacks, restore } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -1044,6 +1044,19 @@ export function gitRoutes(
     const stacks = await readStacks({ provider: client, store, appId: a.id, repo, r });
     c.header("cache-control", "no-store");
     return c.json({ defaultBranch: repo.default_branch, stacks });
+  });
+  // Going back to a change (the ones above it set aside), and putting them back.
+  app.post("/apps/:name/git/stack/back", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ change?: unknown } | null>(c) ?? {};
+    if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
+    return c.json(await goBack({ provider: client, store, appId: a.id, repo, r }, input.change));
+  });
+  app.post("/apps/:name/git/stack/restore", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ stack?: unknown } | null>(c) ?? {};
+    if (typeof input.stack !== "string") throw new HttpError(400, "stack must be a stack's id");
+    return c.json(await restore({ provider: client, store, appId: a.id, repo, r }, input.stack));
   });
   // The workspace committed as a new change: on the default branch a new stack, on a stack's top change the next one.
   app.post("/apps/:name/git/stack", async (c) => {

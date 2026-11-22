@@ -449,6 +449,10 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       if (taken.includes(body.name)) throw Object.assign(new Error("exists"), { status: 409, code: "branch_exists" });
       return { branch: { name: body.name, sha: body.from } };
     }
+    if (path.endsWith("/git/stack/back")) {
+      return { change: { id: body.change, position: 1, branch: "feat/s/1-one", sha: "1".repeat(40), title: "One" }, setAside: [{ title: "Two" }, { title: "Three" }] };
+    }
+    if (path.endsWith("/git/stack/restore")) return { change: { position: 3, branch: "feat/s/3-three", sha: "3".repeat(40) }, restored: 2 };
     if (path.endsWith("/git/stack") && init.method === "POST") {
       duringStack();
       if (opts.stackError) throw Object.assign(new Error(opts.stackError), { status: 409, code: opts.stackError });
@@ -567,6 +571,33 @@ test("git: a change's fallback commit (its top moved on GitHub) commits what was
   assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack", "/sync"]);
   assert.deepEqual(g.calls[1].body.files, g.calls[0].body.files);
   assert.equal(g.state.dirty, true); // the edit stays to commit
+});
+
+test("git: going back to a change commits changes here first, then loads its commit; restore loads the top again", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.activeBranch = "feat/s/1-one"; // on the stack's top (the fake starts the next change as 2-two)
+  g.state.dirty = true;
+  await g.git.goBack({ id: "chg_1" });
+  assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack", "/stack/back", `/tree?ref=${"1".repeat(40)}`]);
+  assert.equal(g.calls[0].body.title, "Edits made in the studio"); // committed as a change first, never dropped
+  assert.deepEqual(g.calls[1].body, { change: "chg_1" });
+  assert.deepEqual([g.state.activeBranch, g.state.headSha, g.state.dirty], ["feat/s/1-one", "d".repeat(40), false]);
+  assert.deepEqual(g.state.back, { position: 1, title: "One", setAside: ["Two", "Three"] });
+  assert.deepEqual(g.hydrated, [[{ path: "a.txt", data: "pulled" }]]);
+  // The next change made from here clears the note.
+  g.state.dirty = true;
+  g.state.activeBranch = "feat/s/1-one";
+  await g.git.commitChange("Four");
+  assert.equal(g.state.back, undefined);
+
+  // Restore: refused over changes here unless they're to be dropped.
+  const r = fakeGit({ onDefault: false });
+  r.state.dirty = true;
+  await assert.rejects(r.git.restore("stk_1"), (e: Json) => e.code === "dirty");
+  assert.deepEqual(r.calls, []);
+  await r.git.restore("stk_1", true);
+  assert.deepEqual(r.calls.map((x: Json) => x.path.split("/git")[1]), ["/stack/restore", `/tree?ref=${"3".repeat(40)}`]);
+  assert.equal(r.state.activeBranch, "feat/s/3-three");
 });
 
 test("git: switching away from the default branch with edits puts them on a branch of their own first", async () => {

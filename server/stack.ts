@@ -42,6 +42,8 @@ export interface StackView {
   baseSha: string;
   /** Bottom first: the top change (the last) holds them all. */
   changes: ChangeView[];
+  /** Changes above the top that were gone back from (bottom first): restorable until a change is built on the top. */
+  setAside: ChangeView[];
 }
 
 const view = (c: StackChange): Omit<ChangeView, "github"> => ({
@@ -76,12 +78,16 @@ export interface Ctx {
 }
 
 const notOnStack = (message: string) => new HttpError(409, message, "not_on_stack");
+const setAside = (c: StackChange) => new HttpError(
+  409, `${c.branch} (change ${c.position} of ${c.stack_name}) was set aside: going back left it out of the stack. Restore it, or load the stack's top`, "set_aside",
+);
 const notOnTop = (c: StackChange, top: StackChange) => new HttpError(
   409, `${c.branch} is change ${c.position} of ${c.stack_name}, below its top (${top.branch}, added since): load the top change first`, "not_on_top",
 );
 
 /**
- * Commits the workspace as a new change. `from`: the branch the workspace is on, at `baseSha`. On the top change of
+ * Commits the workspace as a new change. `from`: the branch the workspace is on, at `baseSha`. On a change set aside,
+ * 409 `set_aside`. On the top change of
  * an open stack it goes on top; on any other branch that isn't one of a stack's changes (the default branch, a
  * branch of its own) it starts a new stack from there. On a change below a stack's top, 409 `not_on_top`; on a top
  * change recorded at another commit than `baseSha`, 409 `not_on_stack` (the caller commits to its branch as before).
@@ -94,6 +100,8 @@ export function commitChange(ctx: Ctx, input: {
   return locked(appId, async () => {
     const stacks = byStack(await store.openStackChanges(appId));
     let below: StackChange | undefined;
+    const aside = input.from === repo.default_branch ? undefined : (await store.setAsideStackChanges(appId)).find((c) => c.branch === input.from);
+    if (aside) throw setAside(aside);
     const on = input.from === repo.default_branch ? undefined : stacks.find((s) => s.some((c) => c.branch === input.from));
     if (on) {
       const top = on.at(-1)!; // a stack listed has a change
@@ -138,6 +146,8 @@ export function commitChange(ctx: Ctx, input: {
     const { name, branch } = candidates[at];
     let c: StackChange;
     try {
+      // Built on a change that was gone back to: the ones set aside above it can't come back (their branches stay).
+      if (below) await store.detachSetAside(appId, below.stack_id, id("stk"));
       c = await store.addStackChange({
         id: id("chg"), app_id: appId, stack_id: below?.stack_id ?? id("stk"), stack_name: name, position, branch,
         sha: out.sha, base_sha: input.baseSha, title: input.title.slice(0, 200), prompt: input.prompt.slice(0, 5000),
@@ -153,27 +163,58 @@ export function commitChange(ctx: Ctx, input: {
   });
 }
 
-/** The app's open stacks, newest first, each change checked against GitHub. */
+/** The app's open stacks, newest first, with their changes set aside, each change checked against GitHub. */
 export async function readStacks(ctx: Ctx): Promise<StackView[]> {
   const stacks = byStack(await ctx.store.openStackChanges(ctx.appId));
-  const all = stacks.flat();
+  const open = new Set(stacks.map((s) => s[0].stack_id));
+  const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).filter((c) => open.has(c.stack_id));
+  const all = [...stacks.flat(), ...aside];
   const heads = await pool(all, 8, (c) => ctx.provider.branchHead(ctx.r, c.branch));
   const head = new Map(all.map((c, i) => [c.id, heads[i]]));
+  const show = (c: StackChange): ChangeView => {
+    const h = head.get(c.id);
+    return { ...view(c), ...(h === c.sha ? { github: "ok" as const } : h ? { github: "moved" as const, headSha: h } : { github: "gone" as const }) };
+  };
   return stacks.reverse().map((s) => ({
     id: s[0].stack_id, name: s[0].stack_name, baseSha: s[0].base_sha,
-    changes: s.map((c) => {
-      const h = head.get(c.id);
-      return { ...view(c), ...(h === c.sha ? { github: "ok" as const } : h ? { github: "moved" as const, headSha: h } : { github: "gone" as const }) };
-    }),
+    changes: s.map(show),
+    setAside: aside.filter((c) => c.stack_id === s[0].stack_id).map(show),
   }));
 }
 
 /**
- * Before `branch` is merged into the default branch, or committed to: a change below its stack's top can't be (merged,
+ * Goes back to a change: the open changes above it in its stack are set aside (their branches kept), so it's the top
+ * and the next change goes on it. Resolves to the change, for the workspace to load its commit.
+ */
+export function goBack(ctx: Ctx, changeId: string): Promise<{ change: ChangeView; stack: { id: string; name: string }; setAside: ChangeView[] }> {
+  return locked(ctx.appId, async () => {
+    const open = await ctx.store.openStackChanges(ctx.appId);
+    const c = open.find((x) => x.id === changeId);
+    if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
+    const above = open.filter((x) => x.stack_id === c.stack_id && x.position > c.position).sort((x, y) => x.position - y.position);
+    await ctx.store.setAsideAbove(ctx.appId, c.stack_id, c.position);
+    return { change: { ...view(c), github: "ok" }, stack: { id: c.stack_id, name: c.stack_name }, setAside: above.map((x) => ({ ...view(x), github: "ok" as const })) };
+  });
+}
+
+/** Puts a stack's changes set aside back on it (while nothing was built where they were). Resolves to its top change. */
+export function restore(ctx: Ctx, stackId: string): Promise<{ change: ChangeView; stack: { id: string; name: string }; restored: number }> {
+  return locked(ctx.appId, async () => {
+    const n = await ctx.store.restoreSetAside(ctx.appId, stackId);
+    if (!n) throw new HttpError(409, "nothing to restore: a change was built where they were, or they're back already", "nothing_set_aside");
+    const top = byStack((await ctx.store.openStackChanges(ctx.appId)).filter((c) => c.stack_id === stackId))[0]!.at(-1)!;
+    return { change: { ...view(top), github: "ok" }, stack: { id: top.stack_id, name: top.stack_name }, restored: n };
+  });
+}
+
+/**
+ * Before `branch` is merged into the default branch, or committed to: a change set aside, or below its stack's top, can't be (merged,
  * its stack would be left open on a branch that's gone; committed to, the changes above wouldn't hold it). Landing
  * part of a stack is a later step; until then the top lands them all.
  */
 export async function assertNotBelowTop(ctx: Ctx, branch: string) {
+  const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).find((c) => c.branch === branch);
+  if (aside) throw setAside(aside);
   for (const s of byStack(await ctx.store.openStackChanges(ctx.appId))) {
     const c = s.find((x) => x.branch === branch), top = s.at(-1)!;
     if (c && c !== top) throw notOnTop(c, top);
