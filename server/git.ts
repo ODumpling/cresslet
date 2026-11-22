@@ -10,7 +10,10 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
-import { assertNotBelowTop, changePull, commitChange, followed, goBack, landed, locked, readStacks, restore, stackPulls, submitStack } from "./stack.ts";
+import {
+  assertNotBelowTop, carryOn, changePull, commitChange, deleteSetAside, followed, goBack, landed, locked, pullIn, readStacks, restore,
+  setAsideBranches, stackPulls, submitStack,
+} from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
@@ -1126,6 +1129,27 @@ export function gitRoutes(
       await store.setStackAutoSubmit(a.id, input.stackAutoSubmit);
     }
     return c.json({ repo: repoView((await store.getAppRepo(a.id))!) });
+  });
+  // A change's branch pushed to on GitHub: pulled in as the top of its stack, or carried on from as a branch of its own.
+  for (const [path, fn] of [["pull-in", pullIn], ["carry-on", carryOn]] as const) {
+    app.post(`/apps/:name/git/stack/${path}`, async (c) => {
+      const { a, r, repo, client } = await linked(c, "deploy");
+      const input = await body<{ change?: unknown; sha?: unknown } | null>(c) ?? {};
+      if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
+      return c.json(await fn({ provider: client, store, appId: a.id, repo, r }, input.change, shaOf(input.sha, "sha")));
+    });
+  }
+  // Changes set aside, listed (Source control), and deleted.
+  app.get("/apps/:name/git/stack/aside", async (c) => {
+    const { a, r, repo, client } = await linked(c, "read");
+    c.header("cache-control", "no-store");
+    return c.json({ changes: await setAsideBranches({ provider: client, store, appId: a.id, repo, r }) });
+  });
+  app.post("/apps/:name/git/stack/aside/delete", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ change?: unknown } | null>(c) ?? {};
+    if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
+    return c.json(await deleteSetAside({ provider: client, store, appId: a.id, repo, r }, input.change));
   });
   // Going back to a change (the ones above it set aside), and putting them back.
   app.post("/apps/:name/git/stack/back", async (c) => {

@@ -301,6 +301,12 @@ async function stackAutoSubmit(db: Db) {
   if (!(await cols(db, "app_repos")).includes("stack_auto_submit")) await db.exec("ALTER TABLE app_repos ADD COLUMN stack_auto_submit INTEGER NOT NULL DEFAULT 0");
 }
 
+/** Stacked changes moved out of their stack (set aside for good, dropped, carried on from) keep which one it was. */
+async function stackOrigin(db: Db) {
+  if (db.dialect === "postgres") return db.exec("ALTER TABLE stack_changes ADD COLUMN IF NOT EXISTS origin_stack_id TEXT");
+  if (!(await cols(db, "stack_changes")).includes("origin_stack_id")) await db.exec("ALTER TABLE stack_changes ADD COLUMN origin_stack_id TEXT");
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
@@ -310,6 +316,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 5, name: "git_upstream", up: gitUpstream },
   { version: 6, name: "stacks", up: stacks },
   { version: 7, name: "stack_auto_submit", up: stackAutoSubmit },
+  { version: 8, name: "stack_origin", up: stackOrigin },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */

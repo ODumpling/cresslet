@@ -506,6 +506,10 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .stack-row[data-aside] .stack-title > span:first-child { color: var(--text-2); text-decoration: line-through; }
 .stack-back { margin-left: auto; min-height: 24px; padding-block: 0; }
 .stack-pull { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.git-aside { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.git-aside li { justify-content: space-between; gap: 8px; }
+.git-aside .mono { overflow-wrap: anywhere; }
+.stack-outside { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
 .pill[data-s="here"] { color: var(--accent-text); background: var(--accent-soft); border-color: transparent; line-height: 18px; }
 .pill[data-s="warn"] { color: var(--warn); background: var(--warn-soft); border-color: transparent; line-height: 18px; }
 .builder-log { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; }

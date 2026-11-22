@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Pull, Repo, SourceControlProvider } from "../server/git.ts";
-import { assertNotBelowTop, changePull, commitChange, type Ctx, followed, goBack, landed, readStacks, restore, slug, stackPulls, submitStack } from "../server/stack.ts";
+import {
+  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, followed, goBack, landed, MAX_STACK, pullIn, readStacks, restore,
+  setAsideBranches, slug, stackPulls, submitStack,
+} from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
 /** Branches and commits in memory: a commit is its files and its parent. */
@@ -25,15 +28,16 @@ function fakeProvider() {
   const taken = (b: string) => [...refs.keys()].some((x) => x === b || b.startsWith(x + "/") || x.startsWith(b + "/"));
   const pulls: (Pull & { title: string; body: string })[] = [];
   const refuse = new Set<string>(); // branches GitHub won't open a pull request from
+  const keep = new Set<string>(); // branches GitHub won't delete (a rule)
   const pullOf = (n: number) => {
     const x = pulls[n - 1];
     if (!x) throw new HttpError(404, "not found on GitHub", "git_not_found");
     return x;
   };
   const p: SourceControlProvider & {
-    refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; push(branch: string, files: Record<string, string>): string;
+    refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; keep: Set<string>; push(branch: string, files: Record<string, string>): string;
   } = {
-    refs, commits, pulls, refuse,
+    refs, commits, pulls, refuse, keep,
     async getPull(_r: Repo, n: number) {
       return { ...pullOf(n) };
     },
@@ -70,7 +74,7 @@ function fakeProvider() {
       refs.set(branch, sha);
     },
     async deleteBranch(_r: Repo, branch: string) {
-      return refs.delete(branch);
+      return !keep.has(branch) && refs.delete(branch);
     },
     async commitTree(_r: Repo, input: CommitInput) {
       const base = commits.get(input.baseSha)!;
@@ -476,6 +480,118 @@ test("stack: going back closes the set-aside changes' pull requests; restore reo
   assert.equal(t.provider.pulls[3].state, "closed");
   await restore(t.ctx, c1.stack.id);
   assert.equal(t.provider.pulls[3].state, "open");
+});
+
+test("stack: a change pushed to on GitHub is pulled in as the top (the ones above set aside for good), or carried on from as a branch", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const code = (e: unknown) => (e as HttpError).code;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await submitStack(t.ctx, c1.stack.id);
+  const pushed = t.provider.push(c2.branch, { "x.txt": "from outside" });
+  let [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((c) => c.github), ["ok", "moved", "ok"]);
+  await assert.rejects(pullIn(t.ctx, c2.change.id, "e".repeat(40)), (e) => code(e) === "conflict"); // not what GitHub has
+  const r = await pullIn(t.ctx, c2.change.id, pushed);
+  assert.deepEqual([r.change.sha, r.dropped], [pushed, 1]);
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes.map((c) => [c.title, c.github]), s.setAside], [[["One", "ok"], ["Two", "ok"]], []]);
+  assert.equal(t.provider.pulls[2].state, "closed");
+  assert.equal(t.provider.refs.get(c3.branch), c3.sha); // kept
+  const n3 = ok(await t.change(c2.branch, pushed, "Three again", "3b"));
+  assert.equal(t.provider.commits.get(n3.sha)!.parent, pushed);
+
+  // Taken in already (another tab replaying it): refused, nothing above it touched.
+  await assert.rejects(pullIn(t.ctx, c2.change.id, pushed), (e) => code(e) === "conflict");
+  assert.equal((await readStacks(t.ctx))[0].changes.length, 3);
+  // A turn on a top pushed to since: refused, so the push isn't left out (from a workspace that hasn't seen it, or one
+  // that pulled it in by hand).
+  const again = t.provider.push(n3.branch, { "w.txt": "pushed again" });
+  await assert.rejects(t.change(n3.branch, n3.sha, "Four", "4"), (e) => code(e) === "moved");
+  await assert.rejects(t.change(n3.branch, again, "Four", "4"), (e) => code(e) === "moved");
+
+  // Carried on from (change 2): the stack ends, all of it, the ones set aside too; its branch takes commits as one branch.
+  const other = t.provider.push(c2.branch, { "y.txt": "more from outside" });
+  const left = await carryOn(t.ctx, c2.change.id, other);
+  assert.equal(left.left, 3);
+  assert.deepEqual(await readStacks(t.ctx), []);
+  await assert.rejects(t.change(c2.branch, other, "Four", "4"), (e) => code(e) === "not_on_stack");
+  await assert.rejects(t.change(c1.branch, c1.sha, "Four", "4"), (e) => code(e) === "not_on_stack");
+});
+
+test("stack: carrying on from a change with ones set aside above: they can't come back over it", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  await goBack(t.ctx, c2.change.id);
+  const pushed = t.provider.push(c2.branch, { "x": "outside" });
+  await carryOn(t.ctx, c2.change.id, pushed);
+  await assert.rejects(restore(t.ctx, c1.stack.id), (e) => (e as HttpError).code === "nothing_set_aside");
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => [c.title, c.restorable]), [["Three", false]]);
+});
+
+test("stack: changes set aside are listed and deleted (with the ones above them); a landed stack's go with it", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  const c4 = ok(await t.change(c3.branch, c3.sha, "Four", "4"));
+  await goBack(t.ctx, c1.change.id);
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => [c.title, c.restorable]).sort(), [["Four", true], ["Three", true], ["Two", true]]);
+  // Deleting 3 takes 4 with it; 4 was pushed to: kept (said), and out of the stack, since 3 below it is gone.
+  t.provider.push(c4.branch, { "z.txt": "pushed" });
+  let d = await deleteSetAside(t.ctx, c3.change.id);
+  assert.deepEqual([d.dropped, d.kept.map((k) => k.position)], [[c3.change.id], [4]]);
+  assert.equal(t.provider.refs.has(c3.branch), false);
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => [c.title, c.restorable]).sort(), [["Four", false], ["Two", true]]);
+  t.provider.refs.set(c4.branch, c4.sha);
+  t.provider.keep.add(c4.branch); // GitHub refuses the delete: kept, said
+  d = await deleteSetAside(t.ctx, c4.change.id);
+  assert.deepEqual([d.dropped, d.kept.map((k) => k.error)], [[], [`GitHub didn't delete ${c4.branch}`]]);
+  t.provider.keep.clear();
+  d = await deleteSetAside(t.ctx, c4.change.id);
+  assert.deepEqual(d.dropped, [c4.change.id]);
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => c.title), ["Two"]);
+  assert.equal((await restore(t.ctx, c1.stack.id)).change.id, c2.change.id);
+
+  // Deleting the one set aside and building on: the new change takes its place.
+  await goBack(t.ctx, c1.change.id);
+  await deleteSetAside(t.ctx, c2.change.id);
+  const n2 = ok(await t.change(c1.branch, c1.sha, "Two again", "2b"));
+  assert.equal(n2.change.position, 2);
+  await goBack(t.ctx, c1.change.id); // n2 set aside, to land below
+
+  // Landing change 1: its ones set aside go (the app deletes merged branches); another stack's don't.
+  const other = ok(await t.change("main", main, "Elsewhere", "e1"));
+  ok(await t.change(other.branch, other.sha, "Elsewhere 2", "e2"));
+  await goBack(t.ctx, other.change.id);
+  await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: c1.sha, deleteBelow: true });
+  assert.equal(t.provider.refs.has(n2.branch), false);
+  assert.deepEqual((await setAsideBranches(t.ctx)).map((c) => c.title), ["Elsewhere 2"]);
+});
+
+test("stack: at its most changes, a turn joins the top change and says so", async () => {
+  await using t = await setup();
+  let from = "main", sha = t.provider.refs.get("main")!, id = "";
+  for (let i = 1; i <= MAX_STACK; i++) {
+    const c = ok(await t.change(from, sha, `Change ${i}`, String(i)));
+    [from, sha, id] = [c.branch, c.sha, c.stack.id];
+  }
+  const j = ok(await t.change(from, sha, "One more", "more"));
+  assert.deepEqual([j.joined, j.branch, j.change.position], [true, from, MAX_STACK]);
+  assert.equal(t.provider.refs.get(from), j.sha);
+  // The top's branch deleted on GitHub: the next one joins it all the same, its branch made again.
+  t.provider.refs.delete(from);
+  const k = ok(await t.change(from, j.sha, "And another", "another"));
+  assert.deepEqual([k.joined, t.provider.refs.get(from)], [true, k.sha]);
+  const j2 = k;
+  const [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.id, s.changes.length, s.changes.at(-1)!.sha], [id, MAX_STACK, j2.sha]);
 });
 
 test("stack: unlinking or relinking the app forgets its stacks", async () => {
