@@ -88,7 +88,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
   };
   const repoJson = (r: Repo, u: GhUser) => ({
     id: r.id, name: r.name, full_name: `${r.owner}/${r.name}`, private: r.private, default_branch: r.default_branch,
-    html_url: `https://github.example/${r.owner}/${r.name}`, owner: { login: r.owner }, permissions: { push: r.push.has(u.login), admin: u.login === r.owner },
+    html_url: `https://github.example/${r.owner}/${r.name}`, owner: { login: r.owner }, permissions: { push: r.push.has(u.login) },
   });
   const addRepo = (owner: string, name: string, push: string[], init = true) => {
     const r: Repo = { id: ++n, owner, name, private: true, default_branch: "main", push: new Set(push), refs: new Map(), protected: new Set(), pulls: [] };

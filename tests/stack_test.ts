@@ -46,7 +46,7 @@ function fakeProvider() {
   } = {
     refs, commits, pulls, refuse, keep, guarded, failUpdate,
     async branchProtection(_r: Repo, branch: string) {
-      return guarded.has(branch) ? { reason: `${branch} is protected on GitHub`, known: true } : null;
+      return guarded.has(branch) ? `${branch} is protected on GitHub` : null;
     },
     async moveBranch(_r: Repo, branch: string, from: string, to: string) {
       if (refs.get(branch) !== from || !contains(to, from)) throw new HttpError(409, `${branch} moved on GitHub meanwhile: try again`, "conflict");
@@ -677,6 +677,18 @@ test("stack: a landing that stops half way is recorded, and landing again carrie
   t.provider.refs.set("main", d1.sha);
   const l = await landUpTo(t.ctx, d2.change.id);
   assert.deepEqual([l.sha, (await readStacks(t.ctx)).length], [d2.sha, 0]);
+});
+
+test("stack: a landed branch the next change's pull request is still on stays, also when Deploy merges it again", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  await submitStack(t.ctx, c1.stack.id);
+  t.provider.failUpdate.add(2);
+  await landUpTo(t.ctx, c1.change.id);
+  await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: c1.sha, deleteBelow: true });
+  assert.deepEqual([t.provider.refs.get(c1.branch), t.provider.pulls[1].state], [c1.sha, "open"]);
 });
 
 test("stack: the change above's pull request not on the default branch yet: its base branch stays, and goes on the next landing", async () => {

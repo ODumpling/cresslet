@@ -629,7 +629,7 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
     const def = repo.default_branch;
     // Protection first: no refusal below may let a caller fall back to a move past it.
     const guarded = await provider.branchProtection(r, def);
-    if (guarded) throw Object.assign(new HttpError(422, `${guarded.reason}: land the stack through its pull requests on GitHub`, "branch_protected"), { known: guarded.known });
+    if (guarded) throw new HttpError(422, `${guarded}: land the stack through its pull requests on GitHub`, "branch_protected");
     // The commit the caller synced and will build (Deploy): the change must still be at it, checked under the lock.
     if (expect && c.sha !== expect) throw new HttpError(409, `${c.branch} isn't at the commit that was synced`, "not_synced");
     const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
@@ -713,6 +713,19 @@ async function dropLanded(ctx: Ctx, stackId: string, keep: string | undefined, e
       errors.push({ change: x.id, position: x.position, error: `${x.branch}'s pull request couldn't be read (${why(e)}): the stack's branches are kept for now` });
     }
   });
+  // The stack's next change (still open): its pull request may be on a landed branch (its move onto the default branch
+  // failed): that base stays.
+  const next = byStack((await ctx.store.openStackChanges(ctx.appId)).filter((x) => x.stack_id === stackId))[0]?.[0];
+  if (next) {
+    try {
+      let p = next.pr_number ? await ctx.provider.getPull(ctx.r, next.pr_number).catch((e) => (e instanceof HttpError && e.status === 404 ? null : Promise.reject(e))) : null;
+      if (!p || p.head !== next.branch || p.state !== "open") p = await ctx.provider.findPull(ctx.r, next.branch) ?? p;
+      if (p?.state === "open") held.add(p.base);
+    } catch (e) {
+      unknown = true;
+      errors.push({ change: next.id, position: next.position, error: `${next.branch}'s pull request couldn't be read (${why(e)}): the stack's branches are kept for now` });
+    }
+  }
   const deleted: string[] = [];
   if (unknown) return deleted;
   await pool(rows.filter((x) => !held.has(x.branch)), 4, async (x) => {
