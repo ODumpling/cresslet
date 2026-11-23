@@ -3,6 +3,7 @@
 // loop, fails its pending requests (503), and clients can reconnect.
 // Run: start the server (npm run dev), then: cd tests/e2e && node websocket.ts [screenshot dir]
 import { chromium } from "@playwright/test";
+import { studioMode } from "./studio-mode.ts";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const assert = (ok: unknown, msg: string) => { if (!ok) throw new Error(msg); };
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -55,6 +56,7 @@ export default {
 `;
 
 const browser = await chromium.launch();
+studioMode(browser);
 const page = await browser.newPage();
 const logs: string[] = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));

@@ -3,6 +3,7 @@
 // Run: start the server (CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev), then:
 //   cd tests/e2e && npm i && npx playwright install chromium && CRESSLET_ADMIN_TOKEN=e2e-admin node studio.ts
 import { chromium } from "@playwright/test";
+import { studioMode } from "./studio-mode.ts";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const admin = process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin";
 /** An operator-issued account (every app belongs to one). */
@@ -12,6 +13,7 @@ const newAccount = async (email: string): Promise<{ token: string }> => (await f
   body: JSON.stringify({ email }),
 })).json();
 const browser = await chromium.launch();
+studioMode(browser);
 const page = await browser.newPage();
 const logs: string[] = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));

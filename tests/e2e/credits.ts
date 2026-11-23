@@ -6,6 +6,7 @@
 // then: cd tests/e2e && npm i && node credits.ts [outdir]
 import { createServer } from "node:http";
 import { chromium } from "@playwright/test";
+import { studioMode } from "./studio-mode.ts";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const admin = process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin";
 const out = process.argv[2] ?? ".";
@@ -35,6 +36,7 @@ const acct = await (await fetch(`${base}/v1/accounts`, {
 })).json();
 
 const browser = await chromium.launch();
+studioMode(browser);
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const logs: string[] = [];
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));

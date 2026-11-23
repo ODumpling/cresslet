@@ -9,6 +9,8 @@ export interface Deploy {
   name: string;
   url?: string;
   deployKey?: string;
+  /** When it last went live from this browser (ms): the workspace's ship line. */
+  at?: number;
 }
 export interface Project {
   id: string;

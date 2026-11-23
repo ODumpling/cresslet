@@ -1,6 +1,7 @@
 // Browser e2e: studio deploy uploads the project source; "Open source" on the home page restores it.
 // Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node source.ts
 import { chromium } from "@playwright/test";
+import { studioMode } from "./studio-mode.ts";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const acct = await (await fetch(`${base}/v1/accounts`, {
   method: "POST",
@@ -8,6 +9,7 @@ const acct = await (await fetch(`${base}/v1/accounts`, {
   body: JSON.stringify({ email: `e2e-${Date.now()}@example.com` }),
 })).json();
 const browser = await chromium.launch();
+studioMode(browser);
 const page = await browser.newPage();
 await page.addInitScript((t) => localStorage.setItem("cresslet.token", t), acct.token);
 try {

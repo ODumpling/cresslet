@@ -1,5 +1,5 @@
-// The app's stack of changes (server/stack.ts), above the AI builder's chat: each builder turn that changed files is a
-// change on a branch of its own, newest on top, the default branch at the bottom. The change the workspace is on is
+// The app's stack of changes (server/stack.ts), on the AI builder's Shipline rail: each builder turn that changed files is a
+// change on a branch of its own, oldest first (under "Not live yet": the default branch is what deploys). The change the workspace is on is
 // marked, and a branch that moved or is gone on GitHub says so. Any change below the top can be gone back to (the
 // ones above are set aside, shown struck through), and set-aside changes restored. On a default branch that needs pull
 // requests (protected), the stack lands from the bottom up: Land next on the bottom change, disabled with the reason
@@ -49,7 +49,7 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
     const here = !aside && c.branch === state.activeBranch;
     return (
       <li key={c.id} className="stack-row" data-here={here ? "" : undefined} data-aside={aside ? "" : undefined} data-github={c.github}>
-        <span className="stack-dot" aria-hidden="true" />
+        <span className="stack-dot" aria-hidden="true">{c.position}</span>
         <div className="stack-body">
           <span className="stack-title">
             <span>{`${c.position} · ${c.title}`}</span>
@@ -98,19 +98,23 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
     );
   };
   const aside = stack.setAside ?? [];
+  const pulled = stack.changes.some((c) => c.pull);
+  // On the Shipline rail (Builder.tsx), under "Not live yet": oldest first, as they were made; set-aside ones last.
   return (
-    <details className="stack-panel" id="stack-panel" open>
-      <summary><span className="stack-head">Stack</span><span className="muted small">{` ${stack.name} · ${n} ${n === 1 ? "change" : "changes"}`}</span></summary>
+    <div className="stack-panel" id="stack-panel" role="group" aria-label={`Stack ${stack.name}`}>
+      <div className="stack-bar small">
+        <span className="stack-head">{`${n} ${n === 1 ? "change" : "changes"} on `}<span className="mono">{state.defaultBranch}</span></span>
+        {on ? (
+          <button className="btn sm" type="button" id="stack-submit" disabled={busy} onClick={onSubmit}
+            title={pulled ? "Pull requests: one per change, each on the one below." : "Review it on GitHub as a chain of pull requests, one per change."}>
+            {pulled ? "Update pull requests" : "Submit stack"}
+          </button>
+        ) : null}
+      </div>
       {!on ? (
         <div className="stack-note small">
           <span className="muted">{`This workspace is on ${state.activeBranch}, not on this stack.`}</span>
           <button className="btn sm" type="button" id="stack-continue" disabled={busy} onClick={() => onContinue(top.branch)}>Continue on it</button>
-        </div>
-      ) : null}
-      {on ? (
-        <div className="stack-note small">
-          <span className="muted">{stack.changes.some((c) => c.pull) ? "Pull requests: one per change, each on the one below." : "Review it on GitHub as a chain of pull requests, one per change."}</span>
-          <button className="btn sm" type="button" id="stack-submit" disabled={busy} onClick={onSubmit}>{stack.changes.some((c) => c.pull) ? "Update pull requests" : "Submit stack"}</button>
         </div>
       ) : null}
       {on && stack.behind ? (
@@ -130,17 +134,10 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
           <button className="btn sm" type="button" id="stack-restore" disabled={busy} onClick={onRestore}>Restore</button>
         </div>
       ) : null}
-      <ol className="stack" aria-label={`Changes of ${stack.name}, newest first`}>
-        {[...aside].reverse().map((c) => row(c, true))}
-        {[...stack.changes].reverse().map((c) => row(c, false))}
-        <li className="stack-row" data-base="">
-          <span className="stack-dot" aria-hidden="true" />
-          <div className="stack-body">
-            <span className="stack-title"><span>{state.defaultBranch}</span></span>
-            <span className="muted small">stays as deployed until you deploy</span>
-          </div>
-        </li>
+      <ol className="stack" aria-label={`Changes of ${stack.name}, oldest first`}>
+        {stack.changes.map((c) => row(c, false))}
+        {aside.map((c) => row(c, true))}
       </ol>
-    </details>
+    </div>
   );
 }

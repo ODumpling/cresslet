@@ -3,6 +3,7 @@
 // scripted stream (page.route), so no key or network is needed; the requests the studio sends are checked.
 // Run with the server up (CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev): cd tests/e2e && npm i && node builder.ts [outdir]
 import { chromium } from "@playwright/test";
+import { studioMode } from "./studio-mode.ts";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const out = process.argv[2] ?? ".";
 // Every app belongs to an account: log the studio in as a fresh one (operator-issued; CRESSLET_ADMIN_TOKEN on the server).
@@ -12,6 +13,7 @@ const acct = await (await fetch(base + "/v1/accounts", {
   body: JSON.stringify({ email: `e2e-${Date.now()}@example.com` }),
 })).json();
 const browser = await chromium.launch();
+studioMode(browser);
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
 await page.addInitScript((t) => localStorage.setItem("cresslet.token", t), acct.token);
 const logs: string[] = [];
