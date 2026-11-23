@@ -1,6 +1,10 @@
 // The AI builder: a chat with Claude that changes the open project (studio/builder.ts runs the conversation and the
 // tools; this is only the chat). Claude is reached with the account's AI credits through this server, or with the
 // user's own Anthropic API key from this browser.
+//
+// Shown as the Shipline: one rail of everything made, with the ship line on it. Above the line is what's live; under
+// it, "Not live yet": the stack's changes (when linked) and this chat's requests, each request one node with what
+// Claude did. Deploying moves the line down past them.
 import { type Ref, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { Container } from "../../../vendor/cresslet-container/cresslet-container.js";
@@ -9,7 +13,8 @@ import type * as API from "../../../api-types.ts";
 import { commitMessage, gitCode, type GitWorkspace } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
 import { logIn, session, useSession } from "../../lib/session.ts";
-import { Icon, SrOnly } from "../../ui/icons.tsx";
+import { TimeAgo } from "../../ui/bits.tsx";
+import { ExtLink, Icon, SrOnly } from "../../ui/icons.tsx";
 
 const STEP_ICON: Record<string, string> = { run_command: "terminal", read_dev_log: "terminal" };
 /** A tool call's input as the model sent it (not validated yet). */
@@ -22,7 +27,8 @@ const runningText = (name: string, input: unknown) => ({
 
 /** One entry in the chat log. */
 type Item =
-  | { id: number; kind: "user" | "assistant"; text: string }
+  | { id: number; kind: "user"; text: string; at: number }
+  | { id: number; kind: "assistant"; text: string }
   | { id: number; kind: "step"; state: "running" | "ok" | "error"; icon: string; text: string; failed?: boolean }
   | { id: number; kind: "notice"; text: string; error?: boolean }
   | { id: number; kind: "approval"; text: string; answer: (ok: boolean) => void };
@@ -45,11 +51,30 @@ export interface BuilderHandle {
   prefill(text: string): void;
 }
 
-export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, ref }: {
+/** The ship line: what's live, and a deploy under way. */
+export interface Ship {
+  /** The live app's address (none: never deployed). */
+  url?: string;
+  /** When it went live from this browser (unknown for a deploy made elsewhere). */
+  at?: number;
+  deploying: boolean;
+  /** The deploy log's latest line while deploying, or why the last deploy failed. */
+  line?: string;
+  failed?: boolean;
+  /** Not live yet: how many changes (the stack's, or this session's requests that changed files). */
+  pending: number;
+}
+
+export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, appName, ship, onTurnEnd = () => {}, ref }: {
   c: Container;
+  /** The project's name (the empty chat asks what it should do). */
+  appName: string;
+  ship: Ship;
+  /** A request finished: whether it changed the workspace (a change not live yet). */
+  onTurnEnd?: (changed: boolean) => void;
   /** Source control: the project's repository, when linked (a finished turn is committed as a change of its stack). */
   git: GitWorkspace | null;
-  /** The stack panel (StackPanel.tsx), shown above the chat. */
+  /** The stack panel (StackPanel.tsx), on the rail under the ship line. */
   stack?: React.ReactNode;
   /** A commit was refused because the stack changed on GitHub: it's read again (its buttons say what to do). */
   onStackStale?: () => void;
@@ -74,7 +99,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
   const [keyError, setKeyError] = useState("");
   const [input, setInput] = useState("");
 
-  const inputRef = useRef<HTMLTextAreaElement>(null), logRef = useRef<HTMLOListElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null), logRef = useRef<HTMLDivElement>(null);
   const keyRef = useRef<HTMLInputElement>(null), loginRef = useRef<HTMLButtonElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   // This request's state: the agent, whether a deploy was approved, Stop pressed; the assistant text and tool step
@@ -228,7 +253,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
       },
     });
     r.stick = true;
-    add({ kind: "user", text });
+    add({ kind: "user", text, at: Date.now() });
     setInput("");
     r.replied = "";
     r.failed = "";
@@ -247,6 +272,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
       if (r.stopped || r.gone) return; // stopped (or left) while it waited
       await r.agent.send(text);
       await commitTurn(text);
+      if (!r.gone) onTurnEnd(r.turnChanged || commandRev() !== r.cmdRev);
     } finally {
       for (const decline of r.approvals) decline(); // its command is gone (stopped, timed out, or left running)
       if (r.approved && r.stopped) on({ type: "notice", text: "If the deploy had started uploading, it may still go live: check the app.", error: true });
@@ -343,10 +369,91 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
   }));
 
   const setupShown = !source, credited = source === "credits";
+  // The chat as turns: a request and what followed it (notices before the first request stand alone).
+  type Turn = { user: Extract<Item, { kind: "user" }> | null; items: Item[] };
+  const turns: Turn[] = [];
+  for (const x of items) {
+    if (x.kind === "user") turns.push({ user: x, items: [] });
+    else if (turns.length) turns.at(-1)!.items.push(x);
+    else turns.push({ user: null, items: [x] });
+  }
+  const isLive = (t: Turn) => !!ship.at && !!t.user && t.user.at < ship.at;
+  const live = turns.filter(isLive), draft = turns.filter((t) => !isLive(t));
+  const lastTurn = turns.at(-1);
+  const fill = (text: string) => {
+    flushSync(() => setInput(text));
+    chatFocus();
+  };
+  const host = ship.url?.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const empty = !items.length && !stack;
+
+  const entry = (x: Item) => {
+    switch (x.kind) {
+      case "user":
+        return null;
+      case "assistant":
+        return <li key={x.id} className="msg assistant">{x.text}</li>;
+      case "step":
+        return <li key={x.id} className="step" data-state={x.state}><Icon name={x.icon} /><span>{x.text}</span>{x.failed ? <SrOnly> (failed)</SrOnly> : null}</li>;
+      case "notice":
+        return <li key={x.id} className="notice" data-error={x.error ? "" : undefined}>{x.text}</li>;
+      case "approval":
+        return (
+          <li key={x.id} className="approval" id={`approval-${x.id}`}>
+            <p>{x.text}</p>
+            <div className="row start">
+              <button type="button" className="btn primary sm" onClick={() => x.answer(true)}>Approve deploy</button>
+              <button type="button" className="btn sm" onClick={() => x.answer(false)}>Decline</button>
+            </div>
+          </li>
+        );
+    }
+  };
+  const turn = (t: Turn, isLiveTurn: boolean) => {
+    const running = busy && t === lastTurn;
+    const failed = t.items.some((x) => (x.kind === "notice" && x.error) || (x.kind === "step" && x.state === "error" && x === t.items.filter((y) => y.kind === "step").at(-1)));
+    const state = running ? "running" : failed ? "error" : "done";
+    const key = t.user?.id ?? `n${t.items[0]?.id}`;
+    if (!t.user) return <li key={key} className="turn" data-live={isLiveTurn ? "" : undefined} data-bare=""><ol className="turn-items">{t.items.map(entry)}</ol></li>;
+    return (
+      <li key={key} className="turn" data-state={state} data-live={isLiveTurn ? "" : undefined}>
+        <span className="turn-node" aria-hidden="true">{running ? <span className="spinner" /> : <Icon name={failed ? "x" : "check"} />}</span>
+        <p className="msg user">{t.user.text}</p>
+        {t.items.length ? <ol className="turn-items" data-state={state}>{t.items.map(entry)}</ol> : null}
+      </li>
+    );
+  };
+  const shipLine = (
+    <li className="ship" key="ship" data-state={ship.deploying ? "deploying" : ship.failed ? "failed" : ship.url ? "live" : "none"}>
+      <span className="ship-beacon" aria-hidden="true" />
+      {ship.deploying ? (
+        <>
+          <span className="ship-what">{`Deploying${ship.pending ? ` ${ship.pending} ${ship.pending === 1 ? "change" : "changes"}` : ""}`}</span>
+          {ship.line ? <span className="ship-when mono">{ship.line}</span> : null}
+        </>
+      ) : ship.url ? (
+        <>
+          <span className="ship-what">Live</span>
+          <span className="ship-when">{ship.at ? <>{"deployed "}<TimeAgo iso={ship.at} /></> : host}</span>
+          {ship.failed && ship.line ? <span className="ship-fail small">{`The last deploy failed: ${ship.line}`}</span> : null}
+          {ship.at && Date.now() - ship.at < 10 * 60_000 && !ship.pending ? (
+            <span className="ship-acts"><ExtLink className="btn sm" href={ship.url}>Open the app</ExtLink></span>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <span className="ship-what">Not online yet</span>
+          {ship.failed && ship.line ? <span className="ship-fail small">{`The deploy failed: ${ship.line}`}</span> : <span className="ship-when">Deploy puts it live at its own address.</span>}
+        </>
+      )}
+    </li>
+  );
+
   return (
     <section className="pane builder-pane" id="builder" aria-labelledby="builder-title" hidden={!open}>
       <div className="pane-head">
-        <h2 id="builder-title" className="pane-title">AI builder</h2>
+        <Icon name="sparkles" className="icon builder-mark" />
+        <h2 id="builder-title" className="pane-title">Build with Claude</h2>
         <button className="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat" disabled={busy} onClick={() => {
           if (r.busy) return;
           // A new feature starts from the default branch: offer to go back to it (this branch stays on GitHub).
@@ -375,13 +482,11 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
         }}>
           <Icon name="plus" />
         </button>
-        <span className="credits" id="builder-credits" hidden={!credited || !credits} title={credits?.title} data-low={credits?.low ? "" : undefined}>{credits?.text}</span>
         <button className="icon-btn" id="builder-close" type="button" aria-label="Close AI builder" title="Close AI builder" onClick={() => setOpen(false)}>
           <Icon name="x" />
         </button>
       </div>
       <p className="sr-only" id="builder-status" role="status">{status}</p>
-      {stack}
       <div id="builder-setup" className="builder-setup" hidden={!setupShown}>
         <p>Ask Claude to change this project. It edits files, runs commands in this tab's terminal and, when you ask, deploys with your session, like the CLI.</p>
         <div id="builder-credits-offer" className="builder-offer" hidden={!creditsOn || !!token}>
@@ -417,63 +522,72 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
         </form>
       </div>
       <div id="builder-chat" className="builder-chat" hidden={setupShown}>
-        <ol id="builder-log" className="builder-log" aria-labelledby="builder-title" tabIndex={0} ref={logRef}>
-          {items.map((x) => {
-            switch (x.kind) {
-              case "user":
-              case "assistant":
-                return <li key={x.id} className={`msg ${x.kind}`}>{x.text}</li>;
-              case "step":
-                return <li key={x.id} className="step" data-state={x.state}><Icon name={x.icon} /><span>{x.text}</span>{x.failed ? <SrOnly> (failed)</SrOnly> : null}</li>;
-              case "notice":
-                return <li key={x.id} className="notice" data-error={x.error ? "" : undefined}>{x.text}</li>;
-              case "approval":
-                return (
-                  <li key={x.id} className="approval" id={`approval-${x.id}`}>
-                    <p>{x.text}</p>
-                    <div className="row start">
-                      <button type="button" className="btn primary sm" onClick={() => x.answer(true)}>Approve deploy</button>
-                      <button type="button" className="btn sm" onClick={() => x.answer(false)}>Decline</button>
-                    </div>
-                  </li>
-                );
-            }
-          })}
-        </ol>
+        <div className="thread" ref={logRef} tabIndex={0} role="region" aria-label="Changes and chat">
+          {empty ? (
+            <div className="thread-empty">
+              <h3>{"What should "}<span className="nowrap">{appName}</span>{" do?"}</h3>
+              <p>Say what to build or change. Claude reads the project, edits it and checks the dev server.</p>
+              <ol className="how">
+                <li><b>Describe a change</b><span>In your own words. No code needed.</span></li>
+                <li><b>Watch the preview update</b><span>Each request becomes one change on this rail.</span></li>
+                <li><b>Deploy when it looks right</b><span>{host ? `It goes live at ${host} in about a second.` : "It goes live at its own address in about a second."}</span></li>
+              </ol>
+              <div className="starters">
+                {["Change the look: colors, fonts and spacing", "Add a page for an about section", "Save something new in the database"].map((t) => (
+                  <button key={t} className="starter" type="button" onClick={() => fill(t)}><Icon name="sparkles" />{t}</button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <ol id="builder-log" className="builder-log rail" aria-labelledby="builder-title" hidden={empty}>
+            {empty ? null : [
+              ...live.map((t) => turn(t, true)),
+              shipLine,
+              ship.pending || draft.length || stack ? (
+                <li className="rail-label" key="label">{"Not live yet"}{ship.pending ? <small>{` ${ship.pending} ${ship.pending === 1 ? "change" : "changes"}`}</small> : null}</li>
+              ) : null,
+              stack ? <li className="rail-stack" key="stack">{stack}</li> : null,
+              ...draft.map((t) => turn(t, false)),
+            ]}
+          </ol>
+        </div>
         <div className="working" id="builder-working" hidden={!working}><span className="spinner" aria-hidden="true" /><span id="builder-working-text">{working || "Working…"}</span></div>
         <form id="builder-form" className="builder-form" ref={formRef} onSubmit={(e) => void send(e)}>
           <label className="sr-only" htmlFor="builder-input">Message to Claude</label>
           <p className="muted small" id="builder-locked" hidden={!locked}>Run the project first (see the preview): sending unlocks with the terminal and Deploy.</p>
-          <textarea id="builder-input" ref={inputRef} className="input" rows={3} placeholder="Describe a change…"
-            aria-describedby={locked ? "builder-locked builder-hint" : "builder-hint"}
-            value={input} onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                formRef.current?.requestSubmit();
-              }
-            }} />
-          <div className="builder-actions">
-            <p className="muted small" id="builder-hint"><kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line.</p>
-            <button className="btn sm" id="builder-forget" type="button" hidden={source !== "key"} disabled={busy} onClick={() => {
-              if (r.busy) return;
-              apiKey.set(null);
-              flushSync(() => setKeyVersion((n) => n + 1));
-              if (creditsOn && token) {
-                void refreshCredits();
-                chatFocus();
-                setStatus("API key removed from this browser. Using your AI credits.");
-              } else {
-                setupFocus();
-                setStatus("API key removed from this browser");
-              }
-            }}>Forget key</button>
-            <button className="btn sm" id="builder-stop" type="button" hidden={!busy} onClick={() => {
-              r.stopped = true;
-              r.agent?.stop();
-              inputRef.current?.focus(); // the Stop button hides
-            }}>Stop</button>
-            <button className="btn primary sm" id="builder-send" type="submit" disabled={busy || locked}>Send</button>
+          <div className="composer">
+            <textarea id="builder-input" ref={inputRef} rows={2} placeholder="Describe a change…"
+              aria-describedby={locked ? "builder-locked builder-hint" : "builder-hint"}
+              value={input} onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  formRef.current?.requestSubmit();
+                }
+              }} />
+            <div className="builder-actions">
+              <span className="credits" id="builder-credits" hidden={!credited || !credits} title={credits?.title} data-low={credits?.low ? "" : undefined}>{credits?.text}</span>
+              <p className="muted small" id="builder-hint"><kbd>Enter</kbd> sends<span className="hint-more">, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line</span></p>
+              <button className="btn sm" id="builder-forget" type="button" hidden={source !== "key"} disabled={busy} onClick={() => {
+                if (r.busy) return;
+                apiKey.set(null);
+                flushSync(() => setKeyVersion((n) => n + 1));
+                if (creditsOn && token) {
+                  void refreshCredits();
+                  chatFocus();
+                  setStatus("API key removed from this browser. Using your AI credits.");
+                } else {
+                  setupFocus();
+                  setStatus("API key removed from this browser");
+                }
+              }}>Forget key</button>
+              <button className="btn sm" id="builder-stop" type="button" hidden={!busy} onClick={() => {
+                r.stopped = true;
+                r.agent?.stop();
+                inputRef.current?.focus(); // the Stop button hides
+              }}><Icon name="x" />Stop</button>
+              <button className="btn primary sm" id="builder-send" type="submit" disabled={busy || locked} hidden={busy}><Icon name="arrow-up" />Send</button>
+            </div>
           </div>
         </form>
       </div>

@@ -1,5 +1,8 @@
-// /p/<id>: a project. Chat first: the AI builder beside the app's preview, the code (files + editor) or the preview's
-// database when asked for, and the terminal and deploy log in a drawer under them. What was last shown is remembered in this browser.
+// /p/<id>: a project, as the Shipline: the AI builder's rail (what's live, the ship line, the changes not live yet and
+// the chat) beside a stage with the app's preview, its code, both side by side (Split), or the preview's database.
+// Two modes, one layout: Guided (light; preview and database, nothing to decode) and Studio (dark and dense; code,
+// Split, the terminal and deploy log in a dock, source control, a status bar). ⌘K runs any action. What was last
+// shown is remembered in this browser.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
@@ -16,6 +19,7 @@ import { rememberAfterLogin, session, useSession } from "../../lib/session.ts";
 import { toast } from "../../lib/toast.tsx";
 import { ExtLink, Icon, SrOnly } from "../../ui/icons.tsx";
 import { Builder, type BuilderHandle } from "./Builder.tsx";
+import { type Command, CommandPalette, type PaletteHandle } from "./CommandPalette.tsx";
 import { DatabaseView, type RunSql } from "./DatabaseView.tsx";
 import { DeployDialog, type DeployDialogHandle } from "./DeployDialog.tsx";
 import { GitDialog, type GitDialogHandle } from "./GitDialog.tsx";
@@ -54,6 +58,7 @@ interface LayoutPrefs {
   view?: string;
   drawer?: boolean;
   chat?: boolean;
+  mode?: string;
 }
 const layoutPrefs = (): LayoutPrefs => {
   try {
@@ -67,8 +72,16 @@ const saveLayout = (p: LayoutPrefs) => {
     localStorage.setItem(LAYOUT, JSON.stringify({ ...layoutPrefs(), ...p }));
   } catch { /* storage blocked: not remembered */ }
 };
-const VIEWS = ["preview", "code", "database"] as const;
+const VIEWS = ["preview", "split", "code", "database"] as const;
 type View = (typeof VIEWS)[number];
+const VIEW_LABEL: Record<View, string> = { preview: "Preview", split: "Split", code: "Code", database: "Database" };
+const VIEW_ICON: Record<View, string> = { preview: "window", split: "split", code: "code", database: "database" };
+/** Guided shows what anyone reads; Studio adds the code (Code, Split), the dock and source control. */
+const MODES = ["guided", "studio"] as const;
+type Mode = (typeof MODES)[number];
+const STUDIO_ONLY: readonly View[] = ["split", "code"];
+const mac = typeof navigator !== "undefined" && /Mac|iP(hone|ad)/.test(navigator.platform);
+const MOD = mac ? "⌘" : "Ctrl+";
 const TABS = ["terminal", "deploy-log"] as const;
 type Tab = (typeof TABS)[number];
 
@@ -79,7 +92,12 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const [status, setStatus] = useState({ text: "Idle", state: "idle" });
   const [prefs] = useState(layoutPrefs);
   const [view, setViewState] = useState<View>(VIEWS.find((v) => v === prefs.view) ?? "preview");
+  const [mode, setModeState] = useState<Mode>(MODES.find((m) => m === prefs.mode) ?? "guided");
+  const studio = mode === "studio";
+  // What's on screen: Guided has no code views and no dock (they're kept for Studio).
+  const shown: View = !studio && STUDIO_ONLY.includes(view) ? "preview" : view;
   const [drawer, setDrawerState] = useState(prefs.drawer === true);
+  const dock = drawer && studio;
   const [chat, setChat] = useState(prefs.chat !== false);
   const [tab, setTab] = useState<Tab>("terminal");
   const [tree, setTree] = useState<TreeItem[]>([]);
@@ -87,6 +105,13 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const [deploy, setDeploy] = useState<Deploy | null>(project.deploy);
   const [deploying, setDeploying] = useState(false);
   const [deployLog, setDeployLog] = useState("");
+  const [deployFailed, setDeployFailed] = useState<string | null>(null);
+  // Requests that changed the workspace since the last deploy (not linked to a repository: its stack counts them then).
+  const [turnsSince, setTurnsSince] = useState(0);
+  // The preview (the draft: this tab's dev server) at desktop or phone width. (The live app can't be framed here:
+  // this page is cross-origin isolated, and apps don't opt in to being embedded.)
+  const [device, setDevice] = useState<"desktop" | "phone">("desktop");
+  const palette = useRef<PaletteHandle>(null);
   const [locked, setLocked] = useState(project.trusted === false);
   const [container, setContainer] = useState<Container | null>(null);
   const [preview, setPreview] = useState<{ ready: boolean; spinner: boolean; msg: ReactNode }>({ ready: false, spinner: true, msg: "Booting runtime…" });
@@ -130,6 +155,13 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     iframe.current.src = previewBase.current.replace(/\/$/, "") + (path.startsWith("/") ? path : "/" + path);
   }, []);
 
+  // The mode's colors are the page's (dialogs and toasts too) while the project is open; the editor and terminal take them.
+  useLayoutEffect(() => {
+    document.documentElement.dataset.ws = mode;
+    engine.current?.setDark(mode === "studio");
+  }, [mode]);
+  useLayoutEffect(() => () => void delete document.documentElement.dataset.ws, []);
+
   useEffect(() => {
     const e = new Engine(project, {
       status: (text, state = "busy") => setStatus({ text, state }),
@@ -147,13 +179,20 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         setContainer(c);
         if (project.trusted !== false) setPreview((p) => ({ ...p, msg: "Installing dependencies…" }));
       },
-      deployed: setDeploy,
+      deployed(d) {
+        d.at = Date.now();
+        void projects.put(project);
+        setDeploy({ ...d });
+        setTurnsSince(0);
+        setDeployFailed(null);
+      },
       git: setGitState,
       builderRunning: () => builder.current?.running() ?? false,
       builderTurn: () => builder.current?.turn() ?? null,
       approveDeploy: (text, signal) => builder.current?.approve(text, signal) ?? Promise.resolve(false),
     }, editorEl.current!); // mounted
     engine.current = e;
+    e.setDark(document.documentElement.dataset.ws === "studio");
     void e.boot();
     return () => {
       e.dispose();
@@ -275,9 +314,16 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   }, [project]);
 
   function setView(v: View) {
+    if (!studio && STUDIO_ONLY.includes(v)) setMode("studio");
     flushSync(() => setViewState(v));
     saveLayout({ view: v });
-    if (v === "code") engine.current?.measureEditor();
+    if (v === "code" || v === "split") engine.current?.measureEditor();
+  }
+  function setMode(m: Mode) {
+    flushSync(() => setModeState(m));
+    saveLayout({ mode: m });
+    if (m === "studio" && drawer) engine.current?.openTerminal(termEl.current!); // mounted
+    engine.current?.measureEditor();
   }
   function setDrawer(open: boolean, { focus = false } = {}) {
     const had = !!drawerEl.current?.contains(document.activeElement);
@@ -288,11 +334,11 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   }
   // The terminal opens with the drawer: also when it was left open last time.
   useEffect(() => {
-    if (drawer && container) engine.current?.openTerminal(termEl.current!); // mounted
-  }, [drawer, container]);
+    if (dock && container) engine.current?.openTerminal(termEl.current!); // mounted
+  }, [dock, container]);
   useEffect(() => {
-    if (view === "code") engine.current?.measureEditor();
-  }, [view]);
+    if (shown === "code" || shown === "split") engine.current?.measureEditor();
+  }, [shown]);
 
   function setBuilderOpen(open: boolean, { focus = true } = {}) {
     flushSync(() => setChat(open));
@@ -371,10 +417,15 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     flushSync(() => {
       setDeploying(true);
       setDeployLog("");
+      setDeployFailed(null);
+      if (!chat) setChat(true); // the ship line shows it going live
     });
-    setDrawer(true);
-    selectTab("deploy-log");
-    if (wasFocused) logEl.current?.focus(); // the disabled button would drop focus to <body>
+    if (studio) {
+      setDrawer(true);
+      selectTab("deploy-log");
+    }
+    // The disabled button would drop focus to <body>: the deploy log, or (Guided) the rail with the ship line.
+    if (wasFocused) (studio ? logEl.current : document.querySelector<HTMLElement>("#builder .thread"))?.focus();
     try {
       // A shared app you only view: say so before building (the API would refuse the upload).
       const target = project.deploy?.name;
@@ -386,6 +437,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       toast(<span>Deployed: <ExtLink href={r.app.url}>{r.app.url}</ExtLink></span>, 10000);
     } catch (err) {
       setDeployLog((l) => l + `\nerror: ${errorMessage(err)}\n`);
+      setDeployFailed(errorMessage(err));
       // A merge that can't go through (conflict, protected branch): nothing was deployed. A conflict can be resolved
       // here (the AI builder, or by hand); a protected branch takes a pull request.
       const code = (err as { code?: string }).code;
@@ -401,6 +453,44 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     }
   }
 
+  // Not live yet: the stack's changes when linked, else the requests that changed something since the last deploy.
+  const stackShown = !!(stack && gitState && gitOn && token && !locked);
+  const pending = stackShown ? stack!.changes.length : turnsSince;
+  const lastLine = deployLog.trimEnd().split("\n").at(-1) ?? "";
+  const gitReady = gitOn && !!token && !!container && !locked;
+
+  // Shortcuts: ⌘K commands, ⌘. Guided/Studio, ⌘J the dock (Studio), ⌘B the AI builder.
+  const keys = useRef<(e: KeyboardEvent) => void>(() => {});
+  keys.current = (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+    const k = e.key.toLowerCase();
+    if (k === "k") palette.current?.toggle();
+    else if (k === ".") setMode(studio ? "guided" : "studio");
+    else if (k === "j" && studio) setDrawer(!drawer, { focus: true });
+    else if (k === "b" && container) setBuilderOpen(!chat);
+    else return;
+    e.preventDefault();
+  };
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => keys.current(e);
+    addEventListener("keydown", on, true); // before the editor and terminal take it
+    return () => removeEventListener("keydown", on, true);
+  }, []);
+  const commands = (): Command[] => {
+    const list: Command[] = [];
+    const add = (id: string, group: string, icon: string, label: string, run: () => void, keys?: string) => list.push({ id, group, icon, label, run, keys });
+    add("deploy", "Actions", "ship", pending ? `Deploy ${pending} ${pending === 1 ? "change" : "changes"}` : "Deploy", () => deployBtn.current?.click());
+    if (container) add("builder", "Actions", "sparkles", chat ? "Hide the AI builder" : "Ask Claude for a change", () => setBuilderOpen(!chat), `${MOD}B`);
+    add("reload", "Actions", "refresh", "Reload the preview", () => (setView("preview"), loadPreview()));
+    if (deploy?.url) add("live", "Actions", "globe", "Open the live app", () => void open(deploy.url, "_blank", "noopener"));
+    if (gitReady) add("git", "Actions", "branch", gitState ? "Source control" : "Connect Git", () => gitDialog.current?.open());
+    add("mode", "Layout", studio ? "sparkles" : "code", studio ? "Switch to Guided" : "Switch to Studio", () => setMode(studio ? "guided" : "studio"), `${MOD}.`);
+    for (const v of VIEWS) if (v !== shown) add(`view-${v}`, "Layout", VIEW_ICON[v], `Show ${VIEW_LABEL[v]}`, () => setView(v));
+    add("dock", "Layout", "terminal", dock ? "Hide the terminal" : "Show the terminal", () => (studio ? setDrawer(!drawer, { focus: !dock }) : (setMode("studio"), setDrawer(true))), `${MOD}J`);
+    for (const f of tree) if (!f.dir) add(`file-${f.path}`, "Files", "file", f.path, () => (shown !== "code" && shown !== "split" && setView("code"), void engine.current?.openFile(f.path)));
+    return list;
+  };
+
   return (
     <>
       <header className="topbar" id="topbar">
@@ -409,57 +499,77 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           <SrOnly>Cresslet: all projects</SrOnly>
         </Link>
         <div className="project-title" id="project-title">
-          <span className="crumb-sep" aria-hidden="true">/</span>
           <input id="project-name" ref={nameEl} aria-label="Project name" spellCheck={false} autoComplete="off" defaultValue={project.name} />
           <span className="status" id="status" data-state={status.state} role="status"><span className="status-dot" aria-hidden="true" /><span id="status-text">{status.text}</span></span>
+          {deploy?.url ? (
+            <a className="deploy-link" id="deploy-link" target="_blank" rel="noopener" href={deploy.url}>
+              <span className="deploy-url">{deploy.url.replace(/^https?:\/\//, "")}</span><Icon name="external" /><SrOnly> (live app, opens in a new tab)</SrOnly>
+            </a>
+          ) : <span className="deploy-link muted" aria-hidden="true">Not live yet</span>}
         </div>
-        {/* What the main area shows next to the chat: the running app, its code, or its database. */}
-        <div className="view-switch" id="view-switch" role="group" aria-label="Show">
-          <button type="button" id="view-preview" data-view="preview" aria-pressed={view === "preview"} onClick={() => setView("preview")}><Icon name="window" />Preview</button>
-          <button type="button" id="view-code" data-view="code" aria-pressed={view === "code"} onClick={() => setView("code")}><Icon name="code" />Code</button>
-          <button type="button" id="view-database" data-view="database" aria-pressed={view === "database"} onClick={() => setView("database")}><Icon name="database" />Database</button>
+        <button className="palette-btn" id="palette-btn" type="button" aria-haspopup="dialog" onClick={() => palette.current?.open()}>
+          <Icon name="search" /><span>Search or run a command</span><kbd aria-hidden="true">{`${MOD}K`}</kbd>
+        </button>
+        <div className="topbar-right">
+          {gitReady ? (
+            gitState ? (
+              <button className="btn git-pill s-only" id="git-btn" type="button" title={`${gitState.owner}/${gitState.repo}`} onClick={() => gitDialog.current?.open()}>
+                <Icon name="branch" /><span id="git-btn-branch" className="mono">{gitState.activeBranch}</span>
+                {gitState.dirty ? <span className="git-dirty" aria-hidden="true" /> : null}
+                {upstreamMoved ? <span className="git-upstream" title={`${gitState.defaultBranch} was updated on GitHub`}>{`↓ ${gitState.defaultBranch}`}</span> : null}
+                {upstreamMoved ? <SrOnly>{` (${gitState.defaultBranch} was updated on GitHub: pull, or deploy to merge it)`}</SrOnly> : null}
+                <SrOnly>{gitState.dirty ? " (changes not pushed)" : ""}</SrOnly><SrOnly>: source control</SrOnly>
+              </button>
+            ) : (
+              <button className="btn s-only" id="git-btn" type="button" onClick={() => gitDialog.current?.open()}><Icon name="branch" />Connect Git</button>
+            )
+          ) : null}
+          {pull && gitReady ? (
+            <ExtLink className="btn git-pr s-only" id="git-pr-link" href={pull.url} title={pull.title}>
+              {`PR #${pull.number}`}<span className="muted small">{` · ${pull.review.replace("_", " ")} · checks ${pull.checks}`}</span>
+            </ExtLink>
+          ) : null}
+          <button className="icon-btn s-only" id="drawer-btn" type="button" ref={drawerBtn} aria-expanded={dock} aria-controls="drawer" title={`Terminal (${MOD}J)`} aria-label="Terminal" onClick={() => setDrawer(!drawer)}>
+            <Icon name="terminal" />
+          </button>
+          <button className="icon-btn" id="builder-btn" type="button" ref={builderBtn} aria-expanded={chat} aria-controls="builder" hidden={!container} title={`AI builder (${MOD}B)`} aria-label="AI builder" onClick={() => setBuilderOpen(!chat)}>
+            <Icon name="sparkles" />
+          </button>
+          <div className="seg mode-switch" id="mode-switch" role="group" aria-label="Mode" title={`Switch mode (${MOD}.)`}>
+            <button type="button" id="mode-guided" aria-pressed={!studio} onClick={() => setMode("guided")}>Guided</button>
+            <button type="button" id="mode-studio" aria-pressed={studio} onClick={() => setMode("studio")}>Studio</button>
+          </div>
+          <button className="deploy-btn" id="deploy-btn" type="button" ref={deployBtn} disabled={locked || deploying || !container} title={locked ? "Run the project first" : ""}
+            data-state={deploying ? "deploying" : deployFailed ? "failed" : !pending && deploy?.at ? "live" : "ready"} onClick={() => void onDeploy()}>
+            {deploying ? <span className="spinner" aria-hidden="true" /> : <Icon name={!pending && deploy?.at && !deployFailed ? "check" : "ship"} />}
+            <span id="deploy-btn-label">{deploying ? "Deploying…" : "Deploy"}</span>
+            {pending && !deploying ? <span className="deploy-count">{`${pending} ${pending === 1 ? "change" : "changes"}`}</span> : null}
+          </button>
         </div>
-        <div className="spacer" />
-        {deploy?.url ? (
-          <a className="deploy-link" id="deploy-link" target="_blank" rel="noopener" href={deploy.url}>
-            <Icon name="globe" /><span className="deploy-url">{deploy.url.replace(/^https?:\/\//, "")}</span><SrOnly> (live app, opens in a new tab)</SrOnly>
-          </a>
-        ) : null}
-        {gitOn && token && container && !locked ? (
-          gitState ? (
-            <button className="btn git-pill" id="git-btn" type="button" title={`${gitState.owner}/${gitState.repo}`} onClick={() => gitDialog.current?.open()}>
-              <Icon name="branch" /><span id="git-btn-branch">{gitState.activeBranch}</span>
-              {gitState.dirty ? <span className="git-dirty" aria-hidden="true" /> : null}
-              {upstreamMoved ? <span className="git-upstream" title={`${gitState.defaultBranch} was updated on GitHub`}>{`↓ ${gitState.defaultBranch}`}</span> : null}
-              {upstreamMoved ? <SrOnly>{` (${gitState.defaultBranch} was updated on GitHub: pull, or deploy to merge it)`}</SrOnly> : null}
-              <SrOnly>{gitState.dirty ? " (changes not pushed)" : ""}</SrOnly><span aria-hidden="true">· Sync</span><SrOnly>: source control</SrOnly>
-            </button>
-          ) : (
-            <button className="btn" id="git-btn" type="button" onClick={() => gitDialog.current?.open()}><Icon name="branch" />Connect Git</button>
-          )
-        ) : null}
-        {pull && gitOn && token && container && !locked ? (
-          <ExtLink className="btn git-pr" id="git-pr-link" href={pull.url} title={pull.title}>
-            {`PR #${pull.number}`}<span className="muted small">{` · ${pull.review.replace("_", " ")} · checks ${pull.checks}`}</span>
-          </ExtLink>
-        ) : null}
-        <button className="btn" id="builder-btn" type="button" ref={builderBtn} aria-expanded={chat} aria-controls="builder" hidden={!container} onClick={() => setBuilderOpen(!chat)}>
-          <Icon name="sparkles" />AI builder
-        </button>
-        <button className="btn" id="drawer-btn" type="button" ref={drawerBtn} aria-expanded={drawer} aria-controls="drawer" onClick={() => setDrawer(!drawer)}>
-          <Icon name="terminal" />Terminal
-        </button>
-        <button className="btn primary" id="deploy-btn" type="button" ref={deployBtn} disabled={locked || deploying || !container} title={locked ? "Run the project first" : ""} onClick={() => void onDeploy()}>
-          <Icon name="rocket" /><span id="deploy-btn-label">{deploying ? "Deploying…" : "Deploy"}</span>
-        </button>
       </header>
 
-      <main id="workspace" className="workspace" aria-labelledby="workspace-title" data-view={view} data-drawer={drawer ? "open" : ""} data-builder={container && chat ? "open" : ""}>
+      <main id="workspace" className="workspace" aria-labelledby="workspace-title" data-mode={mode} data-view={shown} data-drawer={dock ? "open" : ""} data-builder={container && chat ? "open" : ""}>
         <h1 className="sr-only" id="workspace-title" tabIndex={-1}>{`${name}: AI builder, preview, code and database`}</h1>
+        {/* What the stage shows: the running app, its code, both, or its database. */}
+        <div className="stagebar" id="stagebar">
+          <div className="seg view-switch" id="view-switch" role="group" aria-label="Show">
+            {VIEWS.map((v) => (
+              <button key={v} type="button" id={`view-${v}`} data-view={v} className={STUDIO_ONLY.includes(v) ? "s-only" : undefined} aria-pressed={shown === v} onClick={() => setView(v)}>
+                <Icon name={VIEW_ICON[v]} />{VIEW_LABEL[v]}
+              </button>
+            ))}
+          </div>
+          <span className="stage-note muted small">
+            {shown === "database" ? "The preview's own database, not the live app's"
+              : pending ? `Draft: ${pending} ${pending === 1 ? "change" : "changes"} not live yet` : "Draft"}
+          </span>
+        </div>
         {container ? (
           <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
-            onStackStale={() => setGitTick((n) => n + 1)}
-            stack={stack && gitState && gitOn && token && !locked ? (
+            onStackStale={() => setGitTick((n) => n + 1)} appName={name}
+            ship={{ url: deploy?.url, at: deploy?.at, deploying, pending, line: deploying ? lastLine : deployFailed ?? undefined, failed: !!deployFailed }}
+            onTurnEnd={(changed) => changed && setTurnsSince((n) => n + 1)}
+            stack={stack && gitState && stackShown ? (
               <StackPanel stack={stack} state={gitState} busy={stackBusy || deploying} pulls={stackPulls}
               onSubmit={() => {
                 const g = engine.current?.git;
@@ -637,7 +747,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
               return path === engine.current?.current && engine.current.openFile(path);
             }} />
         ) : null}
-        <section className="pane files" id="files-pane" aria-labelledby="files-title" hidden={view !== "code"}>
+        <section className="pane files" id="files-pane" aria-labelledby="files-title" hidden={shown !== "code" && shown !== "split"}>
           <div className="pane-head">
             <h2 id="files-title" className="pane-title">Files</h2>
             <button className="icon-btn" id="new-file" type="button" aria-label="New file" title="New file" onClick={() => {
@@ -650,7 +760,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           </div>
           <Tree items={tree} current={openFile} open={(p) => void engine.current?.openFile(p)} />
         </section>
-        <section className="pane editor-pane" id="editor-pane" aria-labelledby="editor-title" hidden={view !== "code"}>
+        <section className="pane editor-pane" id="editor-pane" aria-labelledby="editor-title" hidden={shown !== "code" && shown !== "split"}>
           <div className="pane-head">
             <h2 className="sr-only" id="editor-title">Code editor</h2>
             <Icon name="file" />
@@ -659,19 +769,23 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           <div id="editor" className="editor" ref={editorEl} />
           <p className="pane-foot" id="editor-help">Tab indents. Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the editor.</p>
         </section>
-        <section className="pane preview-pane" id="preview-pane" aria-labelledby="preview-title" hidden={view !== "preview"}>
-          <div className="pane-head">
+        <section className="pane preview-pane" id="preview-pane" aria-labelledby="preview-title" hidden={shown !== "preview" && shown !== "split"}>
+          <div className="pane-head preview-head">
             <h2 className="sr-only" id="preview-title">Preview</h2>
             <button className="icon-btn" id="preview-reload" type="button" aria-label="Reload preview" title="Reload preview" onClick={loadPreview}>
               <Icon name="refresh" />
             </button>
             <div className="urlbar">
-              <Icon name="globe" />
+              <span className="env-tag" aria-hidden="true" title="Your draft: what you change here, before it's deployed">Draft</span>
               <input id="preview-path" ref={previewPathEl} className="mono" value={previewPath} aria-label="Preview path" spellCheck={false} autoComplete="off"
                 onChange={(e) => setPreviewPath(e.target.value)} onKeyDown={(e) => e.key === "Enter" && loadPreview()} />
             </div>
+            <div className="seg device-switch" role="group" aria-label="Screen size">
+              <button type="button" aria-pressed={device === "desktop"} aria-label="Desktop width" title="Desktop" onClick={() => setDevice("desktop")}><Icon name="monitor" /></button>
+              <button type="button" aria-pressed={device === "phone"} aria-label="Phone width" title="Phone" onClick={() => setDevice("phone")}><Icon name="phone" /></button>
+            </div>
           </div>
-          <div className="preview-body">
+          <div className="preview-body" data-device={device}>
             {/* No top navigation or popups: app server code runs in workers on this origin and could mint blob: URLs
                 here; a preview must not be able to open one as a top-level document. Hidden (out of the tab order)
                 until its dev server is ready. */}
@@ -684,7 +798,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             </div>
           </div>
         </section>
-        <DatabaseView run={sqlRunner} shown={view === "database"} />
+        <DatabaseView run={sqlRunner} shown={shown === "database"} />
         <section className="pane bottom-pane" id="drawer" aria-label="Output" hidden={!drawer} ref={drawerEl}>
           <div className="pane-head drawer-head">
             <div className="tabs" role="tablist" aria-label="Output">
@@ -709,7 +823,18 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           <pre id="deploy-log" className="deploy-log mono" ref={logEl} data-panel="deploy-log" role="tabpanel" aria-labelledby="tab-deploy-log" tabIndex={0} hidden={tab !== "deploy-log"}>{deployLog}</pre>
           <p className="pane-foot" id="terminal-help" data-panel="terminal" hidden={tab !== "terminal"}>Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the terminal.</p>
         </section>
+        <footer className="statusline s-only" id="statusline">
+          <span className="statusline-item"><span className="status-dot" data-state={status.state} aria-hidden="true" />{status.text}</span>
+          {gitState ? <span className="statusline-item mono"><Icon name="branch" />{gitState.activeBranch}{gitState.dirty ? " •" : ""}</span> : null}
+          <span className="statusline-item">{pending ? `${pending} not live yet` : deploy?.url ? "Everything is live" : "Not deployed yet"}</span>
+          <span className="statusline-push">
+            <button type="button" className="statusline-item" onClick={() => palette.current?.open()}><kbd>{`${MOD}K`}</kbd>Commands</button>
+            <button type="button" className="statusline-item" onClick={() => setDrawer(!drawer)}><kbd>{`${MOD}J`}</kbd>Terminal</button>
+            <button type="button" className="statusline-item" onClick={() => setMode("guided")}><kbd>{`${MOD}.`}</kbd>Guided</button>
+          </span>
+        </footer>
       </main>
+      <CommandPalette ref={palette} commands={commands} />
       <DeployDialog ref={dialog} />
       <GitDialog ref={gitDialog} git={engine.current?.git ?? null} app={deploy?.name}
         files={() => engine.current!.sources()} hydrate={(f) => engine.current!.hydrate(f)} reserve={reserveApp}

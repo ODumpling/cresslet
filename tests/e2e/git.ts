@@ -5,6 +5,7 @@
 // live. GitHub is tests/fake_github.ts; the server runs in this process.
 // Needs the studio built (npm run build). Run: cd tests/e2e && node git.ts [outdir]
 import { chromium } from "@playwright/test";
+import { studioMode } from "./studio-mode.ts";
 import { serve } from "@hono/node-server";
 import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -38,6 +39,7 @@ const call = async (path: string, token: string, body?: object) => (await fetch(
 const { token } = await call("/v1/accounts", "adm", { email: "octo@example.com" });
 
 const browser = await chromium.launch();
+studioMode(browser);
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
 await page.addInitScript((t) => (localStorage.setItem("cresslet.token", t), localStorage.setItem("cresslet.anthropicKey", "sk-ant-e2e")), token);
 

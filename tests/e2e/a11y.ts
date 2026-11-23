@@ -2,6 +2,7 @@
 // Deploy, Revoke and admin actions, tabs follow the ARIA pattern, no page-level horizontal scroll at 320px).
 // Run with the server up (CRESSLET_ADMIN_TOKEN=e2e-admin CRESSLET_SITE_ADMINS=admin@example.com npm run dev): node a11y.ts
 import { chromium, type Page } from "@playwright/test";
+import { studioMode } from "./studio-mode.ts";
 const base = process.env.CRESSLET_URL ?? "http://localhost:8787";
 const admin = process.env.CRESSLET_ADMIN_TOKEN ?? "e2e-admin";
 const call = async (path: string, token: string, body?: object) => (await fetch(base + path, {
@@ -15,6 +16,7 @@ const focused = (page: Page) => page.evaluate(() => {
   return a === document.body ? "body" : a.id || a.getAttribute("aria-label") || a.className || a.tagName;
 });
 const browser = await chromium.launch();
+studioMode(browser);
 try {
   const { token } = await call("/v1/accounts", admin, { email: "admin@example.com" });
   await call("/v1/deploys", token, { files: [{ path: "index.html", data: "a11y" }] });

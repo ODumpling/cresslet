@@ -76,6 +76,12 @@ export class Engine {
   private theme = new Compartment();
   private suppress = false;
   private scheme = matchMedia("(prefers-color-scheme: dark)");
+  /** The workspace's mode sets the scheme (Studio dark, Guided light); null follows the system's. */
+  private forceDark: boolean | null = null;
+  private get dark() {
+    return this.forceDark ?? this.scheme.matches;
+  }
+  private onScheme = () => {};
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private treeTimer: ReturnType<typeof setTimeout> | undefined;
   private saving: Promise<void> | null = null;
@@ -150,7 +156,7 @@ export class Engine {
         extensions: [
           basicSetup,
           keymap.of([indentWithTab]),
-          this.theme.of(this.scheme.matches ? oneDark : []),
+          this.theme.of(this.dark ? oneDark : []),
           EditorView.contentAttributes.of({ "aria-label": "Code", "aria-describedby": "editor-help" }),
           this.lang.of([]),
           EditorView.updateListener.of((u) => {
@@ -164,8 +170,8 @@ export class Engine {
       }),
     });
     // Colors follow the light/dark preference; CSS tokens are the source of truth.
-    const onScheme = () => {
-      this.view.dispatch({ effects: this.theme.reconfigure(this.scheme.matches ? oneDark : []) });
+    const onScheme = this.onScheme = () => {
+      this.view.dispatch({ effects: this.theme.reconfigure(this.dark ? oneDark : []) });
       this.term.options.theme = this.termTheme();
     };
     this.scheme.addEventListener("change", onScheme);
@@ -179,7 +185,7 @@ export class Engine {
   private termTheme() {
     const v = (n: string) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
     return {
-      ...ANSI[this.scheme.matches ? "dark" : "light"],
+      ...ANSI[this.dark ? "dark" : "light"],
       background: v("--surface"), foreground: v("--text"), cursor: v("--accent-text"), cursorAccent: v("--surface"), selectionBackground: v("--accent-soft"),
     };
   }
@@ -193,6 +199,12 @@ export class Engine {
     this.fit.fit();
     this.termResize = new ResizeObserver(() => this.fit.fit());
     this.termResize.observe(el);
+  }
+  /** The editor and terminal take the workspace's scheme (its CSS tokens are already set): dark, light, or null (the system's). */
+  setDark(dark: boolean | null) {
+    if (dark === this.forceDark) return;
+    this.forceDark = dark;
+    this.onScheme();
   }
   /** The editor was shown: it measures itself. */
   measureEditor() {
