@@ -14,6 +14,7 @@ import {
   previewAppName,
   previewOrigin,
   rootUrl,
+  sessionCookie,
   type Visibility,
   VISIBILITIES,
 } from "./config.ts";
@@ -239,10 +240,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.json({ error: "internal", message: "internal error" }, 500);
   });
 
-  // ---- the studio's session: an account token in an HttpOnly cookie (page script never sees it). `__Host-`: only this
-  // host can set it (not an app under the domain). Apps under the domain are the same *site* (SameSite lets their
-  // requests carry it), so it only counts on requests the studio's own pages sent (`fromStudio`).
-  const SESSION_COOKIE = cfg.scheme === "https" ? "__Host-cresslet_session" : "cresslet_session";
+  // ---- the studio's session: an account token in an HttpOnly cookie (page script never sees it). Apps under the
+  // domain are the same *site* (SameSite lets their requests carry it), so it only counts on requests the studio's
+  // own pages sent (`fromStudio`).
+  const SESSION_COOKIE = sessionCookie(cfg);
   const SESSION_MAX_AGE = 400 * 86_400; // browsers' cap; the token itself lasts until logout or revocation
   /** Sent by a studio page (this origin), not another site or an app under the domain. */
   const fromStudio = (c: Context<Env>) => {

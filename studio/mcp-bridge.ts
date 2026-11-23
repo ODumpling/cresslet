@@ -203,7 +203,8 @@ export type BridgeState =
 
 export interface BridgeClientOptions {
   wsUrl: string;
-  token: string;
+  /** The account's token; without one, the studio's session cookie (sent with the upgrade) is the credential. */
+  token?: string;
   code: string;
   projectName: string;
   dispatcher: ReturnType<typeof createBridgeDispatcher>;
@@ -246,7 +247,7 @@ export function connectBridge({
   };
 
   ws.addEventListener("open", () => {
-    send({ type: "hello", role: "studio", token, code, projectName });
+    send({ type: "hello", role: "studio", ...(token ? { token } : {}), code, projectName });
   });
 
   ws.addEventListener("message", (ev) => {

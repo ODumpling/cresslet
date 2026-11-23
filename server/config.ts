@@ -347,6 +347,12 @@ export function previewOrigin(cfg: Config): string {
   return `${cfg.scheme}://${cfg.previewHost}${port}`;
 }
 
+/**
+ * The studio's session cookie (server/api.ts): an account token, HttpOnly. `__Host-`: only the studio's host can set
+ * it (not an app under the domain).
+ */
+export const sessionCookie = (cfg: Config) => cfg.scheme === "https" ? "__Host-cresslet_session" : "cresslet_session";
+
 export function rootUrl(cfg: Config): string {
   const defaultPort = cfg.scheme === "https" ? 443 : 80;
   const port = cfg.publicPort === defaultPort ? "" : `:${cfg.publicPort}`;

@@ -148,6 +148,23 @@ test("relay pairs same-account CLI and studio, relays frames, and enforces isola
       await new Promise((r) => setTimeout(r, 30));
     }
 
+    // The studio's session cookie (sent with the upgrade from the studio's origin) is its credential: no token in the
+    // hello. It wins over one (Bob's cookie with Alice's token: Bob's, so not her code).
+    {
+      const s = await connectWs(wsUrl, { ...studioHeaders, cookie: `other=1; cresslet_session=${alice.token}` });
+      const reqP = nextMsg(s);
+      s.send(JSON.stringify({ v: 1, type: "hello", role: "studio", code, projectName: "My App" }));
+      assert.equal((await reqP).type, "pair_request");
+      s.close();
+      await waitClose(s);
+      await new Promise((r) => setTimeout(r, 30));
+      const b = await connectWs(wsUrl, { ...studioHeaders, cookie: `cresslet_session=${bob.token}` });
+      const errP = nextMsg(b);
+      b.send(JSON.stringify({ v: 1, type: "hello", role: "studio", token: alice.token, code }));
+      assert.equal((await errP).code, "not_found");
+      await waitClose(b);
+    }
+
     // Alice's studio claims the code and approves.
     const studio = await connectWs(wsUrl, studioHeaders);
     const reqP = nextMsg(studio);

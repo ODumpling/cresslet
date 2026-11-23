@@ -135,7 +135,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     gone: false, // unmounted (the user left the project): no more UI updates
     // Live Link (`cresslet connect`): paired desktop agent state.
     bridge: null as ReturnType<typeof connectBridge> | null,
-    bridgeToken: null as string | null,
+    bridgeUser: null as string | null, // who connected the desktop agent
     remoteAgent: null as string | null,
     remoteChanged: false,
     remoteCmdRev: 0,
@@ -198,11 +198,11 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
 
   // Disconnect an active desktop agent if the user logs out or switches accounts.
   useEffect(() => {
-    if (r.bridge && r.bridgeToken !== token) {
+    if (r.bridge && r.bridgeUser !== user) {
       r.bridge.disconnect();
       r.bridge = null;
     }
-  }, [token, r]);
+  }, [user, r]);
 
   // Stick to the bottom when new output arrives and the log was already there.
   const nearBottom = () => {
@@ -323,13 +323,12 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
   function startBridge(e: React.FormEvent) {
     e.preventDefault();
     const code = bridgeCode.trim();
-    if (!code || !token || r.busy || r.bridge) return;
+    if (!code || !user || r.busy || r.bridge) return;
     setBridgeError("");
     const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/workspace/relay`;
-    r.bridgeToken = token;
+    r.bridgeUser = user;
     r.bridge = connectBridge({
       wsUrl,
-      token,
       code,
       projectName: appName,
       dispatcher,
@@ -351,7 +350,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
           const hadUncommitted = !!wasAgent && (r.remoteChanged || r.commandRev() !== r.remoteCmdRev);
           r.remoteAgent = null;
           r.bridge = null;
-          r.bridgeToken = null;
+          r.bridgeUser = null;
           setBridgeBusy(false);
           setWorking("");
           for (const decline of r.approvals) decline();
@@ -661,9 +660,9 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         <h2 id="builder-title" className="pane-title">Build with Claude</h2>
         <button className="icon-btn" id="builder-connect" type="button"
           aria-label="Connect desktop agent"
-          title={!token ? "Log in to connect a desktop agent" : remotePaired ? `Connected to ${bridgeState.agent}` : "Connect desktop agent (cresslet connect)"}
+          title={!user ? "Log in to connect a desktop agent" : remotePaired ? `Connected to ${bridgeState.agent}` : "Connect desktop agent (cresslet connect)"}
           aria-expanded={connectOpen}
-          disabled={!token || busy || remotePaired || remotePending}
+          disabled={!user || busy || remotePaired || remotePending}
           onClick={() => {
             setConnectOpen((v) => !v);
             setBridgeError("");
