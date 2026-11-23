@@ -441,7 +441,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     provider: "github", owner: "octo", repo: "shop", url: "https://github.example/octo/shop", defaultBranch: "main",
     activeBranch: onDefault ? "main" : "feat/x", baseSha: "a".repeat(40), headSha: "a".repeat(40), dirty: false,
   };
-  let n = 0;
+  let n = 0, restacks = 0;
   const api = async (path: string, init: Json = {}) => {
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
@@ -489,6 +489,11 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     if (path.endsWith("/git/stack/land-next") && body.change === "chg_edit") rev.n++; // an edit while it lands
     if (path.endsWith("/git/stack/land-next") && body.change === "chg_dirty") state.dirty = true; // …saved as such
     if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } } };
+    if (path.endsWith("/git/stack/restack")) {
+      // First: stops at change 2 (a conflict with change 1); then: done, change 3 updated.
+      if (restacks++ === 0) return { updated: [{ id: "chg_1", position: 1, branch: "feat/s/1-one" }], stopped: { change: { id: "chg_2", position: 2, branch: "feat/s/2-two", sha: "2".repeat(40) }, with: "feat/s/1-one", withSha: "1".repeat(40), paths: ["app.txt"] } };
+      return { updated: [{ id: "chg_3", position: 3, branch: "feat/s/3-three" }] };
+    }
     if (path.endsWith("/git/stack/update")) {
       if (body.change === "chg_edit") rev.n++; // an edit while it's on GitHub
       return { change: { id: body.change, sha: "7".repeat(40) } };
@@ -787,6 +792,29 @@ test("git: Land next lands the bottom through its pull request (the workspace on
   e.state.activeBranch = bottom.branch;
   await assert.rejects(e.git.updateBottom({ ...bottom, id: "chg_edit" }), (x: Json) => x.updated?.sha === "7".repeat(40) && /up to date on GitHub, but not loaded here/.test(x.message));
   assert.deepEqual(e.hydrated, []);
+});
+
+test("git: Update stack stops at a conflict on change 2 (loaded with change 1 merged in), carries on once it's pushed, and goes back to the change it was on", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.activeBranch = "feat/s/3-three";
+  const r = await g.git.updateStack("stk_1");
+  assert.deepEqual([r.stopped.change.position, r.stopped.paths], [2, ["app.txt"]]);
+  const conflicts = g.calls.find((x: Json) => x.path.includes("/git/conflicts"))!.path;
+  assert.match(conflicts, /branch=feat%2Fs%2F2-two&with=feat%2Fs%2F1-one/);
+  assert.deepEqual([g.state.activeBranch, g.state.mergeParent, g.state.restack], ["feat/s/2-two", "f".repeat(40), { stack: "stk_1", returnTo: "feat/s/3-three" }]);
+  // Deploy waits for it; markers left: not pushed.
+  await assert.rejects(g.git.prepareDeploy(), (e: Json) => e.code === "restacking");
+  g.files.list = [{ path: "app.txt", data: "<<<<<<< feat/s/2-two\na\n=======\nb\n>>>>>>> feat/s/1-one\n" }];
+  await assert.rejects(g.git.sync("Merge"), (e: Json) => e.code === "conflicts_left");
+  // Resolved and pushed: the merge committed on change 2, the update carries on, the workspace back on change 3.
+  g.files.list = [{ path: "app.txt", data: "both" }];
+  await g.git.sync("Merge");
+  const sync = g.calls.find((x: Json) => x.path.endsWith("/git/sync"))!.body;
+  assert.deepEqual([sync.branch, sync.mergeParent], ["feat/s/2-two", "f".repeat(40)]);
+  assert.deepEqual([g.calls.filter((x: Json) => x.path.endsWith("/stack/restack")).length, g.state.activeBranch, g.state.restack, g.state.mergeParent], [2, "feat/s/3-three", undefined, undefined]);
+  // Changes not pushed: refused.
+  g.state.dirty = true;
+  await assert.rejects(g.git.updateStack("stk_1"), (e: Json) => e.code === "dirty");
 });
 
 test("git: why Land next can't land the bottom yet, from its pull request", () => {

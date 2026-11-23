@@ -1076,6 +1076,49 @@ test("stack: on a protected default branch, Land next merges each bottom pull re
   assert.deepEqual([sq.status, sq.body.error], [422, "merge_method"]);
 }));
 
+test("stack: Update stack brings main's new commits into each change; a conflict is loaded against the change below and committed there", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const c1 = await add("main", linked.sha, "A", { "a.txt": "a1\n" });
+  const c2 = await add(c1.branch, c1.sha, "B", { "a.txt": "a1\n", "b.txt": "b2\n" });
+  const c3 = await add(c2.branch, c2.sha, "C", { "a.txt": "a1\n", "b.txt": "b2\n", "c.txt": "c3\n" });
+  await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: c1.stack.id });
+  const repo = t.gh.repo("octo/shop");
+  t.gh.write(repo, "main", { "b.txt": "b-main\n" });
+  assert.equal((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0].behind, true);
+
+  const u = await t.send("POST", "/v1/apps/shop/git/stack/restack", tok, { stack: c1.stack.id });
+  assert.equal(u.status, 200, JSON.stringify(u.body));
+  assert.deepEqual([u.body.updated.map((x: { position: number }) => x.position), u.body.stopped.change.position, u.body.stopped.with, u.body.stopped.paths], [[1], 2, c1.branch, ["b.txt"]]);
+  const c1b = u.body.updated[0];
+  assert.deepEqual(t.gh.commit(c1b.sha).parents.length, 2);
+  // The conflict, against change 1 (not main): change 2's lines and change 1's (which holds main's).
+  const cf = await t.send("GET", `/v1/apps/shop/git/conflicts?branch=${encodeURIComponent(c2.branch)}&with=${encodeURIComponent(c1.branch)}`, tok);
+  assert.equal(cf.status, 200, JSON.stringify(cf.body));
+  assert.deepEqual([cf.body.into, cf.body.intoSha, cf.body.conflicts], [c1.branch, c1b.sha, ["b.txt"]]);
+  // Committed onto change 2, below the top, as that merge only; its record follows.
+  const resolved = cf.body.files.map((f: { path: string; data: string }) => (f.path === "b.txt" ? { ...f, data: "b-both\n" } : f));
+  const other = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c2.branch, baseSha: c2.sha, files: resolved });
+  assert.equal(other.body.error, "not_on_top");
+  const sy = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c2.branch, baseSha: c2.sha, files: resolved, mergeParent: c1b.sha, message: `Merge ${c1.branch} into ${c2.branch}` });
+  assert.equal(sy.status, 200, JSON.stringify(sy.body));
+  let st = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
+  assert.deepEqual([st.changes[1].sha, st.changes[1].github], [sy.body.sha, "ok"]);
+  // Run again: change 3 follows; nothing behind.
+  const w = await t.send("POST", "/v1/apps/shop/git/stack/restack", tok, { stack: c1.stack.id });
+  assert.deepEqual([w.body.updated.map((x: { position: number }) => x.position), w.body.stopped], [[3], undefined]);
+  st = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
+  assert.equal(st.behind, undefined);
+  assert.equal(t.gh.files("octo/shop", c3.branch)["b.txt"], "b-both\n");
+  // Landing then fast-forwards main, each pull request merged.
+  const l = await t.send("POST", "/v1/apps/shop/git/stack/land", tok, { change: c3.change.id });
+  assert.equal(l.status, 200, JSON.stringify(l.body));
+  assert.equal(repo.refs.get("main"), st.changes[2].sha);
+  assert.ok(repo.pulls.every((x) => x.merged));
+}));
+
 test("stack: land up to a change (each pull request merged with its own turn); deploy lands the rest the same way", withServer(async (t) => {
   const { tok, linked } = await linkedShop(t);
   const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];

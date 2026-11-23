@@ -562,6 +562,19 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                   (e) => toast((e as { updated?: unknown }).updated ? `${errorMessage(e)}.` : `Not updated: ${errorMessage(e)}`, 12000),
                 ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
+              onUpdateStack={() => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                if (!confirm(`Update stack? ${gitState.defaultBranch} is merged into change ${stack.changes[0].position}, then each change into the one above (merge commits, nothing forced). A conflict stops it at that change, loaded here to resolve; it carries on once that's pushed.`)) return;
+                setStackBusy(true);
+                void g.updateStack(stack.id).then((r) => {
+                  if (!r.stopped) return void toast(r.updated.length ? `Updated ${r.updated.length} ${r.updated.length === 1 ? "change" : "changes"} with ${gitState.defaultBranch}.` : `Already up to date with ${gitState.defaultBranch}.`, 8000);
+                  const s = r.stopped;
+                  toast(`Update stack stopped at change ${s.change.position}: merging ${s.with} into it conflicts in ${s.paths.join(", ")}. Resolve them (the AI builder can), then push: it carries on from there.`, 15000);
+                  builder.current?.prefill(`Merging ${s.with} into ${s.change.branch} (Update stack) conflicts in ${s.paths.join(", ")}. Each of those files holds both versions between <<<<<<< and >>>>>>> lines. Resolve them: keep what both sides meant, remove the marker lines.`);
+                }, (e) => toast(`Not updated: ${errorMessage(e)}`, 12000)).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+              }}
               onOutside={(how, change) => {
                 const g = engine.current?.git;
                 if (!g) return;

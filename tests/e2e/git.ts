@@ -375,6 +375,17 @@ try {
   await page.screenshot({ path: `${out}/git-upstream.png` });
   console.log("webhook: upstream main shown");
 
+  // main moved under the stack: Update stack merges it into each change (no conflict: another file).
+  await page.locator("#stack-panel .stack-note", { hasText: "has commits this stack doesn't" }).waitFor({ timeout: 60000 });
+  await page.locator("#stack-update").click();
+  await toast(/Updated 2 changes with main/, 60000);
+  await page.locator("#stack-update").waitFor({ state: "detached", timeout: 30000 });
+  for (const b of [...gh.repo(full).refs.keys()].filter((x) => /\/[23]-/.test(x))) {
+    if (!gh.files(full, b)["CHANGELOG.md"]) fail(`${b} doesn't hold main's commit after Update stack`);
+  }
+  await page.locator('#tree button[data-path="CHANGELOG.md"]').waitFor({ state: "attached", timeout: 30000 });
+  console.log("updated the stack with main");
+
   // A project never deployed: its address reserved (nothing live), then a repository linked.
   await page.goto(base + "/");
   await page.getByRole("button", { name: /vanilla/ }).click();

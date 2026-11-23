@@ -7,14 +7,14 @@ import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Pull, PullInfo, Repo, SourceControlProvider } from "../server/git.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, pullBody, undoPlan, goBack, landed, landNext, landUpTo, MAX_STACK, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, pullBody, undoPlan, goBack, landed, landNext, landUpTo, MAX_STACK, assertSyncable, restack, pullIn, readStacks, restore,
   setAsideBranches, slug, stackPulls, submitStack, updateBottom,
 } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
-/** Branches and commits in memory: a commit is its files and its parent. */
+/** Branches and commits in memory: a commit is its files and its parent (a merge: and a second one). */
 function fakeProvider() {
-  const commits = new Map<string, { files: Map<string, string>; parent: string | null }>();
+  const commits = new Map<string, { files: Map<string, string>; parent: string | null; parent2?: string }>();
   const refs = new Map<string, string>();
   let n = 0;
   const make = (files: Map<string, string>, parent: string | null) => {
@@ -39,7 +39,16 @@ function fakeProvider() {
   const status = new Map<number, Partial<PullInfo>>();
   const gh = { deleteOnMerge: false };
   const contains = (sha: string, of: string) => { // `of` is `sha` or one of its ancestors
-    for (let x: string | null = sha; x; x = commits.get(x)?.parent ?? null) if (x === of) return true;
+    const todo = [sha], seen = new Set<string>();
+    while (todo.length) {
+      const x = todo.pop()!;
+      if (x === of) return true;
+      if (seen.has(x)) continue;
+      seen.add(x);
+      const c = commits.get(x);
+      if (c?.parent) todo.push(c.parent);
+      if (c?.parent2) todo.push(c.parent2);
+    }
     return false;
   };
   const pullOf = (n: number) => {
@@ -74,11 +83,33 @@ function fakeProvider() {
       }
       return { sha };
     },
-    async merge(_r: Repo, input: { into: string; head: string; message: string }) {
-      // The default branch merged into a change's branch ("Update branch"): its files on top of the change's.
+    async merge(_r: Repo, input: { into: string; head: string; message: string; expect?: string }) {
+      // `head` merged into `into` (a merge commit): file by file against their nearest common commit; both changed one: 409.
       const [into, head] = [refs.get(input.into)!, refs.get(input.head)!];
+      if (input.expect && head !== input.expect) throw new HttpError(409, `${input.head} moved on GitHub since it was synced: pull it first`, "conflict");
       if (contains(into, head)) return { mergedSha: into, headSha: head, fastForward: false, treeChanged: false };
-      const sha = make(new Map([...commits.get(head)!.files, ...commits.get(into)!.files]), into);
+      const order: string[] = [];
+      for (const todo = [into], seen = new Set<string>(); todo.length;) {
+        const x = todo.shift()!;
+        if (seen.has(x)) continue;
+        seen.add(x);
+        order.push(x);
+        const c = commits.get(x)!;
+        if (c.parent) todo.push(c.parent);
+        if (c.parent2) todo.push(c.parent2);
+      }
+      const base = order.find((x) => contains(head, x))!;
+      const [b, o, t] = [base, into, head].map((x) => commits.get(x)!.files);
+      const files = new Map<string, string>(), paths: string[] = [];
+      for (const path of new Set([...b.keys(), ...o.keys(), ...t.keys()])) {
+        const [x, y, z] = [b.get(path), o.get(path), t.get(path)];
+        const pick = y === z || z === x ? y : y === x ? z : undefined;
+        if (!(y === z || z === x || y === x)) paths.push(path);
+        else if (pick !== undefined) files.set(path, pick);
+      }
+      if (paths.length) throw Object.assign(new HttpError(409, `${input.head} doesn't merge cleanly into ${input.into}`, "merge_conflict"), { extra: { paths: paths.sort() } });
+      const sha = make(files, into);
+      commits.get(sha)!.parent2 = head;
       refs.set(input.into, sha);
       return { mergedSha: sha, headSha: head, fastForward: false, treeChanged: true };
     },
@@ -155,6 +186,7 @@ function fakeProvider() {
       const same = files.size === base.files.size && [...files].every(([k, v]) => base.files.get(k) === v);
       if (same) return { sha: input.baseSha, changed: false };
       const sha = make(files, input.baseSha);
+      if (input.mergeParent) commits.get(sha)!.parent2 = input.mergeParent;
       if (input.create) {
         if (taken(input.branch)) throw Object.assign(new HttpError(409, "taken", "branch_exists"), { extra: { sha } });
         refs.set(input.branch, sha);
@@ -790,6 +822,59 @@ test("stack: Land next needs merge commits (squash-only refused), a pull request
   assert.ok(moved);
   const l = await landNext(t.ctx, c1.change.id, u.change.sha);
   assert.equal(t.provider.refs.get("main"), l.sha);
+});
+
+test("stack: Update stack merges the default branch into each change from the bottom up; stops at a conflict, carries on once it's resolved; then lands as a fast-forward", async () => {
+  await using t = await setup();
+  const code = (e: unknown) => (e as HttpError).code;
+  const author = { name: "octo", email: "o@x" };
+  const base = { "index.html": "<h1>hi</h1>", "a.txt": "a", "b.txt": "b", "c.txt": "c" };
+  const main0 = t.provider.push("main", base);
+  const put = (from: string, baseSha: string, title: string, files: Record<string, string>) => commitChange(t.ctx, {
+    from, baseSha, title, prompt: "", author, by: null,
+    files: Object.entries(files).map(([p, d]) => [p, new TextEncoder().encode(d)] as [string, Uint8Array]),
+  }).then(ok);
+  const c1 = await put("main", main0, "A", { ...base, "a.txt": "a1" });
+  const c2 = await put(c1.branch, c1.sha, "B", { ...base, "a.txt": "a1", "b.txt": "b2" });
+  const c3 = await put(c2.branch, c2.sha, "C", { ...base, "a.txt": "a1", "b.txt": "b2", "c.txt": "c3" });
+  assert.equal((await readStacks(t.ctx))[0].behind, undefined);
+
+  // main moved (another file): each change gets one merge commit; each holds the one below (its pull request: its own turn).
+  t.provider.push("main", { "d.txt": "d" });
+  assert.equal((await readStacks(t.ctx))[0].behind, true);
+  const u = await restack(t.ctx, c1.stack.id);
+  assert.deepEqual([u.updated.map((x) => x.position), u.stopped], [[1, 2, 3], undefined]);
+  let [s] = await readStacks(t.ctx);
+  assert.equal(s.behind, undefined);
+  assert.deepEqual(s.changes.map((x) => [x.github, t.provider.commits.get(x.sha)!.files.get("d.txt"), t.provider.refs.get(x.branch) === x.sha]), [["ok", "d", true], ["ok", "d", true], ["ok", "d", true]]);
+  assert.deepEqual(s.changes.map((x, i) => t.provider.commits.get(x.sha)!.parent), [c1.sha, c2.sha, c3.sha]);
+  assert.equal((await restack(t.ctx, c1.stack.id)).updated.length, 0); // nothing to do again
+
+  // main changes b.txt, as change 2 did: change 1 merges, change 2 stops with its conflict, change 3 is left as it was.
+  t.provider.push("main", { "b.txt": "b-main" });
+  const v = await restack(t.ctx, c1.stack.id);
+  assert.deepEqual([v.updated.map((x) => x.position), v.stopped?.change.position, v.stopped?.with, v.stopped?.paths], [[1], 2, c1.branch, ["b.txt"]]);
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes[0].sha, v.stopped?.withSha, s.changes[1].sha, s.changes[2].sha], [v.updated[0].sha, v.updated[0].sha, u.updated[1].sha, u.updated[2].sha]);
+  // Resolved in the workspace and committed onto change 2 (below the top: only as that merge), its record following.
+  await assert.rejects(assertSyncable(t.ctx, s.changes[1].branch, "f".repeat(40)), (e) => code(e) === "not_on_top");
+  const at = await assertSyncable(t.ctx, s.changes[1].branch, v.stopped!.withSha);
+  assert.equal(at?.id, s.changes[1].id);
+  const resolved = await t.provider.commitTree(t.ctx.r, {
+    branch: s.changes[1].branch, baseSha: s.changes[1].sha, subdir: "", message: "Merge", author, mergeParent: v.stopped!.withSha,
+    files: Object.entries({ ...base, "a.txt": "a1", "b.txt": "b-both", "d.txt": "d" }).map(([p, d]) => [p, new TextEncoder().encode(d)] as [string, Uint8Array]),
+  });
+  await t.store.setStackChangeSha(at!.id, resolved.sha);
+  // Run again: carries on with change 3.
+  const w = await restack(t.ctx, c1.stack.id);
+  assert.deepEqual([w.updated.map((x) => x.position), w.stopped], [[3], undefined]);
+  [s] = await readStacks(t.ctx);
+  assert.equal(t.provider.commits.get(s.changes[2].sha)!.files.get("b.txt"), "b-both");
+
+  // Landing after the update: main moves to each change as a fast-forward.
+  const l = await landUpTo(t.ctx, s.changes[2].id);
+  assert.equal(t.provider.refs.get("main"), s.changes[2].sha);
+  assert.equal(l.landed.length, 3);
 });
 
 test("stack: landing is refused before anything moves on a protected default branch, one that moved, or a change pushed to", async () => {

@@ -7,7 +7,7 @@
 import { landBlocked, type ProjectGitState, type PullRequest, type Stack, type StackChange } from "../../../git.ts";
 import { ExtLink } from "../../ui/icons.tsx";
 
-export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside, onLand, onLandNext, onUpdate, onFold, onUndo }: {
+export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside, onLand, onLandNext, onUpdate, onUpdateStack, onFold, onUndo }: {
   stack: Stack;
   state: ProjectGitState;
   busy: boolean;
@@ -25,6 +25,8 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
   onLandNext: (change: StackChange) => void;
   /** Merges the default branch into the bottom change (its pull request must be up to date). */
   onUpdate: (change: StackChange) => void;
+  /** Brings the default branch's new commits into every change, from the bottom up. */
+  onUpdateStack: () => void;
   /** A change pushed to on GitHub: pulled in as the stack's top, or carried on from as a branch of its own. */
   onOutside: (how: "pull-in" | "carry-on", change: StackChange) => void;
   /** Loads the stack's top change into the workspace (it's on another branch). */
@@ -109,6 +111,12 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
         <div className="stack-note small">
           <span className="muted">{stack.changes.some((c) => c.pull) ? "Pull requests: one per change, each on the one below." : "Review it on GitHub as a chain of pull requests, one per change."}</span>
           <button className="btn sm" type="button" id="stack-submit" disabled={busy} onClick={onSubmit}>{stack.changes.some((c) => c.pull) ? "Update pull requests" : "Submit stack"}</button>
+        </div>
+      ) : null}
+      {on && stack.behind ? (
+        <div className="stack-note small">
+          <span className="muted">{`${state.defaultBranch} has commits this stack doesn't (pushed or landed since). Update stack merges them into each change, from the bottom up.`}</span>
+          <button className="btn sm" type="button" id="stack-update" disabled={busy} onClick={onUpdateStack}>Update stack</button>
         </div>
       ) : null}
       {on && guarded ? (

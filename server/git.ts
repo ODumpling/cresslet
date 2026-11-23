@@ -11,8 +11,8 @@ import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landNext, landUpTo, locked, pullIn, readStacks, restore,
-  setAsideBranches, stackPulls, submitStack, updateBottom,
+  assertNotBelowTop, assertSyncable, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landNext, landUpTo, locked, pullIn, readStacks, restore,
+  restack, setAsideBranches, stackPulls, submitStack, updateBottom,
 } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
@@ -1257,7 +1257,8 @@ export function gitRoutes(
     const files = sourceFiles(cfg, input.files as DeployFile[]);
     // With the app's stack changes (in this process): a change added meanwhile doesn't turn this one into a lower one.
     const out = await locked(a.id, async () => {
-      await assertNotBelowTop({ provider: client, store, appId: a.id, repo, r }, branch);
+      // (A change below its stack's top only for an Update stack merge resolved there: its record follows.)
+      const restacked = await assertSyncable({ provider: client, store, appId: a.id, repo, r }, branch, mergeParent);
       const head = await client.branchHead(r, branch);
       if (!head) throw new HttpError(404, `no branch ${branch} on GitHub`, "branch_not_found");
       if (head !== baseSha) {
@@ -1265,6 +1266,9 @@ export function gitRoutes(
       }
       const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
       if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
+      else if (restacked) {
+        if (out.changed && restacked.sha === baseSha) await store.setStackChangeSha(restacked.id, out.sha);
+      }
       // Onto a stack's top change from where it's recorded (a hand edit pushed, a merge resolved): the change follows.
       else if (out.changed) await followed({ provider: client, store, appId: a.id, repo, r }, branch, baseSha, out.sha).catch((e) => console.error(e));
       return out;
@@ -1357,6 +1361,13 @@ export function gitRoutes(
     const out = await landUpTo({ provider: client, store, appId: a.id, repo, r }, input.change);
     await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha }).catch((e) => console.error(e));
     return c.json(out);
+  });
+  // Update stack: the default branch brought into each change, from the bottom up (stops at a conflict).
+  app.post("/apps/:name/git/stack/restack", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ stack?: unknown } | null>(c) ?? {};
+    if (typeof input.stack !== "string") throw new HttpError(400, "stack must be a stack's id");
+    return c.json(await restack({ provider: client, store, appId: a.id, repo, r }, input.stack));
   });
   // Landing the bottom change through its pull request (a default branch that needs them), and bringing it up to date.
   app.post("/apps/:name/git/stack/land-next", async (c) => {
@@ -1476,10 +1487,12 @@ export function gitRoutes(
   app.get("/apps/:name/git/conflicts", async (c) => {
     const { r, repo, client } = await linked(c, "deploy");
     const branch = branchName(c.req.query("branch"));
-    if (branch === repo.default_branch) throw new HttpError(400, `${branch} is the default branch: there's nothing to merge into it`);
-    const out = await client.conflicts(r, { into: repo.default_branch, head: branch, subdir: repo.subdir });
+    // `with`: the branch merged in (default: the default branch; Update stack: the change below).
+    const into = c.req.query("with") ? branchName(c.req.query("with"), "with") : repo.default_branch;
+    if (branch === into) throw new HttpError(400, `${branch} is ${into}: there's nothing to merge into it`);
+    const out = await client.conflicts(r, { into, head: branch, subdir: repo.subdir });
     c.header("cache-control", "no-store");
-    return c.json({ branch, into: repo.default_branch, ...out });
+    return c.json({ branch, into, ...out });
   });
 
   // Pull requests, when the default branch takes no direct merges (protection, required reviews or checks).

@@ -46,6 +46,8 @@ export interface StackView {
   changes: ChangeView[];
   /** Changes above the top that were gone back from (bottom first): restorable until a change is built on the top. */
   setAside: ChangeView[];
+  /** The default branch has commits the bottom change doesn't (a teammate's push, another stack landed): Update stack. */
+  behind?: boolean;
 }
 
 const view = (c: StackChange): Omit<ChangeView, "github"> => ({
@@ -202,15 +204,19 @@ export async function readStacks(ctx: Ctx): Promise<StackView[]> {
   const all = [...stacks.flat(), ...aside];
   const heads = await pool(all, 8, (c) => ctx.provider.branchHead(ctx.r, c.branch));
   const head = new Map(all.map((c, i) => [c.id, heads[i]]));
+  // The default branch moved under a stack: its bottom doesn't hold its head (not read: not said).
+  const def = stacks.length ? await ctx.provider.branchHead(ctx.r, ctx.repo.default_branch).catch(() => null) : null;
+  const behind = await pool(stacks, 4, (s) => (def ? ctx.provider.contains(ctx.r, s[0].sha, def).then((x) => !x, () => false) : Promise.resolve(false)));
   const show = (c: StackChange): ChangeView => {
     const h = head.get(c.id);
     return { ...view(c), ...(h === c.sha ? { github: "ok" as const } : h ? { github: "moved" as const, headSha: h } : { github: "gone" as const }) };
   };
-  return stacks.reverse().map((s) => ({
+  return stacks.map((s, i) => ({
     id: s[0].stack_id, name: s[0].stack_name, baseSha: s[0].base_sha,
     changes: s.map(show),
     setAside: aside.filter((c) => c.stack_id === s[0].stack_id).map(show),
-  }));
+    ...(behind[i] ? { behind: true } : {}),
+  })).reverse();
 }
 
 /**
@@ -294,6 +300,23 @@ export async function followed(ctx: Ctx, branch: string, from: string, to: strin
  * its stack would be left open on a branch that's gone; committed to, the changes above wouldn't hold it). Landing
  * part of a stack is a later step; until then the top lands them all.
  */
+/**
+ * A commit onto `branch` (sync): refused below its stack's top (assertNotBelowTop), but for a restack's merge
+ * resolved there (`mergeParent`: the change below's commit, or the default branch's head for the bottom one). Resolves
+ * to that change (its record follows the commit), or undefined.
+ */
+export async function assertSyncable(ctx: Ctx, branch: string, mergeParent?: string): Promise<StackChange | undefined> {
+  if (mergeParent) {
+    for (const s of byStack(await ctx.store.openStackChanges(ctx.appId))) {
+      const i = s.findIndex((x) => x.branch === branch);
+      if (i < 0 || i === s.length - 1) continue;
+      const with_ = i ? s[i - 1].sha : await ctx.provider.branchHead(ctx.r, ctx.repo.default_branch);
+      if (with_ === mergeParent) return s[i];
+    }
+  }
+  await assertNotBelowTop(ctx, branch);
+}
+
 export async function assertNotBelowTop(ctx: Ctx, branch: string) {
   const aside = (await ctx.store.setAsideStackChanges(ctx.appId)).find((c) => c.branch === branch);
   if (aside) throw setAside(aside);
@@ -660,9 +683,11 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
     // or went further: what's landed is all of it).
     let from = 0;
     if (at !== s[0].base_sha) {
-      const j = s.findIndex((x) => x.sha === at);
-      if (j < 0) {
-        throw new HttpError(409, `${def} has commits the stack doesn't (it moved on GitHub, or the stack wasn't cut from it): nothing was landed. Deploy merges it in (resolving any conflicts there)`, "default_moved");
+      let j = s.findIndex((x) => x.sha === at);
+      // (Brought into the stack by Update stack: the bottom holds it, so it moves on as a fast-forward.)
+      if (j < 0 && await provider.contains(r, s[0].sha, at)) j = -1;
+      else if (j < 0) {
+        throw new HttpError(409, `${def} has commits the stack doesn't (it moved on GitHub, or the stack wasn't cut from it): nothing was landed. Update stack brings it in (resolving any conflicts)`, "default_moved");
       }
       from = j + 1;
       k = Math.max(k, j);
@@ -817,6 +842,48 @@ export function updateBottom(ctx: Ctx, changeId: string, sha?: string): Promise<
     const m = await ctx.provider.merge(ctx.r, { into: c.branch, head: ctx.repo.default_branch, message: `Merge ${ctx.repo.default_branch} into ${c.branch}` });
     if (m.mergedSha !== c.sha) await ctx.store.setStackChangeSha(c.id, m.mergedSha);
     return { change: { ...view({ ...c, sha: m.mergedSha }), github: "ok" } };
+  });
+}
+
+// ---- the default branch moved under a stack: brought into each change, from the bottom up
+
+/**
+ * Update stack: the default branch merged into the bottom change, then each change into the one above, each as a
+ * merge commit (never forced); a change that holds the one below already is skipped, so a run that stopped carries on
+ * where it did. Each change's record follows its merge as it's made. A conflict stops it at that change (`stopped`:
+ * the change, and the branch and commit to merge into it, for the workspace to resolve and commit with `mergeParent`;
+ * then run again). A change pushed to or gone on GitHub stops it before anything's merged into it (409 `moved` / 404).
+ */
+export function restack(ctx: Ctx, stackId: string): Promise<{
+  updated: ChangeView[]; stopped?: { change: ChangeView; with: string; withSha: string; paths: string[] };
+}> {
+  return locked(ctx.appId, async () => {
+    const { provider, store, r, repo } = ctx;
+    const s = byStack((await store.openStackChanges(ctx.appId)).filter((x) => x.stack_id === stackId))[0];
+    if (!s) throw new HttpError(404, "no such open stack", "not_found");
+    const def = await provider.branchHead(r, repo.default_branch);
+    if (!def) throw new HttpError(404, `no branch ${repo.default_branch} on GitHub`, "branch_not_found");
+    const updated: ChangeView[] = [];
+    let below = { branch: repo.default_branch, sha: def };
+    for (const c0 of s) {
+      let c = c0;
+      await atCommit(ctx, c);
+      if (!await provider.contains(r, c.sha, below.sha)) {
+        let m: { mergedSha: string };
+        try {
+          m = await provider.merge(r, { into: c.branch, head: below.branch, expect: below.sha, message: `Merge ${below.branch} into ${c.branch}` });
+        } catch (e) {
+          if (!(e instanceof HttpError) || e.code !== "merge_conflict") throw e;
+          const paths = Array.isArray(e.extra?.paths) ? e.extra.paths as string[] : [];
+          return { updated, stopped: { change: { ...view(c), github: "ok" }, with: below.branch, withSha: below.sha, paths } };
+        }
+        await store.setStackChangeSha(c.id, m.mergedSha);
+        c = { ...c, sha: m.mergedSha };
+        updated.push({ ...view(c), github: "ok" });
+      }
+      below = { branch: c.branch, sha: c.sha };
+    }
+    return { updated };
   });
 }
 
