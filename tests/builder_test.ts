@@ -749,10 +749,10 @@ test("git: Land next lands the bottom through its pull request (the workspace on
   assert.deepEqual([g.calls[0].body, r.next.pull.review], [{ change: "chg_1", sha: bottom.sha }, "pending"]);
   assert.equal(g.state.activeBranch, "main");
   // An edit made while it lands: not overwritten (landed all the same, said).
-  const e = fakeGit({ onDefault: false });
-  e.state.activeBranch = bottom.branch;
-  await assert.rejects(e.git.landNext({ ...bottom, id: "chg_edit" }, "feat/s/3-three"), (x: Json) => x.landed?.sha === "e".repeat(40) && /landed in main, but main isn't loaded here/.test(x.message));
-  assert.deepEqual([e.state.activeBranch, e.hydrated], [bottom.branch, []]);
+  const le = fakeGit({ onDefault: false });
+  le.state.activeBranch = bottom.branch;
+  await assert.rejects(le.git.landNext({ ...bottom, id: "chg_edit" }, "feat/s/3-three"), (x: Json) => x.landed?.sha === "e".repeat(40) && /landed in main, but main isn't loaded here/.test(x.message));
+  assert.deepEqual([le.state.activeBranch, le.hydrated], [bottom.branch, []]);
   // Changes not pushed on it: refused (its branch goes).
   const d = fakeGit({ onDefault: false });
   d.state.activeBranch = bottom.branch;
