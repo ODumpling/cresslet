@@ -1,4 +1,4 @@
-// An app's Overview tab: status, requests, storage, its database tables and deploys (with rollback).
+// An app's Overview tab: status, requests, storage, its repository and deploys (with rollback).
 import { Link } from "@tanstack/react-router";
 import { useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
@@ -65,10 +65,10 @@ function Body({ m }: { m: API.Metrics }) {
   const status = rt.running ? "running" : a.currentDeployId ? "idle" : "empty";
   const manage = canManage(a.access);
   const db = m.database;
-  const rows = db.tables.reduce((n, t) => n + t.rows, 0);
   const t = m.totals;
   const sinceRestart = Date.now() - new Date(m.since).getTime() < 86_400_000;
   const domains = m.domains.filter((x) => x.verified);
+  const git = dep?.git;
 
   return (
     <>
@@ -100,6 +100,8 @@ function Body({ m }: { m: API.Metrics }) {
             ["URL", <ExtLink href={a.url}>{a.url.replace(/^https?:\/\//, "")}</ExtLink>],
             ["Domains", domains.length ? <span>{domains.map((x, i) => <span key={x.domain}>{i ? ", " : null}<ExtLink href={`https://${x.domain}`}>{x.domain}</ExtLink></span>)}</span> : "—"],
             ["Repository", d.repo ? <ExtLink href={d.repo.url} id="app-repo">{d.repo.fullName}</ExtLink> : "Not linked"],
+            d.repo ? ["Branch", <span className="mono" id="app-branch">{d.repo.defaultBranch}</span>] : null,
+            d.repo || git ? ["Commit", git ? <Commit git={git} branch={d.repo?.defaultBranch} /> : "Live deploy isn't from a commit"] : null,
             ["Server", a.config?.server ? `Yes${a.config.crons?.length ? ` · ${plural(a.config.crons.length, "cron")}` : ""}` : "Static only"],
             ["Secrets", <Link to="/apps/$name/secrets" params={{ name }}>{d.secrets.length ? plural(d.secrets.length, "secret") : "None"}</Link>],
             ["Egress", a.egress === null ? "Any public host" : a.egress.length ? a.egress.join(", ") : "None"],
@@ -111,32 +113,22 @@ function Body({ m }: { m: API.Metrics }) {
           <UsageBar u={m.usage} />
         </div>
         <div className="stack">
-          <div className="panel">
-            <div className="panel-head"><h2>Database tables</h2>
-              {db.tables.length ? <Link className="small" to="/apps/$name/database/{-$table}" params={{ name, table: undefined }}>Explore</Link> : null}
-            </div>
-            {db.error ? <p className="error small">{db.error}</p>
-              : db.tables.length ? (
-                <div className="scroll-x" tabIndex={0} role="region" aria-label="Database tables">
-                  <table className="table">
-                    <thead><tr><th scope="col">Table</th><th scope="col" className="num">Rows</th></tr></thead>
-                    <tbody>
-                      {db.tables.map((x) => (
-                        <tr key={x.name}>
-                          <td><Link className="mono" to="/apps/$name/database/{-$table}" params={{ name, table: x.name }}>{x.name}</Link></td>
-                          <td className="num">{x.rows.toLocaleString()}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot><tr><td className="muted">Total</td><td className="num muted">{rows.toLocaleString()}</td></tr></tfoot>
-                  </table>
-                </div>
-              ) : <p className="muted small">{a.config?.server ? "No database yet: it's made the first time the server uses env.db." : "Static sites have no database."}</p>}
-          </div>
           <Deploys manage={manage} />
         </div>
       </div>
     </>
+  );
+}
+
+/** The live deploy's commit: short sha (linked when it's on GitHub), its version tag, and its branch when not the default. */
+function Commit({ git, branch }: { git: NonNullable<API.DeployInfo["git"]>; branch: string | undefined }) {
+  const sha = git.sha.slice(0, 7);
+  const extra = [git.tag, git.branch && git.branch !== branch ? `on ${git.branch}` : null].filter(Boolean).join(" · ");
+  return (
+    <span id="app-commit">
+      {git.url ? <ExtLink className="ext mono" href={git.url} title={git.sha}>{sha}</ExtLink> : <span className="mono" title={git.sha}>{sha}</span>}
+      {extra ? ` · ${extra}` : null}
+    </span>
   );
 }
 
