@@ -752,11 +752,12 @@ test("stack: on a protected default branch, Land next merges the bottom's pull r
   const kept = t.provider.refs.get("main")!;
   t.provider.refs.set("main", squash);
   await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /reset/.test((e as Error).message));
-  t.provider.refs.set("main", kept);
   // Squashed on GitHub (its commit not in main's history): not carried on from.
+  // (main at the squash commit too.)
   pr[2].mergeSha = squash;
   await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /squashed or rebased/.test((e as Error).message));
   pr[2].mergeSha = mergeSha;
+  t.provider.refs.set("main", kept);
   t.provider.refs.delete(c3.branch);
   const l3 = await landNext(t.ctx, c3.change.id);
   assert.equal(l3.sha, mergeSha);

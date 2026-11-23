@@ -364,6 +364,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       return json(200, pullJson(pr));
     }
     if ((x = /^\/commits\/([0-9a-f]+)\/check-runs$/.exec(rest))) return json(200, { check_runs: checks.get(x[1]) ?? [] });
+    if ((x = /^\/commits\/([0-9a-f]+)\/status$/.exec(rest))) return json(200, { state: "pending", statuses: [] });
     if (rest.startsWith("/contents/") && req.method === "PUT") {
       const path = decodeURIComponent(rest.slice("/contents/".length));
       const b = Buffer.from(body.content, "base64");

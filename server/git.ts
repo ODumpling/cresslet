@@ -737,12 +737,15 @@ export class GitHub implements SourceControlProvider {
     const states = [...latest.values()];
     // (A commit status as a check run: pending, or completed with its outcome. Either kind readable: known.)
     const runs = [...checks?.check_runs ?? [], ...(status?.statuses ?? []).map((x) => (x.state === "pending" ? { status: "queued", conclusion: null } : { status: "completed", conclusion: x.state }))];
-    const known = !!checks || !!status;
+    // Seen failing or running on either: so. Else none or all passing only when both could be read (one hidden from
+    // this app could hold a required check).
+    const known = !!checks && !!status;
+    const seen = runs.some((x) => x.status !== "completed") ? "pending" as const
+      : runs.some((x) => x.status === "completed" && !["success", "neutral", "skipped"].includes(x.conclusion ?? "")) ? "failure" as const : null;
     return {
       number: p.number, url: p.html_url, title: p.title, draft: !!p.draft, headSha: p.head.sha,
       review: states.includes("CHANGES_REQUESTED") ? "changes_requested" : states.includes("APPROVED") ? "approved" : "pending",
-      checks: !known ? "unknown" : !runs.length ? "none" : runs.some((x) => x.status !== "completed") ? "pending"
-        : runs.every((x) => ["success", "neutral", "skipped"].includes(x.conclusion ?? "")) ? "success" : "failure",
+      checks: seen ?? (!known ? "unknown" : !runs.length ? "none" : "success"),
       base: p.base?.ref ?? "",
       mergeable: (["clean", "unstable", "has_hooks", "blocked", "behind", "dirty", "draft"] as const).find((x) => x === p.mergeable_state) ?? "unknown",
     };
