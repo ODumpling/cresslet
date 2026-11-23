@@ -55,6 +55,15 @@ const view = (c: StackChange): Omit<ChangeView, "github"> => ({
   author: c.author, createdAt: new Date(c.created_at).toISOString(), pull: c.pr_number ?? null,
 });
 
+/**
+ * `upper` holds `lower`: its commit, or, `lower` at a sync commit (squash-only landing), the commit that was made from
+ * (the same files): the changes above a synced one are left as they are.
+ */
+async function holds(ctx: Ctx, upper: string, lower: { sha: string; synced_from?: string | null }) {
+  if (await ctx.provider.contains(ctx.r, upper, lower.sha)) return true;
+  return !!lower.synced_from && ctx.provider.contains(ctx.r, upper, lower.synced_from);
+}
+
 /** Open changes by stack, each bottom first; stacks oldest first. */
 function byStack(changes: StackChange[]) {
   const out = new Map<string, StackChange[]>();
@@ -209,7 +218,7 @@ export async function readStacks(ctx: Ctx): Promise<StackView[]> {
   const def = stacks.length ? await ctx.provider.branchHead(ctx.r, ctx.repo.default_branch).catch(() => null) : null;
   const behind = await pool(stacks, 2, async (s) => {
     if (!def) return false;
-    const links = await pool(s.map((c, i) => [c.sha, i ? s[i - 1].sha : def] as const), 4, ([sha, of]) => ctx.provider.contains(ctx.r, sha, of).catch(() => true));
+    const links = await pool(s.map((c, i) => [c.sha, i ? s[i - 1] : { sha: def }] as const), 4, ([sha, below]) => holds(ctx, sha, below).catch(() => true));
     return links.some((x) => !x);
   });
   const show = (c: StackChange): ChangeView => {
@@ -713,7 +722,7 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
     }
     // Each change holds the one below it (an Update stack stopped part way: not yet), so each move is a fast-forward.
     for (let i = from; i <= k; i++) {
-      if (!await provider.contains(r, s[i].sha, i === from ? at : s[i - 1].sha)) {
+      if (!await holds(ctx, s[i].sha, i === from ? { sha: at } : s[i - 1])) {
         throw new HttpError(409, `change ${s[i].position} doesn't hold ${i === from ? def : `change ${s[i - 1].position}`} yet (an Update stack stopped there): run Update stack first, nothing was landed`, "stack_behind");
       }
     }
@@ -826,6 +835,11 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
         if (squashedOn && !await provider.contains(r, c.sha, squashedOn)) {
           throw new HttpError(409, `${def} has commits change ${c.position} doesn't: run Update stack first (squashed, its pull request would take them in unseen)`, "stack_behind");
         }
+        // (The change above synced with the squash takes its files as they are: it must hold all of this one, an
+        // Update made only here not left out of it, which its pull request would then show as undone.)
+        if (s[1] && !await holds(ctx, s[1].sha, c)) {
+          throw new HttpError(409, `change ${s[1].position} doesn't hold change ${c.position} yet: run Update stack first, nothing was merged`, "stack_behind");
+        }
       }
       merged = (await provider.mergePull(r, p.number, { sha: c.sha, title: `${c.title} (#${p.number})`, method: methods.merge ? "merge" : "squash" })).sha;
     }
@@ -843,15 +857,16 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
         const [first] = await provider.commitParents(r, merged);
         if (!squashedOn || first !== squashedOn || !await provider.contains(r, c.sha, squashedOn)) throw new HttpError(409, `${def} had other commits before the squash: run Update stack`, "stack_behind");
         await atCommit(ctx, next);
+        if (!await holds(ctx, next.sha, c)) throw new HttpError(409, `change ${next.position} doesn't hold change ${c.position}: run Update stack`, "stack_behind");
         const sha = await provider.syncCommit(r, { branch: next.branch, from: next.sha, with: merged, message: `Sync with ${def} after change ${c.position} (#${p!.number}) was squashed` });
         await store.db.tx(async () => {
-          await store.setStackChangeSha(next.id, sha, merged);
+          await store.setStackChangeSha(next.id, sha, merged, next.sha);
           if (next.id === s.at(-1)!.id) await store.detachSetAside(appId, c.stack_id, id("stk"));
         });
         synced = true;
       } catch (e) {
         keep = c.branch;
-        pullErrors.push({ change: next.id, position: next.position, error: `not synced with ${def} (${why(e)}): its pull request stays on ${c.branch}, kept until then` });
+        pullErrors.push({ change: next.id, position: next.position, error: `not synced with ${def} (${why(e)}): its pull request stays on ${c.branch}, which is kept; run Update stack, then Update pull requests, then Land next` });
       }
     }
     if (next && (!squashed || synced)) {
@@ -899,7 +914,7 @@ export async function assertLinked(ctx: Ctx, topId: string) {
   const c = open.find((x) => x.id === topId);
   if (!c) return;
   const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0].filter((x) => x.position <= c.position);
-  const links = await pool(s.slice(1).map((x, i) => [x, s[i]] as const), 4, ([x, below]) => ctx.provider.contains(ctx.r, x.sha, below.sha));
+  const links = await pool(s.slice(1).map((x, i) => [x, s[i]] as const), 4, ([x, below]) => holds(ctx, x.sha, below));
   const i = links.findIndex((x) => !x);
   if (i >= 0) {
     throw new HttpError(409, `change ${s[i + 1].position} doesn't hold change ${s[i].position} yet (an Update stack stopped there): run Update stack first, nothing was merged`, "stack_behind");
@@ -925,11 +940,11 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
     const def = await provider.branchHead(r, repo.default_branch);
     if (!def) throw new HttpError(404, `no branch ${repo.default_branch} on GitHub`, "branch_not_found");
     const updated: ChangeView[] = [];
-    let below = { branch: repo.default_branch, sha: def };
+    let below: { branch: string; sha: string; synced_from?: string | null } = { branch: repo.default_branch, sha: def };
     for (const c0 of s) {
       let c = c0;
       await atCommit(ctx, c);
-      if (!await provider.contains(r, c.sha, below.sha)) {
+      if (!await holds(ctx, c.sha, below)) {
         let m: { mergedSha: string };
         try {
           m = await provider.merge(r, { into: c.branch, head: below.branch, expect: below.sha, message: `Merge ${below.branch} into ${c.branch}` });
@@ -945,10 +960,10 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
           await store.setStackChangeSha(c.id, sha, base);
           if (c.id === s.at(-1)!.id) await store.detachSetAside(ctx.appId, stackId, id("stk"));
         });
-        c = { ...c, sha: m.mergedSha, base_sha: below.sha };
+        c = { ...c, sha: m.mergedSha, base_sha: below.sha, synced_from: null };
         updated.push({ ...view(c), github: "ok" });
       }
-      below = { branch: c.branch, sha: c.sha };
+      below = { branch: c.branch, sha: c.sha, synced_from: c.synced_from };
     }
     // `base`: the default branch's head brought in; `branches`: the stack's.
     return { updated, base: def, branches: s.map((x) => x.branch) };
@@ -1042,7 +1057,7 @@ export function fold(ctx: Ctx, changeId: string, into: string): Promise<{ change
     const off = [lower, upper].find((x, j) => heads[j] !== x.sha);
     if (off) throw new HttpError(409, `${off.branch} ${heads[[lower, upper].indexOf(off)] ? "was pushed to" : "is gone"} on GitHub: nothing was folded`, "moved");
     // (An Update stack stopped between them: the upper one doesn't hold the lower one's merge yet, which folding drops.)
-    if (!await provider.contains(r, upper.sha, lower.sha)) throw new HttpError(409, `change ${upper.position} doesn't hold change ${lower.position} yet (an Update stack stopped there): run Update stack first, nothing was folded`, "stack_behind");
+    if (!await holds(ctx, upper.sha, lower)) throw new HttpError(409, `change ${upper.position} doesn't hold change ${lower.position} yet (an Update stack stopped there): run Update stack first, nothing was folded`, "stack_behind");
     const base = i > 1 ? s[i - 2].branch : repo.default_branch;
     const [lowerPull, upperPull] = await Promise.all([pullOf(ctx, lower), pullOf(ctx, upper)]);
     // Its pull request onto the lower one's base first (before that branch goes). Refused: nothing changes.

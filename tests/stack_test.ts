@@ -858,8 +858,11 @@ test("stack: squash-only, Land next squashes the bottom and gives the next chang
   assert.deepEqual([sync.parent, sync.parent2, s.changes[0].github, s.changes[0].baseSha], [c2.sha, l1.sha, "ok", l1.sha]);
   assert.deepEqual([...sync.files], [...t.provider.commits.get(c2.sha)!.files]);
   assert.equal(pr[1].base, "main");
-  // Change 3 is left alone until it's the bottom.
+  // Change 3 is left alone until it's the bottom, and the stack isn't behind for it (it holds what 2 was synced from).
   assert.equal(s.changes[1].sha, c3.sha);
+  assert.equal(s.behind, undefined);
+  await assertLinked(t.ctx, s.changes[1].id);
+  assert.deepEqual((await restack(t.ctx, c1.stack.id)).updated, []);
 
   // main moved meanwhile (another commit): refused before the squash (Update stack first).
   const before = t.provider.refs.get("main")!;
@@ -868,6 +871,15 @@ test("stack: squash-only, Land next squashes the bottom and gives the next chang
   assert.equal(pr[1].merged, false);
   t.provider.refs.set("main", before);
 
+  // main brought into change 2 only ("Update branch"): change 3 doesn't hold that, so its sync would undo it: refused.
+  const moved = t.provider.push("main", { "e.txt": "e" });
+  const up = await updateBottom(t.ctx, s.changes[0].id);
+  await assert.rejects(landNext(t.ctx, s.changes[0].id), (e) => code(e) === "stack_behind" && /doesn't hold change 2/.test((e as Error).message));
+  assert.equal(pr[1].merged, false);
+  // Update stack brings it into change 3; then it lands.
+  assert.deepEqual((await restack(t.ctx, c1.stack.id)).updated.map((x) => x.position), [3]);
+  assert.ok(moved && up);
+  [s] = await readStacks(t.ctx);
   const l2 = await landNext(t.ctx, s.changes[0].id);
   [s] = await readStacks(t.ctx);
   assert.deepEqual([t.provider.commits.get(s.changes[0].sha)!.parent2, pr[2].base, t.provider.refs.get("main")], [l2.sha, "main", l2.sha]);

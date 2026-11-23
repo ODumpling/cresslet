@@ -307,6 +307,12 @@ async function stackOrigin(db: Db) {
   if (!(await cols(db, "stack_changes")).includes("origin_stack_id")) await db.exec("ALTER TABLE stack_changes ADD COLUMN origin_stack_id TEXT");
 }
 
+/** A stack change's sync commit (squash-only landing) keeps the commit it was made from. */
+async function stackSyncedFrom(db: Db) {
+  if (db.dialect === "postgres") return db.exec("ALTER TABLE stack_changes ADD COLUMN IF NOT EXISTS synced_from TEXT");
+  if (!(await cols(db, "stack_changes")).includes("synced_from")) await db.exec("ALTER TABLE stack_changes ADD COLUMN synced_from TEXT");
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
@@ -317,6 +323,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 6, name: "stacks", up: stacks },
   { version: 7, name: "stack_auto_submit", up: stackAutoSubmit },
   { version: 8, name: "stack_origin", up: stackOrigin },
+  { version: 9, name: "stack_synced_from", up: stackSyncedFrom },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */
