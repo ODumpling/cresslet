@@ -490,6 +490,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     if (path.endsWith("/git/stack/land-next") && body.change === "chg_dirty") state.dirty = true; // …saved as such
     if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } } };
     if (path.endsWith("/git/stack/restack")) {
+      if (body.stack === "stk_edit") rev.n++; // an edit while it's updated on GitHub
       // First: stops at change 2 (a conflict with change 1); then: done, change 3 updated.
       if (restacks++ === 0) return { updated: [{ id: "chg_1", position: 1, branch: "feat/s/1-one" }], stopped: { change: { id: "chg_2", position: 2, branch: "feat/s/2-two", sha: "2".repeat(40) }, with: "feat/s/1-one", withSha: "1".repeat(40), paths: ["app.txt"] } };
       return { updated: [{ id: "chg_3", position: 3, branch: "feat/s/3-three" }] };
@@ -815,6 +816,19 @@ test("git: Update stack stops at a conflict on change 2 (loaded with change 1 me
   // Changes not pushed: refused.
   g.state.dirty = true;
   await assert.rejects(g.git.updateStack("stk_1"), (e: Json) => e.code === "dirty");
+
+  // An edit while it's updated on GitHub: not overwritten (it stops there, said).
+  const e = fakeGit({ onDefault: false });
+  e.state.activeBranch = "feat/s/3-three";
+  await assert.rejects(e.git.updateStack("stk_edit"), (x: Json) => x.code === "changed");
+  assert.deepEqual(e.hydrated, []);
+  // A held update dropped by Pull: Deploy isn't held for it any more.
+  const h = fakeGit({ onDefault: false });
+  h.state.activeBranch = "feat/s/3-three";
+  await h.git.updateStack("stk_1");
+  assert.ok(h.state.restack);
+  await h.git.pull();
+  assert.equal(h.state.restack, undefined);
 });
 
 test("git: why Land next can't land the bottom yet, from its pull request", () => {

@@ -204,9 +204,14 @@ export async function readStacks(ctx: Ctx): Promise<StackView[]> {
   const all = [...stacks.flat(), ...aside];
   const heads = await pool(all, 8, (c) => ctx.provider.branchHead(ctx.r, c.branch));
   const head = new Map(all.map((c, i) => [c.id, heads[i]]));
-  // The default branch moved under a stack: its bottom doesn't hold its head (not read: not said).
+  // The default branch moved under a stack, or an update stopped part way: a change doesn't hold the one below it (the
+  // bottom: the default branch's head). Not read: not said.
   const def = stacks.length ? await ctx.provider.branchHead(ctx.r, ctx.repo.default_branch).catch(() => null) : null;
-  const behind = await pool(stacks, 4, (s) => (def ? ctx.provider.contains(ctx.r, s[0].sha, def).then((x) => !x, () => false) : Promise.resolve(false)));
+  const behind = await pool(stacks, 2, async (s) => {
+    if (!def) return false;
+    const links = await pool(s.map((c, i) => [c.sha, i ? s[i - 1].sha : def] as const), 4, ([sha, of]) => ctx.provider.contains(ctx.r, sha, of).catch(() => true));
+    return links.some((x) => !x);
+  });
   const show = (c: StackChange): ChangeView => {
     const h = head.get(c.id);
     return { ...view(c), ...(h === c.sha ? { github: "ok" as const } : h ? { github: "moved" as const, headSha: h } : { github: "gone" as const }) };
@@ -700,6 +705,12 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
         ? new HttpError(409, `${off.branch} was pushed to on GitHub: pull it in, or carry on from it, first`, "moved")
         : new HttpError(404, `${off.branch} is gone on GitHub: nothing was landed`, "branch_not_found");
     }
+    // Each change holds the one below it (an Update stack stopped part way: not yet), so each move is a fast-forward.
+    for (let i = from; i <= k; i++) {
+      if (!await provider.contains(r, s[i].sha, i === from ? at : s[i - 1].sha)) {
+        throw new HttpError(409, `change ${s[i].position} doesn't hold ${i === from ? def : `change ${s[i - 1].position}`} yet (an Update stack stopped there): run Update stack first, nothing was landed`, "stack_behind");
+      }
+    }
     if (from) await store.landStack(appId, c.stack_id, s[from - 1].position, s[from - 1].sha);
     for (let i = from; i <= k; i++) {
       const x = s[i];
@@ -877,8 +888,9 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
           const paths = Array.isArray(e.extra?.paths) ? e.extra.paths as string[] : [];
           return { updated, stopped: { change: { ...view(c), github: "ok" }, with: below.branch, withSha: below.sha, paths } };
         }
-        await store.setStackChangeSha(c.id, m.mergedSha);
-        c = { ...c, sha: m.mergedSha };
+        // (Its base is the commit merged in now: what Undo takes its turn back to.)
+        await store.setStackChangeSha(c.id, m.mergedSha, below.sha);
+        c = { ...c, sha: m.mergedSha, base_sha: below.sha };
         updated.push({ ...view(c), github: "ok" });
       }
       below = { branch: c.branch, sha: c.sha };

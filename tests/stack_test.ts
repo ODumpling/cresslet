@@ -849,6 +849,9 @@ test("stack: Update stack merges the default branch into each change from the bo
   assert.deepEqual(s.changes.map((x) => [x.github, t.provider.commits.get(x.sha)!.files.get("d.txt"), t.provider.refs.get(x.branch) === x.sha]), [["ok", "d", true], ["ok", "d", true], ["ok", "d", true]]);
   assert.deepEqual(s.changes.map((x, i) => t.provider.commits.get(x.sha)!.parent), [c1.sha, c2.sha, c3.sha]);
   assert.equal((await restack(t.ctx, c1.stack.id)).updated.length, 0); // nothing to do again
+  // Undo still works on an updated change (its base is now the commit merged in).
+  const un = await undoPlan(t.ctx, s.changes[0].id);
+  assert.equal(un.files.find((f) => f.path === "a.txt")?.data, "a");
 
   // main changes b.txt, as change 2 did: change 1 merges, change 2 stops with its conflict, change 3 is left as it was.
   t.provider.push("main", { "b.txt": "b-main" });
@@ -856,6 +859,11 @@ test("stack: Update stack merges the default branch into each change from the bo
   assert.deepEqual([v.updated.map((x) => x.position), v.stopped?.change.position, v.stopped?.with, v.stopped?.paths], [[1], 2, c1.branch, ["b.txt"]]);
   [s] = await readStacks(t.ctx);
   assert.deepEqual([s.changes[0].sha, v.stopped?.withSha, s.changes[1].sha, s.changes[2].sha], [v.updated[0].sha, v.updated[0].sha, u.updated[1].sha, u.updated[2].sha]);
+  // Stopped part way: still said (change 1 holds main, change 2 not change 1), and landing past it refused unmoved.
+  assert.equal(s.behind, true);
+  const mainNow = t.provider.refs.get("main");
+  await assert.rejects(landUpTo(t.ctx, s.changes[2].id), (e) => code(e) === "stack_behind");
+  assert.equal(t.provider.refs.get("main"), mainNow);
   // Resolved in the workspace and committed onto change 2 (below the top: only as that merge), its record following.
   await assert.rejects(assertSyncable(t.ctx, s.changes[1].branch, "f".repeat(40)), (e) => code(e) === "not_on_top");
   const at = await assertSyncable(t.ctx, s.changes[1].branch, v.stopped!.withSha);

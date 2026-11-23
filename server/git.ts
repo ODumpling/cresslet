@@ -499,8 +499,10 @@ export class GitHub implements SourceControlProvider {
    */
   async revert(r: Repo, input: { change: string; parent: string; top: string; subdir: string; label: string }) {
     const cmp = await this.ok<{ status: string; total_commits?: number; commits?: { parents: unknown[] }[] }>("GET", this.#path(r, `/compare/${input.parent}...${input.change}`));
-    const commits = cmp.commits ?? [];
-    if (cmp.status !== "ahead" || (cmp.total_commits ?? commits.length) > commits.length || commits.some((c) => c.parents.length !== 1)) {
+    const commits = (cmp.commits ?? []) as { parents: { sha: string }[] }[];
+    // (A merge of what the parent holds, as Update stack makes, is fine: undoing to the parent keeps that.)
+    const foreign = await Promise.all(commits.filter((c) => c.parents.length > 1).flatMap((c) => c.parents.slice(1)).map((p) => this.contains(r, input.parent, p.sha).then((x) => !x)));
+    if (cmp.status !== "ahead" || (cmp.total_commits ?? commits.length) > commits.length || foreign.some(Boolean)) {
       throw new HttpError(409, `${input.label} has a merge in it (from the default branch, or pulled in from GitHub): undoing it would undo that too, so it isn't done in the studio`, "undo_merge");
     }
     const full = await Promise.all([input.change, input.top, input.parent].map((sha) => this.#entries(r, sha))) as [Entries, Entries, Entries];
@@ -1259,6 +1261,8 @@ export function gitRoutes(
     const out = await locked(a.id, async () => {
       // (A change below its stack's top only for an Update stack merge resolved there: its record follows.)
       const restacked = await assertSyncable({ provider: client, store, appId: a.id, repo, r }, branch, mergeParent);
+      // (…from its recorded commit only: a push since isn't merged in unseen.)
+      if (restacked && restacked.sha !== baseSha) throw new HttpError(409, `${branch} was pushed to on GitHub since the update stopped there: pull it in, or carry on from it, first`, "moved");
       const head = await client.branchHead(r, branch);
       if (!head) throw new HttpError(404, `no branch ${branch} on GitHub`, "branch_not_found");
       if (head !== baseSha) {
@@ -1266,9 +1270,8 @@ export function gitRoutes(
       }
       const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
       if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
-      else if (restacked) {
-        if (out.changed && restacked.sha === baseSha) await store.setStackChangeSha(restacked.id, out.sha);
-      }
+      // (Its base is the commit merged in now: what Undo takes its turn back to.)
+      else if (restacked && out.changed) await store.setStackChangeSha(restacked.id, out.sha, mergeParent);
       // Onto a stack's top change from where it's recorded (a hand edit pushed, a merge resolved): the change follows.
       else if (out.changed) await followed({ provider: client, store, appId: a.id, repo, r }, branch, baseSha, out.sha).catch((e) => console.error(e));
       return out;

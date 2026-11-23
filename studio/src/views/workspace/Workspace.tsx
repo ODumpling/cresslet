@@ -218,7 +218,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     let live = true;
     void g.stacks().then((r) => live && setStack(r.current ?? r.stacks[0] ?? null), () => {});
     return () => void (live = false);
-  }, [gitState?.owner, gitState?.repo, gitState?.activeBranch, gitState?.headSha, token, deploy?.name, gitTick]);
+  }, [gitState?.owner, gitState?.repo, gitState?.activeBranch, gitState?.headSha, token, deploy?.name, gitTick, upstream]); // (main moved: Update stack)
 
   // Back from connecting GitHub (server/git.ts redirects here with the outcome in the hash): once the project runs,
   // the dialog opens again where it left off.

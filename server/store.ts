@@ -1195,8 +1195,9 @@ export class Store implements RateHits {
     return this.db.all<StackChange>("SELECT * FROM stack_changes WHERE app_id = ? AND state = ? ORDER BY created_at, stack_id, position", appId, state);
   }
   /** A change's commit, taken as it is on GitHub (pulled in after a push from outside). */
-  async setStackChangeSha(id: string, sha: string) {
-    await this.db.run("UPDATE stack_changes SET sha = ?, updated_at = ? WHERE id = ?", sha, Date.now(), id);
+  async setStackChangeSha(id: string, sha: string, base?: string) {
+    if (base) await this.db.run("UPDATE stack_changes SET sha = ?, base_sha = ?, updated_at = ? WHERE id = ?", sha, base, Date.now(), id);
+    else await this.db.run("UPDATE stack_changes SET sha = ?, updated_at = ? WHERE id = ?", sha, Date.now(), id);
   }
   /**
    * Folds `upper` into `lower` (the change below it): the lower one leaves the stack (`dropped`, its position free),

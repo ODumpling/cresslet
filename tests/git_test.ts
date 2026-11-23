@@ -1102,6 +1102,11 @@ test("stack: Update stack brings main's new commits into each change; a conflict
   const resolved = cf.body.files.map((f: { path: string; data: string }) => (f.path === "b.txt" ? { ...f, data: "b-both\n" } : f));
   const other = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c2.branch, baseSha: c2.sha, files: resolved });
   assert.equal(other.body.error, "not_on_top");
+  // (Not from another commit than the one recorded: a push since isn't merged in unseen.)
+  const pushed = t.gh.write(repo, c2.branch, { "x.txt": "x\n" });
+  const stale = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c2.branch, baseSha: pushed, files: resolved, mergeParent: c1b.sha });
+  assert.equal(stale.body.error, "moved");
+  repo.refs.set(c2.branch, c2.sha);
   const sy = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c2.branch, baseSha: c2.sha, files: resolved, mergeParent: c1b.sha, message: `Merge ${c1.branch} into ${c2.branch}` });
   assert.equal(sy.status, 200, JSON.stringify(sy.body));
   let st = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
@@ -1112,6 +1117,11 @@ test("stack: Update stack brings main's new commits into each change; a conflict
   st = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
   assert.equal(st.behind, undefined);
   assert.equal(t.gh.files("octo/shop", c3.branch)["b.txt"], "b-both\n");
+  // Undo on an updated change: its turn reversed, main's commit (merged in) kept.
+  const un = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.equal(un.status, 200, JSON.stringify(un.body));
+  const unFiles = Object.fromEntries(un.body.files.map((f: { path: string; data: string }) => [f.path, f.data]));
+  assert.deepEqual([unFiles["a.txt"], unFiles["b.txt"]], [undefined, "b-both\n"]);
   // Landing then fast-forwards main, each pull request merged.
   const l = await t.send("POST", "/v1/apps/shop/git/stack/land", tok, { change: c3.change.id });
   assert.equal(l.status, 200, JSON.stringify(l.body));

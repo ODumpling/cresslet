@@ -238,7 +238,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : s.mergeParent ? { baseSha: s.mergeParent } : {}),
     });
     // An Update stack merge committed: it carries on with the changes above (an edit made meanwhile: not yet).
-    if (s.restack && s.mergeParent && !o.state()!.dirty) await restackRun(s.restack.stack, s.restack.returnTo);
+    if (s.restack && s.mergeParent && !o.state()!.dirty) await restackRun(s.restack.stack, s.restack.returnTo, revision());
     return { ...r, files };
   }
 
@@ -247,17 +247,18 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
    * loaded, the update having moved it); stopped at a conflict, that change and its merge loaded (markers in the
    * conflicted files), to be resolved and committed (then it carries on: syncNow).
    */
-  async function restackRun(stack: string, returnTo: string): Promise<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; paths: string[] } }> {
+  /** `rev`: the workspace's revision before it started (an edit since isn't overwritten: it stops, said). */
+  async function restackRun(stack: string, returnTo: string, rev: number): Promise<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; paths: string[] } }> {
     const r = await post<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; withSha: string; paths: string[] } }>("/stack/restack", { stack });
     if (!r.stopped) {
       await set({ restack: undefined });
       const s = o.state()!;
-      if (s.activeBranch !== returnTo || r.updated.some((c) => c.branch === returnTo)) await pullNow(returnTo);
+      if (s.activeBranch !== returnTo || r.updated.some((c) => c.branch === returnTo)) await pullNow(returnTo, returnTo, { rev });
       return r;
     }
     const at = r.stopped.change;
-    await pullNow(at.branch, at.sha);
-    const rev = revision();
+    await pullNow(at.branch, at.sha, { rev });
+    rev = revision();
     const m = await o.api<{ intoSha: string; headSha: string; conflicts: string[]; files: GitFile[] }>(path(`/conflicts?branch=${encodeURIComponent(at.branch)}&with=${encodeURIComponent(r.stopped.with)}`));
     unchangedSince(rev, "loading the merge");
     const merging = () => set({ headSha: m.headSha, mergeParent: m.intoSha, conflicts: m.conflicts, dirty: true, restack: { stack, returnTo } });
@@ -338,7 +339,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     const extra = (await opts.before?.()) ?? {};
     unchangedSince(rev, `loading ${branch}`);
     // Edited while it loaded (npm install, say): those are changes, kept dirty.
-    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, back: undefined, undo: undefined, ...extra, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
+    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, back: undefined, undo: undefined, restack: undefined, ...extra, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
     try {
       await o.hydrate(t.files);
     } catch (e) {
@@ -533,7 +534,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     updateStack: (stack: string) => serial(async () => {
       const s = o.state()!;
       if (s.dirty) throw Object.assign(new Error("this workspace has changes not pushed yet: push them first"), { code: "dirty" });
-      return restackRun(stack, s.restack?.returnTo ?? s.activeBranch);
+      return restackRun(stack, s.restack?.returnTo ?? s.activeBranch, revision());
     }),
     /**
      * Lands the stack's bottom change through its pull request (server/stack.ts landNext), for a default branch that
