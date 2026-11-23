@@ -473,7 +473,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       if (r.top.branch !== s.activeBranch || r.top.sha !== s.headSha) throw stackChanged();
       unchangedSince(rev, "loading the undo");
       // The dotenv files it puts back (the server says which), their public entries: checked on every commit of it.
-      const env = r.files.filter((f) => r.restore?.includes(f.path)).map((f) => ({ path: f.path, data: f.data }));
+      let env = r.files.filter((f) => r.restore?.includes(f.path)).map((f) => ({ path: f.path, data: f.data }));
       const holding = () => set({ dirty: true, undo: { title: r.title, conflicts: r.conflicts, ...(env.length ? { env } : {}) } });
       try {
         await o.hydrate(r.files);
@@ -483,10 +483,15 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         if (!r.conflicts.some((p) => /(?:^|\/)package(?:-lock)?\.json$/.test(p))) throw e;
         return { conflicts: r.conflicts, title: r.title, committed: false };
       }
+      // A dotenv file the workspace kept as it was (its own local lines in the way): not as planned, so not committed
+      // until it is (one the undo puts back, or one the workspace already had otherwise than the top).
+      const dotenvs = r.files.filter((f) => /(?:^|\/)\.env[^/]*$/i.test(f.path));
+      const now = dotenvs.length ? await o.files() : [];
+      const drift = dotenvs.filter((f) => !r.restore?.includes(f.path) && envKept([f], now).length).map((f) => ({ path: f.path, data: f.data }));
+      env = [...env, ...drift];
       await holding();
-      // A dotenv file the workspace kept as it was (its own local lines in the way): not put back, so not committed.
       if (env.length) {
-        const kept = envKept(env, await o.files());
+        const kept = envKept(env, now);
         if (kept.length) {
           throw Object.assign(new Error(`${kept.join(", ")} couldn't be put back here (this workspace's own lines in it are in the way): give it the public entries it had in change ${change.position}`), { code: "dotenv_kept", held: true });
         }

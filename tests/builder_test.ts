@@ -699,6 +699,12 @@ test("git: undoing a change loads the result; clean, it's committed at once as \
   k.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }];
   await k.git.commitChange("Commit the undo");
   assert.deepEqual([k.calls.at(-1)!.body.title, k.state.undo], ["Undo: Theme", undefined]);
+  // One it leaves as it is but the workspace kept otherwise (its own lines in the way): held to it too.
+  const drift = fakeGit({ onDefault: false });
+  drift.state.activeBranch = "feat/s/1-one";
+  drift.files.list = [{ path: ".env", data: "VITE_THEME=old\n" }];
+  await assert.rejects(drift.git.undo({ id: "chg_f", position: 1 }, top), (x: Json) => x.held === true && x.code === "dotenv_kept");
+  assert.deepEqual(drift.state.undo?.env, [{ path: ".env", data: "VITE_THEME=light\n" }]);
   // A dotenv file the undo leaves as it is: not held to it (resolving may change it).
   const same = fakeGit({ onDefault: false });
   same.state.activeBranch = "feat/s/1-one";
