@@ -102,8 +102,8 @@ The workspace is chat first: the **AI builder** pane (a chat with Claude that ch
 
 Claude is reached one of two ways:
 
-- **AI credits** (when the server has `CRESSLET_ANTHROPIC_API_KEY` and the user is logged in): the browser's Anthropic SDK points at `<origin>/v1/ai` with the Cresslet token; [`server/credits.ts`](../server/credits.ts) checks the request (streamed, a listed model, client tools only), forwards it with the operator's key, streams the reply back and charges the account from the tokens in the reply's `usage` (see [AI credits](api.md#ai-credits)). The Cresslet token stays on the server.
-- **Own key**: the browser calls the Anthropic API directly (`claude-opus-5-5`, streamed) with the user's own API key, kept in the studio origin's `localStorage` (`cresslet.anthropicKey`), like the Cresslet token: previews and project code run on the preview origin and can't read it. It's sent only to `api.anthropic.com`; **Forget key** removes it.
+- **AI credits** (when the server has `CRESSLET_ANTHROPIC_API_KEY` and the user is logged in): the browser's Anthropic SDK points at `<origin>/v1/ai` with the studio's session cookie; [`server/credits.ts`](../server/credits.ts) checks the request (streamed, a listed model, client tools only), forwards it with the operator's key, streams the reply back and charges the account from the tokens in the reply's `usage` (see [AI credits](api.md#ai-credits)). The operator's key stays on the server.
+- **Own key**: the browser calls the Anthropic API directly (`claude-opus-5-5`, streamed) with the user's own API key, kept in the studio origin's `localStorage` (`cresslet.anthropicKey`) (the Cresslet session is an HttpOnly cookie script can't read): previews and project code run on the preview origin and can't read it. It's sent only to `api.anthropic.com`; **Forget key** removes it.
 
 Both ways:
 

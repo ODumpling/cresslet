@@ -166,29 +166,44 @@ export function fromTree(tree: FileSystemTree, prefix = "", out: Files = {}): Fi
   return out;
 }
 
-export const auth = {
-  get token() {
+const stored = (key: string) => ({
+  get(): string | null {
     try {
-      return localStorage.getItem("cresslet.token");
+      return localStorage.getItem(key);
     } catch {
       return null;
     }
   },
-  set token(v: string | null) {
+  set(v: string | null) {
     try {
-      v ? localStorage.setItem("cresslet.token", v) : localStorage.removeItem("cresslet.token");
+      v ? localStorage.setItem(key, v) : localStorage.removeItem(key);
     } catch { /* storage blocked */ }
+  },
+});
+const user = stored("cresslet.user"), email = stored("cresslet.email"), legacy = stored("cresslet.token");
+
+/**
+ * This browser's login. The credential is an HttpOnly session cookie (server/api.ts) page script can't read; `login`
+ * is the logged-in account's id, kept so every tab knows it's logged in, and as whom.
+ */
+export const auth = {
+  get user() {
+    return user.get();
+  },
+  set user(v: string | null) {
+    user.set(v);
   },
   get email() {
-    try {
-      return localStorage.getItem("cresslet.email");
-    } catch {
-      return null;
-    }
+    return email.get();
   },
   set email(v: string | null) {
-    try {
-      v ? localStorage.setItem("cresslet.email", v) : localStorage.removeItem("cresslet.email");
-    } catch { /* storage blocked */ }
+    email.set(v);
+  },
+  /** A token stored before session cookies: the session (lib/session.ts) hands it to the cookie, then drops it. */
+  get legacyToken() {
+    return legacy.get();
+  },
+  set legacyToken(v: string | null) {
+    legacy.set(v);
   },
 };

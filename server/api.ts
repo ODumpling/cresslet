@@ -80,6 +80,8 @@ type Env = {
     account?: Account;
     token?: Token;
     bearer?: string;
+    /** The account came from the studio's session cookie (not a bearer token). */
+    session?: boolean;
     deploy?: unknown;
     deployBytes?: Uint8Array<ArrayBuffer>;
     deployRead?: boolean;
@@ -237,6 +239,26 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.json({ error: "internal", message: "internal error" }, 500);
   });
 
+  // ---- the studio's session: an account token in an HttpOnly cookie (page script never sees it). `__Host-`: only this
+  // host can set it (not an app under the domain). Apps under the domain are the same *site* (SameSite lets their
+  // requests carry it), so it only counts on requests the studio's own pages sent (`fromStudio`).
+  const SESSION_COOKIE = cfg.scheme === "https" ? "__Host-cresslet_session" : "cresslet_session";
+  const SESSION_MAX_AGE = 400 * 86_400; // browsers' cap; the token itself lasts until logout or revocation
+  /** Sent by a studio page (this origin), not another site or an app under the domain. */
+  const fromStudio = (c: Context<Env>) => {
+    const site = c.req.header("sec-fetch-site");
+    return site ? site === "same-origin" : c.req.header("origin") === rootUrl(cfg);
+  };
+  const setSession = (c: Context<Env>, token: string) =>
+    setCookie(c, SESSION_COOKIE, token, { path: "/", httpOnly: true, secure: cfg.scheme === "https", sameSite: "Strict", maxAge: SESSION_MAX_AGE });
+  const clearSession = (c: Context<Env>) => deleteCookie(c, SESSION_COOKIE, { path: "/", secure: cfg.scheme === "https" });
+  /** Logged in from the studio: the token goes in the session cookie, never to the page. Anyone else gets the token. */
+  const loggedIn = (c: Context<Env>, account: Account, token: string) => {
+    if (!fromStudio(c)) return c.json({ account: accountView(account), token });
+    setSession(c, token);
+    return c.json({ account: accountView(account) });
+  };
+
   app.use("*", async (c, next) => {
     const auth = c.req.header("authorization");
     const bearer = auth?.startsWith("Bearer ") ? auth.slice(7).trim() : undefined;
@@ -247,6 +269,19 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         if (!found) throw new HttpError(401, "invalid token", "unauthorized");
         c.set("account", found.account);
         c.set("token", found.token);
+      }
+    }
+    const cookie = !c.get("account") && fromStudio(c) ? getCookie(c, SESSION_COOKIE) : undefined;
+    if (cookie) {
+      const found = cookie.startsWith("clv_acct_") ? await store.useToken(cookie) : undefined;
+      if (found) {
+        c.set("account", found.account);
+        c.set("token", found.token);
+        c.set("session", true);
+      } else {
+        // Revoked (logged out elsewhere, or in API tokens): dropped, and the request goes on logged out (a login
+        // still works; what needs one answers 401, and the studio logs the tab out).
+        clearSession(c);
       }
     }
     await next();
@@ -497,6 +532,25 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.json({ revoked: c.req.param("id") });
   });
 
+  // ---- the studio's session cookie
+  /** A studio logged in before session cookies (its token in localStorage, sent as a bearer): the cookie takes it over. */
+  app.post("/auth/session", async (c) => {
+    if (!fromStudio(c)) throw new HttpError(403, "only the studio can start a session", "forbidden");
+    const a = accountWide(c, "admin");
+    if (c.get("session") || !c.get("bearer")?.startsWith("clv_acct_")) throw new HttpError(400, "send the token to keep as a bearer");
+    setSession(c, c.get("bearer")!);
+    return c.json({ account: accountView(a) });
+  });
+
+  /** Logs this browser out: its session's token is revoked, not just forgotten. */
+  app.post("/auth/logout", async (c) => {
+    if (!fromStudio(c)) throw new HttpError(403, "only the studio can end its session", "forbidden");
+    const a = c.get("account"), t = c.get("token");
+    if (c.get("session") && a && t) await store.revokeToken(a.id, t.id);
+    clearSession(c);
+    return c.json({ loggedOut: true });
+  });
+
   // ---- email + password login (server/passwords.ts). No signup this way: nothing here proves who owns an email, and
   // emails pick site admins, invites and GitHub links. An account gets a password in Settings or from the operator.
   if (cfg.passwordLogin) {
@@ -520,7 +574,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       try {
         // Only while it still has that password (not dropped by a GitHub link meanwhile).
         const { token } = await store.issueToken(account.id, { name: "Studio (password login)", passwordHash: account.password_hash! });
-        return c.json({ account: accountView(account), token });
+        return loggedIn(c, account, token);
       } catch (e) {
         if (e instanceof AccountDisabledError) throw new HttpError(403, "this account is disabled; ask a site admin", "account_disabled");
         if (e instanceof PasswordChangedError) throw new HttpError(409, "the password changed meanwhile: try again", "conflict");
@@ -601,7 +655,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     app.post("/auth/exchange", async (c) => {
       const { code } = await body<{ code?: unknown } | null>(c) ?? {};
       const l = gh.exchange(String(code ?? ""));
-      return c.json({ account: accountView(l.account), token: l.token });
+      return loggedIn(c, l.account, l.token);
     });
 
     // CLI: device flow, proxied so the client secret never leaves the server.

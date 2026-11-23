@@ -98,7 +98,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
   setOpen: (open: boolean, opts?: { focus?: boolean }) => void;
   ref: Ref<BuilderHandle>;
 }) {
-  const { token } = useSession();
+  const { user } = useSession();
   const loginIcon = useLoginButton().icon;
   const [creditsOn, setCreditsOn] = useState(false);
   const [keyVersion, setKeyVersion] = useState(0); // bumped when the stored key changes
@@ -162,7 +162,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
 
   // Where Claude is reached: "key" (the user's own key), "credits" (this server; logged in), or null (set one up).
   void keyVersion;
-  const source = apiKey.get() ? "key" : creditsOn && token ? "credits" : null;
+  const source = apiKey.get() ? "key" : creditsOn && user ? "credits" : null;
   const sourceRef = useRef(source);
   sourceRef.current = source;
 
@@ -181,7 +181,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     const unit = fmt.format(left) === "1" ? "credit" : "credits";
     setCredits({ text: `${fmt.format(left)} ${unit}`, title: `${fmt.format(left)} AI ${unit} left`, low: left <= 0 });
   }
-  useEffect(() => void refreshCredits(), [source, token]);
+  useEffect(() => void refreshCredits(), [source, user]);
   // Leaving the project: the conversation stops with it (no more requests, tools or credits spent), and a deploy
   // waiting for approval is declined.
   useEffect(() => {
@@ -373,7 +373,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
 
   // Where focus goes in the chat: the message field.
   const chatFocus = () => inputRef.current?.focus();
-  const setupFocus = () => (creditsOn && !token ? loginRef.current : keyRef.current)?.focus();
+  const setupFocus = () => (creditsOn && !user ? loginRef.current : keyRef.current)?.focus();
 
   function on(ev: AgentEvent) {
     switch (ev.type) {
@@ -432,8 +432,8 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     if (!sourceRef.current) return;
     // Each request goes the way chosen when it's sent (the key can be forgotten or entered mid-chat).
     r.agent ??= createAgent({
-      // (each source has its secret: "key" a stored key, "credits" a session token)
-      client: () => (sourceRef.current === "key" ? anthropicClient(apiKey.get()!) : creditsClient(session().token ?? "")),
+      // ("key": a stored key; "credits": this browser's session cookie)
+      client: () => (sourceRef.current === "key" ? anthropicClient(apiKey.get()!) : creditsClient()),
       errorText: (x) => errorText(x, { credits: sourceRef.current !== "key" }),
       tools,
       on,
@@ -745,7 +745,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
       ) : null}
       <div id="builder-setup" className="builder-setup" hidden={!setupShown}>
         <p>Ask Claude to change this project. It edits files, runs commands in this tab's terminal and, when you ask, deploys with your session, like the CLI.</p>
-        <div id="builder-credits-offer" className="builder-offer" hidden={!creditsOn || !!token}>
+        <div id="builder-credits-offer" className="builder-offer" hidden={!creditsOn || !!user}>
           <p id="builder-credits-text">Log in to use AI credits: no API key needed.</p>
           <div className="row start">
             <button className="btn primary" id="builder-login" type="button" ref={loginRef} onClick={() => void logIn(location.pathname + location.search)}><Icon name={loginIcon} />Log in</button>
@@ -836,7 +836,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
                 if (r.busy) return;
                 apiKey.set(null);
                 flushSync(() => setKeyVersion((n) => n + 1));
-                if (creditsOn && token) {
+                if (creditsOn && user) {
                   void refreshCredits();
                   chatFocus();
                   setStatus("API key removed from this browser. Using your AI credits.");

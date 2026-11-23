@@ -137,7 +137,7 @@ test("studio: `cresslet` in server code is the vendored SDK (virtual module), no
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (url: URL) => new Response(await readFile(url, "utf8"))) as unknown as typeof fetch;
   try {
-    await createCresslet(c, { auth: () => ({}), project: () => null }).build();
+    await createCresslet(c, { project: () => null }).build();
     const hooks: { resolve?: (a: { path: string }) => unknown; load?: () => Promise<{ contents: string }>; filter?: RegExp } = {};
     options!.plugins.find((p) => p.name === "cresslet-sdk")!.setup({
       onResolve: (o: { filter: RegExp }, f: typeof hooks.resolve) => ((hooks.filter = o.filter), (hooks.resolve = f)),

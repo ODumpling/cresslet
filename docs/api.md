@@ -5,6 +5,7 @@ Base: `http://localhost:8787` (self-hosted default). JSON in/out. CORS `*`.
 Auth (either):
 - `Authorization: Bearer clv_acct_…` (or `clv_scoped_…`) — account token (GitHub login, or created in the studio under Settings → API tokens).
 - `X-Cresslet-Deploy-Key: clv_app_…` (or `Authorization: Bearer clv_app_…`) — per-app key, returned once on app creation.
+- The studio's session: an account token in an HttpOnly cookie (`__Host-cresslet_session`; `cresslet_session` over http), set by a login the studio sends. It counts only on requests from the studio's own origin (`Sec-Fetch-Site: same-origin`, or else an `Origin` of the root URL): apps under the domain are the same site, so their requests carry it but never act with it. A bearer token wins over it. A revoked one is cleared and the request goes on logged out.
 
 Site admin = an account with the `SiteAdmin` role (or listed in `CRESSLET_SITE_ADMINS`) using a full-access token (`admin`, all apps), or the operator's `CRESSLET_ADMIN_TOKEN`. The studio shows them an **Admin** page (`/admin`), **Users** (`/admin-users`) and **Organizations** (`/admin-orgs`), and, with AI credits on, an **AI credits** page (`/admin-credits`): use per day, model and account, and giving or taking back credits.
 
@@ -45,11 +46,13 @@ Creating apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin`
 | POST | `/v1/me/tokens` | `{name, role?: read\|deploy\|admin (default admin), apps?: ["name", …] \| null}` → `{token, info}` (201). The secret is only in this response. Scoped tokens start `clv_scoped_` |
 | DELETE | `/v1/me/tokens/:id` | revoke one token |
 | POST | `/v1/me/token` | revoke all of this account's tokens → `{account, token}` (new full-access one). A password stays (the operator can reset one you didn't set) |
-| POST | `/v1/auth/password` | password login on: `{email, password}` → `{account, token}` (a new full-access token); 401 `invalid_credentials` for a wrong email or password alike. No signup: only accounts that have a password. 10 tries per email and 30 per client per 10 min (429 `rate_limited`) |
+| POST | `/v1/auth/password` | password login on: `{email, password}` → `{account, token}` (a new full-access token; from the studio's origin it goes in the session cookie instead, and the answer is `{account}`); 401 `invalid_credentials` for a wrong email or password alike. No signup: only accounts that have a password. 10 tries per email and 30 per client per 10 min (429 `rate_limited`) |
 | PUT | `/v1/me/password` | password login on, full-access token: `{password, currentPassword?}` → `{account}`. Sets the password (8-256 characters); changing one needs `currentPassword` (403 `wrong_password`; 10 tries per account per 10 min). 409 `conflict` if the password or the calling token changed meanwhile. Other tokens stay valid: revoke them to end other sessions |
 | DELETE | `/v1/me/password` | password login on, full-access token: `{currentPassword}` → `{account}`: removes the password (403 `wrong_password`, 409 as above) |
 | GET | `/v1/auth/github` | browser: GitHub web flow → redirects to `/#cresslet_login=<code>` (or `#cresslet_login_error=…`) |
-| POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` |
+| POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` (from the studio's origin: the session cookie, and `{account}`) |
+| POST | `/v1/auth/session` | studio's origin only (else 403): a full-access account token as the bearer → `{account}`, and that token becomes the session cookie (a studio logged in before session cookies, its token in localStorage) |
+| POST | `/v1/auth/logout` | studio's origin only (else 403): revokes the session's token and clears the cookie → `{loggedOut: true}` |
 | POST | `/v1/auth/github/device` | CLI/agents: → `{deviceCode, userCode, verificationUri, expiresIn, interval}` |
 | POST | `/v1/auth/github/device/token` | `{deviceCode}` → `{status: pending\|slow_down}` or `{status: complete, account, token}`; poll every `interval`s |
 | POST | `/v1/auth/cli` | CLI browser login: → `{deviceCode, userCode, verificationUri, expiresIn, interval}`; open `verificationUri` (the studio's `/cli`) and show `userCode`, which the user types there. 20 per client per 10 min |

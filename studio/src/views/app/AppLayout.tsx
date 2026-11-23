@@ -59,14 +59,14 @@ const TABS = [
 
 export function AppLayout() {
   const { name } = useParams({ from: "/apps/$name" });
-  const { token } = useSession();
+  const { user } = useSession();
   const navigate = useNavigate();
   useView("site", name);
   useEffect(() => {
-    if (!token) void navigate({ to: "/", replace: true });
-  }, [token, navigate]);
+    if (!user) void navigate({ to: "/", replace: true });
+  }, [user, navigate]);
   // Another app or account: a fresh page (nothing of the previous one stays shown, its streams stop).
-  return token ? <AppPage key={`${token}\n${name}`} name={name} /> : null;
+  return user ? <AppPage key={`${user}\n${name}`} name={name} /> : null;
 }
 
 function AppPage({ name }: { name: string }) {

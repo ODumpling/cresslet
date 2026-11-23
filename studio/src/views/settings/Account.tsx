@@ -1,5 +1,5 @@
 // /settings: the account (its GitHub login and email), its password, and logging this browser out.
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type * as API from "../../../api-types.ts";
@@ -30,9 +30,9 @@ export function SettingsAccount() {
       <section className="block" aria-labelledby="session-title">
         <div className="block-head"><h2 id="session-title">Session</h2></div>
         <div className="panel split">
-          <p className="muted small">Logs this browser out. Its token stays valid until you revoke it in <Link to="/settings/tokens">API tokens</Link>.</p>
+          <p className="muted small">Logs this browser out and ends its session.</p>
           <button className="btn" id="logout-btn" type="button" onClick={() => {
-            logOut();
+            void logOut();
             void navigate({ to: "/" });
           }}><Icon name="logout" />Log out</button>
         </div>

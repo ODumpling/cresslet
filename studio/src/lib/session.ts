@@ -1,5 +1,6 @@
-// Who's logged in: the token (localStorage, store.ts `auth`) and what /v1/me says about its account. A store outside
-// React (the API client and non-React modules change it too), read in components with useSession().
+// Who's logged in: this browser's session (an HttpOnly cookie the page never reads; `auth.user` in localStorage says
+// it's there, and whose) and what /v1/me says about its account. A store outside React (the API client and non-React
+// modules change it too), read in components with useSession().
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { auth } from "../../store.ts";
 import type * as API from "../../api-types.ts";
@@ -7,7 +8,8 @@ import { api, meta, setOnExpired } from "./api.ts";
 import { toast } from "./toast.tsx";
 
 export interface Session {
-  token: string | null;
+  /** The logged-in account's id as this browser stored it at login (not a credential), or null: logged out. */
+  user: string | null;
   /** The account's GitHub login, else its email (shown in the sidebar). */
   email: string | null;
   /** Tells your own row apart (Share, org members, admin users); null until /v1/me answers. */
@@ -17,19 +19,19 @@ export interface Session {
   orgs: API.MyOrg[];
 }
 
-let state: Session = { token: auth.token, email: auth.email, accountId: null, siteAdmin: false, orgs: [] };
+let state: Session = { user: auth.user, email: auth.email, accountId: null, siteAdmin: false, orgs: [] };
 const listeners = new Set<() => void>();
 function set(next: Partial<Session>) {
   state = { ...state, ...next };
   for (const l of listeners) l();
 }
 /**
- * The session, as stored: the token is localStorage's (a write there in this tab, as the old studio read it on every
- * route, counts too: `session()` and each navigation pick it up).
+ * The session, as stored: localStorage's login (a write there in this tab counts too: `session()` and each navigation
+ * pick it up).
  */
 export const session = () => {
-  const token = auth.token;
-  if (token !== state.token) state = { token, email: auth.email, accountId: null, siteAdmin: false, orgs: [] };
+  const user = auth.user;
+  if (user !== state.user) state = { user, email: auth.email, accountId: null, siteAdmin: false, orgs: [] };
   return state;
 };
 const subscribe = (l: () => void) => {
@@ -39,61 +41,100 @@ const subscribe = (l: () => void) => {
 export const useSession = () => useSyncExternalStore(subscribe, session, session);
 
 /**
- * Another tab logged in or out, or this tab's storage changed before a navigation: follow it (views keyed on the token
- * reload, so no other account's data stays shown). The layout loads the new token's account.
+ * Another tab logged in or out, or this tab's storage changed before a navigation: follow it (views keyed on the login
+ * reload, so no other account's data stays shown). The layout loads the new login's account.
  */
 if (typeof window !== "undefined") {
   const sync = () => {
     const before = state;
     if (session() !== before) for (const l of listeners) l();
-    else if (auth.email !== state.email && auth.token) set({ email: auth.email });
+    else if (auth.email !== state.email && auth.user) set({ email: auth.email });
   };
-  addEventListener("storage", (e) => (e.key === "cresslet.token" || e.key === "cresslet.email" || e.key === null) && sync());
+  addEventListener("storage", (e) => (e.key === "cresslet.user" || e.key === "cresslet.email" || e.key === null) && sync());
   addEventListener("hashchange", sync);
   addEventListener("popstate", sync);
 }
 
 /**
- * Stores a login (`token`) or what /v1/me said about the current one; `sentWith`: the token that /v1/me call sent (an
- * answer about an account this tab has since left is dropped).
+ * A login (the server set the session cookie: no `sentWith`), or what /v1/me said about the current one; `sentWith`:
+ * the login that /v1/me call was sent with (an answer about an account this tab has since left is dropped).
  */
-export function setAccount(r: { token?: string; account: API.Account }, sentWith?: string | null) {
-  if (sentWith !== undefined && sentWith !== auth.token) return;
-  if (r.token) auth.token = r.token;
-  auth.email = r.account.github ?? r.account.email;
-  const changed = state.token !== auth.token;
-  set({ token: auth.token, email: auth.email, accountId: r.account.id, siteAdmin: r.account.role === "SiteAdmin", ...(changed ? { orgs: [] } : {}) });
+export function setAccount(account: API.Account, sentWith?: string | null) {
+  if (sentWith !== undefined && sentWith !== auth.user) return;
+  auth.user = account.id;
+  auth.email = account.github ?? account.email;
+  const changed = state.user !== auth.user;
+  set({ user: auth.user, email: auth.email, accountId: account.id, siteAdmin: account.role === "SiteAdmin", ...(changed ? { orgs: [] } : {}) });
   void loadMyOrgs();
 }
 
-export function logOut() {
-  auth.token = null;
+/** Forgets the login here (every tab follows); the server already ended the session (it refused it). */
+function forget() {
+  auth.user = null;
   auth.email = null;
-  set({ token: null, email: null, accountId: null, siteAdmin: false, orgs: [] });
+  set({ user: null, email: null, accountId: null, siteAdmin: false, orgs: [] });
+}
+
+/** Logs this browser out: the server revokes the session's token and drops its cookie. */
+export async function logOut() {
+  forget();
+  const res = await fetch("/v1/auth/logout", { method: "POST", credentials: "same-origin" }).catch(() => null);
+  if (!res?.ok) toast("Couldn't end the session on the server: revoke it in Settings › API tokens.");
 }
 let expired = false;
 /**
- * The server refused this page's token (revoked elsewhere) since the page loaded: a view opened meanwhile may still
+ * The server refused this page's session (revoked elsewhere) since the page loaded: a view opened meanwhile may still
  * show (Settings: it checks the account itself, as the old studio did).
  */
 export const sessionExpired = () => expired;
 setOnExpired(() => {
   expired = true;
-  logOut();
+  forget();
   toast("Your session expired. Log in again.");
 });
 
+let migrating: Promise<void> | undefined;
+/**
+ * A token stored in localStorage before session cookies: handed to the server, which keeps it in the cookie, and
+ * dropped from storage. Started as the page loads; the layout shows no view until it's done (none loads logged out).
+ */
+function moveLegacyToken(): Promise<void> | undefined {
+  const token = auth.legacyToken;
+  if (!token) return migrating;
+  return migrating ??= (async () => {
+    try {
+      const res = await fetch("/v1/auth/session", { method: "POST", headers: { authorization: `Bearer ${token}` }, credentials: "same-origin" });
+      if (res.ok) {
+        auth.legacyToken = null;
+        setAccount(((await res.json()) as { account: API.Account }).account);
+      } else if (res.status === 401 || res.status === 403) {
+        auth.legacyToken = null; // revoked, or not a full-access token: log in again
+        if (auth.user) forget();
+      }
+      // Otherwise (the server's down): kept for the next page load.
+    } catch { /* offline: next time */ }
+    migrating = undefined;
+  })();
+}
+if (typeof window !== "undefined") void moveLegacyToken();
+/** True while a stored token moves to the session cookie (see moveLegacyToken). */
+export function useMovingSession() {
+  const [moving, setMoving] = useState(!!migrating);
+  useEffect(() => void migrating?.then(() => setMoving(false)), []);
+  return moving;
+}
+
 /** Role can change server-side: refresh it (shows the admin links to site admins). */
 export function refreshAccount() {
-  const sent = auth.token;
+  const sent = auth.user;
   if (!sent) return Promise.resolve(null);
-  return api<{ account: API.Account }>("/v1/me").then((r) => (setAccount(r, sent), r.account), () => null);
+  return api<{ account: API.Account }>("/v1/me").then((r) => (setAccount(r.account, sent), r.account), () => null);
 }
 
 export async function loadMyOrgs() {
-  const token = auth.token;
-  const orgs = token ? await api<{ orgs: API.MyOrg[] }>("/v1/orgs").then((r) => r.orgs, (): API.MyOrg[] => []) : [];
-  if (auth.token === token) set({ orgs });
+  const user = auth.user;
+  const orgs = user ? await api<{ orgs: API.MyOrg[] }>("/v1/orgs").then((r) => r.orgs, (): API.MyOrg[] => []) : [];
+  if (auth.user === user) set({ orgs });
   return orgs;
 }
 
@@ -160,7 +201,7 @@ export async function finishLogin(): Promise<string | null> {
     return null;
   }
   try {
-    setAccount(await api<{ token: string; account: API.Account }>("/v1/auth/exchange", { method: "POST", body: JSON.stringify({ code: p.code }) }));
+    setAccount((await api<{ account: API.Account }>("/v1/auth/exchange", { method: "POST", body: JSON.stringify({ code: p.code }), credentials: "same-origin" })).account);
   } catch (e) {
     toast(`GitHub login failed: ${(e as Error).message}`);
     return null;

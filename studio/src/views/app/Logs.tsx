@@ -14,7 +14,7 @@ let lineId = 0; // React keys for the lines
 
 export function AppLogs() {
   const { name } = useApp();
-  const { token } = useSession();
+  const { user } = useSession();
   const [filter, setFilter] = useState<Kind>("all");
   const [lines, setLines] = useState<(API.LogLine & { n: number })[]>([]);
   const [state, setState] = useState("Connecting…");
@@ -40,7 +40,7 @@ export function AppLogs() {
     };
     void (async () => {
       try {
-        const res = await fetch(appPath(name, "/logs?n=200&follow=1"), { headers: token ? { authorization: `Bearer ${token}` } : {}, signal: ctrl.signal });
+        const res = await fetch(appPath(name, "/logs?n=200&follow=1"), { credentials: user ? "same-origin" : "omit", signal: ctrl.signal });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message ?? `${res.status}`);
         setState("Live");
         const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader(); // an ok GET's body
@@ -64,7 +64,7 @@ export function AppLogs() {
       }
     })();
     return () => ctrl.abort();
-  }, [name, token, gen]);
+  }, [name, user, gen]);
 
   // Following the end: new lines keep it in view (not when scrolled up to read).
   useLayoutEffect(() => {

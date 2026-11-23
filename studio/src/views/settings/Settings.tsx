@@ -37,21 +37,21 @@ const here = () => (location.pathname.startsWith("/settings/") ? location.pathna
 
 export function Settings() {
   useView("settings", null); // each tab sets the title
-  const { token } = useSession();
+  const { user } = useSession();
   const navigate = useNavigate();
-  // Opened logged out: to the landing page. Its session expired (a 401 dropped the token, maybe while this view
+  // Opened logged out: to the landing page. Its session expired (a 401 dropped the login, maybe while this view
   // loaded): the page reloads for no account, and goes there if the account doesn't load (below).
-  const [entered] = useState(() => !!token || sessionExpired());
+  const [entered] = useState(() => !!user || sessionExpired());
   useEffect(() => {
     if (entered) return;
     rememberAfterLogin(here()); // back here once logged in (#82)
     void navigate({ to: "/", replace: true });
   }, [entered, navigate]);
   if (!entered) return null;
-  return <SettingsPage key={token ?? ""} />;
+  return <SettingsPage key={user ?? ""} />;
 }
 
-/** One account's settings (keyed on the token: another account's never stay shown). */
+/** One account's settings (keyed on the user: another account's never stay shown). */
 function SettingsPage() {
   const navigate = useNavigate();
   const [secret, setSecret] = useState<Created>(null);
@@ -59,12 +59,12 @@ function SettingsPage() {
   const alive = useAlive();
   const created: CreatedState = { secret, keep: (c) => (alive.current ? (setSecret(c), true) : false), creating, setCreating };
   const account = useLoad(() => {
-    const sent = session().token;
-    return api<{ account: API.Account }>("/v1/me").then((r) => (setAccount(r, sent), r.account));
+    const sent = session().user;
+    return api<{ account: API.Account }>("/v1/me").then((r) => (setAccount(r.account, sent), r.account));
   }, []);
   useEffect(() => {
     if (!account.error) return;
-    if (!auth.token) {
+    if (!auth.user) {
       rememberAfterLogin(here()); // the session expired: back here once logged in again
       void navigate({ to: "/" });
     }

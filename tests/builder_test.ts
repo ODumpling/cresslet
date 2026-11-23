@@ -371,7 +371,7 @@ test("cresslet deploy from the builder: asks first, deploys to the app it named,
   const asked: Json[] = [];
   let answer = (_ok: boolean) => {};
   const cresslet = createCresslet(c, {
-    auth: () => ({ token: null }),
+    loggedIn: () => false,
     project: () => project,
     builderRunning: () => running,
     approveDeploy: (target: string | null) => {
@@ -1075,10 +1075,10 @@ test("cresslet deploy on a linked app: the upload is refused if the source isn't
   });
   try {
     const committed = sourceDigest([{ path: "cresslet.json", data: "{}" }, { path: "index.html", data: "<h1>v1</h1>" }]);
-    const cr = createCresslet(c as Json, { auth: () => ({}), project: () => ({ deploy: { name: "a" } }), beforeDeploy: async () => ({ sha: "a".repeat(40), branch: "main", repo: "o/r", source: committed }) });
+    const cr = createCresslet(c as Json, { project: () => ({ deploy: { name: "a" } }), beforeDeploy: async () => ({ sha: "a".repeat(40), branch: "main", repo: "o/r", source: committed }) });
     await assert.rejects(cr.deploy(), /changed while building/);
     assert.equal(posted.length, 0);
-    const same = createCresslet(c as Json, { auth: () => ({}), project: () => ({ deploy: { name: "a" } }), beforeDeploy: async () => ({ sha: "a".repeat(40), branch: "main", repo: "o/r", source: sourceDigest([{ path: "cresslet.json", data: "{}" }, { path: "index.html", data: "<h1>v2</h1>" }]) }) });
+    const same = createCresslet(c as Json, { project: () => ({ deploy: { name: "a" } }), beforeDeploy: async () => ({ sha: "a".repeat(40), branch: "main", repo: "o/r", source: sourceDigest([{ path: "cresslet.json", data: "{}" }, { path: "index.html", data: "<h1>v2</h1>" }]) }) });
     await same.deploy();
     assert.equal(posted.length, 1);
     assert.deepEqual(JSON.parse(posted[0].body).git, { sha: "a".repeat(40), branch: "main", repo: "o/r" });

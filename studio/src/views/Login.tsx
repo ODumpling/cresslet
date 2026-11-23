@@ -14,7 +14,7 @@ import { Icon } from "../ui/icons.tsx";
 export function Login() {
   useView("login", "Log in");
   const navigate = useNavigate();
-  const { token } = useSession();
+  const { user } = useSession();
   const alive = useAlive();
   const [m, setMeta] = useState<API.Meta | null>(null);
   useEffect(() => void meta().then(setMeta), []);
@@ -25,16 +25,17 @@ export function Login() {
   const passwordInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (token && !busy) void navigate({ href: afterLoginPath() ?? "/", replace: true });
-  }, [token, busy, navigate]);
+    if (user && !busy) void navigate({ href: afterLoginPath() ?? "/", replace: true });
+  }, [user, busy, navigate]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     try {
-      const r = await api<{ token: string; account: API.Account }>("/v1/auth/password", json("POST", { email, password }));
+      // The answer sets the session cookie (credentials: kept although this tab is logged out).
+      const r = await api<{ account: API.Account }>("/v1/auth/password", { ...json("POST", { email, password }), credentials: "same-origin" });
       if (!alive.current) return;
-      setAccount(r);
+      setAccount(r.account);
       const to = afterLoginPath();
       if (!to) toast(`Logged in as ${r.account.github ?? r.account.email}`);
       void navigate({ href: to ?? "/", replace: true });
