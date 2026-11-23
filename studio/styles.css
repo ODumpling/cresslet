@@ -331,11 +331,11 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .toast-body a { color: var(--accent-text); }
 
 /* ------------------------------------------------------------------ workspace: the Shipline */
-/* Two modes, one layout (Workspace.tsx). Guided is daylight, Studio is night: the open project sets <html data-ws>, so
-   its dialogs and toasts take the mode's colors too. Every pair meets WCAG AA, as above. --live is what's online,
-   --draft what isn't yet. */
+/* Two modes, one layout (Workspace.tsx); the theme is separate (light or dark, the system's until picked). The
+   open project sets <html data-ws> (its mode) and <html data-ws-theme> (its colors), so its dialogs and toasts take
+   them too. Every pair meets WCAG AA, as above. --live is what's online, --draft what isn't yet. */
 :root { --live: var(--success); --live-soft: var(--success-soft); --draft: var(--warn); --draft-soft: var(--warn-soft); --display: var(--sans); }
-:root[data-ws="guided"] {
+:root[data-ws-theme="light"] {
   color-scheme: light;
   --bg: #eceaf4; --surface: #ffffff; --surface-2: #f5f4fa; --surface-3: #ebe9f3;
   --line: #e1dfec; --line-strong: #8b88a0;
@@ -345,7 +345,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   --focus: #5536f0; --grid-line: #17152b0d;
   --shadow: 0 1px 2px #17152b12, 0 22px 44px -26px #30227873;
 }
-:root[data-ws="studio"] {
+:root[data-ws-theme="dark"] {
   color-scheme: dark;
   --bg: #0d0c15; --surface: #15141f; --surface-2: #1b1a27; --surface-3: #252336;
   --line: #262438; --line-strong: #625f7c;
@@ -406,6 +406,14 @@ a.deploy-link:hover { color: var(--accent-text); }
 .topbar-right .btn { min-height: 32px; padding: 4px 11px; }
 #builder-btn[aria-expanded="true"], #drawer-btn[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-text); }
 .git-pill .mono { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; }
+/* Short of room (the top bar wraps only at 900px and below): tighter gaps (more than the theme button's 40px), a
+   shorter branch, and the PR pill's review and checks are for screen readers only. */
+@media (min-width: 901px) and (max-width: 1279px) {
+  .topbar { gap: 8px; }
+  .topbar-right { gap: 4px; }
+  .git-pill .mono { max-width: 8rem; }
+  .git-pr .small { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
 .git-dirty { width: 7px; height: 7px; border-radius: 50%; background: var(--draft); }
 .git-upstream { font: 600 11px var(--mono); color: var(--draft); background: var(--draft-soft); padding: 0 5px; border-radius: 5px; }
 .topbar .seg, .workspace .seg { flex: none; display: inline-flex; gap: 2px; padding: 2px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface-2); }
