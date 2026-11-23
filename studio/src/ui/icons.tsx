@@ -59,6 +59,8 @@ const SYMBOLS = [
   `<symbol id="i-split" viewBox="0 0 24 24"><rect width="18" height="16" x="3" y="4" rx="2"/><path d="M12 4v16"/></symbol>`,
   `<symbol id="i-monitor" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>`,
   `<symbol id="i-phone" viewBox="0 0 24 24"><rect width="12" height="20" x="6" y="2" rx="2"/><path d="M12 18h.01"/></symbol>`,
+  `<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>`,
+  `<symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>`,
 ].join("");
 
 /** The icon sprite: once per page (the layout renders it). */

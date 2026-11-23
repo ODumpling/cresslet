@@ -78,7 +78,7 @@ export class Engine {
   private theme = new Compartment();
   private suppress = false;
   private scheme = matchMedia("(prefers-color-scheme: dark)");
-  /** The workspace's mode sets the scheme (Studio dark, Guided light); null follows the system's. */
+  /** The workspace's theme sets the scheme (light or dark); null follows the system's. */
   private forceDark: boolean | null = null;
   private get dark() {
     return this.forceDark ?? this.scheme.matches;

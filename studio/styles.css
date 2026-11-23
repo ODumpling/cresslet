@@ -331,11 +331,11 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 .toast-body a { color: var(--accent-text); }
 
 /* ------------------------------------------------------------------ workspace: the Shipline */
-/* Two modes, one layout (Workspace.tsx). Guided is daylight, Studio is night: the open project sets <html data-ws>, so
-   its dialogs and toasts take the mode's colors too. Every pair meets WCAG AA, as above. --live is what's online,
+/* Two modes, one layout (Workspace.tsx); the theme is separate (light or dark, the system's until picked). The open
+   project sets <html data-ws> (its mode) and <html data-ws-theme> (its colors), so its dialogs and toasts take them too. Every pair meets WCAG AA, as above. --live is what's online,
    --draft what isn't yet. */
 :root { --live: var(--success); --live-soft: var(--success-soft); --draft: var(--warn); --draft-soft: var(--warn-soft); --display: var(--sans); }
-:root[data-ws="guided"] {
+:root[data-ws-theme="light"] {
   color-scheme: light;
   --bg: #eceaf4; --surface: #ffffff; --surface-2: #f5f4fa; --surface-3: #ebe9f3;
   --line: #e1dfec; --line-strong: #8b88a0;
@@ -345,7 +345,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
   --focus: #5536f0; --grid-line: #17152b0d;
   --shadow: 0 1px 2px #17152b12, 0 22px 44px -26px #30227873;
 }
-:root[data-ws="studio"] {
+:root[data-ws-theme="dark"] {
   color-scheme: dark;
   --bg: #0d0c15; --surface: #15141f; --surface-2: #1b1a27; --surface-3: #252336;
   --line: #262438; --line-strong: #625f7c;

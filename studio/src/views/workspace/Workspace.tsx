@@ -1,7 +1,7 @@
 // /p/<id>: a project, as the Shipline: the AI builder's rail (what's live, the ship line, the changes not live yet and
 // the chat) beside a stage with the app's preview, its code, both side by side (Split), or the preview's database.
-// Two modes, one layout: Guided (light; preview and database, nothing to decode) and Studio (dark and dense; code,
-// Split, the terminal and deploy log in a dock, source control, a status bar). Both show the repo's branch (the topbar
+// Two modes, one layout: Guided (preview and database, nothing to decode) and Studio (dense; code, Split, the terminal
+// and deploy log in a dock, source control, a status bar). The theme (light or dark) is its own toggle, not the mode's. Both show the repo's branch (the topbar
 // pill). Guided's dock starts closed but opens on request (the Terminal button, ⌘J). ⌘K runs any action. What was last
 // shown is remembered in this browser.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
@@ -60,6 +60,7 @@ interface LayoutPrefs {
   drawer?: boolean;
   chat?: boolean;
   mode?: string;
+  theme?: string;
 }
 const layoutPrefs = (): LayoutPrefs => {
   try {
@@ -81,6 +82,10 @@ const VIEW_ICON: Record<View, string> = { preview: "window", split: "split", cod
 const MODES = ["guided", "studio"] as const;
 type Mode = (typeof MODES)[number];
 const STUDIO_ONLY: readonly View[] = ["split", "code"];
+/** Light or dark, whichever mode; until one is picked, the system's. */
+const THEMES = ["light", "dark"] as const;
+type Theme = (typeof THEMES)[number];
+const systemDark = () => matchMedia("(prefers-color-scheme: dark)");
 const mac = typeof navigator !== "undefined" && /Mac|iP(hone|ad)/.test(navigator.platform);
 const MOD = mac ? "⌘" : "Ctrl+";
 const TABS = ["terminal", "deploy-log"] as const;
@@ -95,6 +100,14 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const [view, setViewState] = useState<View>(VIEWS.find((v) => v === prefs.view) ?? "preview");
   const [mode, setModeState] = useState<Mode>(MODES.find((m) => m === prefs.mode) ?? "guided");
   const studio = mode === "studio";
+  const [picked, setPicked] = useState<Theme | undefined>(THEMES.find((t) => t === prefs.theme));
+  const [sysDark, setSysDark] = useState(() => systemDark().matches);
+  useEffect(() => {
+    const q = systemDark(), on = () => setSysDark(q.matches);
+    q.addEventListener("change", on);
+    return () => q.removeEventListener("change", on);
+  }, []);
+  const theme: Theme = picked ?? (sysDark ? "dark" : "light");
   // What's on screen: Guided has no code views (they're kept for Studio).
   const shown: View = !studio && STUDIO_ONLY.includes(view) ? "preview" : view;
   // The dock: Studio's is remembered; Guided's starts closed every time (opened by hand when it's needed).
@@ -158,12 +171,18 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     iframe.current.src = previewBase.current.replace(/\/$/, "") + (path.startsWith("/") ? path : "/" + path);
   }, []);
 
-  // The mode's colors are the page's (dialogs and toasts too) while the project is open; the editor and terminal take them.
+  // The mode and theme are the page's (dialogs and toasts too) while the project is open; the editor and terminal take the theme.
   useLayoutEffect(() => {
     document.documentElement.dataset.ws = mode;
-    engine.current?.setDark(mode === "studio");
   }, [mode]);
-  useLayoutEffect(() => () => void delete document.documentElement.dataset.ws, []);
+  useLayoutEffect(() => {
+    document.documentElement.dataset.wsTheme = theme;
+    engine.current?.setDark(theme === "dark");
+  }, [theme]);
+  useLayoutEffect(() => () => {
+    delete document.documentElement.dataset.ws;
+    delete document.documentElement.dataset.wsTheme;
+  }, []);
 
   useEffect(() => {
     const e = new Engine(project, {
@@ -196,7 +215,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       approveDeploy: (text, signal) => builder.current?.approve(text, signal) ?? Promise.resolve(false),
     }, editorEl.current!); // mounted
     engine.current = e;
-    e.setDark(document.documentElement.dataset.ws === "studio");
+    e.setDark(document.documentElement.dataset.wsTheme === "dark");
     void e.boot();
     return () => {
       e.dispose();
@@ -300,6 +319,11 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     saveLayout({ mode: m });
     if (m === "studio" ? studioDrawer : guidedDrawer) engine.current?.openTerminal(termEl.current!); // mounted
     engine.current?.measureEditor();
+  }
+  function toggleTheme() {
+    const t: Theme = theme === "dark" ? "light" : "dark";
+    setPicked(t);
+    saveLayout({ theme: t });
   }
   function setDrawer(open: boolean, { focus = false } = {}) {
     const had = !!drawerEl.current?.contains(document.activeElement);
@@ -461,6 +485,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (deploy?.url) add("live", "Actions", "globe", "Open the live app", () => void open(deploy.url, "_blank", "noopener"));
     if (gitReady) add("git", "Actions", "branch", gitState ? "Source control" : "Connect Git", () => gitDialog.current?.open());
     add("mode", "Layout", studio ? "sparkles" : "code", studio ? "Switch to Guided" : "Switch to Studio", () => setMode(studio ? "guided" : "studio"), `${MOD}.`);
+    add("theme", "Layout", theme === "dark" ? "sun" : "moon", theme === "dark" ? "Switch to light theme" : "Switch to dark theme", toggleTheme);
     for (const v of VIEWS) if (v !== shown) add(`view-${v}`, "Layout", VIEW_ICON[v], `Show ${VIEW_LABEL[v]}`, () => setView(v));
     add("dock", "Layout", "terminal", dock ? "Hide the terminal" : "Show the terminal", () => setDrawer(!dock, { focus: !dock }), `${MOD}J`);
     for (const f of tree) if (!f.dir) add(`file-${f.path}`, "Files", "file", f.path, () => (shown !== "code" && shown !== "split" && setView("code"), void engine.current?.openFile(f.path)));
@@ -510,6 +535,9 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           </button>
           <button className="icon-btn" id="builder-btn" type="button" ref={builderBtn} aria-expanded={chat} aria-controls="builder" hidden={!container} title={`AI builder (${MOD}B)`} aria-label="AI builder" onClick={() => setBuilderOpen(!chat)}>
             <Icon name="sparkles" />
+          </button>
+          <button className="icon-btn" id="theme-btn" type="button" title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} aria-label="Dark theme" aria-pressed={theme === "dark"} onClick={toggleTheme}>
+            <Icon name={theme === "dark" ? "sun" : "moon"} />
           </button>
           <div className="seg mode-switch" id="mode-switch" role="group" aria-label="Mode" title={`Switch mode (${MOD}.)`}>
             <button type="button" id="mode-guided" aria-pressed={!studio} onClick={() => setMode("guided")}>Guided</button>
