@@ -82,6 +82,7 @@ test("the cookie counts only from the studio's origin: not an app's under the do
   assert.equal(await me({}), 401);
   // Or the studio's header (another origin's page can't send it: CORS doesn't allow it).
   assert.equal(await me({ "x-cresslet-user": t.account }), 200);
+  assert.equal(await me({ origin: "http://evil.test.local", "x-cresslet-user": t.account }), 401); // an Origin decides
   const preflight = await t.req("/v1/me", { method: "OPTIONS", headers: { origin: "http://evil.test.local", "access-control-request-method": "GET", "access-control-request-headers": "x-cresslet-user" } });
   assert.doesNotMatch(preflight.headers.get("access-control-allow-headers") ?? "", /x-cresslet-user/i);
   // Changes too: an app's page can't act as the user.
@@ -111,6 +112,7 @@ test("logging out revokes the session's token; a page elsewhere can't log the us
 
   const out = await t.req("/v1/auth/logout", { method: "POST", headers: { ...STUDIO, cookie } });
   assert.equal(out.status, 200);
+  assert.deepEqual(out.cookies, []); // not deleted: a late answer could wipe a newer login's cookie
   assert.equal((await t.req("/v1/me", { headers: { ...STUDIO, cookie } })).status, 401);
   // The token itself is gone, not just the cookie.
   const token = decodeURIComponent(cookie.split("=")[1]);

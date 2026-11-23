@@ -54,8 +54,8 @@ export function SettingsTokens() {
       toast(`Could not revoke: ${errorMessage(e)}`);
       return;
     }
-    if (t.current) {
-      sessionEnded(sent); // it was this session's: nothing more to end on the server
+    // It was this session's (nothing more to end on the server), unless another tab logged in as someone else since.
+    if (t.current && sessionEnded(sent)) {
       void navigate({ to: "/" });
       toast("Token revoked. You're logged out.");
       return;

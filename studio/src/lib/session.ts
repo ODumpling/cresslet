@@ -80,7 +80,8 @@ function forget() {
 }
 
 /**
- * Logs this browser out: the server revokes the session's token and drops its cookie. Resolves to whether it did (if
+ * Logs this browser out: the server revokes the session's token (the cookie stays, no longer counting: a login in
+ * another tab may have replaced it meanwhile). Resolves to whether it did (if
  * the server can't be reached, the session stays, so Log out can be tried again).
  */
 export async function logOut(): Promise<boolean> {
@@ -94,9 +95,14 @@ export async function logOut(): Promise<boolean> {
   auth.legacyToken = null; // a stored token still waiting to move: not after a logout
   return true;
 }
-/** The session `user` logged in with ended: forgotten here, unless another login (another tab's) has replaced it. */
-export function sessionEnded(user: string | null) {
-  if (user && auth.user === user) forget();
+/**
+ * The session `user` logged in with ended: forgotten here, unless another login (another tab's) has replaced it.
+ * Returns whether it was forgotten.
+ */
+export function sessionEnded(user: string | null): boolean {
+  if (!user || auth.user !== user) return false;
+  forget();
+  return true;
 }
 let expired = false;
 /**
