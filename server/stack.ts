@@ -841,6 +841,9 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
         }
         // (The change above synced with the squash takes its files as they are: it must hold all of this one, an
         // Update made only here not left out of it, which its pull request would then show as undone.)
+        // (…and at its commit: a push to it found only after the squash would leave the sync undone, its pull request
+        // moved onto the default branch already where GitHub deletes the landed branch itself.)
+        if (s[1]) await atCommit(ctx, s[1]);
         if (s[1] && !await holds(ctx, s[1].sha, c)) {
           throw new HttpError(409, `change ${s[1].position} doesn't hold change ${c.position} yet: run Update stack first, nothing was merged`, "stack_behind");
         }
@@ -868,7 +871,10 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
         synced = { branch: next.branch, from: next.sha, sha };
       } catch (e) {
         keep = c.branch;
-        pullErrors.push({ change: next.id, position: next.position, error: `not synced with ${def} (${why(e)}): its pull request stays on ${c.branch}, which is kept; run Update stack, then Update pull requests, then Land next` });
+        // (GitHub may have moved it onto the default branch already, deleting the landed branch itself.)
+        const np = await pullOf(ctx, next).catch(() => null);
+        const where = np?.base === def ? `its pull request is on ${def} already (GitHub moved it), showing earlier turns until then` : `its pull request stays on ${c.branch}, which is kept`;
+        pullErrors.push({ change: next.id, position: next.position, error: `not synced with ${def} (${why(e)}): ${where}; run Update stack, then Update pull requests, then Land next` });
       }
     }
     if (next && (!squashed || synced)) {

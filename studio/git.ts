@@ -571,7 +571,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         });
       } else if (s) {
         // On the change synced with the squash (the same files), wherever it is in the stack: its new commit.
-        const synced = r.synced?.branch === s.activeBranch && s.headSha === r.synced.from ? { headSha: r.synced.sha } : {};
+        // (It holds the squash: the default branch it sits on is that.)
+        const synced = r.synced?.branch === s.activeBranch && s.headSha === r.synced.from ? { headSha: r.synced.sha, baseSha: r.sha } : {};
         if (s.activeBranch === top && top !== change.branch) await set({ baseSha: r.sha, ...synced });
         else if ("headSha" in synced) await set(synced);
       }

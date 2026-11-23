@@ -888,6 +888,11 @@ test("stack: squash-only, Land next squashes the bottom and gives the next chang
   const moved = t.provider.push("main", { "e.txt": "e" });
   const up = await updateBottom(t.ctx, s.changes[0].id);
   await assert.rejects(landNext(t.ctx, s.changes[0].id), (e) => code(e) === "stack_behind" && /doesn't hold change 2/.test((e as Error).message));
+  // (A push to change 3 meanwhile: refused before the squash too.)
+  const c3now = t.provider.refs.get(c3.branch)!;
+  t.provider.push(c3.branch, { "z.txt": "z" });
+  await assert.rejects(landNext(t.ctx, s.changes[0].id), (e) => code(e) === "moved" || code(e) === "stack_behind");
+  t.provider.refs.set(c3.branch, c3now);
   assert.equal(pr[1].merged, false);
   // Update stack brings it into change 3; then it lands.
   assert.deepEqual((await restack(t.ctx, c1.stack.id)).updated.map((x) => x.position), [3]);

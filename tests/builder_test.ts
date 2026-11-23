@@ -767,7 +767,7 @@ test("git: Land next lands the bottom through its pull request (the workspace on
   const sm = fakeGit({ onDefault: false });
   sm.state.activeBranch = "feat/s/2-two";
   await sm.git.landNext({ ...bottom, id: "chg_sq" }, "feat/s/3-three");
-  assert.equal(sm.state.headSha, "5".repeat(40));
+  assert.deepEqual([sm.state.headSha, sm.state.baseSha], ["5".repeat(40), "e".repeat(40)]);
   // An edit made while it lands: not overwritten (landed all the same, said).
   const le = fakeGit({ onDefault: false });
   le.state.activeBranch = bottom.branch;
