@@ -719,12 +719,25 @@ test("stack: on a protected default branch, Land next merges the bottom's pull r
   let [s] = await readStacks(t.ctx);
   assert.deepEqual(s.changes.map((c) => c.position), [2, 3]);
 
+  // Its pull request not on main (a landing that left it on the branch below): refused, nothing moved (moving it may
+  // dismiss its approval; Update pull requests does it).
+  t.provider.pulls[1].base = c1.branch;
+  await assert.rejects(landNext(t.ctx, c2.change.id), (e) => code(e) === "pull_base");
+  t.provider.pulls[1].base = "main";
   // GitHub's own "delete branch on merge" did both already: fine.
   t.provider.gh.deleteOnMerge = true;
   const l2 = await landNext(t.ctx, c2.change.id);
   assert.deepEqual([l2.deleted, l2.pullErrors, pr[2].base, t.provider.refs.has(c2.branch)], [[], undefined, "main", false]);
   [s] = await readStacks(t.ctx);
   assert.deepEqual(s.changes.map((c) => c.position), [3]);
+  // Merged on GitHub already, its branch deleted with it: recorded as landed (into main only).
+  Object.assign(pr[2], { base: c2.branch, state: "closed", merged: true });
+  await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere");
+  pr[2].base = "main";
+  t.provider.refs.delete(c3.branch);
+  const l3 = await landNext(t.ctx, c3.change.id);
+  assert.equal(l3.sha, t.provider.refs.get("main"));
+  assert.deepEqual(await readStacks(t.ctx), []);
 });
 
 test("stack: Land next needs merge commits (squash-only refused), a pull request, and the bottom at its commit; Update merges the default branch into it", async () => {

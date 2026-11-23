@@ -487,7 +487,10 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       return merge ?? { mergedSha: "c".repeat(40), fastForward: true, treeChanged: false, branch: "main", deletedBranch: true };
     }
     if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } } };
-    if (path.endsWith("/git/stack/update")) return { change: { id: body.change, sha: "7".repeat(40) } };
+    if (path.endsWith("/git/stack/update")) {
+      if (body.change === "chg_edit") rev.n++; // an edit while it's on GitHub
+      return { change: { id: body.change, sha: "7".repeat(40) } };
+    }
     if (path.includes("/git/tree")) return { sha: "d".repeat(40), files: [{ path: "a.txt", data: "pulled" }] };
     if (path.includes("/git/conflicts")) return { intoSha: "f".repeat(40), headSha: "9".repeat(40), conflicts: ["app.txt"], files: [{ path: "app.txt", data: "<<<<<<< feat/x\na\n=======\nb\n>>>>>>> main\n" }] };
     if (path.includes("/git/pulls")) return init.method === "POST" ? { pull: { number: 7, url: "u", title: "t", review: "pending", checks: "none" } } : { pull: null };
@@ -758,6 +761,11 @@ test("git: Land next lands the bottom through its pull request (the workspace on
   u.state.dirty = false;
   assert.equal((await u.git.updateBottom(bottom)).sha, "7".repeat(40));
   assert.deepEqual(u.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/stack/update", "/tree"]);
+  // An edit made while it's updated on GitHub: not overwritten (updated there all the same, said).
+  const e = fakeGit({ onDefault: false });
+  e.state.activeBranch = bottom.branch;
+  await assert.rejects(e.git.updateBottom({ ...bottom, id: "chg_edit" }), (x: Json) => x.updated?.sha === "7".repeat(40) && /up to date on GitHub, but not loaded here/.test(x.message));
+  assert.deepEqual(e.hydrated, []);
 });
 
 test("git: why Land next can't land the bottom yet, from its pull request", () => {
@@ -770,7 +778,7 @@ test("git: why Land next can't land the bottom yet, from its pull request", () =
   assert.equal(landBlocked(c, p({ mergeable: "blocked", checks: "failure" }), "main"), "checks failing");
   assert.match(landBlocked(c, p({ mergeable: "behind" }), "main"), /behind main.*Update/);
   assert.match(landBlocked(c, p({ mergeable: "dirty" }), "main"), /conflicts with main/);
-  assert.equal(landBlocked(c, p({ mergeable: "unknown", checks: "failure" }), "main"), "checks failing");
+  assert.equal(landBlocked(c, p({ mergeable: "unstable", checks: "failure" }), "main"), null); // (an optional check: GitHub would merge it)
 });
 
 test("git: switching away from the default branch with edits puts them on a branch of their own first", async () => {

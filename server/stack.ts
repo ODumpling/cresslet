@@ -710,28 +710,35 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
 
 // ---- landing through pull requests: a default branch that needs them (reviews, checks, rules)
 
-/** The stack's bottom change, at its commit on GitHub (`sha`: as the caller saw it). */
-async function bottom(ctx: Ctx, changeId: string, sha?: string) {
+/** The stack's bottom change (`sha`: as the caller saw it), at its commit on GitHub. */
+async function bottom(ctx: Ctx, changeId: string, sha?: string, atHead = true) {
   const open = await ctx.store.openStackChanges(ctx.appId);
   const c = open.find((x) => x.id === changeId);
   if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
   if (sha && c.sha !== sha) throw stackChanged();
   const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
   if (s[0].id !== c.id) throw new HttpError(409, `change ${s[0].position} is the bottom: changes land from the bottom up`, "not_bottom");
+  if (atHead) await atCommit(ctx, c);
+  return { c, s };
+}
+
+/** A change's branch on GitHub at its commit, else 409 `moved` / 404 `branch_not_found`. */
+async function atCommit(ctx: Ctx, c: StackChange) {
   const head = await ctx.provider.branchHead(ctx.r, c.branch);
   if (head !== c.sha) {
     throw head
       ? new HttpError(409, `${c.branch} was pushed to on GitHub: pull it in, or carry on from it, first`, "moved")
       : new HttpError(404, `${c.branch} is gone on GitHub: nothing was landed`, "branch_not_found");
   }
-  return { c, s };
 }
 
 /**
  * Lands the stack's bottom change through its pull request, for a default branch that needs one (reviews, checks,
  * rules): GitHub merges it as the user (a merge commit: the repository must allow them; squash-only isn't supported
- * yet), only while its head is the change's commit. Refused (not approved, checks, rules, conflicts): 409
- * `merge_refused` with GitHub's reason, nothing changed. Merged on GitHub already: recorded as landed. Then the change
+ * yet), only while its head is the change's commit and its base the default branch (else 409 `pull_base`: moving it
+ * may dismiss its approval). Refused (not approved, checks, rules, conflicts): 409 `merge_refused` with GitHub's
+ * reason, nothing changed. Merged into the default branch on GitHub already (its branch maybe gone): recorded as
+ * landed; merged elsewhere: 409 `merged_elsewhere`. Then the change
  * above is the bottom: its pull request is pointed at the default branch before the landed branch goes (an API delete
  * of a base branch closes the pull requests on it for good; GitHub's own "delete branch on merge" may have done both,
  * which is fine). `next`: the new bottom's pull request read again (pointing it at the default branch may have
@@ -743,21 +750,24 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo, appId } = ctx;
     const def = repo.default_branch;
-    const { c, s } = await bottom(ctx, changeId, sha);
-    const methods = await provider.mergeMethods(r);
-    if (!methods.merge) {
-      throw new HttpError(422, methods.squash && !methods.rebase
-        ? `${repo.owner}/${repo.name} only allows squash merges: landing a stack there isn't supported yet (merge it on GitHub)`
-        : `${repo.owner}/${repo.name} doesn't allow merge commits: landing a stack needs them (merge it on GitHub)`, "merge_method");
-    }
+    const { c, s } = await bottom(ctx, changeId, sha, false);
     const p = await pullOf(ctx, c);
-    if (!p || (p.state !== "open" && !p.merged)) throw new HttpError(409, `change ${c.position} has no open pull request: submit the stack first`, "no_pull");
     let merged: string;
-    if (p.merged) {
-      // Merged on GitHub already: the default branch holds it.
+    if (p?.merged) {
+      // Merged on GitHub already (its branch maybe deleted with it): landed, if into the default branch.
+      if (p.base !== def) throw new HttpError(409, `pull request #${p.number} was merged into ${p.base}, not ${def}: change ${c.position} isn't in ${def}`, "merged_elsewhere");
       merged = await provider.branchHead(r, def) ?? c.sha;
     } else {
-      if (p.base !== def) await provider.updatePull(r, p.number, { base: def });
+      await atCommit(ctx, c);
+      const methods = await provider.mergeMethods(r);
+      if (!methods.merge) {
+        throw new HttpError(422, methods.squash && !methods.rebase
+          ? `${repo.owner}/${repo.name} only allows squash merges: landing a stack there isn't supported yet (Cresslet issue #127; merge it on GitHub)`
+          : `${repo.owner}/${repo.name} doesn't allow merge commits: landing a stack needs them (merge it on GitHub)`, "merge_method");
+      }
+      if (!p || p.state !== "open") throw new HttpError(409, `change ${c.position} has no open pull request: submit the stack first`, "no_pull");
+      // (Not moved here: a move may dismiss its approval, and GitHub could then refuse the merge.)
+      if (p.base !== def) throw new HttpError(409, `pull request #${p.number} is on ${p.base}, not ${def}: Update pull requests first (its review may need giving again)`, "pull_base");
       merged = (await provider.mergePull(r, p.number, { sha: c.sha, title: `${c.title} (#${p.number})` })).sha;
     }
     await store.landStack(appId, c.stack_id, c.position, merged);

@@ -559,7 +559,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 setStackBusy(true);
                 void g.updateBottom(change).then(
                   (c) => toast(`Change ${change.position} is up to date with ${gitState.defaultBranch} @ ${c.sha.slice(0, 7)}. Its checks run again on GitHub.`, 10000),
-                  (e) => toast(`Not updated: ${errorMessage(e)}`, 12000),
+                  (e) => toast((e as { updated?: unknown }).updated ? `${errorMessage(e)}.` : `Not updated: ${errorMessage(e)}`, 12000),
                 ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
               onOutside={(how, change) => {

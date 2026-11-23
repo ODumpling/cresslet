@@ -98,19 +98,20 @@ export const gitCode = (e: unknown) => (e as GitError | null)?.code;
 export function landBlocked(c: StackChange, p: PullRequest | undefined, defaultBranch: string): string | null {
   if (!c.pull) return "submit the stack first: it lands through its pull request";
   if (!p) return "its pull request isn't read yet";
+  // GitHub's own decision says whether it's blocked; its review and checks only say why (guessed: which reviews or
+  // checks are required isn't read).
   switch (p.mergeable) {
     case "draft": return "its pull request is a draft";
     case "dirty": return `it conflicts with ${defaultBranch}: resolve it on GitHub`;
     case "behind": return `it's behind ${defaultBranch}, which needs it up to date: Update first`;
     case "blocked":
-      if (p.review === "changes_requested") return "changes requested";
-      if (p.review === "pending") return "waiting for review";
-      if (p.checks === "pending") return "checks running";
       if (p.checks === "failure") return "checks failing";
+      if (p.review === "changes_requested") return "changes requested";
+      if (p.checks === "pending") return "checks running";
+      if (p.review === "pending") return "waiting for review";
       return `${defaultBranch}'s rules on GitHub don't allow it yet`;
     default:
       // (Mergeable, or not worked out yet: GitHub decides, and says why if not.)
-      if (p.checks === "failure") return "checks failing";
       return null;
   }
 }
@@ -503,8 +504,14 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       const s = o.state();
       const on = s?.activeBranch === change.branch;
       if (on && s!.dirty) throw Object.assign(new Error("this workspace has changes not pushed yet on that change: push them first"), { code: "dirty" });
+      const rev = revision();
       const r = await post<{ change: StackChange }>("/stack/update", { change: change.id, sha: change.sha });
-      if (on) await pullNow(change.branch, r.change.sha);
+      // (An edit made meanwhile isn't overwritten: updated on GitHub all the same, loaded with Pull.)
+      if (on) {
+        await pullNow(change.branch, r.change.sha, { rev }).catch((e) => {
+          throw Object.assign(new Error(`change ${change.position} is up to date on GitHub, but not loaded here: ${(e as Error).message}`), { code: gitCode(e), updated: r.change });
+        });
+      }
       return r.change;
     }),
     /**
