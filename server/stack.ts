@@ -761,6 +761,9 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
       merged = p.mergeSha ?? await provider.branchHead(r, def) ?? c.sha;
       // (Squashed or rebased on GitHub: the change's commit isn't in the default branch's history, so the next pull
       // request would show it again.)
+      // (…nor in it now: the default branch reset since.)
+      const now = await provider.branchHead(r, def);
+      if (now && !await provider.contains(r, now, c.sha)) throw new HttpError(409, `change ${c.position} isn't in ${def} any more (reset on GitHub since pull request #${p.number} was merged)`, "merged_elsewhere");
       if (!await provider.contains(r, merged, c.sha)) {
         throw new HttpError(409, `pull request #${p.number} was merged on GitHub without its commit (squashed or rebased): the stack can't carry on from it (Cresslet issue #127)`, "merged_elsewhere");
       }

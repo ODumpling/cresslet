@@ -735,12 +735,13 @@ export class GitHub implements SourceControlProvider {
     const latest = new Map<string, string>();
     for (const x of reviews) if (x.user && x.state !== "COMMENTED") latest.set(x.user.login, x.state);
     const states = [...latest.values()];
-    // (A commit status as a check run: pending, or completed with its outcome.)
+    // (A commit status as a check run: pending, or completed with its outcome. Either kind readable: known.)
     const runs = [...checks?.check_runs ?? [], ...(status?.statuses ?? []).map((x) => (x.state === "pending" ? { status: "queued", conclusion: null } : { status: "completed", conclusion: x.state }))];
+    const known = !!checks || !!status;
     return {
       number: p.number, url: p.html_url, title: p.title, draft: !!p.draft, headSha: p.head.sha,
       review: states.includes("CHANGES_REQUESTED") ? "changes_requested" : states.includes("APPROVED") ? "approved" : "pending",
-      checks: !checks ? "unknown" : !runs.length ? "none" : runs.some((x) => x.status !== "completed") ? "pending"
+      checks: !known ? "unknown" : !runs.length ? "none" : runs.some((x) => x.status !== "completed") ? "pending"
         : runs.every((x) => ["success", "neutral", "skipped"].includes(x.conclusion ?? "")) ? "success" : "failure",
       base: p.base?.ref ?? "",
       mergeable: (["clean", "unstable", "has_hooks", "blocked", "behind", "dirty", "draft"] as const).find((x) => x === p.mergeable_state) ?? "unknown",

@@ -108,7 +108,8 @@ export function landBlocked(c: StackChange, p: PullRequest | undefined, defaultB
       if (p.checks === "failure") return "checks failing";
       if (p.review === "changes_requested") return "changes requested";
       if (p.checks === "pending") return "checks running";
-      if (p.review === "pending") return "waiting for review";
+      // (Its checks not readable: whether a review is what's missing isn't known.)
+      if (p.review === "pending") return p.checks === "unknown" ? "waiting for review or checks" : "waiting for review";
       return `${defaultBranch}'s rules on GitHub don't allow it yet`;
     default:
       // (Mergeable, or not worked out yet: GitHub decides, and says why if not.)
@@ -495,10 +496,14 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       const rev = revision();
       const r = await post<{ landed: StackChange; sha: string; next?: { change: string; pull: PullRequest | null }; pullErrors?: PullError[] }>("/stack/land-next", { change: change.id, sha: change.sha });
       const s = o.state();
-      // (Landed on GitHub whatever happens here: an edit made meanwhile isn't overwritten, a failed load is said as such.)
-      if (s && s.activeBranch === change.branch && !s.dirty) {
+      // Landed on GitHub whatever happens here: an edit made meanwhile isn't overwritten, a failed load is said as such.
+      if (s && s.activeBranch === change.branch) {
+        const landed = (why: string, e?: unknown) => Object.assign(new Error(`change ${change.position} landed in ${s.defaultBranch}, but ${why}`), { code: gitCode(e), landed: r });
+        if (s.dirty || revision() !== rev) throw landed(`this workspace's edits made meanwhile are kept here, on ${change.branch} (${s.defaultBranch} isn't loaded): push them to a branch of their own`);
         await pullNow(s.defaultBranch, s.defaultBranch, { rev }).catch((e) => {
-          throw Object.assign(new Error(`change ${change.position} landed in ${s.defaultBranch}, but ${s.defaultBranch} isn't loaded here: ${(e as Error).message}`), { code: gitCode(e), landed: r });
+          throw (e as { filesWritten?: boolean }).filesWritten
+            ? landed(`${s.defaultBranch} is loaded with a problem: ${(e as Error).message}`, e)
+            : landed(`${s.defaultBranch} isn't loaded here: ${(e as Error).message}`, e);
         });
       } else if (s && s.activeBranch === top && top !== change.branch) await set({ baseSha: r.sha });
       return r;

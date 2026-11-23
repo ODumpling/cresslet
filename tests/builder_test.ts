@@ -487,6 +487,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       return merge ?? { mergedSha: "c".repeat(40), fastForward: true, treeChanged: false, branch: "main", deletedBranch: true };
     }
     if (path.endsWith("/git/stack/land-next") && body.change === "chg_edit") rev.n++; // an edit while it lands
+    if (path.endsWith("/git/stack/land-next") && body.change === "chg_dirty") state.dirty = true; // …saved as such
     if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } } };
     if (path.endsWith("/git/stack/update")) {
       if (body.change === "chg_edit") rev.n++; // an edit while it's on GitHub
@@ -751,8 +752,16 @@ test("git: Land next lands the bottom through its pull request (the workspace on
   // An edit made while it lands: not overwritten (landed all the same, said).
   const le = fakeGit({ onDefault: false });
   le.state.activeBranch = bottom.branch;
-  await assert.rejects(le.git.landNext({ ...bottom, id: "chg_edit" }, "feat/s/3-three"), (x: Json) => x.landed?.sha === "e".repeat(40) && /landed in main, but main isn't loaded here/.test(x.message));
+  await assert.rejects(le.git.landNext({ ...bottom, id: "chg_edit" }, "feat/s/3-three"), (x: Json) => x.landed?.sha === "e".repeat(40) && /landed in main, but this workspace's edits made meanwhile are kept here/.test(x.message));
   assert.deepEqual([le.state.activeBranch, le.hydrated], [bottom.branch, []]);
+  // …marked dirty already (the edit saved before the answer): the same.
+  const ld = fakeGit({ onDefault: false });
+  ld.state.activeBranch = bottom.branch;
+  await assert.rejects(ld.git.landNext({ ...bottom, id: "chg_dirty" }, "feat/s/3-three"), (x: Json) => !!x.landed && /edits made meanwhile are kept/.test(x.message));
+  // npm install failing once main's files are in: loaded, said so.
+  const li = fakeGit({ onDefault: false, hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  li.state.activeBranch = bottom.branch;
+  await assert.rejects(li.git.landNext(bottom, "feat/s/3-three"), (x: Json) => !!x.landed && /main is loaded with a problem: npm install failed/.test(x.message));
   // Changes not pushed on it: refused (its branch goes).
   const d = fakeGit({ onDefault: false });
   d.state.activeBranch = bottom.branch;
@@ -785,6 +794,7 @@ test("git: why Land next can't land the bottom yet, from its pull request", () =
   assert.match(landBlocked({ pull: null }, undefined, "main"), /submit the stack/);
   assert.equal(landBlocked(c, p({}), "main"), null);
   assert.equal(landBlocked(c, p({ mergeable: "blocked", review: "pending" }), "main"), "waiting for review");
+  assert.equal(landBlocked(c, p({ mergeable: "blocked", review: "pending", checks: "unknown" }), "main"), "waiting for review or checks");
   assert.equal(landBlocked(c, p({ mergeable: "blocked", review: "changes_requested" }), "main"), "changes requested");
   assert.equal(landBlocked(c, p({ mergeable: "blocked", checks: "pending" }), "main"), "checks running");
   assert.equal(landBlocked(c, p({ mergeable: "blocked", checks: "failure" }), "main"), "checks failing");
