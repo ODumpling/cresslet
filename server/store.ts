@@ -535,7 +535,7 @@ export class Store implements RateHits {
    * First GitHub login of an account set up by email: links it, and drops the tokens and password issued before (not
    * proven to be this person's), at once under the account's lock (a password login in flight gets no token after).
    */
-  linkGithubFirst(accountId: string, github: { id: number; login: string }): Promise<void> {
+  linkGithubFirst(accountId: string, github: { id: number; login: string }): Promise<Account | undefined> {
     return this.serialized(accountLock(accountId), async () => {
       // Linked meanwhile (another login of this person): what was issued since stays.
       const r = await this.db.run(
@@ -543,6 +543,7 @@ export class Store implements RateHits {
         github.id, github.login, accountId,
       );
       if (r.changes) await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+      return this.accountById(accountId);
     });
   }
   accountById(accountId: string): Promise<Account | undefined> {

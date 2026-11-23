@@ -433,7 +433,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (await store.disabledAccount({ emails: [email] })) throw new HttpError(409, `${email} belongs to a disabled account: enable it first`, "account_disabled");
     let account = await store.accountByEmail(email) ?? await store.createAccount(email);
     if (typeof password === "string") {
-      await store.setPasswordHash(account.id, await hashPassword(password));
+      if (!await store.setPasswordHash(account.id, await hashPassword(password))) {
+        throw new HttpError(409, `${email} was disabled meanwhile: enable it first`, "account_disabled");
+      }
       account = await store.accountById(account.id) ?? account;
     }
     const { token } = await store.issueToken(account.id, { name: "Operator-issued" });

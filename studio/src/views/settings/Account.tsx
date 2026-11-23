@@ -44,7 +44,8 @@ export function SettingsAccount() {
 /** Sets or changes the account's password (email + password login), when the server has that login. */
 function Password({ account, reload }: { account?: API.Account; reload: () => Promise<unknown> }) {
   const [on, setOn] = useState(false);
-  useEffect(() => void meta().then((m) => setOn(!!m.auth?.password)), []);
+  const [github, setGithub] = useState(false);
+  useEffect(() => void meta().then((m) => (setOn(!!m.auth?.password), setGithub(!!m.auth?.github))), []);
   const alive = useAlive();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
@@ -78,7 +79,7 @@ function Password({ account, reload }: { account?: API.Account; reload: () => Pr
       form.current?.querySelector<HTMLInputElement>("#pw-current")?.focus();
       return;
     }
-    if (!confirm(account!.github
+    if (!confirm(account!.github && github
       ? "Remove your password? You'll log in with GitHub until you set one again."
       : "Remove your password? It's your only way to log in to the studio: once you log out, only this server's operator can let you back in.")) return;
     setBusy(true);
