@@ -776,8 +776,8 @@ async function atCommit(ctx: Ctx, c: StackChange) {
 
 /**
  * Lands the stack's bottom change through its pull request, for a default branch that needs one (reviews, checks,
- * rules): GitHub merges it as the user (a merge commit: the repository must allow them; squash-only isn't supported
- * yet), only while its head is the change's commit and its base the default branch (else 409 `pull_base`: moving it
+ * rules): GitHub merges it as the user (a merge commit; squashed where the repository allows only that, the change
+ * above then synced with the squash before its pull request moves), only while its head is the change's commit and its base the default branch (else 409 `pull_base`: moving it
  * may dismiss its approval). Refused (not approved, checks, rules, conflicts): 409 `merge_refused` with GitHub's
  * reason, nothing changed. Merged into the default branch on GitHub already (its branch maybe gone): recorded as
  * landed; merged elsewhere: 409 `merged_elsewhere`. Then the change
@@ -795,38 +795,66 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
     const { c, s } = await bottom(ctx, changeId, sha, false);
     const p = await pullOf(ctx, c);
     let merged: string;
+    // Squash-only: the default branch's head before (it must hold nothing the bottom doesn't, so the squash holds just
+    // this turn on top of it).
+    let squashed = false, squashedOn: string | null = null;
     if (p?.merged) {
       // Merged on GitHub already (its branch maybe deleted with it): landed, if into the default branch.
       if (p.base !== def) throw new HttpError(409, `pull request #${p.number} was merged into ${p.base}, not ${def}: change ${c.position} isn't in ${def}`, "merged_elsewhere");
       // (Merged at another commit, say before a push since: that push isn't in the default branch.)
       if (p.headSha && p.headSha !== c.sha) throw new HttpError(409, `pull request #${p.number} was merged at another commit than change ${c.position}'s: what's on ${c.branch} since isn't in ${def} (carry on from it as a branch of its own)`, "merged_elsewhere");
       merged = p.mergeSha ?? await provider.branchHead(r, def) ?? c.sha;
-      // (Squashed or rebased on GitHub: the change's commit isn't in the default branch's history, so the next pull
-      // request would show it again.)
-      if (!await provider.contains(r, merged, c.sha)) {
-        throw new HttpError(409, `pull request #${p.number} was merged on GitHub without its commit (squashed or rebased): the stack can't carry on from it (Cresslet issue #127)`, "merged_elsewhere");
-      }
+      // (Squashed on GitHub: the change's commit isn't in the default branch's history; carried on as a squash, the
+      // next change synced with it.)
+      if (!await provider.contains(r, merged, c.sha)) [squashed, squashedOn] = [true, (await provider.commitParents(r, merged))[0] ?? null];
       // (…nor in it now: the default branch reset since.)
       const now = await provider.branchHead(r, def);
-      if (now && !await provider.contains(r, now, c.sha)) throw new HttpError(409, `change ${c.position} isn't in ${def} any more (reset on GitHub since pull request #${p.number} was merged)`, "merged_elsewhere");
+      if (now && !await provider.contains(r, now, squashed ? merged : c.sha)) throw new HttpError(409, `change ${c.position} isn't in ${def} any more (reset on GitHub since pull request #${p.number} was merged)`, "merged_elsewhere");
     } else {
       await atCommit(ctx, c);
+      // A merge commit where the repository allows them; else a squash (the next change then gets a sync commit).
       const methods = await provider.mergeMethods(r);
-      if (!methods.merge) {
-        throw new HttpError(422, methods.squash && !methods.rebase
-          ? `${repo.owner}/${repo.name} only allows squash merges: landing a stack there isn't supported yet (Cresslet issue #127; merge it on GitHub)`
-          : `${repo.owner}/${repo.name} doesn't allow merge commits: landing a stack needs them (merge it on GitHub)`, "merge_method");
+      if (!methods.merge && !methods.squash) {
+        throw new HttpError(422, `${repo.owner}/${repo.name} only allows rebase merges: landing a stack needs merge commits or squash merges (merge it on GitHub)`, "merge_method");
       }
       if (!p || p.state !== "open") throw new HttpError(409, `change ${c.position} has no open pull request: submit the stack first`, "no_pull");
       // (Not moved here: a move may dismiss its approval, and GitHub could then refuse the merge.)
       if (p.base !== def) throw new HttpError(409, `pull request #${p.number} is on ${p.base}, not ${def}: Update pull requests first (its review may need giving again)`, "pull_base");
-      merged = (await provider.mergePull(r, p.number, { sha: c.sha, title: `${c.title} (#${p.number})` })).sha;
+      if (!methods.merge) {
+        squashed = true;
+        squashedOn = await provider.branchHead(r, def);
+        if (squashedOn && !await provider.contains(r, c.sha, squashedOn)) {
+          throw new HttpError(409, `${def} has commits change ${c.position} doesn't: run Update stack first (squashed, its pull request would take them in unseen)`, "stack_behind");
+        }
+      }
+      merged = (await provider.mergePull(r, p.number, { sha: c.sha, title: `${c.title} (#${p.number})`, method: methods.merge ? "merge" : "squash" })).sha;
     }
     await store.landStack(appId, c.stack_id, c.position, merged);
     const pullErrors: PullError[] = [], deleted: string[] = [];
     let keep: string | undefined;
     const next = s[1];
-    if (next) {
+    // Squashed: the change above is based on commits the default branch doesn't have, so its pull request would show
+    // every earlier turn. One sync commit on it (the squash as a second parent, its files as they are) first, then its
+    // pull request is moved. Not when the default branch had other commits in between (Update stack brings them in),
+    // nor when it was pushed to: then its pull request stays where it is (and the branch below with it).
+    let synced = false;
+    if (next && squashed) {
+      try {
+        const [first] = await provider.commitParents(r, merged);
+        if (!squashedOn || first !== squashedOn || !await provider.contains(r, c.sha, squashedOn)) throw new HttpError(409, `${def} had other commits before the squash: run Update stack`, "stack_behind");
+        await atCommit(ctx, next);
+        const sha = await provider.syncCommit(r, { branch: next.branch, from: next.sha, with: merged, message: `Sync with ${def} after change ${c.position} (#${p!.number}) was squashed` });
+        await store.db.tx(async () => {
+          await store.setStackChangeSha(next.id, sha, merged);
+          if (next.id === s.at(-1)!.id) await store.detachSetAside(appId, c.stack_id, id("stk"));
+        });
+        synced = true;
+      } catch (e) {
+        keep = c.branch;
+        pullErrors.push({ change: next.id, position: next.position, error: `not synced with ${def} (${why(e)}): its pull request stays on ${c.branch}, kept until then` });
+      }
+    }
+    if (next && (!squashed || synced)) {
       await retarget(ctx, next, def).catch((e) => {
         keep = c.branch;
         pullErrors.push({ change: next.id, position: next.position, error: `${why(e)} (${keep} is kept until it's on ${def}: land again)` });

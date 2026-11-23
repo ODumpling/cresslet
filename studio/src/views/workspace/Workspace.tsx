@@ -540,7 +540,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
                 const next = stack.changes[1];
                 if (!confirm(`Land change ${change.position} in ${gitState.defaultBranch} through pull request #${change.pull}?\n\n` +
-                  `GitHub merges it (a merge commit), with ${gitState.defaultBranch}'s reviews, checks and rules applied, and its branch goes.` +
+                  `GitHub merges it (a merge commit, or squashed where the repository allows only that), with ${gitState.defaultBranch}'s reviews, checks and rules applied, and its branch goes.` +
                   `${next ? ` Change ${next.position}'s pull request moves onto ${gitState.defaultBranch}.` : ""} Nothing is deployed: Deploy puts ${gitState.defaultBranch} live.`)) return;
                 setStackBusy(true);
                 void g.landNext(change, stack.changes.at(-1)!.branch).then((r) => {
