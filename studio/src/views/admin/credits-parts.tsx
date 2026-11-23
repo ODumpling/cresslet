@@ -1,10 +1,11 @@
 // What the AI credits pages share: number formats, the grant form, the per-day chart, the ledger.
 import { Link } from "@tanstack/react-router";
-import { type FormEvent, type RefObject, useEffect, useRef, useState } from "react";
+import { type FormEvent, type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type * as API from "../../../api-types.ts";
 import { api, errorMessage, json, statusOf } from "../../lib/api.ts";
-import { useAlive } from "../../lib/hooks.ts";
+import { refocus } from "../../lib/focus.ts";
+import { type Loaded, useAlive, useLoad } from "../../lib/hooks.ts";
 import { toast } from "../../lib/toast.tsx";
 import { DataTable, EmptyState, Field, FormError, TimeAgo } from "../../ui/bits.tsx";
 import { Icon } from "../../ui/icons.tsx";
@@ -156,8 +157,80 @@ export function DayChart({ days }: { days: API.AdminCredits["days"] }) {
   );
 }
 
+const PAGE = 25;
+
+/** The page's reload, which also counts (`gen`) reloads: each takes its Activity back to the first page, with the latest entries. */
+export function useReloads<T>(loaded: Loaded<T>) {
+  const [gen, setGen] = useState(0);
+  const { reload: load } = loaded;
+  const reload = useCallback(() => {
+    setGen((g) => g + 1);
+    return load();
+  }, [load]);
+  return { reload, gen };
+}
+
+/**
+ * Credit activity, newest first, a page at a time: every account's (with an Account column), or one `account`'s.
+ * A new `gen` (the page reloaded) goes back to the first page, with the latest entries.
+ */
+export function Activity({ account = null, gen }: { account?: string | null; gen: number }) {
+  // Pages count from the newest entry the first page had (upTo), so entries added meanwhile don't shift them.
+  const [want, setWant] = useState<{ offset: number; upTo: number | null; gen: number }>({ offset: 0, upTo: null, gen });
+  if (want.gen !== gen) setWant({ offset: 0, upTo: null, gen });
+  /** The pager button pressed, until its page is in. */
+  const moved = useRef<"activity-prev" | "activity-next" | null>(null);
+  // The page shown keeps its own offset: the previous one stays shown while the next loads.
+  const c = useLoad(async () => {
+    const q = new URLSearchParams({ offset: String(want.offset), limit: String(PAGE) });
+    if (want.upTo !== null) q.set("upTo", String(want.upTo));
+    if (account) q.set("account", account);
+    return { at: want.offset, r: await api<API.AdminCreditActivity>(`/v1/admin/credits/activity?${q}`) };
+  }, [want, account], { keep: true });
+  useEffect(() => {
+    const from = moved.current;
+    if (!c.data || !from) return;
+    moved.current = null;
+    // The first or last page: its button is disabled now, so the other one takes focus.
+    const b = document.getElementById(from) as HTMLButtonElement | null;
+    if (b?.disabled && (document.activeElement === b || document.activeElement === document.body)) document.getElementById(from === "activity-next" ? "activity-prev" : "activity-next")?.focus();
+    else refocus();
+  }, [c.data]);
+  const go = (offset: number, upTo: number, from: "activity-prev" | "activity-next") => {
+    if (c.loading) return;
+    moved.current = from;
+    setWant({ offset, upTo, gen });
+  };
+  const retry = () => {
+    moved.current = null;
+    void c.reload().then((ok) => ok && refocus(["activity-next", "activity-prev"].map((id) => document.getElementById(id) as HTMLButtonElement | null).find((x) => x && !x.disabled)));
+  };
+  const at = c.data?.at ?? 0, r = c.data?.r;
+  return (
+    <div aria-busy={c.loading}>
+      <LedgerTable rows={r?.entries ?? []} account={!account}
+        empty={!c.data ? (c.error ? "Could not load the activity." : "Loading…") : at ? "No more entries." : "No credit activity yet."} />
+      {c.error ? (
+        <div className="row start pager" role="alert">
+          <p className="error small">Could not load the activity: {c.error.message}</p>
+          <button className="btn sm" type="button" id="activity-retry" onClick={retry}><Icon name="refresh" />Retry</button>
+        </div>
+      ) : null}
+      {r && (r.total > PAGE || at > 0) ? (
+        <div className="row start pager" id="activity-pager">
+          <span className="muted small" role="status">
+            {r.entries.length ? `Entries ${(at + 1).toLocaleString()}–${(at + r.entries.length).toLocaleString()} of ${r.total.toLocaleString()}` : ""}
+          </span>
+          <button className="btn sm" type="button" id="activity-prev" disabled={at === 0} onClick={() => go(Math.max(0, at - PAGE), r.upTo, "activity-prev")}>Newer</button>
+          <button className="btn sm" type="button" id="activity-next" disabled={at + PAGE >= r.total} onClick={() => go(at + PAGE, r.upTo, "activity-next")}>Older</button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** Credit activity, newest first; `account`: with an Account column (across accounts). */
-export function LedgerTable({ rows, account = false }: { rows: API.LedgerEntry[]; account?: boolean }) {
+function LedgerTable({ rows, account = false, empty }: { rows: API.LedgerEntry[]; account?: boolean; empty: string }) {
   return (
     <DataTable label="Credit activity" caption="Credit activity, newest first"
       heads={[["When"], ...(account ? [["Account"] as [string]] : []), ["Activity"], ["Credits", "num"]]}>
@@ -171,7 +244,7 @@ export function LedgerTable({ rows, account = false }: { rows: API.LedgerEntry[]
             <td className={`num credit-delta${h.credits > 0 ? " plus" : ""}`}>{signed(h.credits)}</td>
           </tr>
         );
-      }) : <tr><td colSpan={account ? 4 : 3} className="empty">No credit activity yet.</td></tr>}
+      }) : <tr><td colSpan={account ? 4 : 3} className="empty">{empty}</td></tr>}
     </DataTable>
   );
 }

@@ -1351,10 +1351,11 @@ export class Store implements RateHits {
     );
   }
 
-  /** The account's newest ledger row (0: none yet), and how many rows it has up to `upTo` (all: null). */
-  async aiLedgerCount(accountId: string, upTo: number | null = null): Promise<{ last: number; count: number }> {
+  /** The account's (every account's: null) newest ledger row (0: none yet), and how many rows it has up to `upTo` (all: null). */
+  async aiLedgerCount(accountId: string | null, upTo: number | null = null): Promise<{ last: number; count: number }> {
     const r = (await this.db.get<{ last: number | null; n: number }>(
-      "SELECT MAX(id) AS last, COUNT(*) AS n FROM ai_ledger WHERE account_id = ? AND id <= ?", accountId, upTo ?? Number.MAX_SAFE_INTEGER,
+      `SELECT MAX(id) AS last, COUNT(*) AS n FROM ai_ledger WHERE id <= ?${accountId === null ? "" : " AND account_id = ?"}`,
+      upTo ?? Number.MAX_SAFE_INTEGER, ...(accountId === null ? [] : [accountId]),
     ))!;
     return { last: Number(r.last ?? 0), count: Number(r.n) };
   }
@@ -1420,12 +1421,17 @@ export class Store implements RateHits {
     return { balance: r.balance, overdrawn: r.overdrawn };
   }
 
-  /** The latest ledger rows across every account, newest first, with the account. */
-  aiLedgerAll(limit = 100): Promise<(AiLedgerRow & { account_id: string; email: string; github_login: string | null })[]> {
+  /**
+   * Ledger rows across every account (or just `accountId`'s) up to row `upTo` (all: null), newest first, with the
+   * account: `limit` of them after skipping `offset`.
+   */
+  aiLedgerAll(limit = 100, offset = 0, upTo: number | null = null, accountId: string | null = null):
+    Promise<(AiLedgerRow & { account_id: string; email: string; github_login: string | null })[]> {
     return this.db.all(
       `SELECT l.account_id, l.created_at, l.kind, l.amount, l.detail, a.email, a.github_login
-       FROM ai_ledger l JOIN accounts a ON a.id = l.account_id ORDER BY l.id DESC LIMIT ?`,
-      limit,
+       FROM ai_ledger l JOIN accounts a ON a.id = l.account_id
+       WHERE l.id <= ?${accountId === null ? "" : " AND l.account_id = ?"} ORDER BY l.id DESC LIMIT ? OFFSET ?`,
+      upTo ?? Number.MAX_SAFE_INTEGER, ...(accountId === null ? [] : [accountId]), limit, offset,
     );
   }
 

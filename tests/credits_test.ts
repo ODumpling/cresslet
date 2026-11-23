@@ -357,11 +357,28 @@ test("AI credits admin view: totals, per model and per day, accounts, the ledger
     });
     assert.ok(acct.lastUsedAt);
     assert.equal(d.accounts[1].available, 0.86);
-    assert.deepEqual(d.recent.map((x: { kind: string; account: { email: string } }) => [x.kind, x.account.email]),
+
+    // The ledger across accounts, a page at a time.
+    assert.equal((await view(a, "/activity")).status, 403);
+    const all = (await view("adm", "/activity")).body;
+    assert.equal(all.enabled, true);
+    assert.equal(all.total, 3);
+    assert.equal(typeof all.upTo, "number");
+    assert.deepEqual(all.entries.map((x: { kind: string; account: { email: string } }) => [x.kind, x.account.email]),
       [["grant", "a@b.co"], ["usage", "boss@b.co"], ["usage", "a@b.co"]]);
-    assert.deepEqual({ ...d.recent[0], at: undefined, account: undefined }, { at: undefined, kind: "grant", credits: 10, note: "beta", by: "boss@b.co", account: undefined });
-    assert.equal(d.recent[2].usd, 0.0194);
-    assert.equal(d.recent[2].free, 1);
+    assert.deepEqual({ ...all.entries[0], at: undefined, account: undefined }, { at: undefined, kind: "grant", credits: 10, note: "beta", by: "boss@b.co", account: undefined });
+    assert.deepEqual(all.entries[0].account, { id: acct.id, email: "a@b.co", github: null });
+    assert.equal(all.entries[2].usd, 0.0194);
+    assert.equal(all.entries[2].free, 1);
+    const p2 = (await view("adm", `/activity?offset=1&limit=1&upTo=${all.upTo}`)).body;
+    assert.deepEqual(p2.entries, all.entries.slice(1, 2));
+    assert.equal(p2.total, 3);
+    // One account's; unknown ids 404.
+    const mine = (await view(boss, `/activity?account=${acct.id}`)).body;
+    assert.equal(mine.total, 2);
+    assert.deepEqual(mine.entries.map((h: { kind: string; credits: number }) => [h.kind, h.credits]), [["grant", 10], ["usage", -1.94]]);
+    assert.deepEqual((await view(boss, `/activity?account=${acct.id}&offset=1`)).body.entries, mine.entries.slice(1));
+    assert.equal((await view("adm", "/activity?account=nope")).status, 404);
 
     // One account: its wallet and ledger; a site admin's session works too, unknown ids 404.
     const one = await view(boss, `/accounts/${acct.id}`);
@@ -369,7 +386,6 @@ test("AI credits admin view: totals, per model and per day, accounts, the ledger
     assert.equal(one.body.account.email, "a@b.co");
     assert.equal(one.body.account.siteAdmin, false);
     assert.equal(one.body.account.available, 9.06);
-    assert.deepEqual(one.body.history.map((h: { kind: string; credits: number }) => [h.kind, h.credits]), [["grant", 10], ["usage", -1.94]]);
     assert.equal((await view("adm", "/accounts/nope")).status, 404);
     // An account with no wallet yet: zeros.
     const idle = (await t.json("/v1/me", { headers: t.bearer(await t.account("new@b.co")) })).body.account.id;
@@ -377,7 +393,7 @@ test("AI credits admin view: totals, per model and per day, accounts, the ledger
     assert.deepEqual({ ...empty.account, id: undefined }, {
       id: undefined, email: "new@b.co", github: null, siteAdmin: false, balance: 0, monthlyUsed: 0, available: 1, used: 0, requests: 0, lastUsedAt: null,
     });
-    assert.deepEqual(empty.history, []);
+    assert.deepEqual((await view("adm", `/activity?account=${idle}`)).body, { enabled: true, entries: [], total: 0, upTo: 0 });
   } finally {
     await t.close();
   }
@@ -387,6 +403,7 @@ test("AI credits admin view: off without AI credits", async () => {
   const t = await setup(null);
   try {
     assert.deepEqual((await t.json("/v1/admin/credits", { headers: t.bearer("adm") })).body, { enabled: false });
+    assert.deepEqual((await t.json("/v1/admin/credits/activity", { headers: t.bearer("adm") })).body, { enabled: false });
   } finally {
     await t.close();
   }

@@ -334,7 +334,16 @@ export interface AdminCredits {
   accounts: CreditAccount[];
   days: { date: string; credits: number; requests: number }[];
   models: { model: string; requests: number; inputTokens: number; outputTokens: number; usd: number; credits: number }[];
-  recent: LedgerEntry[];
+}
+/** GET /v1/admin/credits/activity */
+export interface AdminCreditActivity {
+  enabled: boolean;
+  /** One page, newest first. */
+  entries: LedgerEntry[];
+  /** Every entry up to `upTo`. */
+  total: number;
+  /** The newest entry counted: pass it back as `upTo` to page through the same entries while new ones are added. */
+  upTo: number;
 }
 /** GET /v1/admin/credits/accounts/:id */
 export interface AdminCreditsAccount {
@@ -342,7 +351,6 @@ export interface AdminCreditsAccount {
   account: CreditAccount;
   resetsAt: string;
   monthlyCredits: number;
-  history: LedgerEntry[];
 }
 
 /** A file in a template or an app's uploaded source. */

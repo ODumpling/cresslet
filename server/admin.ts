@@ -6,7 +6,7 @@ import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { appUrl, type Config, paths } from "./config.ts";
 import { type Account, type AiAccountRow, type App, ORG_ROLES, orgLock, type OrgRole, SITE_ADMIN, type Store, type Token } from "./store.ts";
-import { credits as toCredits, ledgerEntry, nextPeriod, period, periodStart } from "./credits.ts";
+import { credits as toCredits, ledgerEntry, ledgerPage, nextPeriod, period, periodStart } from "./credits.ts";
 import type { Runtime } from "./runtime.ts";
 import { inspect } from "./inspect.ts";
 import { HttpError, KEEP_DEPLOYS, removeAppFiles } from "./deploys.ts";
@@ -447,11 +447,28 @@ export function adminRoutes(
         outputTokens: m.output,
       })),
       accounts,
-      recent: (await store.aiLedgerAll(50)).map((r) => ({ ...ledgerEntry(r, { admin: true }), account: acctRef({ ...r, id: r.account_id }) })),
     });
   });
 
-  // One account's wallet and its latest 200 ledger rows.
+  // The credit ledger across accounts (or one: ?account=<id>), a page at a time, newest first (see ledgerPage).
+  app.get("/admin/credits/activity", async (c) => {
+    requireSiteAdmin(c);
+    if (!cfg.ai) return c.json({ enabled: false });
+    const id = c.req.query("account")?.trim() || null;
+    if (id && !(await store.accountById(id))) throw new HttpError(404, "account not found", "not_found");
+    const { limit, offset, upTo } = ledgerPage(c);
+    const n = await store.aiLedgerCount(id, upTo);
+    const top = upTo ?? n.last;
+    return c.json({
+      enabled: true,
+      entries: (await store.aiLedgerAll(limit, offset, top, id))
+        .map((r) => ({ ...ledgerEntry(r, { admin: true }), account: acctRef({ ...r, id: r.account_id }) })),
+      total: n.count,
+      upTo: top,
+    });
+  });
+
+  // One account's wallet.
   app.get("/admin/credits/accounts/:id", async (c) => {
     requireSiteAdmin(c);
     const ai = cfg.ai;
@@ -466,7 +483,6 @@ export function adminRoutes(
       monthlyCredits: ai.monthlyCredits,
       resetsAt: nextPeriod(now),
       account: { ...acctRef(acct), siteAdmin: isSiteAdmin(cfg, acct), ...walletView(allowance, row) },
-      history: (await store.aiLedger(acct.id, 200)).map((r) => ledgerEntry(r, { admin: true })),
     });
   });
 }
