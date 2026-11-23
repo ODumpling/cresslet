@@ -65,7 +65,7 @@ export interface Ship {
   pending: number;
 }
 
-export function Builder({ c, devLog, onChange, locked, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, appName, ship, onTurnEnd = () => {}, ref }: {
+export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, appName, ship, onTurnEnd = () => {}, ref }: {
   c: Container;
   /** The project's name (the empty chat asks what it should do). */
   appName: string;
@@ -82,7 +82,6 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
   commandRev?: () => number;
   devLog: () => string;
   onChange: (path: string) => unknown;
-  locked: boolean;
   open: boolean;
   setOpen: (open: boolean, opts?: { focus?: boolean }) => void;
   ref: Ref<BuilderHandle>;
@@ -107,7 +106,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
   const r = useRef({
     agent: null as ReturnType<typeof createAgent> | null,
     approvals: new Set<() => void>(), // decline functions of the deploy approvals waiting for the user
-    approved: false, stopped: false, busy: false, locked,
+    approved: false, stopped: false, busy: false,
     bubble: null as number | null, step: null as number | null,
     replied: "", failed: "", id: 0, stick: false,
     git, prompt: "", // the project's repository; the message being worked on
@@ -116,7 +115,6 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
     turnChanged: false, cmdRev: 0,
     gone: false, // unmounted (the user left the project): no more UI updates
   }).current;
-  r.locked = locked;
   r.git = git;
   const [tools] = useState(() => createTools(c, {
     devLog,
@@ -179,7 +177,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
   };
   const update = (id: number, fn: (i: Item) => Item) => setItems((xs) => xs.map((x) => (x.id === id ? fn(x) : x)));
 
-  // Where focus goes in the chat: the message field (it takes a draft while locked; only sending waits).
+  // Where focus goes in the chat: the message field.
   const chatFocus = () => inputRef.current?.focus();
   const setupFocus = () => (creditsOn && !token ? loginRef.current : keyRef.current)?.focus();
 
@@ -236,7 +234,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || r.busy || r.locked) return;
+    if (!text || r.busy) return;
     if (!sourceRef.current) return;
     // Each request goes the way chosen when it's sent (the key can be forgotten or entered mid-chat).
     r.agent ??= createAgent({
@@ -554,10 +552,9 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
         <div className="working" id="builder-working" hidden={!working}><span className="spinner" aria-hidden="true" /><span id="builder-working-text">{working || "Working…"}</span></div>
         <form id="builder-form" className="builder-form" ref={formRef} onSubmit={(e) => void send(e)}>
           <label className="sr-only" htmlFor="builder-input">Message to Claude</label>
-          <p className="muted small" id="builder-locked" hidden={!locked}>Run the project first (see the preview): sending unlocks with the terminal and Deploy.</p>
           <div className="composer">
             <textarea id="builder-input" ref={inputRef} rows={2} placeholder="Describe a change…"
-              aria-describedby={locked ? "builder-locked builder-hint" : "builder-hint"}
+              aria-describedby="builder-hint"
               value={input} onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -586,7 +583,7 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
                 r.agent?.stop();
                 inputRef.current?.focus(); // the Stop button hides
               }}><Icon name="x" />Stop</button>
-              <button className="btn primary sm" id="builder-send" type="submit" disabled={busy || locked} hidden={busy}><Icon name="arrow-up" />Send</button>
+              <button className="btn primary sm" id="builder-send" type="submit" disabled={busy} hidden={busy}><Icon name="arrow-up" />Send</button>
             </div>
           </div>
         </form>

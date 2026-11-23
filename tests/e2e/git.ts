@@ -253,6 +253,9 @@ try {
   const dep = after.deploys[0];
   if (dep.id === before.app.currentDeployId || !dep.current) fail("no new live deploy");
   if (dep.git?.branch !== "main" || dep.git?.sha !== mainSha || dep.git?.repo !== full) fail(`deploy provenance: ${JSON.stringify(dep.git)}`);
+  // The first deploy from the repository: main's commit is tagged v1 (as the user, on GitHub), and the log says so.
+  if (dep.git?.tag !== "v1" || gh.repo(full).tags.get("v1") !== mainSha) fail(`version tag: ${JSON.stringify(dep.git)} ${JSON.stringify([...gh.repo(full).tags])}`);
+  if (!log.includes(`tagged ${mainSha.slice(0, 7)} as v1`)) fail(`deploy log lacks the tag:\n${log}`);
   if (gh.commit(mainSha).parents.length !== 2) fail("not a merge commit");
   if (!gh.files(full)["src/App.tsx"].includes("// edited in the studio")) fail("edit not on main");
   await page.locator("#git-btn-branch", { hasText: /^main$/ }).waitFor();
@@ -387,6 +390,19 @@ try {
   }
   await page.locator('#tree button[data-path="CHANGELOG.md"]').waitFor({ state: "attached", timeout: 30000 });
   console.log("updated the stack with main");
+
+  // Open in studio, from the app's page: a new project on the repository's main (CHANGELOG.md is only on GitHub, not
+  // in the live deploy's source), running at once: nothing to click before the preview shows the app.
+  await page.goto(`${base}/apps/${app}`);
+  await page.getByRole("button", { name: "Open in studio" }).click();
+  await page.waitForURL(/\/p\//);
+  await page.locator("#git-btn-branch", { hasText: /^main$/ }).waitFor({ timeout: 60000 });
+  await page.locator('#tree button[data-path="CHANGELOG.md"]').waitFor({ state: "attached", timeout: 60000 });
+  await page.locator("#view-preview").click();
+  await page.frameLocator("#preview").locator("h1").waitFor({ timeout: 180000 });
+  if (await page.locator("#git-btn .git-dirty").count()) fail("opened from the repository, but marked as changed");
+  await page.screenshot({ path: `${out}/git-open-in-studio.png` });
+  console.log("opened the app in the studio: on main, running");
 
   // A project never deployed: its address reserved (nothing live), then a repository linked.
   await page.goto(base + "/");

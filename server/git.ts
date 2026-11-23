@@ -254,6 +254,29 @@ export class GitHub implements SourceControlProvider {
     return (await Promise.all([under, ...names.map((n) => this.branchHead(r, n).then(Boolean, () => false))])).some(Boolean);
   }
 
+  /**
+   * Gives `sha` the repository's next version tag: `v<n>`, one more than its highest `v<n>` tag (`v1` first), or the one
+   * it already has. A tag taken meanwhile (another deploy) moves it on to the next number.
+   */
+  async tagVersion(r: Repo, sha: string): Promise<string> {
+    for (let i = 0; i < 5; i++) {
+      const refs = await this.ok<{ ref: string; object: { sha: string; type: string } }[]>("GET", this.#path(r, "/git/matching-refs/tags/v"));
+      let max = 0n; // (exact however many digits: every tag it makes, it reads back)
+      for (const t of refs) {
+        const m = /^refs\/tags\/v([1-9]\d*)$/.exec(t.ref);
+        if (!m) continue;
+        if (t.object.type === "commit" && t.object.sha === sha) return `v${m[1]}`;
+        if (BigInt(m[1]) > max) max = BigInt(m[1]);
+      }
+      const tag = `v${max + 1n}`;
+      const res = await this.req<{ message?: string }>("POST", this.#path(r, "/git/refs"), { ref: `refs/tags/${tag}`, sha });
+      if (res.status === 201) return tag;
+      // Taken meanwhile: GitHub says 422 "already exists", or 409.
+      if (res.status !== 409 && !(res.status === 422 && /already exists/i.test(res.body?.message ?? ""))) throw ghError(res.status, res.body?.message);
+    }
+    throw conflict("couldn't find a free version tag (other deploys kept taking them): try again");
+  }
+
   /** True if it was deleted (false: it wasn't there). */
   async deleteBranch(r: Repo, branch: string): Promise<boolean> {
     const res = await this.req<{ message?: string }>("DELETE", this.#path(r, `/git/refs/heads/${this.#ref(branch)}`));
@@ -1261,7 +1284,7 @@ export function gitRoutes(
     const files = await client.readTree(r, sha, repo.subdir);
     if (ref === repo.default_branch) await store.updateAppRepoSync(repo, { sha });
     c.header("cache-control", "no-store"); // private project source
-    return c.json({ ref, sha, files });
+    return c.json({ ref, sha, files, repo: repoView(repo) }); // (as GitHub has it now: renamed, its new name)
   });
 
   // One commit making the branch hold exactly `files` (the workspace). `baseSha`: the commit the workspace is on;
@@ -1580,5 +1603,33 @@ export function gitRoutes(
     return c.json({ ok: true, apps });
   });
 
-  return { repoView, callback };
+  /**
+   * A deploy built from the linked repository's default branch (POST /v1/deploys `git`): its commit tagged with the
+   * repository's next version, as the deploying account, and the tag recorded on the deploy. Resolves to the tag, or
+   * null when the deploy isn't one of those (no account behind it, no repository, another one or another branch).
+   * GitHub refusing (no access, a ruleset on tags) throws: the deploy is live either way.
+   */
+  async function tagDeploy(c: Context<Env>, a: App, deployId: string, git: { sha: string; branch: string | null; repo: string | null } | null) {
+    const acct = c.get("account");
+    if (!gh || !git || !acct) return null;
+    const repo = await store.getAppRepo(a.id);
+    if (!repo || !git.repo || !git.branch) return null;
+    // As a person (a deploy key has no GitHub of its own), with deploy access to the app.
+    if (!await authorize(c, a, "deploy", { account: true }).then(() => true, () => false)) return null;
+    if (!await store.getGitConnection(acct.id, provider)) return null; // never connected GitHub: nothing to tag as
+    const { client } = await as(acct);
+    // The repository by its id (renamed: still the one; another one given the old name: never), as it is now.
+    const info = await client.repoById(repo.repo_id);
+    const names = [`${repo.owner}/${repo.name}`, info.fullName].map((n) => n.toLowerCase());
+    if (git.branch !== info.defaultBranch || !names.includes(git.repo.toLowerCase())) return null;
+    // A version is a commit of the default branch, whatever the request called it.
+    const r = { owner: info.owner, name: info.name };
+    const head = await client.branchHead(r, info.defaultBranch);
+    if (!head || !await client.contains(r, head, git.sha)) throw new HttpError(409, `${git.sha.slice(0, 7)} isn't on ${info.defaultBranch}`, "conflict");
+    const tag = await client.tagVersion(r, git.sha);
+    await store.setDeployTag(deployId, tag);
+    return tag;
+  }
+
+  return { repoView, callback, tagDeploy };
 }

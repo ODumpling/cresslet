@@ -18,8 +18,6 @@ export interface Project {
   template: string;
   files: Files;
   deploy: Deploy | null;
-  /** false: opened from a deployed app's source; nothing runs until the user says so. */
-  trusted?: boolean;
   /** Its app's repository and the branch it's on (source control, studio/git.ts). No tokens. */
   git?: ProjectGitState;
   /** Set by `projects.put`. */

@@ -313,6 +313,12 @@ async function stackSyncedFrom(db: Db) {
   if (!(await cols(db, "stack_changes")).includes("synced_from")) await db.exec("ALTER TABLE stack_changes ADD COLUMN synced_from TEXT");
 }
 
+/** A deploy built from a commit of a linked repository records the version tag it gave that commit (`v3`). */
+async function deployGitTag(db: Db) {
+  if (db.dialect === "postgres") return db.exec("ALTER TABLE deploys ADD COLUMN IF NOT EXISTS git_tag TEXT");
+  if (!(await cols(db, "deploys")).includes("git_tag")) await db.exec("ALTER TABLE deploys ADD COLUMN git_tag TEXT");
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
@@ -324,6 +330,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 7, name: "stack_auto_submit", up: stackAutoSubmit },
   { version: 8, name: "stack_origin", up: stackOrigin },
   { version: 9, name: "stack_synced_from", up: stackSyncedFrom },
+  { version: 10, name: "deploy_git_tag", up: deployGitTag },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */

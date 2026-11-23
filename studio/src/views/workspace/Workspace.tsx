@@ -114,7 +114,6 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   // this page is cross-origin isolated, and apps don't opt in to being embedded.)
   const [device, setDevice] = useState<"desktop" | "phone">("desktop");
   const palette = useRef<PaletteHandle>(null);
-  const [locked, setLocked] = useState(project.trusted === false);
   const [container, setContainer] = useState<Container | null>(null);
   const [preview, setPreview] = useState<{ ready: boolean; spinner: boolean; msg: ReactNode }>({ ready: false, spinner: true, msg: "Booting runtime…" });
   const [previewPath, setPreviewPath] = useState("/");
@@ -124,7 +123,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const gitDialog = useRef<GitDialogHandle>(null);
 
   const editorEl = useRef<HTMLDivElement>(null), termEl = useRef<HTMLDivElement>(null), drawerEl = useRef<HTMLElement>(null);
-  const iframe = useRef<HTMLIFrameElement>(null), previewMsg = useRef<HTMLParagraphElement>(null), previewEmpty = useRef<HTMLDivElement>(null);
+  const iframe = useRef<HTMLIFrameElement>(null), previewEmpty = useRef<HTMLDivElement>(null);
   const previewPathEl = useRef<HTMLInputElement>(null), deployBtn = useRef<HTMLButtonElement>(null), drawerBtn = useRef<HTMLButtonElement>(null);
   const builderBtn = useRef<HTMLButtonElement>(null), logEl = useRef<HTMLPreElement>(null), nameEl = useRef<HTMLInputElement>(null);
   const builder = useRef<BuilderHandle>(null), dialog = useRef<DeployDialogHandle>(null);
@@ -138,7 +137,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (!e?.cresslet) throw new Error("the project isn't running");
     return e.cresslet.sql(sql, e.previewPort); // the database of the dev server the preview shows
   }, []);
-  const sqlRunner = container && !locked ? runSql : null;
+  const sqlRunner = container ? runSql : null;
 
   // Logged out (or the session expired) on a server where projects need it: back to the landing page.
   useEffect(() => {
@@ -169,7 +168,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       status: (text, state = "busy") => setStatus({ text, state }),
       previewReady(url) {
         previewBase.current = url;
-        const hadFocus = !!previewEmpty.current?.contains(document.activeElement); // e.g. the message after Run it
+        const hadFocus = !!previewEmpty.current?.contains(document.activeElement);
         flushSync(() => setPreview((p) => ({ ...p, ready: true, spinner: true })));
         if (hadFocus) previewPathEl.current?.focus();
         loadPreview();
@@ -179,7 +178,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       openFile: setOpenFile,
       booted(c) {
         setContainer(c);
-        if (project.trusted !== false) setPreview((p) => ({ ...p, msg: "Installing dependencies…" }));
+        setPreview((p) => ({ ...p, msg: "Installing dependencies…" }));
       },
       deployed(d) {
         d.at = Date.now();
@@ -272,34 +271,6 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (err) toast(`GitHub didn't connect: ${err}`, 10000);
     else gitDialog.current?.open();
   }, [container]);
-
-  // Opened from a deployed app's source: its code (and npm deps, and a deploy's build: PostCSS/Tailwind plugins)
-  // would run in this browser. Nothing runs, Deploy and the AI builder included, until the user says so.
-  useEffect(() => {
-    if (engine.current) engine.current.locked = locked;
-  }, [locked]);
-  useEffect(() => {
-    if (project.trusted !== false) return;
-    setStatus({ text: "Not running", state: "idle" });
-    setPreview({
-      ready: false, spinner: false, msg: (
-        <>
-          {"This project was opened from a deployed app's source. Review it, then "}
-          <button className="btn primary" type="button" onClick={async () => {
-            project.trusted = true;
-            await projects.put(project);
-            flushSync(() => {
-              setLocked(false);
-              setPreview({ ready: false, spinner: true, msg: "Installing dependencies…" });
-            });
-            engine.current?.start(); // replaced the message, button included: keep focus on the message
-            previewMsg.current?.focus();
-          }}>Run it</button>
-          {" to install its dependencies and start it here (the terminal, Deploy and the AI builder unlock then)."}
-        </>
-      ),
-    });
-  }, [project]);
 
   // The project's name: saved on change (blur or Enter), as the input's change event.
   useEffect(() => {
@@ -456,10 +427,10 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   }
 
   // Not live yet: the stack's changes when linked, else the requests that changed something since the last deploy.
-  const stackShown = !!(stack && gitState && gitOn && token && !locked);
+  const stackShown = !!(stack && gitState && gitOn && token);
   const pending = stackShown ? stack!.changes.length : turnsSince;
   const lastLine = deployLog.trimEnd().split("\n").at(-1) ?? "";
-  const gitReady = gitOn && !!token && !!container && !locked;
+  const gitReady = gitOn && !!token && !!container;
 
   // Shortcuts: ⌘K commands, ⌘. Guided/Studio, ⌘J the dock, ⌘B the AI builder.
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
@@ -541,7 +512,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             <button type="button" id="mode-guided" aria-pressed={!studio} onClick={() => setMode("guided")}>Guided</button>
             <button type="button" id="mode-studio" aria-pressed={studio} onClick={() => setMode("studio")}>Studio</button>
           </div>
-          <button className="deploy-btn" id="deploy-btn" type="button" ref={deployBtn} disabled={locked || deploying || !container} title={locked ? "Run the project first" : ""}
+          <button className="deploy-btn" id="deploy-btn" type="button" ref={deployBtn} disabled={deploying || !container}
             data-state={deploying ? "deploying" : deployFailed ? "failed" : !pending && deploy?.at ? "live" : "ready"} onClick={() => void onDeploy()}>
             {deploying ? <span className="spinner" aria-hidden="true" /> : <Icon name={!pending && deploy?.at && !deployFailed ? "check" : "ship"} />}
             <span id="deploy-btn-label">{deploying ? "Deploying…" : "Deploy"}</span>
@@ -567,7 +538,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           </span>
         </div>
         {container ? (
-          <Builder ref={builder} c={container} locked={locked} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
+          <Builder ref={builder} c={container} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
             onStackStale={() => setGitTick((n) => n + 1)} appName={name}
             ship={{ url: deploy?.url, at: deploy?.at, deploying, pending, line: deploying ? lastLine : deployFailed ?? undefined, failed: !!deployFailed }}
             onTurnEnd={(changed) => changed && setTurnsSince((n) => n + 1)}
@@ -795,7 +766,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             <div className="preview-empty" id="preview-empty" ref={previewEmpty} hidden={preview.ready}>
               <div className="preview-empty-inner">
                 <span className="spinner" id="preview-spinner" aria-hidden="true" hidden={!preview.spinner} />
-                <p id="preview-msg" tabIndex={-1} ref={previewMsg}>{preview.msg}</p>
+                <p id="preview-msg" tabIndex={-1}>{preview.msg}</p>
               </div>
             </div>
           </div>

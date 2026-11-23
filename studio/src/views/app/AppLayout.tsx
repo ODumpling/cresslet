@@ -121,7 +121,7 @@ function AppPage({ name }: { name: string }) {
           {a ? (
             <>
               <ExtLink href={a.url} className="btn">Visit</ExtLink>
-              <button className="btn" type="button" title="Open the deployed source as a new project" onClick={() => void openSource(a)}><Icon name="download" />Open source</button>
+              <button className="btn" type="button" title="Open the app as a new project in the studio: its repository's default branch when it's linked, else its deployed source" onClick={() => void openSource(a)}><Icon name="code" />Open in studio</button>
               {canManage(a.access) ? <Link className="btn" to="/share/$name" params={{ name }}><Icon name="users" />Share</Link> : null}
               <button className="btn" type="button" title="Refresh" onClick={again}><Icon name="refresh" /><SrOnly>Refresh</SrOnly></button>
             </>

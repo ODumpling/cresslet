@@ -191,8 +191,8 @@ function Deploys({ manage }: { manage: boolean }) {
                     {x.current ? <span className="badge">live</span> : null}
                     <span className="sub"><TimeAgo iso={x.createdAt} />{` · ${fmtBytes(x.bytes)} · ${plural(x.files, "file")} · via ${x.source}`}
                       {x.git ? <>{" · "}{x.git.url
-                        ? <ExtLink className="mono git-ref" href={x.git.url} title={`Built from ${x.git.repo} ${x.git.branch ?? ""} @ ${x.git.sha}`}>{`${x.git.branch ?? "commit"} @ ${x.git.sha.slice(0, 7)}`}</ExtLink>
-                        : <span className="mono git-ref">{`${x.git.branch ?? "commit"} @ ${x.git.sha.slice(0, 7)}`}</span>}</> : null}
+                        ? <ExtLink className="mono git-ref" href={x.git.url} title={`Built from ${x.git.repo} ${x.git.branch ?? ""} @ ${x.git.sha}`}>{`${x.git.tag ? `${x.git.tag} · ` : ""}${x.git.branch ?? "commit"} @ ${x.git.sha.slice(0, 7)}`}</ExtLink>
+                        : <span className="mono git-ref">{`${x.git.tag ? `${x.git.tag} · ` : ""}${x.git.branch ?? "commit"} @ ${x.git.sha.slice(0, 7)}`}</span>}</> : null}
                     </span>
                   </td>
                   <td className="actions">

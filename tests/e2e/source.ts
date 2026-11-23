@@ -1,4 +1,4 @@
-// Browser e2e: studio deploy uploads the project source; "Open source" on the home page restores it.
+// Browser e2e: studio deploy uploads the project source; "Open in studio" on the home page restores it, running.
 // Run: start the server with CRESSLET_ADMIN_TOKEN=adm (npm run dev), then: cd tests/e2e && node source.ts
 import { chromium } from "@playwright/test";
 import { studioMode } from "./studio-mode.ts";
@@ -36,49 +36,53 @@ try {
   }, acct.token);
   await home.goto(base + "/");
   const row = home.locator(".list-row", { hasText: app });
-  await row.getByRole("button", { name: "Open source" }).click();
+  await row.getByRole("button", { name: "Open in studio" }).click();
   await home.waitForURL(/\/p\//);
   await home.getByRole("button", { name: "Code", exact: true }).click();
   await home.getByRole("button", { name: "Terminal", exact: true }).click();
   await home.locator("#tree").getByText("App.tsx").waitFor({ timeout: 30000 });
-  // Imported code doesn't run until the user says so.
-  await home.getByRole("button", { name: "Preview", exact: true }).click(); // Run it is in the preview
-  await home.getByRole("button", { name: "Run it" }).waitFor({ timeout: 30000 });
-  await home.waitForTimeout(1500);
-  const termText = await home.locator(".xterm-rows").innerText(); // must be readable
-  if ((await home.locator("#preview").getAttribute("src")) || /npm install/.test(termText)) {
-    throw new Error("imported source started before Run it");
-  }
-  if (!(await home.locator("#deploy-btn").isDisabled())) throw new Error("Deploy enabled before Run it (a build runs project CSS plugins)");
-  // the terminal takes no input either
-  await home.locator(".xterm").click();
-  await home.keyboard.type("echo typed-before-consent\n");
-  await home.waitForTimeout(1000);
-  if (/typed-before-consent/.test(await home.locator(".xterm-rows").innerText())) throw new Error("terminal accepted input before Run it");
-  // the AI builder takes a draft, but doesn't send it
-  const draft = home.locator("#builder-input");
-  await draft.click();
-  await home.keyboard.type("rename the heading");
-  if ((await draft.inputValue()) !== "rename the heading") throw new Error("AI builder message field didn't take typing before Run it");
-  if (!(await home.locator("#builder-send").isDisabled())) throw new Error("AI builder Send enabled before Run it");
-  await home.keyboard.press("Enter");
-  if ((await draft.inputValue()) !== "rename the heading" || (await home.locator("#builder-log li").count())) throw new Error("AI builder sent before Run it");
-  await home.getByRole("button", { name: "Run it" }).click();
-  await home.locator("#builder-send:not([disabled])").waitFor({ timeout: 5000 });
-  if ((await draft.inputValue()) !== "rename the heading") throw new Error("AI builder draft lost on Run it");
-  await home.locator("#deploy-btn:not([disabled])").waitFor({ timeout: 5000 });
+  // It runs as it opens: dependencies installed, the dev server started, nothing to click first.
+  await home.getByRole("button", { name: "Preview", exact: true }).click();
   await home.frameLocator("#preview").getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
-  // the terminal works again: stop the dev server, run a fresh command
+  await home.locator("#deploy-btn:not([disabled])").waitFor({ timeout: 5000 });
+  await home.locator("#builder-send:not([disabled])").waitFor({ timeout: 5000 }); // the AI builder sends
+  // the terminal takes input: stop the dev server, run a fresh command
   await home.locator(".xterm").click();
   await home.keyboard.press("Control+C");
   await home.waitForTimeout(500);
   await home.keyboard.type("pwd\n");
   // its output: a line that's just a path (innerText: one line per terminal row)
   for (let i = 0; !/^\/\S+\s*$/m.test(await home.locator(".xterm-rows").innerText()); i++) {
-    if (i > 50) throw new Error("terminal input still ignored after Run it");
+    if (i > 50) throw new Error("terminal input ignored");
     await home.waitForTimeout(200);
   }
-  console.log("opened deployed source in a new project; preview runs");
+  // The project's code runs as it opens, so `cresslet deploy` in the terminal (a script's or typed) asks first: typing
+  // deploy lets it through.
+  home.once("dialog", (d) => void d.accept("deploy"));
+  await home.keyboard.type("cresslet deploy\n");
+  for (let i = 0; !new RegExp(`deployed ${app} →`).test(await home.locator(".xterm-rows").innerText()); i++) {
+    if (i > 300) throw new Error("terminal deploy with deploy typed didn't deploy");
+    await home.waitForTimeout(200);
+  }
+  let asked = "";
+  // A stray Enter (the prompt's default, empty) refuses it.
+  home.once("dialog", (d) => (asked = `${d.type()}: ${d.message()}`, void d.accept("")));
+  await home.keyboard.type("cresslet deploy\n");
+  for (let i = 0; !/deploy not confirmed by the user/.test(await home.locator(".xterm-rows").innerText()); i++) {
+    if (i > 100) throw new Error(`terminal deploy wasn't refused (asked: ${JSON.stringify(asked)})`);
+    await home.waitForTimeout(200);
+  }
+  if (!asked.startsWith("prompt:") || !asked.includes(`deploy to ${app}`)) throw new Error(`asked: ${asked}`);
+  // Declined once: the next one is refused without asking (a stray Enter can't accept a later one).
+  let again = false;
+  home.once("dialog", (d) => (again = true, void d.accept("deploy")));
+  await home.keyboard.type("cresslet deploy\n");
+  for (let i = 0; ((await home.locator(".xterm-rows").innerText()).match(/deploy not confirmed by the user/g) ?? []).length < 2; i++) {
+    if (i > 100) throw new Error("second terminal deploy wasn't refused");
+    await home.waitForTimeout(200);
+  }
+  if (again) throw new Error("asked again after a decline");
+  console.log("opened deployed source in a new project; preview runs; a terminal deploy asks first");
 } catch (e) {
   process.exitCode = 1;
   console.log("FAIL", (e as Error).message);
