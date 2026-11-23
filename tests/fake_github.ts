@@ -268,7 +268,9 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       const [a, b] = [x[1], x[2]];
       const base = mergeBase(a, b)!;
       const status = a === b ? "identical" : base === a ? "ahead" : base === b ? "behind" : "diverged";
-      return json(200, { status, merge_base_commit: { sha: base }, files: diff(commits.get(base)!.tree, commits.get(b)!.tree) });
+      const inBase = ancestors(base);
+      const ahead = [...ancestors(b)].filter((c) => !inBase.has(c)).map((sha) => ({ sha, parents: commits.get(sha)!.parents.map((p) => ({ sha: p })) }));
+      return json(200, { status, merge_base_commit: { sha: base }, total_commits: ahead.length, commits: ahead, files: diff(commits.get(base)!.tree, commits.get(b)!.tree) });
     }
     if (rest === "/merges" && req.method === "POST") {
       if (!canPush) return json(403, { message: "Resource not accessible" });

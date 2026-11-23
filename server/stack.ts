@@ -4,7 +4,7 @@
 // and collaborator sees the same stack; GitHub stays the authority for where the branches point (readStacks says
 // when one moved or is gone). Routes are with the other git routes (server/git.ts); this takes the provider and the
 // store, so it's tested without a network (tests/stack_test.ts).
-import { HttpError } from "./deploys.ts";
+import { type DeployFile, HttpError } from "./deploys.ts";
 import { type Author, type Pull, type PullInfo, pool, type Repo, type SourceControlProvider } from "./git.ts";
 import { type AppRepo, id, type StackChange, type Store } from "./store.ts";
 
@@ -833,5 +833,34 @@ export function fold(ctx: Ctx, changeId: string, into: string): Promise<{ change
       pullErrors.push({ change: lower.id, position: lower.position, error: `${lower.branch} is kept (moved on GitHub, or GitHub didn't delete it): delete it there` });
     }
     return { change: { ...view(now), github: "ok" }, dropped: lower.id, ...(pullErrors.length ? { pullErrors } : {}) };
+  });
+}
+
+// ---- undoing a change and keeping the later ones
+
+/**
+ * What undoing a change below its stack's top gives (the workspace then commits it as a new change on top, titled
+ * `title`): the top merged with the change's parent, the change as the base, file by file. A file later changes also
+ * touched where it did comes back with conflict markers (`conflicts`), for the builder or the user to resolve first.
+ * The top change itself is undone by going back (409 `top`).
+ */
+export function undoPlan(ctx: Ctx, changeId: string, seen?: { sha: string; base: string }): Promise<{ change: string; title: string; top: { branch: string; sha: string }; conflicts: string[]; files: DeployFile[]; restore?: string[] }> {
+  return locked(ctx.appId, async () => {
+    const { provider, store, r, repo, appId } = ctx;
+    const open = await store.openStackChanges(appId);
+    const c = open.find((x) => x.id === changeId);
+    if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
+    // `seen`: the change as the caller saw it (folded into since: it holds more than that).
+    if (seen && (c.sha !== seen.sha || c.base_sha !== seen.base)) throw stackChanged();
+    const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
+    const top = s.at(-1)!;
+    if (top.id === c.id) throw new HttpError(409, `${c.branch} is the stack's top: undo it by going back to the change below`, "top");
+    // At the limit the next commit joins the top change: the undo would too, under the top's title.
+    if (s.length >= MAX_STACK) throw new HttpError(409, `the stack has ${MAX_STACK} changes, the most it can: land or fold some first`, "stack_full");
+    const heads = await Promise.all([c, top].map((x) => provider.branchHead(r, x.branch)));
+    const off = [c, top].find((x, i) => heads[i] && heads[i] !== x.sha);
+    if (off) throw new HttpError(409, `${off.branch} was pushed to on GitHub: pull it in, or carry on from it, first`, "moved");
+    const out = await provider.revert(r, { change: c.sha, parent: c.base_sha, top: top.sha, subdir: repo.subdir, label: `change ${c.position}` });
+    return { change: c.id, title: `Undo: ${c.title}`.slice(0, 200), top: { branch: top.branch, sha: top.sha }, ...out };
   });
 }

@@ -454,6 +454,16 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       return { change: { id: body.change, position: 1, branch: "feat/s/1-one", sha: "1".repeat(40), title: "One" }, stack: { id: "stk_1" }, now: ["chg_2"], setAside: [{ title: "Two" }, { title: "Three" }] };
     }
     if (/\/git\/stack\/(pull-in|carry-on)$/.test(path)) return { change: { id: body.change, sha: body.sha } };
+    if (path.includes("/git/stack/undo?change=chg_p")) return { title: "Undo: Deps", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: ["package.json"], files: [{ path: ".env", data: "VITE_THEME=light\n" }, { path: "package.json", data: "<<<<<<< now\n{}\n=======\n>>>>>>> undo change 1\n" }] };
+    if (path.includes("/git/stack/undo?change=chg_f")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: ["a.txt"], files: [{ path: ".env", data: "VITE_THEME=light\n" }, { path: "a.txt", data: "<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n" }] };
+    if (path.includes("/git/stack/undo?change=chg_e")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: [], files: [{ path: ".env", data: "VITE_THEME=light\n" }], restore: [".env"] };
+    if (path.includes("/git/stack/undo")) {
+      const conflicted = path.includes("chg_c");
+      return {
+        title: "Undo: Add a", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: conflicted ? ["a.txt"] : [],
+        files: [{ path: "a.txt", data: conflicted ? "<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n" : "b" }],
+      };
+    }
     if (path.endsWith("/git/stack/restore")) {
       duringRestore();
       return { change: { id: "chg_3", position: 3, branch: "feat/s/3-three", sha: "3".repeat(40) }, below: { id: "chg_1", sha: "1".repeat(40) }, restored: 2 };
@@ -461,7 +471,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     if (path.endsWith("/git/stack") && init.method === "POST") {
       duringStack();
       if (opts.stackError) throw Object.assign(new Error(opts.stackError), { status: 409, code: opts.stackError });
-      if (body.from !== "main" && body.from !== "feat/s/1-one") throw Object.assign(new Error("not a change of a stack"), { status: 409, code: "not_on_stack" });
+      if (!["main", "feat/s/1-one", "feat/s/2-two"].includes(body.from)) throw Object.assign(new Error("not a change of a stack"), { status: 409, code: "not_on_stack" });
       if (body.files.some((f: Json) => f.data === "same")) return { changed: false, sha: body.baseSha };
       return { changed: true, sha: String(++n).padStart(40, "c"), branch: "feat/s/2-two", change: { position: 2 }, stack: { id: "stk_1", name: "s" } };
     }
@@ -639,6 +649,89 @@ test("git: a change pushed to on GitHub is loaded as GitHub has it once the serv
   await assert.rejects(d.git.takeOutside("carry-on", change), (e: Json) => e.code === "dirty");
   await d.git.takeOutside("carry-on", change, true);
   assert.equal(d.calls[1].path.split("/git")[1], "/stack/carry-on");
+});
+
+test("git: undoing a change loads the result; clean, it's committed at once as \"Undo: …\"; with conflicts, not until they're resolved", async () => {
+  const top = { id: "chg_t", branch: "feat/s/1-one", sha: "a".repeat(40) };
+  const g = fakeGit({ onDefault: false });
+  g.state.activeBranch = "feat/s/1-one";
+  await g.git.undo({ id: "chg_1" }, top);
+  assert.deepEqual(g.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/stack/undo", "/stack"]);
+  assert.equal(g.calls[1].body.title, "Undo: Add a");
+  assert.deepEqual([g.state.undo, g.hydrated], [undefined, [[{ path: "a.txt", data: "b" }]]]);
+
+  const c = fakeGit({ onDefault: false });
+  c.state.activeBranch = "feat/s/1-one";
+  const r = await c.git.undo({ id: "chg_c" }, top);
+  assert.deepEqual([r.conflicts, c.state.undo, c.state.dirty], [["a.txt"], { title: "Undo: Add a", conflicts: ["a.txt"] }, true]);
+  assert.deepEqual(c.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/stack/undo"]); // nothing committed
+  c.files.list = [{ path: "a.txt", data: "<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n" }];
+  await assert.rejects(c.git.commitChange("Fix it", "resolve"), (e: Json) => e.code === "conflicts_left");
+  // As the workspace may export text: base64.
+  c.files.list = [{ path: "a.txt", data: Buffer.from("<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n").toString("base64"), encoding: "base64" }];
+  await assert.rejects(c.git.commitChange("Fix it", "resolve"), (e: Json) => e.code === "conflicts_left");
+  // Pushing it (or opening a pull request, switching branch): a change of its own too, never a commit onto the top.
+  await assert.rejects(c.git.sync("Update"), (e: Json) => e.code === "conflicts_left");
+  c.files.list = [{ path: "a.txt", data: "x" }];
+  await c.git.sync("Update");
+  assert.deepEqual([c.calls.at(-1)!.path.split("/git")[1], c.calls.at(-1)!.body.title], ["/stack", "Undo: Add a"]);
+  assert.equal(c.state.undo, undefined);
+
+  // Edits here: committed first as a change of their own; the undo goes on that (the server's top is the new one).
+  const d = fakeGit({ onDefault: false });
+  d.state.activeBranch = "feat/s/1-one";
+  d.state.dirty = true;
+  const u = await d.git.undo({ id: "chg_1" }, top);
+  assert.deepEqual(d.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/stack", "/stack/undo", "/stack"]);
+  assert.deepEqual([d.calls[0].body.title, d.calls[2].body.title, u.committed], ["Edits made in the studio", "Undo: Add a", true]);
+  // Loaded, but its commit refused (the top moved meanwhile): held, and said so.
+  const h = fakeGit({ onDefault: false, stackError: "moved" });
+  h.state.activeBranch = "feat/s/1-one";
+  await assert.rejects(h.git.undo({ id: "chg_1" }, top), (x: Json) => x.held === true && x.code === "moved");
+  assert.deepEqual([h.state.undo, h.state.dirty], [{ title: "Undo: Add a", conflicts: [] }, true]);
+  // A dotenv file the workspace kept as it was (its own lines in the way): held, not committed, the path said.
+  const k = fakeGit({ onDefault: false });
+  k.state.activeBranch = "feat/s/1-one";
+  k.files.list = [{ path: ".env", data: "VITE_THEME=dark\n" }];
+  await assert.rejects(k.git.undo({ id: "chg_e", position: 1 }, top), (x: Json) => x.held === true && x.code === "dotenv_kept" && /\.env/.test(x.message));
+  assert.deepEqual([k.state.undo?.title, k.calls.some((x: Json) => x.path.endsWith("/git/stack"))], ["Undo: Theme", false]);
+  // Committing it (Push, a request): refused until the file is put back, then committed.
+  await assert.rejects(k.git.commitChange("Commit the undo"), (x: Json) => x.code === "dotenv_kept");
+  k.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }];
+  await k.git.commitChange("Commit the undo");
+  assert.deepEqual([k.calls.at(-1)!.body.title, k.state.undo], ["Undo: Theme", undefined]);
+  // One it leaves as it is but the workspace kept otherwise (its own lines in the way): held to it too.
+  const drift = fakeGit({ onDefault: false });
+  drift.state.activeBranch = "feat/s/1-one";
+  drift.files.list = [{ path: ".env", data: "VITE_THEME=old\n" }];
+  await assert.rejects(drift.git.undo({ id: "chg_f", position: 1 }, top), (x: Json) => x.held === true && x.code === "dotenv_kept");
+  assert.deepEqual(drift.state.undo?.env, [{ path: ".env", data: "VITE_THEME=light\n" }]);
+  // npm install failing after the files are in (a conflicted package.json): checked all the same.
+  const deps = fakeGit({ onDefault: false, hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  deps.state.activeBranch = "feat/s/1-one";
+  deps.files.list = [{ path: ".env", data: "VITE_THEME=old\n" }];
+  assert.deepEqual((await deps.git.undo({ id: "chg_p", position: 1 }, top)).conflicts, ["package.json"]);
+  assert.deepEqual(deps.state.undo?.env, [{ path: ".env", data: "VITE_THEME=light\n" }]);
+  deps.files.list = [{ path: ".env", data: "VITE_THEME=old\n" }, { path: "package.json", data: "{}" }];
+  await assert.rejects(deps.git.commitChange("Commit the undo"), (x: Json) => x.code === "dotenv_kept");
+  // A dotenv file the undo leaves as it is: not held to it (resolving may change it).
+  const same = fakeGit({ onDefault: false });
+  same.state.activeBranch = "feat/s/1-one";
+  same.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }];
+  await same.git.undo({ id: "chg_f", position: 1 }, top);
+  assert.equal(same.state.undo?.env, undefined);
+  same.files.list = [{ path: ".env", data: "VITE_THEME=dark\n" }, { path: "a.txt", data: "x" }];
+  await same.git.commitChange("Commit the undo");
+  assert.equal(same.calls.at(-1)!.body.title, "Undo: Theme");
+  const kk = fakeGit({ onDefault: false });
+  kk.state.activeBranch = "feat/s/1-one";
+  kk.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }]; // put back: committed
+  assert.equal((await kk.git.undo({ id: "chg_e", position: 1 }, top)).committed, true);
+  // The stack not as the caller saw it: nothing done.
+  const e = fakeGit({ onDefault: false });
+  e.state.activeBranch = "feat/s/1-one";
+  await assert.rejects(e.git.undo({ id: "chg_1" }, { ...top, sha: "f".repeat(40) }), (x: Json) => x.code === "changed");
+  assert.deepEqual(e.calls, []);
 });
 
 test("git: switching away from the default branch with edits puts them on a branch of their own first", async () => {

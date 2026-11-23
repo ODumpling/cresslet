@@ -223,7 +223,8 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
       context: () => {
         const s = r.git?.connected ? r.git.state : undefined;
         const back = s?.back ? ` The user went back to change ${s.back.position} ("${s.back.title}"): the later changes (${s.back.setAside.map((t) => `"${t}"`).join(", ") || "none"}) are set aside, so their code isn't in the workspace; your changes go on top of change ${s.back.position}.` : "";
-        return s ? `[Source control: this project is linked to the GitHub repository ${s.owner}/${s.repo}. The workspace is on branch ${s.activeBranch} (default branch: ${s.defaultBranch})${s.dirty ? ", with changes not committed yet" : ""}.${back}]` : null;
+        const undo = s?.undo ? ` The workspace holds "${s.undo.title}", not committed yet: it reverses an earlier change while keeping the later ones.${s.undo.conflicts.length ? ` Where later changes touched the same lines there are conflict markers (in ${s.undo.conflicts.join(", ")}): the part between <<<<<<< and ======= is what's there now, the part after it what the earlier change undone gives; resolve them, keeping the later changes' intent.` : ""}` : "";
+        return s ? `[Source control: this project is linked to the GitHub repository ${s.owner}/${s.repo}. The workspace is on branch ${s.activeBranch} (default branch: ${s.defaultBranch})${s.dirty ? ", with changes not committed yet" : ""}.${back}${undo}]` : null;
       },
     });
     r.stick = true;

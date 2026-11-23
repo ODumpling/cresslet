@@ -5,7 +5,7 @@
 import type { ProjectGitState, PullRequest, Stack, StackChange } from "../../../git.ts";
 import { ExtLink } from "../../ui/icons.tsx";
 
-export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside, onLand, onFold }: {
+export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside, onLand, onFold, onUndo }: {
   stack: Stack;
   state: ProjectGitState;
   busy: boolean;
@@ -13,6 +13,8 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
   pulls?: Record<string, PullRequest>;
   /** Opens or updates a pull request per change. */
   onSubmit: () => void;
+  /** Undoes a change, keeping the later ones (the top: going back instead). */
+  onUndo: (change: StackChange) => void;
   /** Folds a change into the one below it. */
   onFold: (change: StackChange) => void;
   /** Lands a change and the ones below it into the default branch. */
@@ -45,6 +47,9 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
             {!aside && on ? (
               <span className="stack-actions">
                 {c !== top ? <button className="btn sm" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button> : null}
+                {state.activeBranch === top.branch && (c !== top || stack.changes.length > 1) ? (
+                  <button className="btn sm" type="button" disabled={busy} onClick={() => onUndo(c)} aria-label={`Undo change ${c.position}, ${c.title}`}>Undo</button>
+                ) : null}
                 {c !== stack.changes[0] && state.activeBranch === top.branch ? (
                   <button className="btn sm" type="button" disabled={busy} onClick={() => onFold(c)}
                     aria-label={`Fold change ${c.position}, ${c.title}, into change ${stack.changes[stack.changes.indexOf(c) - 1].position}`}>Fold</button>

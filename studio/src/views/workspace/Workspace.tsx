@@ -473,6 +473,39 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 void g.submitStack(stack.id).then((r) => said(r.pulls), (e) => toast(`Couldn't submit the stack: ${errorMessage(e)}`, 10000))
                   .finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
+              onUndo={(change) => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                const top = stack.changes.at(-1)!;
+                // The top change is undone by going back to the one below (no new change needed).
+                if (change.id === top.id) {
+                  const below = stack.changes[stack.changes.indexOf(change) - 1];
+                  if (!below || !confirm(`Undo the top change, "${change.title}"? That's going back to change ${below.position}: "${change.title}" is set aside (restorable until something is committed on change ${below.position}).`)) return;
+                  setStackBusy(true);
+                  void g.goBack(below, top).then(() => toast(`Back on change ${below.position}`, 8000), (e) => toast(`Couldn't go back: ${errorMessage(e)}`, 10000))
+                    .finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+                  return;
+                }
+                const later = stack.changes.length - 1 - stack.changes.indexOf(change);
+                if (!confirm(`Undo change ${change.position}, "${change.title}"? A new change on top reverses it, keeping the ${later} after it.${gitState.dirty ? " Changes not pushed yet are committed first." : ""}`)) return;
+                setStackBusy(true);
+                void g.undo(change, top).then((r) => {
+                  if (!r.conflicts.length) return void toast(r.committed ? `Committed "${r.title}" as a new change` : `Nothing to undo: the later changes already undid "${change.title}"`, 8000);
+                  // Conflicts: the workspace holds them with markers; the AI builder is offered to resolve them.
+                  toast(`"${r.title}" has conflicts in ${r.conflicts.join(", ")}: resolve them (the AI builder can), then it's committed with the next request or Push.`, 15000);
+                  builder.current?.prefill(`Resolve the conflict markers in ${r.conflicts.join(", ")}: this undoes "${change.title}" while keeping the later changes.`);
+                }, (e) => {
+                  // Loaded, but npm install failed (not because of a conflicted package.json): resolve, then fix the install.
+                  // Or loaded, but its commit failed: held here, committed with the next request or Push.
+                  const { filesWritten, held } = e as { filesWritten?: boolean; held?: boolean };
+                  const u = filesWritten || held ? g.state?.undo : undefined;
+                  if (u?.conflicts.length) builder.current?.prefill(`Resolve the conflict markers in ${u.conflicts.join(", ")}: this undoes "${change.title}" while keeping the later changes. npm install also failed: check the terminal.`);
+                  toast(!u ? `Not undone: ${errorMessage(e)}`
+                    : held && (e as { code?: string }).code !== "stack_gone" ? `"${u.title}" is loaded but not committed (${errorMessage(e)}): it's committed with the next request or Push; Pull drops it.`
+                    : `"${u.title}" is loaded, but: ${errorMessage(e)}`, 15000);
+                }).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+              }}
               onFold={(change) => {
                 const g = engine.current?.git;
                 if (!g) return;

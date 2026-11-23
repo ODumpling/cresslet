@@ -652,6 +652,28 @@ test("webhooks off: 404", withServer(async (t) => {
   assert.equal((await t.call("/v1/webhooks/github", { method: "POST", body: "{}" })).status, 404);
 }));
 
+test("conflicts: a file the branch made of main's symlink is loaded for the merge, and an edit to it there is refused, not dropped", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const m0 = t.gh.write(t.gh.repo("octo/shop"), "main", { "x.js": "target", "app.txt": "hello\n" });
+  t.gh.commit(m0).tree.set("x.js", { ...t.gh.commit(m0).tree.get("x.js")!, mode: "120000" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/s" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/s", baseSha: m0, files: [...linked.files, { path: "app.txt", data: "branch\n" }, { path: "x.js", data: "real\n" }],
+  });
+  assert.equal(t.gh.commit(mine.body.sha).tree.get("x.js")!.mode, "100644");
+  const theirs = t.gh.write(t.gh.repo("octo/shop"), "main", { "app.txt": "main\n" });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/s", tok);
+  assert.equal(cf.status, 200, JSON.stringify(cf.body));
+  const files = cf.body.files.map((f: { path: string; data: string }) => (f.path === "app.txt" ? { ...f, data: "both\n" } : f));
+  assert.equal(files.find((f: { path: string }) => f.path === "x.js")?.data, "real\n");
+  const edited = files.map((f: { path: string; data: string }) => (f.path === "x.js" ? { ...f, data: "edited\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/s", baseSha: mine.body.sha, files: edited, mergeParent: theirs });
+  assert.deepEqual([s.status, s.body.paths], [409, ["x.js"]]);
+  const ok = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/s", baseSha: mine.body.sha, files, mergeParent: theirs });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(t.gh.files("octo/shop", "feat/s")["x.js"], "real\n");
+}));
+
 test("conflicts: main merged into the branch with markers; resolved and committed with main as a parent, the deploy merge fast-forwards", withServer(async (t) => {
   const { tok, linked } = await linkedShop(t);
   const base = [...linked.files, { path: "app.txt", data: "hello\n" }, { path: "keep.txt", data: "k\n" }];
@@ -1078,4 +1100,131 @@ test("stack: fold a change into the one below (its pull request on that one's ba
   assert.equal(repo.refs.has(c1.branch), false);
   const s = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0];
   assert.deepEqual(s.changes.map((c: { branch: string; pull: number }) => [c.branch, c.pull]), [[c2.branch, 2]]);
+}));
+
+test("stack: undo a change below the top (the real three-way merge): clean, conflicting, and what can't be undone here", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const base = linked.files;
+  const with_ = (extra: Record<string, string>) => [...base, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const c1 = await add("main", linked.sha, "Add a", { "a.txt": "a1\n" });
+  const c2 = await add(c1.branch, c1.sha, "Add b", { "a.txt": "a1\n", "b.txt": "b\n" });
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.equal(u.status, 200, JSON.stringify(u.body));
+  assert.deepEqual([u.body.title, u.body.top.sha, u.body.conflicts], ["Undo: Add a", c2.sha, []]);
+  const paths = u.body.files.map((f: { path: string }) => f.path);
+  assert.equal(paths.includes("a.txt"), false);
+  assert.ok(paths.includes("b.txt"));
+  assert.equal((await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c2.change.id}`, tok)).body.error, "top");
+
+  // A later change touched the same lines: markers.
+  const c3 = await add(c2.branch, c2.sha, "Edit a", { "a.txt": "a2\n", "b.txt": "b\n" });
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.deepEqual(v.body.conflicts, ["a.txt"]);
+  assert.equal(v.body.files.find((f: { path: string }) => f.path === "a.txt").data, "<<<<<<< now\na2\n=======\n>>>>>>> undo change 1\n");
+
+  // Binary on both sides: refused with its path.
+  const bin = Buffer.from([0, 1, 2]).toString("base64"), bin2 = Buffer.from([0, 1, 3]).toString("base64");
+  const d1 = (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c3.branch, baseSha: c3.sha, title: "Logo", files: [...with_({ "a.txt": "a2\n", "b.txt": "b\n" }), { path: "logo.bin", data: bin, encoding: "base64" }] })).body;
+  await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: d1.branch, baseSha: d1.sha, title: "Logo 2", files: [...with_({ "a.txt": "a2\n", "b.txt": "b\n" }), { path: "logo.bin", data: bin2, encoding: "base64" }] });
+  const w = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${d1.change.id}`, tok);
+  assert.deepEqual([w.status, w.body.error, w.body.paths], [409, "merge_unresolvable", ["logo.bin"]]);
+}));
+
+test("stack: undo refuses a change with a merge in it, and a result holding a file where a folder is", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  // Change 1 took in main (a merge): undoing it would undo main's work too.
+  const c1 = await add("main", linked.sha, "Add a", { "a.txt": "a\n" });
+  const theirs = t.gh.write(t.gh.repo("octo/shop"), "main", { "m.txt": "m\n" });
+  const m = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c1.branch, baseSha: c1.sha, files: with_({ "a.txt": "a\n", "m.txt": "m\n" }), mergeParent: theirs });
+  assert.equal(m.status, 200, JSON.stringify(m.body));
+  const c2 = await add(c1.branch, m.body.sha, "Add b", { "a.txt": "a\n", "m.txt": "m\n", "b.txt": "b\n" });
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.deepEqual([u.status, u.body.error], [409, "undo_merge"]);
+
+  // Change 3 deleted the file `dir`, change 4 added `dir/x`: undoing 3 would hold both.
+  const c3 = await add(c2.branch, c2.sha, "Add dir", { "a.txt": "a\n", "m.txt": "m\n", "b.txt": "b\n", dir: "d\n" });
+  const c4 = await add(c3.branch, c3.sha, "Drop dir", { "a.txt": "a\n", "m.txt": "m\n", "b.txt": "b\n" });
+  await add(c4.branch, c4.sha, "Add dir/x", { "a.txt": "a\n", "m.txt": "m\n", "b.txt": "b\n", "dir/x": "x\n" });
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}`, tok);
+  assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["dir"]]);
+}));
+
+test("stack: undo refuses bringing back an executable, and a folder's dotenv file where the result has a file", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const main = t.gh.write(t.gh.repo("octo/shop"), "main", { "run.sh": "#!/bin/sh\n" });
+  t.gh.commit(main).tree.set("run.sh", { ...t.gh.commit(main).tree.get("run.sh")!, mode: "100755" });
+  // Change 1 deleted the executable run.sh: undone, the studio's commit would bring it back as a plain file.
+  const c1 = await add("main", main, "Drop run.sh", {});
+  const c2 = await add(c1.branch, c1.sha, "Add b", { "b.txt": "b\n" });
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.deepEqual([u.status, u.body.error, u.body.paths], [409, "merge_unresolvable", ["run.sh"]]);
+
+  // Change 4 deleted the file `config`, change 5 added `config/.env`: undoing 4 would hold both.
+  const c3 = await add(c2.branch, c2.sha, "Add config", { "b.txt": "b\n", config: "c\n" });
+  const c4 = await add(c3.branch, c3.sha, "Drop config", { "b.txt": "b\n" });
+  const c5 = await add(c4.branch, c4.sha, "Add config/.env", { "b.txt": "b\n", "config/.env": "A=1\n" });
+  assert.ok(c5.branch, JSON.stringify(c5));
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}`, tok);
+  assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["config"]]);
+  // The change as the studio saw it: since folded into (another base), refused.
+  const w = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}&sha=${c4.sha}&base=${c2.sha}`, tok);
+  assert.deepEqual([w.status, w.body.error], [409, "conflict"]);
+}));
+
+test("stack: undo keeps a file a later change made of a symlink, and refuses undoing a change that only made a file executable", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const main = t.gh.write(t.gh.repo("octo/shop"), "main", { asset: "target", "run.sh": "#!/bin/sh\n" });
+  t.gh.commit(main).tree.set("asset", { ...t.gh.commit(main).tree.get("asset")!, mode: "120000" });
+  // Change 1 left the symlink alone; change 2 made it a file: undoing 1 keeps that file.
+  const c1 = await add("main", main, "Add a", { "run.sh": "#!/bin/sh\n", "a.txt": "a\n" });
+  const c2 = await add(c1.branch, c1.sha, "Asset file", { "run.sh": "#!/bin/sh\n", "a.txt": "a\n", asset: "real\n" });
+  assert.equal(t.gh.commit(c2.sha).tree.get("asset")!.mode, "100644");
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.equal(u.status, 200, JSON.stringify(u.body));
+  const files = Object.fromEntries(u.body.files.map((f: { path: string; data: string }) => [f.path, f.data]));
+  assert.deepEqual([files.asset, files["a.txt"]], ["real\n", undefined]);
+
+  // Change 3 only made run.sh executable (on GitHub, pulled in as the top), change 4 touched another file.
+  const c3 = await add(c2.branch, c2.sha, "Add b", { "run.sh": "#!/bin/sh\n", "a.txt": "a\n", asset: "real\n", "b.txt": "b\n" });
+  t.gh.commit(c3.sha).tree.set("run.sh", { ...t.gh.commit(c3.sha).tree.get("run.sh")!, mode: "100755" });
+  await add(c3.branch, c3.sha, "Add c", { "run.sh": "#!/bin/sh\n", "a.txt": "a\n", asset: "real\n", "b.txt": "b\n", "c.txt": "c\n" });
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c3.change.id}`, tok);
+  assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["run.sh"]]);
+}));
+
+test("stack: undo puts back a dotenv file's public entries (its private lines kept), and refuses dropping a file a later change made executable", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const main = t.gh.write(t.gh.repo("octo/shop"), "main", { ".env": "VITE_THEME=light\nSECRET=s\n" });
+  // Change 1 switched the theme (the studio sends public entries only); change 2 touched another file.
+  const c1 = await add("main", main, "Dark theme", { ".env": "VITE_THEME=dark\n" });
+  assert.match(t.gh.files("octo/shop", c1.branch)[".env"], /VITE_THEME=dark[\s\S]*SECRET=s/);
+  const c2 = await add(c1.branch, c1.sha, "Add b", { ".env": "VITE_THEME=dark\n", "b.txt": "b\n" });
+  const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
+  assert.equal(u.status, 200, JSON.stringify(u.body));
+  const env = u.body.files.find((f: { path: string }) => f.path === ".env");
+  assert.deepEqual([env?.data, u.body.conflicts, u.body.restore], ["VITE_THEME=light\n", [], [".env"]]);
+  // Committed as the studio would: the parent's file exactly.
+  const c3 = await add(c2.branch, c2.sha, u.body.title, { ".env": env.data, "b.txt": "b\n" });
+  assert.equal(t.gh.files("octo/shop", c3.branch)[".env"], "VITE_THEME=light\nSECRET=s\n");
+
+  // Change 4 added deploy.sh, change 5 only made it executable: undoing 4 would delete what 5 changed.
+  const c4 = await add(c3.branch, c3.sha, "Add deploy.sh", { ".env": env.data, "b.txt": "b\n", "deploy.sh": "#!/bin/sh\n" });
+  const c5 = await add(c4.branch, c4.sha, "Add c", { ".env": env.data, "b.txt": "b\n", "deploy.sh": "#!/bin/sh\n", "c.txt": "c\n" });
+  t.gh.commit(c5.sha).tree.set("deploy.sh", { ...t.gh.commit(c5.sha).tree.get("deploy.sh")!, mode: "100755" });
+  const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}`, tok);
+  assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["deploy.sh"]]);
 }));

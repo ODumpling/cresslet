@@ -203,12 +203,17 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
             </div>
             <div className="row start">
               <button className="btn primary" type="button" id="git-push" disabled={!!busy} onClick={() => void run("Pushing…", async () => {
+                // An undo being finished: committed as its own change.
+                if (s.undo) {
+                  const u = await git!.commitChange(s.undo.title);
+                  return u.changed ? `Committed "${s.undo.title}" as a new change` : "Nothing to commit";
+                }
                 // Changes go on a branch: the default branch takes them only through Deploy's merge.
                 const b = s.activeBranch === s.defaultBranch && s.dirty ? await git!.newBranch("edit", message.trim() || "changes") : s.activeBranch;
                 const r = await git!.sync(message.trim() || `Update ${app}`);
                 setMessage("");
                 return r.changed ? `Pushed to ${b}` : "Nothing to push";
-              })}>{s.activeBranch === s.defaultBranch && s.dirty ? "Push to a new branch" : "Push"}</button>
+              })}>{s.undo ? "Commit the undo" : s.activeBranch === s.defaultBranch && s.dirty ? "Push to a new branch" : "Push"}</button>
               <button className="btn" type="button" id="git-pull" disabled={!!busy} onClick={() => {
                 if (s.dirty && !confirm(`Replace this workspace's changes with ${s.activeBranch} from GitHub?`)) return;
                 void run("Pulling…", async () => (await git!.pull(), `Pulled ${s.activeBranch}`));
