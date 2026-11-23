@@ -24,7 +24,7 @@ const MIGRATIONS: string[][] = [
 
 let ready: Promise<void> | null = null;
 
-/** Brings the schema up to date (once per sandbox). Call before queries: `await migrate()`. */
+/** Brings the schema up to date (once per sandbox). src/start.ts runs it before every request, so queries needn't. */
 export function migrate(): Promise<void> {
   ready ??= run().catch((e) => {
     ready = null; // try again on the next request

@@ -139,6 +139,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     return e.cresslet.sql(sql, e.previewPort); // the database of the dev server the preview shows
   }, []);
   const sqlRunner = container ? runSql : null;
+  const [dbChanges, setDbChanges] = useState(0); // writes to the preview's database (an open Database view relists)
 
   // Logged out (or the session expired) on a server where projects need it: back to the landing page.
   useEffect(() => {
@@ -189,6 +190,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         setDeployFailed(null);
       },
       git: setGitState,
+      dbChanged: () => setDbChanges((n) => n + 1),
       builderRunning: () => builder.current?.running() ?? false,
       builderTurn: () => builder.current?.turn() ?? null,
       approveDeploy: (text, signal) => builder.current?.approve(text, signal) ?? Promise.resolve(false),
@@ -772,7 +774,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             </div>
           </div>
         </section>
-        <DatabaseView run={sqlRunner} shown={shown === "database"} />
+        <DatabaseView run={sqlRunner} shown={shown === "database"} changes={dbChanges} />
         <section className="pane bottom-pane" id="drawer" aria-label="Output" hidden={!dock} ref={drawerEl}>
           <div className="pane-head drawer-head">
             <div className="tabs" role="tablist" aria-label="Output">

@@ -1,6 +1,6 @@
 // Browser e2e: the TanStack Start template in the studio (studio/start-build.ts): New project → in-browser npm install →
-// SSR preview → sign up (server functions, db, kv session cookie) → todos → a new file route → an edit reloads the
-// preview → Deploy → the same flow on the deployed app.
+// its tables in the Database view from the start → SSR preview → sign up (server functions, db, kv session cookie) →
+// todos → a new file route → an edit reloads the preview → Deploy → the same flow on the deployed app.
 // Run: start the server (CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev), then:
 //   cd tests/e2e && npm i && npx playwright install chromium && node start.ts [screenshot dir]
 import { chromium, type FrameLocator, type Page } from "@playwright/test";
@@ -56,6 +56,35 @@ try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /tanstack-start/ }).click();
   await page.waitForURL(/\/p\//);
+  // The Database view, open from the start: the app's tables are listed as soon as its first request (the preview's
+  // page load) has made them, before anyone signs up (the view relists on the app's writes).
+  await page.getByRole("button", { name: "Database", exact: true }).click();
+  for (const t of ["users", "todos", "_schema"]) await page.locator(`#db-tables-pane button[data-table="${t}"]`).waitFor({ timeout: 240000 });
+  console.log("database initialized from the start:", (await page.locator("#db-tables-pane [data-table]").evaluateAll((b) => b.map((e) => e.getAttribute("data-table")))).join(", "));
+  await page.screenshot({ path: `${shots}/start-database.png` });
+  // The app writing while the view is open: a failed sign-in in the (hidden) preview counts the attempt in kv, a table
+  // the app hasn't made yet; the view lists it without being reloaded.
+  if (await page.locator('#db-tables-pane button[data-table="_cresslet_kv"]').count()) throw new Error("kv table made before any kv write");
+  // A client navigation (once the router is up): the form it renders is React's, its submit handler committed with it.
+  // (A server-rendered one may not be hydrated yet, and its submit would be the browser's own, calling nothing.)
+  await (await previewFrame()).evaluate(async () => {
+    for (let i = 0; !window.__TSR_ROUTER__; i++) {
+      if (i > 150) throw new Error("the preview's router never started");
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    await window.__TSR_ROUTER__.navigate({ to: "/login" });
+  });
+  await frame.locator("form input[name=password]").waitFor({ state: "attached", timeout: 30000 });
+  await (await previewFrame()).evaluate(() => {
+    const form = document.querySelector("form")!;
+    (form.querySelector("input[name=email]") as HTMLInputElement).value = "nobody@example.com";
+    (form.querySelector("input[name=password]") as HTMLInputElement).value = "wrong password";
+    form.requestSubmit();
+  });
+  await page.locator('#db-tables-pane button[data-table="_cresslet_kv"]').waitFor({ timeout: 30000 });
+  console.log("database view relisted on the app's write");
+  await (await previewFrame()).evaluate(() => window.__TSR_ROUTER__.navigate({ to: "/" }));
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await frame.getByRole("heading", { name: "TanStack Start on Cresslet" }).waitFor({ timeout: 240000 });
   console.log("preview rendered");
 
