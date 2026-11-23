@@ -899,6 +899,19 @@ test("stack: Update stack merges the default branch into each change from the bo
   assert.equal(l.landed.length, 2);
 });
 
+test("stack: recorded landed, then looked at again (Deploy's one merge): the set-aside branches go too", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  await goBack(t.ctx, c1.change.id);
+  const merged = t.provider.push("main", { x: "y" });
+  assert.equal((await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: merged, deleteBelow: false }))?.changes, 1);
+  assert.equal(t.provider.refs.has(c2.branch), true);
+  await landed(t.ctx, { branch: c1.branch, headSha: c1.sha, mergedSha: merged, deleteBelow: true });
+  assert.deepEqual([t.provider.refs.has(c1.branch), t.provider.refs.has(c2.branch)], [false, false]);
+});
+
 test("stack: landing is refused before anything moves on a protected default branch, one that moved, or a change pushed to", async () => {
   await using t = await setup();
   const main = t.provider.refs.get("main")!;

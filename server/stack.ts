@@ -356,6 +356,8 @@ export async function landed(ctx: Ctx, input: { branch: string; headSha: string;
     if (!was) return null;
     const pullErrors: PullError[] = [];
     const deleted = ctx.repo.delete_branch && input.deleteBelow ? await dropLanded(ctx, was.stack_id, undefined, pullErrors) : [];
+    // (Recorded landed a moment before, Deploy's one merge: its set-aside branches go now, as on the first run.)
+    if (ctx.repo.delete_branch && input.deleteBelow) await dropLandedAside(ctx, was.stack_id);
     return { stack: was.stack_name, changes: 0, deleted, ...(pullErrors.length ? { pullErrors } : {}) };
   }
   const n = await ctx.store.landStack(ctx.appId, top.stack_id, top.position, input.mergedSha);
