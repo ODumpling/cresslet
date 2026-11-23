@@ -38,6 +38,8 @@ export interface Callbacks {
   approveDeploy(text: string, signal?: AbortSignal): Promise<boolean>;
   /** Source control: the project's repository and branch changed (or it was linked or unlinked). */
   git(state: ProjectGitState | undefined): void;
+  /** The preview's database changed (the app or the Database view wrote to it). */
+  dbChanged(): void;
 }
 
 // ANSI colors too: xterm's defaults are made for black and fail AA on these surfaces (≥ 4.5:1 here).
@@ -304,6 +306,7 @@ export class Engine {
         if (linked) throw new Error(`${name} is linked to ${linked.fullName}, but this workspace isn't: open Source control (the branch button) to load it first`);
         return null;
       },
+      dbChanged: (port) => port === this.previewPort && cb.dbChanged(), // the database the preview (and Database view) shows
     });
 
     // keep the tree in sync with terminal changes

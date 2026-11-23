@@ -33,8 +33,12 @@ async function listTables(run: RunSql): Promise<{ list: Table[]; truncated: bool
   return { list: all, truncated: r.truncated };
 }
 
-/** `run`: null until the project's container is up. `shown`: the view is on screen (it reads the tables then). */
-export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolean }) {
+/**
+ * `run`: null until the project's container is up. `shown`: the view is on screen (it reads the tables then).
+ * `changes`: counts writes to the database: while shown, each reads the tables again (say the app made them on its
+ * first request after the view had listed none).
+ */
+export function DatabaseView({ run, shown, changes }: { run: RunSql | null; shown: boolean; changes: number }) {
   const alive = useAlive();
   const [tables, setTables] = useState<{ list: Table[]; truncated: boolean } | { error: string } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -54,7 +58,7 @@ export function DatabaseView({ run, shown }: { run: RunSql | null; shown: boolea
   }, [run, alive]);
   useEffect(() => {
     if (shown) void refresh();
-  }, [shown, refresh]);
+  }, [shown, refresh, changes]);
   // Not readable yet (the dev server is still installing or starting): try again while the view is shown.
   const failed = !!tables && "error" in tables;
   useEffect(() => {

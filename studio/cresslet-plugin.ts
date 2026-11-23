@@ -189,6 +189,8 @@ export interface CressletOptions {
    * and record; it throws to stop the deploy before anything is built. Null: not linked.
    */
   beforeDeploy?: (log: (line: string) => void, signal: AbortSignal | undefined, app: string | undefined) => Promise<{ sha: string; branch: string; repo: string; source?: string } | null>;
+  /** The database of the `cresslet dev` serving `port` changed (its server or a script wrote to it), once it's saved. */
+  dbChanged?: (port: number) => void;
 }
 
 type Log = (line: string) => void;
@@ -599,6 +601,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
               out(`\x1b[31mcouldn't save the preview's database (${dbPath}): ${e.message}\x1b[0m`);
               return e;
             });
+            void saved.then(() => opts.dbChanged?.(port)); // e.g. the app made its tables: an open Database view lists them
           }
           else if (m.type === "response") {
             waiting.get(m.id)?.done(m);

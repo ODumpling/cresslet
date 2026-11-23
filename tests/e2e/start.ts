@@ -62,6 +62,20 @@ try {
   for (const t of ["users", "todos", "_schema"]) await page.locator(`#db-tables-pane button[data-table="${t}"]`).waitFor({ timeout: 240000 });
   console.log("database initialized from the start:", (await page.locator("#db-tables-pane [data-table]").evaluateAll((b) => b.map((e) => e.getAttribute("data-table")))).join(", "));
   await page.screenshot({ path: `${shots}/start-database.png` });
+  // The app writing while the view is open: a failed sign-in in the (hidden) preview counts the attempt in kv, a table
+  // the app hasn't made yet; the view lists it without being reloaded.
+  if (await page.locator('#db-tables-pane button[data-table="_cresslet_kv"]').count()) throw new Error("kv table made before any kv write");
+  await (await previewFrame()).evaluate(() => (location.href = "/login"));
+  await frame.locator("form input[name=password]").waitFor({ state: "attached", timeout: 30000 });
+  await (await previewFrame()).evaluate(() => {
+    const form = document.querySelector("form")!;
+    (form.querySelector("input[name=email]") as HTMLInputElement).value = "nobody@example.com";
+    (form.querySelector("input[name=password]") as HTMLInputElement).value = "wrong password";
+    form.requestSubmit();
+  });
+  await page.locator('#db-tables-pane button[data-table="_cresslet_kv"]').waitFor({ timeout: 30000 });
+  console.log("database view relisted on the app's write");
+  await (await previewFrame()).evaluate(() => (location.href = "/"));
   await page.getByRole("button", { name: "Preview", exact: true }).click();
   await frame.getByRole("heading", { name: "TanStack Start on Cresslet" }).waitFor({ timeout: 240000 });
   console.log("preview rendered");
