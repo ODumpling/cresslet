@@ -81,6 +81,8 @@ try {
   // The Overview shows it.
   await page.getByRole("link", { name: "Overview" }).click();
   await page.locator("#app-repo", { hasText: "octo/shop" }).waitFor();
+  await page.locator("#app-branch", { hasText: "main" }).waitFor();
+  await page.locator(".kv", { hasText: "No commit recorded" }).waitFor(); // deployed from the CLI without its commit
   // Deployed without its source: Create is off (no empty repository made for nothing), and it says why.
   await page.goto(`${base}/apps/bare/settings`);
   await page.locator("#repo-form", { hasText: "no source uploaded with it" }).waitFor();

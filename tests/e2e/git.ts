@@ -426,6 +426,7 @@ try {
   await page.goto(`${base}/apps/${app}`);
   await page.locator("#app-repo", { hasText: full }).waitFor({ timeout: 30000 });
   await page.locator(".git-ref", { hasText: `main @ ${mainSha.slice(0, 7)}` }).waitFor();
+  await page.locator("#app-commit", { hasText: resolvedHead.slice(0, 7) }).waitFor(); // the live deploy: main after the resolution
   await page.screenshot({ path: `${out}/git-overview.png`, fullPage: true });
 
   // Settings: connected as octo.
