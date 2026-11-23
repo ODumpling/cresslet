@@ -558,7 +558,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       // (Changes here on it would be left on a branch that goes.)
       if (o.state()?.activeBranch === change.branch && o.state()!.dirty) throw Object.assign(new Error("this workspace has changes not pushed yet on that change: push them first"), { code: "dirty" });
       const rev = revision();
-      const r = await post<{ landed: StackChange; sha: string; next?: { change: string; pull: PullRequest | null }; pullErrors?: PullError[] }>("/stack/land-next", { change: change.id, sha: change.sha });
+      const r = await post<{ landed: StackChange; sha: string; next?: { change: string; pull: PullRequest | null }; pullErrors?: PullError[]; synced?: { branch: string; from: string; sha: string } }>("/stack/land-next", { change: change.id, sha: change.sha });
       const s = o.state();
       // Landed on GitHub whatever happens here: an edit made meanwhile isn't overwritten, a failed load is said as such.
       if (s && s.activeBranch === change.branch) {
@@ -569,7 +569,10 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
             ? landed(`${s.defaultBranch} is loaded with a problem: ${(e as Error).message}`, e)
             : landed(`${s.defaultBranch} isn't loaded here: ${(e as Error).message}`, e);
         });
-      } else if (s && s.activeBranch === top && top !== change.branch) await set({ baseSha: r.sha });
+      } else if (s && s.activeBranch === top && top !== change.branch) {
+        // On the change synced with the squash (the same files): its new commit.
+        await set({ baseSha: r.sha, ...(r.synced?.branch === s.activeBranch && s.headSha === r.synced.from ? { headSha: r.synced.sha } : {}) });
+      }
       return r;
     }),
     /**

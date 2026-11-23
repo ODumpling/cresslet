@@ -1093,6 +1093,7 @@ test("stack: squash-only, Land next squashes the bottom; the next change's sync 
   // Change 2: a sync commit (its files as they were, main's squash as a second parent), on main, only its own turn.
   const head = repo.refs.get(c2.branch)!;
   assert.deepEqual(t.gh.commit(head).parents, [c2.sha, l.body.sha]);
+  assert.deepEqual(l.body.synced, { branch: c2.branch, from: c2.sha, sha: head });
   assert.deepEqual([...t.gh.commit(head).tree], [...t.gh.commit(c2.sha).tree]);
   assert.equal(repo.pulls[1].base, "main");
   const files = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0].changes[0];

@@ -797,6 +797,8 @@ async function atCommit(ctx: Ctx, c: StackChange) {
  */
 export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
   landed: ChangeView; sha: string; stack: string; deleted: string[]; next?: { change: string; pull: PullInfo | null }; pullErrors?: PullError[]; before?: boolean;
+  /** The change above's sync commit (squashed): its branch, the commit it was at, and the sync commit (same files). */
+  synced?: { branch: string; from: string; sha: string };
 }> {
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo, appId } = ctx;
@@ -851,7 +853,7 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
     // every earlier turn. One sync commit on it (the squash as a second parent, its files as they are) first, then its
     // pull request is moved. Not when the default branch had other commits in between (Update stack brings them in),
     // nor when it was pushed to: then its pull request stays where it is (and the branch below with it).
-    let synced = false;
+    let synced: { branch: string; from: string; sha: string } | undefined;
     if (next && squashed) {
       try {
         const [first] = await provider.commitParents(r, merged);
@@ -863,7 +865,7 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
           await store.setStackChangeSha(next.id, sha, merged, next.sha);
           if (next.id === s.at(-1)!.id) await store.detachSetAside(appId, c.stack_id, id("stk"));
         });
-        synced = true;
+        synced = { branch: next.branch, from: next.sha, sha };
       } catch (e) {
         keep = c.branch;
         pullErrors.push({ change: next.id, position: next.position, error: `not synced with ${def} (${why(e)}): its pull request stays on ${c.branch}, which is kept; run Update stack, then Update pull requests, then Land next` });
@@ -887,6 +889,7 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
     return {
       landed: { ...view(c), github: "ok" }, sha: merged, stack: c.stack_name, deleted,
       ...(next ? { next: { change: next.id, pull } } : {}), ...(pullErrors.length ? { pullErrors } : {}), ...(p?.merged ? { before: true } : {}),
+      ...(synced ? { synced } : {}),
     };
   });
 }
