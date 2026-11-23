@@ -863,6 +863,12 @@ test("stack: squash-only, Land next squashes the bottom and gives the next chang
   assert.equal(s.behind, undefined);
   await assertLinked(t.ctx, s.changes[1].id);
   assert.deepEqual((await restack(t.ctx, c1.stack.id)).updated, []);
+  // …but folding it into change 2 would put its pull request on main without the squash: refused, as is landing
+  // past change 2 as fast-forwards.
+  await assert.rejects(fold(t.ctx, s.changes[1].id, s.changes[0].id), (e) => code(e) === "stack_behind" && /sync commit/.test((e as Error).message));
+  t.provider.guarded.delete("main");
+  await assert.rejects(landUpTo(t.ctx, s.changes[1].id), (e) => code(e) === "stack_behind" && /land up to change 2 first/.test((e as Error).message));
+  t.provider.guarded.add("main");
 
   // main moved meanwhile (another commit): refused before the squash (Update stack first).
   const before = t.provider.refs.get("main")!;

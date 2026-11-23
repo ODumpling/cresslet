@@ -722,7 +722,9 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
     }
     // Each change holds the one below it (an Update stack stopped part way: not yet), so each move is a fast-forward.
     for (let i = from; i <= k; i++) {
-      if (!await holds(ctx, s[i].sha, i === from ? { sha: at } : s[i - 1])) {
+      // (Moved as fast-forwards: each must hold the one below's commit itself, a synced one's too.)
+      if (!await provider.contains(r, s[i].sha, i === from ? at : s[i - 1].sha)) {
+        if (i > from && s[i - 1].synced_from) throw new HttpError(409, `change ${s[i].position} doesn't hold change ${s[i - 1].position}'s sync commit: land up to change ${s[i - 1].position} first (nothing was landed)`, "stack_behind");
         throw new HttpError(409, `change ${s[i].position} doesn't hold ${i === from ? def : `change ${s[i - 1].position}`} yet (an Update stack stopped there): run Update stack first, nothing was landed`, "stack_behind");
       }
     }
@@ -1060,6 +1062,11 @@ export function fold(ctx: Ctx, changeId: string, into: string): Promise<{ change
     const off = [lower, upper].find((x, j) => heads[j] !== x.sha);
     if (off) throw new HttpError(409, `${off.branch} ${heads[[lower, upper].indexOf(off)] ? "was pushed to" : "is gone"} on GitHub: nothing was folded`, "moved");
     // (An Update stack stopped between them: the upper one doesn't hold the lower one's merge yet, which folding drops.)
+    // (Its pull request goes onto the lower one's base: it must hold the lower one's commit itself, a synced one's
+    // too, or it would show earlier turns again.)
+    if (lower.synced_from && !await provider.contains(r, upper.sha, lower.sha)) {
+      throw new HttpError(409, `change ${upper.position} doesn't hold change ${lower.position}'s sync commit: land change ${lower.position} first, nothing was folded`, "stack_behind");
+    }
     if (!await holds(ctx, upper.sha, lower)) throw new HttpError(409, `change ${upper.position} doesn't hold change ${lower.position} yet (an Update stack stopped there): run Update stack first, nothing was folded`, "stack_behind");
     const base = i > 1 ? s[i - 2].branch : repo.default_branch;
     const [lowerPull, upperPull] = await Promise.all([pullOf(ctx, lower), pullOf(ctx, upper)]);
