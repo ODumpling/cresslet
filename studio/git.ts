@@ -257,19 +257,23 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
    */
   /** `rev`: the workspace's revision before it started (an edit since isn't overwritten: it stops, said). */
   async function restackRun(stack: string, returnTo: string, rev: number): Promise<Restacked> {
-    const r = await post<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; withSha: string; paths: string[] } }>("/stack/restack", { stack });
+    const r = await post<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; withSha: string; paths: string[] }; base?: string }>("/stack/restack", { stack });
     if (!r.stopped) {
       await set({ restack: undefined });
       const s = o.state()!;
       if (s.activeBranch !== returnTo || r.updated.some((c) => c.branch === returnTo)) await pullNow(returnTo, returnTo, { rev });
+      // (The default branch's head it brought in: what the workspace's branch sits on now.)
+      if (r.base && o.state()!.activeBranch !== o.state()!.defaultBranch) await set({ baseSha: r.base });
       return r;
     }
+    // The stopped change's merge, read first (refused: nothing here moved), then loaded once.
     const at = r.stopped.change;
-    await pullNow(at.branch, at.sha, { rev });
-    rev = revision();
     const m = await o.api<{ intoSha: string; headSha: string; conflicts: string[]; files: GitFile[] }>(path(`/conflicts?branch=${encodeURIComponent(at.branch)}&with=${encodeURIComponent(r.stopped.with)}`));
     unchangedSince(rev, "loading the merge");
-    const merging = () => set({ headSha: m.headSha, mergeParent: m.intoSha, conflicts: m.conflicts, dirty: true, restack: { stack, returnTo } });
+    const merging = () => set({
+      activeBranch: at.branch, headSha: m.headSha, mergeParent: m.intoSha, conflicts: m.conflicts, dirty: true, restack: { stack, returnTo },
+      back: undefined, undo: undefined,
+    });
     try {
       await o.hydrate(m.files);
     } catch (e) {

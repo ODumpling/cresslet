@@ -491,6 +491,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } } };
     if (path.endsWith("/git/stack/restack")) {
       if (body.stack === "stk_edit") rev.n++; // an edit while it's updated on GitHub
+      if (body.stack === "stk_bin") return { updated: [], stopped: { change: { id: "chg_2", position: 2, branch: "feat/s/2-two", sha: "2".repeat(40) }, with: "feat/s/1-bin", withSha: "1".repeat(40), paths: ["logo.png"] } };
       if (body.stack === "stk_fail" && restacks === 1) { restacks++; throw Object.assign(new Error("change 3 was pushed to on GitHub"), { status: 409, code: "moved" }); }
       // First: stops at change 2 (a conflict with change 1); then: done, change 3 updated.
       if (restacks++ === 0) return { updated: [{ id: "chg_1", position: 1, branch: "feat/s/1-one" }], stopped: { change: { id: "chg_2", position: 2, branch: "feat/s/2-two", sha: "2".repeat(40) }, with: "feat/s/1-one", withSha: "1".repeat(40), paths: ["app.txt"] } };
@@ -501,6 +502,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       return { change: { id: body.change, sha: "7".repeat(40) } };
     }
     if (path.includes("/git/tree")) return { sha: "d".repeat(40), files: [{ path: "a.txt", data: "pulled" }] };
+    if (path.includes("/git/conflicts") && path.includes("1-bin")) throw Object.assign(new Error("logo.png can't be resolved in the studio"), { status: 409, code: "merge_unresolvable" });
     if (path.includes("/git/conflicts")) return { intoSha: "f".repeat(40), headSha: "9".repeat(40), conflicts: ["app.txt"], files: [{ path: "app.txt", data: "<<<<<<< feat/x\na\n=======\nb\n>>>>>>> main\n" }] };
     if (path.includes("/git/pulls")) return init.method === "POST" ? { pull: { number: 7, url: "u", title: "t", review: "pending", checks: "none" } } : { pull: null };
     throw new Error(`unexpected ${path}`);
@@ -819,6 +821,11 @@ test("git: Update stack stops at a conflict on change 2 (loaded with change 1 me
   g.state.dirty = true;
   await assert.rejects(g.git.updateStack("stk_1"), (e: Json) => e.code === "dirty");
 
+  // A conflict the studio can't hold (binary): refused before anything here moves.
+  const b = fakeGit({ onDefault: false });
+  b.state.activeBranch = "feat/s/3-three";
+  await assert.rejects(b.git.updateStack("stk_bin"), (x: Json) => x.code === "merge_unresolvable");
+  assert.deepEqual([b.state.activeBranch, b.hydrated, b.state.restack], ["feat/s/3-three", [], undefined]);
   // Carrying on failing after the merge is committed: the commit's made, said apart.
   const f = fakeGit({ onDefault: false });
   f.state.activeBranch = "feat/s/3-three";

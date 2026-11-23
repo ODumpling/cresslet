@@ -316,9 +316,11 @@ export async function assertSyncable(ctx: Ctx, branch: string, mergeParent?: str
       const i = s.findIndex((x) => x.branch === branch);
       if (i < 0) continue;
       const with_ = i ? s[i - 1].sha : await ctx.provider.branchHead(ctx.r, ctx.repo.default_branch);
-      if (with_ === mergeParent) return s[i];
+      // Only while it lacks that merge (an up-to-date change below the top isn't committed to).
+      const merging = () => ctx.provider.contains(ctx.r, s[i].sha, mergeParent).then((x) => !x);
+      if (with_ === mergeParent && await merging()) return s[i];
       // (The bottom: the default branch may have moved on while it was resolved; Update stack again brings the rest in.)
-      if (!i && with_ && await ctx.provider.contains(ctx.r, with_, mergeParent)) return s[i];
+      if (!i && with_ && await ctx.provider.contains(ctx.r, with_, mergeParent) && await merging()) return s[i];
     }
   }
   await assertNotBelowTop(ctx, branch);
@@ -868,7 +870,7 @@ export function updateBottom(ctx: Ctx, changeId: string, sha?: string): Promise<
  * then run again). A change pushed to or gone on GitHub stops it before anything's merged into it (409 `moved` / 404).
  */
 export function restack(ctx: Ctx, stackId: string): Promise<{
-  updated: ChangeView[]; stopped?: { change: ChangeView; with: string; withSha: string; paths: string[] };
+  updated: ChangeView[]; stopped?: { change: ChangeView; with: string; withSha: string; paths: string[] }; base: string;
 }> {
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo } = ctx;
@@ -888,7 +890,7 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
         } catch (e) {
           if (!(e instanceof HttpError) || e.code !== "merge_conflict") throw e;
           const paths = Array.isArray(e.extra?.paths) ? e.extra.paths as string[] : [];
-          return { updated, stopped: { change: { ...view(c), github: "ok" }, with: below.branch, withSha: below.sha, paths } };
+          return { updated, stopped: { change: { ...view(c), github: "ok" }, with: below.branch, withSha: below.sha, paths }, base: def };
         }
         // (Its base is the commit merged in now: what Undo takes its turn back to. The top moved: changes set aside above
         // it can't come back, as for any commit on it.)
@@ -902,7 +904,8 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
       }
       below = { branch: c.branch, sha: c.sha };
     }
-    return { updated };
+    // `base`: the default branch's head brought in.
+    return { updated, base: def };
   });
 }
 
@@ -992,6 +995,8 @@ export function fold(ctx: Ctx, changeId: string, into: string): Promise<{ change
     const heads = await Promise.all([lower, upper].map((x) => provider.branchHead(r, x.branch)));
     const off = [lower, upper].find((x, j) => heads[j] !== x.sha);
     if (off) throw new HttpError(409, `${off.branch} ${heads[[lower, upper].indexOf(off)] ? "was pushed to" : "is gone"} on GitHub: nothing was folded`, "moved");
+    // (An Update stack stopped between them: the upper one doesn't hold the lower one's merge yet, which folding drops.)
+    if (!await provider.contains(r, upper.sha, lower.sha)) throw new HttpError(409, `change ${upper.position} doesn't hold change ${lower.position} yet (an Update stack stopped there): run Update stack first, nothing was folded`, "stack_behind");
     const base = i > 1 ? s[i - 2].branch : repo.default_branch;
     const [lowerPull, upperPull] = await Promise.all([pullOf(ctx, lower), pullOf(ctx, upper)]);
     // Its pull request onto the lower one's base first (before that branch goes). Refused: nothing changes.

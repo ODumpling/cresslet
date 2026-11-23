@@ -272,9 +272,11 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
     // This turn changed nothing (earlier or hand changes aren't its own): its tools didn't, nor did its commands.
     if (!g.state?.dirty || !(r.turnChanged || commandRev() !== r.cmdRev)) return;
     try {
+      const onto = g.state!.activeBranch;
       const out = await g.commitChange(commitMessage(text), text);
       if (out.changed) {
-        const s = g.state!;
+        // (Update stack carrying on may have moved the workspace since: the branch committed to is the one it was on.)
+        const s = { ...g.state!, ...(out.restacked ? { activeBranch: onto } : {}) };
         on({
           type: "notice",
           text: out.joined ? `The stack has ${out.change?.position} changes, its most: this request joined the top one, on ${s.activeBranch}. Deploy to land the stack, then new requests are changes of their own again.`

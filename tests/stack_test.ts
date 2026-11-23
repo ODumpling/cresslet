@@ -864,10 +864,12 @@ test("stack: Update stack merges the default branch into each change from the bo
   const mainNow = t.provider.refs.get("main");
   await assert.rejects(landUpTo(t.ctx, s.changes[2].id), (e) => code(e) === "stack_behind");
   assert.equal(t.provider.refs.get("main"), mainNow);
+  // …and folding change 2 into change 1 (it doesn't hold change 1's merge: folding would drop it).
+  await assert.rejects(fold(t.ctx, s.changes[1].id, s.changes[0].id), (e) => code(e) === "stack_behind");
   // Resolved in the workspace and committed onto change 2 (below the top: only as that merge), its record following.
   await assert.rejects(assertSyncable(t.ctx, s.changes[1].branch, "f".repeat(40)), (e) => code(e) === "not_on_top");
-  // (The bottom: a merge of an earlier main head still counts, main having moved on while it was resolved.)
-  assert.equal((await assertSyncable(t.ctx, s.changes[0].branch, main0))?.id, s.changes[0].id);
+  // (Not onto a change below the top that holds that merge already: change 1 holds main.)
+  await assert.rejects(assertSyncable(t.ctx, s.changes[0].branch, main0), (e) => code(e) === "not_on_top");
   const at = await assertSyncable(t.ctx, s.changes[1].branch, v.stopped!.withSha);
   assert.equal(at?.id, s.changes[1].id);
   const resolved = await t.provider.commitTree(t.ctx.r, {
