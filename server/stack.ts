@@ -317,6 +317,8 @@ export async function assertSyncable(ctx: Ctx, branch: string, mergeParent?: str
       if (i < 0) continue;
       const with_ = i ? s[i - 1].sha : await ctx.provider.branchHead(ctx.r, ctx.repo.default_branch);
       if (with_ === mergeParent) return s[i];
+      // (The bottom: the default branch may have moved on while it was resolved; Update stack again brings the rest in.)
+      if (!i && with_ && await ctx.provider.contains(ctx.r, with_, mergeParent)) return s[i];
     }
   }
   await assertNotBelowTop(ctx, branch);

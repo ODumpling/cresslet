@@ -866,6 +866,8 @@ test("stack: Update stack merges the default branch into each change from the bo
   assert.equal(t.provider.refs.get("main"), mainNow);
   // Resolved in the workspace and committed onto change 2 (below the top: only as that merge), its record following.
   await assert.rejects(assertSyncable(t.ctx, s.changes[1].branch, "f".repeat(40)), (e) => code(e) === "not_on_top");
+  // (The bottom: a merge of an earlier main head still counts, main having moved on while it was resolved.)
+  assert.equal((await assertSyncable(t.ctx, s.changes[0].branch, main0))?.id, s.changes[0].id);
   const at = await assertSyncable(t.ctx, s.changes[1].branch, v.stopped!.withSha);
   assert.equal(at?.id, s.changes[1].id);
   const resolved = await t.provider.commitTree(t.ctx.r, {

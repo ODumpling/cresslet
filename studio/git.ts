@@ -91,7 +91,7 @@ export interface Stack {
 }
 
 /** Where Update stack got to: the changes it merged into, and where it stopped at a conflict (held in the workspace). */
-export interface Restacked { updated: StackChange[]; stopped?: { change: StackChange; with: string; paths: string[] } }
+export interface Restacked { updated: StackChange[]; stopped?: { change: StackChange; with: string; paths: string[] }; /** It didn't carry on: why. */ error?: string }
 
 /** A file as the API takes and returns them (POST /v1/deploys's shape). */
 export interface GitFile {
@@ -242,7 +242,11 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     });
     // An Update stack merge committed: it carries on with the changes above (an edit made meanwhile: not yet; Update
     // stack again carries on). Stopped again: held again (restackRun).
-    if (s.restack && s.mergeParent && !o.state()!.dirty) return { ...r, files, restacked: await restackRun(s.restack.stack, s.restack.returnTo, revision()) };
+    // (Its failing isn't this commit's: that's made. Said apart; Update stack again carries on.)
+    if (s.restack && s.mergeParent && !o.state()!.dirty) {
+      const restacked = await restackRun(s.restack.stack, s.restack.returnTo, revision()).catch((e): Restacked => ({ updated: [], error: (e as Error).message }));
+      return { ...r, files, restacked };
+    }
     return { ...r, files };
   }
 

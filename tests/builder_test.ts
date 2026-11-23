@@ -491,6 +491,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } } };
     if (path.endsWith("/git/stack/restack")) {
       if (body.stack === "stk_edit") rev.n++; // an edit while it's updated on GitHub
+      if (body.stack === "stk_fail" && restacks === 1) { restacks++; throw Object.assign(new Error("change 3 was pushed to on GitHub"), { status: 409, code: "moved" }); }
       // First: stops at change 2 (a conflict with change 1); then: done, change 3 updated.
       if (restacks++ === 0) return { updated: [{ id: "chg_1", position: 1, branch: "feat/s/1-one" }], stopped: { change: { id: "chg_2", position: 2, branch: "feat/s/2-two", sha: "2".repeat(40) }, with: "feat/s/1-one", withSha: "1".repeat(40), paths: ["app.txt"] } };
       return { updated: [{ id: "chg_3", position: 3, branch: "feat/s/3-three" }] };
@@ -817,6 +818,14 @@ test("git: Update stack stops at a conflict on change 2 (loaded with change 1 me
   // Changes not pushed: refused.
   g.state.dirty = true;
   await assert.rejects(g.git.updateStack("stk_1"), (e: Json) => e.code === "dirty");
+
+  // Carrying on failing after the merge is committed: the commit's made, said apart.
+  const f = fakeGit({ onDefault: false });
+  f.state.activeBranch = "feat/s/3-three";
+  await f.git.updateStack("stk_fail");
+  f.files.list = [{ path: "app.txt", data: "both" }];
+  const pf = await f.git.sync("Merge");
+  assert.deepEqual([pf.changed, pf.restacked.error], [true, "change 3 was pushed to on GitHub"]);
 
   // An edit while it's updated on GitHub: not overwritten (it stops there, said).
   const e = fakeGit({ onDefault: false });

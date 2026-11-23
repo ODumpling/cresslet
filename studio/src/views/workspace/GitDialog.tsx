@@ -213,6 +213,7 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
                 const r = await git!.sync(message.trim() || `Update ${app}`);
                 setMessage("");
                 const rs = r.restacked;
+                if (rs?.error) return `Pushed to ${b}; Update stack didn't carry on: ${rs.error} (run it again)`;
                 if (rs?.stopped) return `Pushed to ${b}; Update stack stopped at change ${rs.stopped.change.position} (conflicts in ${rs.stopped.paths.join(", ")}): resolve them, then push`;
                 if (rs) return `Pushed to ${b}; Update stack finished`;
                 return r.changed ? `Pushed to ${b}` : "Nothing to push";
