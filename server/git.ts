@@ -501,11 +501,13 @@ export class GitHub implements SourceControlProvider {
     const envBack = async (x: Outside["take"][number]) => {
       const [t, p] = [full[1].get(x.path), full[2].get(x.path)];
       if (!DOTENV.test(x.path) || !x.sha || !t || !p || t.mode !== p.mode || !workspaceEnv(t, x.path, prefix) || !workspaceEnv(p, x.path, prefix)) return false;
-      const [want, now] = await Promise.all([p.sha, t.sha].map((sha) => this.#blob(r, sha).then((d) => dec.decode(d))));
-      const pub = dec.decode(publicDotenv(new TextEncoder().encode(want)));
+      // By bytes: what the commit would write against the parent's file (text that isn't UTF-8 wouldn't survive it).
+      const [want, now] = await Promise.all([p.sha, t.sha].map((sha) => this.#blob(r, sha)));
+      const pub = publicDotenv(want);
       // (Its public entries as they are: the commit leaves the file alone.)
-      if (pub === dec.decode(publicDotenv(new TextEncoder().encode(now)))) return now === want;
-      return mergeDotenvText(now, pub) === want;
+      if (Buffer.from(pub).equals(Buffer.from(publicDotenv(now)))) return Buffer.from(now).equals(Buffer.from(want));
+      const merged = mergeDotenvText(dec.decode(now), dec.decode(pub));
+      return merged !== null && Buffer.from(new TextEncoder().encode(merged)).equals(Buffer.from(want));
     };
     const back = new Set((await Promise.all(outside.take.map(async (x) => (await envBack(x)) ? x.path : null))).filter((x) => x !== null));
     const refused = [...new Set([...outside.both, ...outside.take.map((x) => x.path).filter((x) => !back.has(x)), ...exec.map((e) => e.path), ...moded.map((e) => e.path)])].sort();

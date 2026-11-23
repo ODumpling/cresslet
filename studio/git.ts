@@ -477,6 +477,15 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         return { conflicts: r.conflicts, title: r.title, committed: false };
       }
       await holding();
+      // A dotenv file the workspace kept as it was (its own local lines in the way): not put back, so not committed.
+      const envs = r.files.filter((f) => /(?:^|\/)\.env[^/]*$/i.test(f.path));
+      if (envs.length) {
+        const now = await o.files();
+        const kept = envs.filter((f) => now.find((x) => x.path === f.path)?.data !== f.data).map((f) => f.path);
+        if (kept.length) {
+          throw Object.assign(new Error(`${kept.join(", ")} couldn't be put back here (this workspace's own lines in it are in the way): give it the public entries it had in change ${change.position}`), { code: "dotenv_kept", held: true });
+        }
+      }
       // No conflicts: committed now (nothing to commit: later changes had undone it already).
       if (!r.conflicts.length) {
         try {

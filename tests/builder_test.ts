@@ -454,6 +454,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       return { change: { id: body.change, position: 1, branch: "feat/s/1-one", sha: "1".repeat(40), title: "One" }, stack: { id: "stk_1" }, now: ["chg_2"], setAside: [{ title: "Two" }, { title: "Three" }] };
     }
     if (/\/git\/stack\/(pull-in|carry-on)$/.test(path)) return { change: { id: body.change, sha: body.sha } };
+    if (path.includes("/git/stack/undo?change=chg_e")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: [], files: [{ path: ".env", data: "VITE_THEME=light\n" }] };
     if (path.includes("/git/stack/undo")) {
       const conflicted = path.includes("chg_c");
       return {
@@ -686,6 +687,16 @@ test("git: undoing a change loads the result; clean, it's committed at once as \
   h.state.activeBranch = "feat/s/1-one";
   await assert.rejects(h.git.undo({ id: "chg_1" }, top), (x: Json) => x.held === true && x.code === "moved");
   assert.deepEqual([h.state.undo, h.state.dirty], [{ title: "Undo: Add a", conflicts: [] }, true]);
+  // A dotenv file the workspace kept as it was (its own lines in the way): held, not committed, the path said.
+  const k = fakeGit({ onDefault: false });
+  k.state.activeBranch = "feat/s/1-one";
+  k.files.list = [{ path: ".env", data: "VITE_THEME=dark\n" }];
+  await assert.rejects(k.git.undo({ id: "chg_e", position: 1 }, top), (x: Json) => x.held === true && x.code === "dotenv_kept" && /\.env/.test(x.message));
+  assert.deepEqual([k.state.undo?.title, k.calls.some((x: Json) => x.path.endsWith("/git/stack"))], ["Undo: Theme", false]);
+  const kk = fakeGit({ onDefault: false });
+  kk.state.activeBranch = "feat/s/1-one";
+  kk.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }]; // put back: committed
+  assert.equal((await kk.git.undo({ id: "chg_e", position: 1 }, top)).committed, true);
   // The stack not as the caller saw it: nothing done.
   const e = fakeGit({ onDefault: false });
   e.state.activeBranch = "feat/s/1-one";
