@@ -1,8 +1,8 @@
 // /p/<id>: a project, as the Shipline: the AI builder's rail (what's live, the ship line, the changes not live yet and
 // the chat) beside a stage with the app's preview, its code, both side by side (Split), or the preview's database.
 // Two modes, one layout: Guided (light; preview and database, nothing to decode) and Studio (dark and dense; code,
-// Split, the terminal and deploy log in a dock, source control, a status bar). ⌘K runs any action. What was last
-// shown is remembered in this browser.
+// Split, the terminal and deploy log in a dock, source control, a status bar). Guided's dock starts closed but opens on
+// request (the Terminal button, ⌘J). ⌘K runs any action. What was last shown is remembered in this browser.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
@@ -76,7 +76,7 @@ const VIEWS = ["preview", "split", "code", "database"] as const;
 type View = (typeof VIEWS)[number];
 const VIEW_LABEL: Record<View, string> = { preview: "Preview", split: "Split", code: "Code", database: "Database" };
 const VIEW_ICON: Record<View, string> = { preview: "window", split: "split", code: "code", database: "database" };
-/** Guided shows what anyone reads; Studio adds the code (Code, Split), the dock and source control. */
+/** Guided shows what anyone reads (the dock only on request); Studio adds the code (Code, Split), the dock and source control. */
 const MODES = ["guided", "studio"] as const;
 type Mode = (typeof MODES)[number];
 const STUDIO_ONLY: readonly View[] = ["split", "code"];
@@ -94,10 +94,12 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const [view, setViewState] = useState<View>(VIEWS.find((v) => v === prefs.view) ?? "preview");
   const [mode, setModeState] = useState<Mode>(MODES.find((m) => m === prefs.mode) ?? "guided");
   const studio = mode === "studio";
-  // What's on screen: Guided has no code views and no dock (they're kept for Studio).
+  // What's on screen: Guided has no code views (they're kept for Studio).
   const shown: View = !studio && STUDIO_ONLY.includes(view) ? "preview" : view;
-  const [drawer, setDrawerState] = useState(prefs.drawer === true);
-  const dock = drawer && studio;
+  // The dock: Studio's is remembered; Guided's starts closed every time (opened by hand when it's needed).
+  const [studioDrawer, setStudioDrawer] = useState(prefs.drawer === true);
+  const [guidedDrawer, setGuidedDrawer] = useState(false);
+  const dock = studio ? studioDrawer : guidedDrawer;
   const [chat, setChat] = useState(prefs.chat !== false);
   const [tab, setTab] = useState<Tab>("terminal");
   const [tree, setTree] = useState<TreeItem[]>([]);
@@ -322,13 +324,13 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   function setMode(m: Mode) {
     flushSync(() => setModeState(m));
     saveLayout({ mode: m });
-    if (m === "studio" && drawer) engine.current?.openTerminal(termEl.current!); // mounted
+    if (m === "studio" ? studioDrawer : guidedDrawer) engine.current?.openTerminal(termEl.current!); // mounted
     engine.current?.measureEditor();
   }
   function setDrawer(open: boolean, { focus = false } = {}) {
     const had = !!drawerEl.current?.contains(document.activeElement);
-    flushSync(() => setDrawerState(open));
-    saveLayout({ drawer: open });
+    flushSync(() => (studio ? setStudioDrawer : setGuidedDrawer)(open));
+    if (studio) saveLayout({ drawer: open });
     if (open) engine.current?.openTerminal(termEl.current!); // mounted
     if (!open && (focus || had)) drawerBtn.current?.focus();
   }
@@ -459,14 +461,14 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const lastLine = deployLog.trimEnd().split("\n").at(-1) ?? "";
   const gitReady = gitOn && !!token && !!container && !locked;
 
-  // Shortcuts: ⌘K commands, ⌘. Guided/Studio, ⌘J the dock (Studio), ⌘B the AI builder.
+  // Shortcuts: ⌘K commands, ⌘. Guided/Studio, ⌘J the dock, ⌘B the AI builder.
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
   keys.current = (e) => {
     if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
     const k = e.key.toLowerCase();
     if (k === "k") palette.current?.toggle();
     else if (k === ".") setMode(studio ? "guided" : "studio");
-    else if (k === "j" && studio) setDrawer(!drawer, { focus: true });
+    else if (k === "j") setDrawer(!dock, { focus: true });
     else if (k === "b" && container) setBuilderOpen(!chat);
     else return;
     e.preventDefault();
@@ -486,7 +488,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (gitReady) add("git", "Actions", "branch", gitState ? "Source control" : "Connect Git", () => gitDialog.current?.open());
     add("mode", "Layout", studio ? "sparkles" : "code", studio ? "Switch to Guided" : "Switch to Studio", () => setMode(studio ? "guided" : "studio"), `${MOD}.`);
     for (const v of VIEWS) if (v !== shown) add(`view-${v}`, "Layout", VIEW_ICON[v], `Show ${VIEW_LABEL[v]}`, () => setView(v));
-    add("dock", "Layout", "terminal", dock ? "Hide the terminal" : "Show the terminal", () => (studio ? setDrawer(!drawer, { focus: !dock }) : (setMode("studio"), setDrawer(true))), `${MOD}J`);
+    add("dock", "Layout", "terminal", dock ? "Hide the terminal" : "Show the terminal", () => setDrawer(!dock, { focus: !dock }), `${MOD}J`);
     for (const f of tree) if (!f.dir) add(`file-${f.path}`, "Files", "file", f.path, () => (shown !== "code" && shown !== "split" && setView("code"), void engine.current?.openFile(f.path)));
     return list;
   };
@@ -529,7 +531,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
               {`PR #${pull.number}`}<span className="muted small">{` · ${pull.review.replace("_", " ")} · checks ${pull.checks}`}</span>
             </ExtLink>
           ) : null}
-          <button className="icon-btn s-only" id="drawer-btn" type="button" ref={drawerBtn} aria-expanded={dock} aria-controls="drawer" title={`Terminal (${MOD}J)`} aria-label="Terminal" onClick={() => setDrawer(!drawer)}>
+          <button className="icon-btn" id="drawer-btn" type="button" ref={drawerBtn} aria-expanded={dock} aria-controls="drawer" title={`Terminal (${MOD}J)`} aria-label="Terminal" onClick={() => setDrawer(!dock)}>
             <Icon name="terminal" />
           </button>
           <button className="icon-btn" id="builder-btn" type="button" ref={builderBtn} aria-expanded={chat} aria-controls="builder" hidden={!container} title={`AI builder (${MOD}B)`} aria-label="AI builder" onClick={() => setBuilderOpen(!chat)}>
@@ -799,7 +801,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           </div>
         </section>
         <DatabaseView run={sqlRunner} shown={shown === "database"} />
-        <section className="pane bottom-pane" id="drawer" aria-label="Output" hidden={!drawer} ref={drawerEl}>
+        <section className="pane bottom-pane" id="drawer" aria-label="Output" hidden={!dock} ref={drawerEl}>
           <div className="pane-head drawer-head">
             <div className="tabs" role="tablist" aria-label="Output">
               {TABS.map((t, i) => (
@@ -820,7 +822,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             </button>
           </div>
           <div id="terminal" className="terminal" ref={termEl} data-panel="terminal" role="tabpanel" aria-labelledby="tab-terminal" aria-describedby="terminal-help" hidden={tab !== "terminal"} />
-          <pre id="deploy-log" className="deploy-log mono" ref={logEl} data-panel="deploy-log" role="tabpanel" aria-labelledby="tab-deploy-log" tabIndex={0} hidden={tab !== "deploy-log"}>{deployLog}</pre>
+          <pre id="deploy-log" className="deploy-log mono" ref={logEl} data-panel="deploy-log" role="tabpanel" aria-labelledby="tab-deploy-log" tabIndex={0} hidden={tab !== "deploy-log"}>{deployLog || <span className="deploy-log-empty">No deploys yet in this session. Press Deploy to see its output here.</span>}</pre>
           <p className="pane-foot" id="terminal-help" data-panel="terminal" hidden={tab !== "terminal"}>Press <kbd>Esc</kbd> then <kbd>Tab</kbd> to leave the terminal.</p>
         </section>
         <footer className="statusline s-only" id="statusline">
@@ -829,7 +831,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           <span className="statusline-item">{pending ? `${pending} not live yet` : deploy?.url ? "Everything is live" : "Not deployed yet"}</span>
           <span className="statusline-push">
             <button type="button" className="statusline-item" onClick={() => palette.current?.open()}><kbd>{`${MOD}K`}</kbd>Commands</button>
-            <button type="button" className="statusline-item" onClick={() => setDrawer(!drawer)}><kbd>{`${MOD}J`}</kbd>Terminal</button>
+            <button type="button" className="statusline-item" onClick={() => setDrawer(!dock)}><kbd>{`${MOD}J`}</kbd>Terminal</button>
             <button type="button" className="statusline-item" onClick={() => setMode("guided")}><kbd>{`${MOD}.`}</kbd>Guided</button>
           </span>
         </footer>
