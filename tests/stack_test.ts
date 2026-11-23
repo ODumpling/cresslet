@@ -849,6 +849,7 @@ test("stack: squash-only, Land next squashes the bottom and gives the next chang
   Object.assign(t.provider.methods, { merge: false, squash: true, rebase: false });
   const pr = t.provider.pulls;
 
+  await goBack(t.ctx, c2.change.id); // change 3 set aside meanwhile
   const l1 = await landNext(t.ctx, c1.change.id);
   const s1 = t.provider.commits.get(l1.sha)!;
   assert.deepEqual([s1.parent, s1.parent2, pr[0].merged], [main0, undefined, true]); // a squash: one commit on main
@@ -858,6 +859,11 @@ test("stack: squash-only, Land next squashes the bottom and gives the next chang
   assert.deepEqual([sync.parent, sync.parent2, s.changes[0].github, s.changes[0].baseSha], [c2.sha, l1.sha, "ok", l1.sha]);
   assert.deepEqual([...sync.files], [...t.provider.commits.get(c2.sha)!.files]);
   assert.equal(pr[1].base, "main");
+  // (A change set aside above a synced one stays restorable: same files.)
+  assert.equal(s.setAside.length, 1);
+  await restore(t.ctx, c1.stack.id);
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((x) => x.position), [2, 3]);
   // Change 3 is left alone until it's the bottom, and the stack isn't behind for it (it holds what 2 was synced from).
   assert.equal(s.changes[1].sha, c3.sha);
   assert.equal(s.behind, undefined);

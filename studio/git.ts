@@ -569,9 +569,11 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
             ? landed(`${s.defaultBranch} is loaded with a problem: ${(e as Error).message}`, e)
             : landed(`${s.defaultBranch} isn't loaded here: ${(e as Error).message}`, e);
         });
-      } else if (s && s.activeBranch === top && top !== change.branch) {
-        // On the change synced with the squash (the same files): its new commit.
-        await set({ baseSha: r.sha, ...(r.synced?.branch === s.activeBranch && s.headSha === r.synced.from ? { headSha: r.synced.sha } : {}) });
+      } else if (s) {
+        // On the change synced with the squash (the same files), wherever it is in the stack: its new commit.
+        const synced = r.synced?.branch === s.activeBranch && s.headSha === r.synced.from ? { headSha: r.synced.sha } : {};
+        if (s.activeBranch === top && top !== change.branch) await set({ baseSha: r.sha, ...synced });
+        else if ("headSha" in synced) await set(synced);
       }
       return r;
     }),

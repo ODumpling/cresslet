@@ -863,10 +863,8 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
         await atCommit(ctx, next);
         if (!await holds(ctx, next.sha, c)) throw new HttpError(409, `change ${next.position} doesn't hold change ${c.position}: run Update stack`, "stack_behind");
         const sha = await provider.syncCommit(r, { branch: next.branch, from: next.sha, with: merged, message: `Sync with ${def} after change ${c.position} (#${p!.number}) was squashed` });
-        await store.db.tx(async () => {
-          await store.setStackChangeSha(next.id, sha, merged, next.sha);
-          if (next.id === s.at(-1)!.id) await store.detachSetAside(appId, c.stack_id, id("stk"));
-        });
+        // (Its files as they were: changes set aside above it still fit, and stay restorable.)
+        await store.setStackChangeSha(next.id, sha, merged, next.sha);
         synced = { branch: next.branch, from: next.sha, sha };
       } catch (e) {
         keep = c.branch;
