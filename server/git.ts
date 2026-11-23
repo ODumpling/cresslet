@@ -11,8 +11,8 @@ import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landNext, landUpTo, locked, pullIn, readStacks, restore,
-  setAsideBranches, stackPulls, submitStack, updateBottom,
+  assertLinked, assertNotBelowTop, assertSyncable, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landNext, landUpTo, locked, pullIn, readStacks, restore,
+  restack, setAsideBranches, stackPulls, submitStack, updateBottom,
 } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
@@ -499,8 +499,10 @@ export class GitHub implements SourceControlProvider {
    */
   async revert(r: Repo, input: { change: string; parent: string; top: string; subdir: string; label: string }) {
     const cmp = await this.ok<{ status: string; total_commits?: number; commits?: { parents: unknown[] }[] }>("GET", this.#path(r, `/compare/${input.parent}...${input.change}`));
-    const commits = cmp.commits ?? [];
-    if (cmp.status !== "ahead" || (cmp.total_commits ?? commits.length) > commits.length || commits.some((c) => c.parents.length !== 1)) {
+    const commits = (cmp.commits ?? []) as { parents: { sha: string }[] }[];
+    // (A merge of what the parent holds, as Update stack makes, is fine: undoing to the parent keeps that.)
+    const foreign = await Promise.all(commits.filter((c) => c.parents.length > 1).flatMap((c) => c.parents.slice(1)).map((p) => this.contains(r, input.parent, p.sha).then((x) => !x)));
+    if (cmp.status !== "ahead" || (cmp.total_commits ?? commits.length) > commits.length || foreign.some(Boolean)) {
       throw new HttpError(409, `${input.label} has a merge in it (from the default branch, or pulled in from GitHub): undoing it would undo that too, so it isn't done in the studio`, "undo_merge");
     }
     const full = await Promise.all([input.change, input.top, input.parent].map((sha) => this.#entries(r, sha))) as [Entries, Entries, Entries];
@@ -1257,7 +1259,10 @@ export function gitRoutes(
     const files = sourceFiles(cfg, input.files as DeployFile[]);
     // With the app's stack changes (in this process): a change added meanwhile doesn't turn this one into a lower one.
     const out = await locked(a.id, async () => {
-      await assertNotBelowTop({ provider: client, store, appId: a.id, repo, r }, branch);
+      // (A change below its stack's top only for an Update stack merge resolved there: its record follows.)
+      const restacked = await assertSyncable({ provider: client, store, appId: a.id, repo, r }, branch, mergeParent);
+      // (…from its recorded commit only: a push since isn't merged in unseen.)
+      if (restacked && restacked.sha !== baseSha) throw new HttpError(409, `${branch} was pushed to on GitHub since the update stopped there: pull it in, or carry on from it, first`, "moved");
       const head = await client.branchHead(r, branch);
       if (!head) throw new HttpError(404, `no branch ${branch} on GitHub`, "branch_not_found");
       if (head !== baseSha) {
@@ -1265,6 +1270,11 @@ export function gitRoutes(
       }
       const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
       if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
+      // An Update stack merge (the top's too): its base is the commit merged in now (what Undo takes its turn back to).
+      else if (restacked && out.changed) {
+        await followed({ provider: client, store, appId: a.id, repo, r }, branch, baseSha, out.sha);
+        await store.setStackChangeSha(restacked.id, out.sha, mergeParent);
+      }
       // Onto a stack's top change from where it's recorded (a hand edit pushed, a merge resolved): the change follows.
       else if (out.changed) await followed({ provider: client, store, appId: a.id, repo, r }, branch, baseSha, out.sha).catch((e) => console.error(e));
       return out;
@@ -1358,6 +1368,13 @@ export function gitRoutes(
     await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha }).catch((e) => console.error(e));
     return c.json(out);
   });
+  // Update stack: the default branch brought into each change, from the bottom up (stops at a conflict).
+  app.post("/apps/:name/git/stack/restack", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ stack?: unknown } | null>(c) ?? {};
+    if (typeof input.stack !== "string") throw new HttpError(400, "stack must be a stack's id");
+    return c.json(await restack({ provider: client, store, appId: a.id, repo, r }, input.stack));
+  });
   // Landing the bottom change through its pull request (a default branch that needs them), and bringing it up to date.
   app.post("/apps/:name/git/stack/land-next", async (c) => {
     const { a, r, repo, client } = await linked(c, "deploy");
@@ -1442,6 +1459,18 @@ export function gitRoutes(
         if (!(e instanceof HttpError) || !asBefore) throw e;
       }
     }
+    // A stack's top as one merge: checked, merged and recorded with the app's stack changes held (an Update stack's
+    // merge pushed below meanwhile isn't left out unseen): the top must hold every change below it.
+    let recorded: Awaited<ReturnType<typeof landed>> | undefined;
+    if (top && !m) {
+      const one = await locked(a.id, async () => {
+        await assertLinked(ctx, top.id);
+        const mm = await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
+        return { mm, st: await landed(ctx, { branch, headSha: mm.headSha, mergedSha: mm.mergedSha, deleteBelow: false }).catch((e) => (console.error(e), null)) };
+      });
+      m = one.mm;
+      recorded = one.st;
+    }
     m ??= await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
     if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha, upstream: m.mergedSha }).catch((e) => console.error(e));
     // The merge happened: from here on it's reported, whatever else fails. Its files (when they differ from the
@@ -1456,9 +1485,11 @@ export function gitRoutes(
     }
     // A stack's top change merged: the stack is in. Its lower branches go with the top's (not when the files didn't
     // load: the branch is kept to retry from).
-    const stack = stackLanded ?? (into === repo.default_branch
+    // (Recorded already: its branches looked at now, the files in.)
+    const again = into === repo.default_branch && (!recorded || !filesError)
       ? await landed(ctx, { branch, headSha: m.headSha, mergedSha: m.mergedSha, deleteBelow: !filesError }).catch((e) => (console.error(e), null))
-      : null);
+      : null;
+    const stack = stackLanded ?? (recorded ? { ...recorded, ...(again ? { deleted: again.deleted, pullErrors: again.pullErrors } : {}) } : again);
     // A stack's own cleanup decided about its branches (the merged one too: not under a pull request still open).
     let deletedBranch = !!stack?.deleted.includes(branch);
     // Only while it's still the commit that was merged: a push since then keeps it. (GitHub can't delete a ref
@@ -1476,10 +1507,12 @@ export function gitRoutes(
   app.get("/apps/:name/git/conflicts", async (c) => {
     const { r, repo, client } = await linked(c, "deploy");
     const branch = branchName(c.req.query("branch"));
-    if (branch === repo.default_branch) throw new HttpError(400, `${branch} is the default branch: there's nothing to merge into it`);
-    const out = await client.conflicts(r, { into: repo.default_branch, head: branch, subdir: repo.subdir });
+    // `with`: the branch merged in (default: the default branch; Update stack: the change below).
+    const into = c.req.query("with") ? branchName(c.req.query("with"), "with") : repo.default_branch;
+    if (branch === into) throw new HttpError(400, `${branch} is ${into}: there's nothing to merge into it`);
+    const out = await client.conflicts(r, { into, head: branch, subdir: repo.subdir });
     c.header("cache-control", "no-store");
-    return c.json({ branch, into: repo.default_branch, ...out });
+    return c.json({ branch, into, ...out });
   });
 
   // Pull requests, when the default branch takes no direct merges (protection, required reviews or checks).

@@ -34,6 +34,12 @@ export interface ProjectGitState {
    * isn't as it should be.
    */
   undo?: { title: string; conflicts: string[]; env?: { path: string; data: string }[] };
+  /**
+   * Update stack stopped at a conflict (this workspace holds that change's merge, `mergeParent` the change below's
+   * commit or the default branch's): once it's committed, the update carries on, then the workspace goes back to
+   * `returnTo`.
+   */
+  restack?: { stack: string; returnTo: string };
 }
 
 /** An open pull request (GET /v1/apps/:name/git/pulls). */
@@ -78,9 +84,14 @@ export interface Stack {
   changes: StackChange[];
   /** Changes gone back from (above the top, bottom first): restorable until a change is built on the top. */
   setAside: StackChange[];
+  /** The default branch has commits the bottom change doesn't: Update stack brings them in. */
+  behind?: boolean;
   /** Why the default branch takes no direct moves (the stack lands through its pull requests: Land next), or null. */
   guarded?: string | null;
 }
+
+/** Where Update stack got to: the changes it merged into, and where it stopped at a conflict (held in the workspace). */
+export interface Restacked { updated: StackChange[]; stopped?: { change: StackChange; with: string; paths: string[] }; /** It didn't carry on: why. */ error?: string }
 
 /** A file as the API takes and returns them (POST /v1/deploys's shape). */
 export interface GitFile {
@@ -199,7 +210,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
   }));
 
   /** `snap`: files already read (and the revision before), to commit exactly those. */
-  async function syncNow(message: string, snap?: { files: GitFile[]; rev: number }): Promise<{ sha: string; changed: boolean; files: GitFile[] }> {
+  async function syncNow(message: string, snap?: { files: GitFile[]; rev: number }): Promise<{ sha: string; changed: boolean; files: GitFile[]; restacked?: Restacked }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
     // An undo being finished is a change of its own (its title, its markers checked), never a commit onto the top.
@@ -225,11 +236,55 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       throw e;
     }
     await set({
-      headSha: r.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, ...(r.changed ? { back: undefined } : {}),
+      headSha: r.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, restack: undefined, ...(r.changed ? { back: undefined } : {}),
       // A merge of the default branch committed: the branch is on top of that now.
       ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : s.mergeParent ? { baseSha: s.mergeParent } : {}),
     });
+    // An Update stack merge committed: it carries on with the changes above (an edit made meanwhile: not yet; Update
+    // stack again carries on). Stopped again: held again (restackRun).
+    // (Its failing isn't this commit's: that's made. Said apart; Update stack again carries on.)
+    if (s.restack && s.mergeParent && !o.state()!.dirty) {
+      const restacked = await restackRun(s.restack.stack, s.restack.returnTo, revision()).catch((e): Restacked => ({ updated: [], error: (e as Error).message }));
+      return { ...r, files, restacked };
+    }
     return { ...r, files };
+  }
+
+  /**
+   * Update stack (server/stack.ts restack), from where it is: done, the workspace back on `returnTo` (its commit
+   * loaded, the update having moved it); stopped at a conflict, that change and its merge loaded (markers in the
+   * conflicted files), to be resolved and committed (then it carries on: syncNow).
+   */
+  /** `rev`: the workspace's revision before it started (an edit since isn't overwritten: it stops, said). */
+  async function restackRun(stack: string, returnTo: string, rev: number): Promise<Restacked> {
+    const r = await post<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; withSha: string; paths: string[] }; base?: string; branches?: string[] }>("/stack/restack", { stack });
+    if (!r.stopped) {
+      await set({ restack: undefined });
+      const s = o.state()!;
+      if (s.activeBranch !== returnTo || r.updated.some((c) => c.branch === returnTo)) await pullNow(returnTo, returnTo, { rev });
+      // (The default branch's head it brought in: what the workspace's branch sits on now.)
+      // (Only on one of the stack's changes: another branch doesn't hold it.)
+      if (r.base && r.branches?.includes(o.state()!.activeBranch)) await set({ baseSha: r.base });
+      return r;
+    }
+    // The stopped change's merge, read first (refused: nothing here moved), then loaded once.
+    const at = r.stopped.change;
+    const m = await o.api<{ intoSha: string; headSha: string; conflicts: string[]; files: GitFile[] }>(path(`/conflicts?branch=${encodeURIComponent(at.branch)}&with=${encodeURIComponent(r.stopped.with)}`));
+    unchangedSince(rev, "loading the merge");
+    const merging = () => set({
+      activeBranch: at.branch, headSha: m.headSha, mergeParent: m.intoSha, conflicts: m.conflicts, dirty: true, restack: { stack, returnTo },
+      back: undefined, undo: undefined,
+    });
+    try {
+      await o.hydrate(m.files);
+    } catch (e) {
+      if (!(e as { filesWritten?: boolean }).filesWritten) throw e;
+      await merging();
+      if (!m.conflicts.some((p) => /(?:^|\/)package(?:-lock)?\.json$/.test(p))) throw e;
+      return { updated: r.updated, stopped: { change: at, with: r.stopped.with, paths: m.conflicts } };
+    }
+    await merging();
+    return { updated: r.updated, stopped: { change: at, with: r.stopped.with, paths: m.conflicts } };
   }
 
   /**
@@ -242,7 +297,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
   /** `submit: false`: a change made on the way somewhere (going back, deploying): the app's auto-submit skips it. */
   async function changeNow(title: string, prompt: string, submit = true): Promise<{
     sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string };
-    submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean;
+    submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean; restacked?: Restacked;
   }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
@@ -297,7 +352,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     const extra = (await opts.before?.()) ?? {};
     unchangedSince(rev, `loading ${branch}`);
     // Edited while it loaded (npm install, say): those are changes, kept dirty.
-    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, back: undefined, undo: undefined, ...extra, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
+    const done = () => set({ activeBranch: branch, headSha: t.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, back: undefined, undo: undefined, restack: undefined, ...extra, ...(branch === s.defaultBranch ? { baseSha: t.sha } : {}) });
     try {
       await o.hydrate(t.files);
     } catch (e) {
@@ -486,6 +541,15 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       return r;
     }),
     /**
+     * Update stack: the default branch brought into each change of `stack`, from the bottom up (restackRun). Changes
+     * here not pushed yet: refused (the workspace moves to a stopped change, and back).
+     */
+    updateStack: (stack: string) => serial(async () => {
+      const s = o.state()!;
+      if (s.dirty) throw Object.assign(new Error("this workspace has changes not pushed yet: push them first"), { code: "dirty" });
+      return restackRun(stack, s.restack?.returnTo ?? s.activeBranch, revision());
+    }),
+    /**
      * Lands the stack's bottom change through its pull request (server/stack.ts landNext), for a default branch that
      * needs one. The workspace on it: on the default branch now (its files loaded, unless it has changes not pushed);
      * on the top above it: the default branch it sits on is the merge.
@@ -633,6 +697,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       // Changes here that are a change of their own first, merged like any other: an AI builder turn's (it's deploying
       // mid-turn), or edits on the default branch (by hand).
       const was = o.state()!;
+      if (was.restack && was.mergeParent) throw Object.assign(new Error("Update stack is waiting for this merge: resolve it and push it first (it carries on from there)"), { code: "restacking" });
       let synced: { sha: string; files: GitFile[] } | undefined;
       if (was.dirty && !was.mergeParent && (turn || was.undo || was.activeBranch === was.defaultBranch)) {
         log(`committing the changes here as a change…`);
