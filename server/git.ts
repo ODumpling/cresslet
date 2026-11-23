@@ -11,8 +11,8 @@ import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landUpTo, locked, pullIn, readStacks, restore,
-  setAsideBranches, stackPulls, submitStack,
+  assertNotBelowTop, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landNext, landUpTo, locked, pullIn, readStacks, restore,
+  setAsideBranches, stackPulls, submitStack, updateBottom,
 } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
@@ -98,6 +98,13 @@ export interface SourceControlProvider {
   branchProtection(r: Repo, branch: string): Promise<string | null>;
   /** Moves `branch` from `from` to `to`, a fast-forward (never forced). Moved meanwhile: 409 `conflict`. */
   moveBranch(r: Repo, branch: string, from: string, to: string): Promise<void>;
+  /** The merge methods the repository allows for pull requests. */
+  mergeMethods(r: Repo): Promise<{ merge: boolean; squash: boolean; rebase: boolean }>;
+  /**
+   * Merges a pull request through the host (its reviews, checks and rules applied), as a merge commit, only while
+   * its head is `sha`. Resolves to the merge commit; refused: 409 `merge_refused` with the host's reason.
+   */
+  mergePull(r: Repo, number: number, input: { sha: string; title: string }): Promise<{ sha: string }>;
 }
 export interface Pull {
   number: number;
@@ -667,6 +674,24 @@ export class GitHub implements SourceControlProvider {
     await this.ok("POST", this.#path(r, `/issues/${number}/comments`), { body });
   }
 
+  async mergeMethods(r: Repo) {
+    // (Not said, as for a user who can't push: allowed, and GitHub refuses at the merge if not.)
+    const g = await this.ok<{ allow_merge_commit?: boolean; allow_squash_merge?: boolean; allow_rebase_merge?: boolean }>("GET", this.#path(r));
+    return { merge: g.allow_merge_commit !== false, squash: g.allow_squash_merge !== false, rebase: g.allow_rebase_merge !== false };
+  }
+
+  async mergePull(r: Repo, number: number, input: { sha: string; title: string }) {
+    const res = await this.req<{ sha?: string; message?: string }>("PUT", this.#path(r, `/pulls/${number}/merge`), {
+      sha: input.sha, merge_method: "merge", commit_title: input.title,
+    });
+    if (res.status === 200 && res.body?.sha) return { sha: res.body.sha };
+    // Not mergeable (reviews, checks, rules, conflicts), or its head moved: GitHub's reason.
+    if (res.status === 405 || res.status === 409 || res.status === 422) {
+      throw new HttpError(409, `GitHub didn't merge pull request #${number}: ${res.body?.message ?? "it isn't mergeable"}`, "merge_refused");
+    }
+    throw ghError(res.status, res.body?.message);
+  }
+
   async pullStatus(r: Repo, number: number) {
     return this.#pullInfo(r, await this.ok<GhPull>("GET", this.#path(r, `/pulls/${number}`)));
   }
@@ -702,6 +727,8 @@ export class GitHub implements SourceControlProvider {
       review: states.includes("CHANGES_REQUESTED") ? "changes_requested" : states.includes("APPROVED") ? "approved" : "pending",
       checks: !checks ? "unknown" : !runs.length ? "none" : runs.some((x) => x.status !== "completed") ? "pending"
         : runs.every((x) => ["success", "neutral", "skipped"].includes(x.conclusion ?? "")) ? "success" : "failure",
+      base: p.base?.ref ?? "",
+      mergeable: (["clean", "unstable", "has_hooks", "blocked", "behind", "dirty", "draft"] as const).find((x) => x === p.mergeable_state) ?? "unknown",
     };
   }
 
@@ -725,7 +752,7 @@ type Entries = Map<string, GhEntry>;
 type Outside = { take: { path: string; mode: string; type: string; sha: string | null }[]; both: string[]; outside: Set<string> };
 type GhPull = {
   number: number; html_url: string; title: string; draft?: boolean; head: { sha: string; ref?: string }; base?: { ref: string };
-  state?: string; merged?: boolean; merged_at?: string | null;
+  state?: string; merged?: boolean; merged_at?: string | null; mergeable_state?: string;
 };
 export interface PullInfo {
   number: number;
@@ -735,6 +762,14 @@ export interface PullInfo {
   headSha: string;
   review: "approved" | "changes_requested" | "pending";
   checks: "success" | "failure" | "pending" | "none" | "unknown";
+  /** Its base branch. */
+  base: string;
+  /**
+   * Whether GitHub would merge it now (its `mergeable_state`): `clean`/`unstable`/`has_hooks` yes; `blocked` (reviews,
+   * required checks, rules), `behind` (must be up to date with its base), `dirty` (conflicts), `draft`, or `unknown`
+   * (not worked out yet, or read from a list).
+   */
+  mergeable: "clean" | "unstable" | "has_hooks" | "blocked" | "behind" | "dirty" | "draft" | "unknown";
 }
 
 /** The tree's regular files under `subdir`, with their paths relative to it (names a deploy can't hold left out). */
@@ -1221,9 +1256,14 @@ export function gitRoutes(
   // Stacked changes (server/stack.ts): the app's open stacks, checked against GitHub.
   app.get("/apps/:name/git/stack", async (c) => {
     const { a, r, repo, client } = await linked(c, "read");
-    const stacks = await readStacks({ provider: client, store, appId: a.id, repo, r });
+    const ctx = { provider: client, store, appId: a.id, repo, r };
+    // `protected`: why the default branch takes no direct moves (stacks land through their pull requests), or null.
+    const [stacks, guarded] = await Promise.all([
+      readStacks(ctx),
+      client.branchProtection(r, repo.default_branch).catch(() => `${repo.default_branch}'s protection couldn't be read`),
+    ]);
     c.header("cache-control", "no-store");
-    return c.json({ defaultBranch: repo.default_branch, stacks });
+    return c.json({ defaultBranch: repo.default_branch, protected: guarded, stacks });
   });
   // Pull requests for a stack's changes (opened or updated as the user), and their review and checks.
   app.post("/apps/:name/git/stack/submit", async (c) => {
@@ -1298,6 +1338,21 @@ export function gitRoutes(
     const out = await landUpTo({ provider: client, store, appId: a.id, repo, r }, input.change);
     await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha }).catch((e) => console.error(e));
     return c.json(out);
+  });
+  // Landing the bottom change through its pull request (a default branch that needs them), and bringing it up to date.
+  app.post("/apps/:name/git/stack/land-next", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ change?: unknown; sha?: unknown } | null>(c) ?? {};
+    if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
+    const out = await landNext({ provider: client, store, appId: a.id, repo, r }, input.change, input.sha != null ? shaOf(input.sha, "sha") : undefined);
+    await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha }).catch((e) => console.error(e));
+    return c.json(out);
+  });
+  app.post("/apps/:name/git/stack/update", async (c) => {
+    const { a, r, repo, client } = await linked(c, "deploy");
+    const input = await body<{ change?: unknown; sha?: unknown } | null>(c) ?? {};
+    if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
+    return c.json(await updateBottom({ provider: client, store, appId: a.id, repo, r }, input.change, input.sha != null ? shaOf(input.sha, "sha") : undefined));
   });
   // Going back to a change (the ones above it set aside), and putting them back.
   app.post("/apps/:name/git/stack/back", async (c) => {

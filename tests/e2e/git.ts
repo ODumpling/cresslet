@@ -305,12 +305,13 @@ try {
   await page.locator("#git-btn .git-dirty").waitFor({ timeout: 30000 });
   await page.waitForTimeout(1500);
   await page.locator("#deploy-btn").click();
-  await toast(/Not deployed: main is protected/, 60000);
-  await page.locator("#toast").getByRole("button", { name: "Open a pull request" }).click();
-  await toast(/Pull request #\d+/, 30000);
+  // The edit is a change of its own (a stack): Deploy says it's left to land, through its pull request.
+  await toast(/Nothing was deployed: main is protected .*change 1 is left to land, one at a time through its pull request/, 60000);
+  await page.locator("#stack-submit").click();
+  await toast(/Submitted: 1 pull request/, 30000);
   if (!gh.repo(full).pulls.some((p) => p.head === EDITS && p.state === "open")) fail(`no pull request from ${EDITS}`);
   await page.screenshot({ path: `${out}/git-pull-request.png` });
-  console.log("protected main: pull request opened");
+  console.log("protected main: deploy says what's left to land; pull request opened");
 
   // A small follow-up as a change of its own, folded into the one below: one change, one pull request.
   await input.fill("Make the heading bluer");
@@ -339,6 +340,27 @@ try {
   if (undone["src/bluer.css"] || !undone["src/footer.txt"]) fail(`the undo change holds the wrong files: ${Object.keys(undone)}`);
   await page.locator("#stack-panel").screenshot({ path: `${out}/git-stack-undone.png` });
   console.log("undid change 1, keeping change 2");
+
+  // Protected main needing a review: the stack lands from the bottom up. Land next waits for the bottom's approval,
+  // then GitHub merges its pull request and the next one moves onto main.
+  Object.assign(gh.repo(full), { requireReview: true, dismissStale: true });
+  await page.locator("#stack-submit").click();
+  await toast(/Submitted: 3 pull requests/, 60000);
+  const bottomRow = page.locator("#stack-panel .stack-row", { hasText: "1 · Edits made in the studio" });
+  await bottomRow.locator(".stack-why", { hasText: "Can't land yet: waiting for review." }).waitFor({ timeout: 30000 });
+  if (!await bottomRow.getByRole("button", { name: /Land change 1 .* through its pull request/ }).isDisabled()) fail("Land next is enabled before the review");
+  await page.locator("#stack-panel .stack-note", { hasText: "Reviewers: approve the bottom change first" }).waitFor();
+  const bottomPr = gh.repo(full).pulls.find((p) => p.state === "open" && p.base === "main")!;
+  bottomPr.reviews.push({ user: { login: "rev" }, state: "APPROVED" });
+  await page.locator("#stack-submit").click(); // read again
+  await bottomRow.locator(".stack-why").waitFor({ state: "detached", timeout: 30000 });
+  await bottomRow.getByRole("button", { name: /Land change 1 .* through its pull request/ }).click();
+  await toast(/Landed change 1 in main .* Change 2 is the bottom now, waiting for review/, 60000);
+  const nextPr = gh.repo(full).pulls.find((p) => p.state === "open" && p.head.includes("/2-"))!;
+  if (!bottomPr.merged || nextPr?.base !== "main") fail(`land next: ${JSON.stringify({ merged: bottomPr.merged, next: nextPr })}`);
+  await page.locator("#stack-panel .stack-row", { hasText: "2 · Add a footer" }).locator(".stack-why", { hasText: "waiting for review" }).waitFor({ timeout: 30000 });
+  await page.locator("#stack-panel").screenshot({ path: `${out}/git-stack-land-next.png` });
+  console.log("protected main: landed change 1 through its pull request; change 2 is the bottom");
 
   // A webhook says main moved on GitHub: the branch pill shows it.
   const upstreamSha = gh.write(gh.repo(full), "main", { "CHANGELOG.md": "x\n" }, "Changelog", "teammate");
