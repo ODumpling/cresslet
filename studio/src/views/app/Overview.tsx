@@ -100,8 +100,8 @@ function Body({ m }: { m: API.Metrics }) {
             ["URL", <ExtLink href={a.url}>{a.url.replace(/^https?:\/\//, "")}</ExtLink>],
             ["Domains", domains.length ? <span>{domains.map((x, i) => <span key={x.domain}>{i ? ", " : null}<ExtLink href={`https://${x.domain}`}>{x.domain}</ExtLink></span>)}</span> : "—"],
             ["Repository", d.repo ? <ExtLink href={d.repo.url} id="app-repo">{d.repo.fullName}</ExtLink> : "Not linked"],
-            d.repo ? ["Branch", <span className="mono" id="app-branch">{d.repo.defaultBranch}</span>] : null,
-            d.repo || git ? ["Commit", git ? <Commit git={git} branch={d.repo?.defaultBranch} /> : "Live deploy isn't from a commit"] : null,
+            d.repo ? ["Default branch", <span className="mono" id="app-branch">{d.repo.defaultBranch}</span>] : null,
+            d.repo || git ? ["Commit", git ? <Commit git={git} repo={d.repo} /> : dep ? "Live deploy isn't from a commit" : "—"] : null,
             ["Server", a.config?.server ? `Yes${a.config.crons?.length ? ` · ${plural(a.config.crons.length, "cron")}` : ""}` : "Static only"],
             ["Secrets", <Link to="/apps/$name/secrets" params={{ name }}>{d.secrets.length ? plural(d.secrets.length, "secret") : "None"}</Link>],
             ["Egress", a.egress === null ? "Any public host" : a.egress.length ? a.egress.join(", ") : "None"],
@@ -120,13 +120,20 @@ function Body({ m }: { m: API.Metrics }) {
   );
 }
 
-/** The live deploy's commit: short sha (linked when it's on GitHub), its version tag, and its branch when not the default. */
-function Commit({ git, branch }: { git: NonNullable<API.DeployInfo["git"]>; branch: string | undefined }) {
+/**
+ * The live deploy's commit: short sha (linked when it's on GitHub), its version tag, and where it's from when that
+ * isn't the linked repository's default branch (another branch, or a repository linked before this one).
+ */
+function Commit({ git, repo }: { git: NonNullable<API.DeployInfo["git"]>; repo: API.AppRepo | null | undefined }) {
   const sha = git.sha.slice(0, 7);
-  const extra = [git.tag, git.branch && git.branch !== branch ? `on ${git.branch}` : null].filter(Boolean).join(" · ");
+  const other = !!repo && !!git.repo && git.repo !== repo.fullName;
+  const extra = [git.tag, other ? `from ${git.repo}` : null, git.branch && (other || git.branch !== repo?.defaultBranch) ? `on ${git.branch}` : null]
+    .filter(Boolean).join(" · ");
   return (
     <span id="app-commit">
-      {git.url ? <ExtLink className="ext mono" href={git.url} title={git.sha}>{sha}</ExtLink> : <span className="mono" title={git.sha}>{sha}</span>}
+      {git.url
+        ? <ExtLink className="ext mono" href={git.url} title={git.sha}><SrOnly>Commit </SrOnly>{sha}</ExtLink>
+        : <span className="mono" title={git.sha}>{sha}</span>}
       {extra ? ` · ${extra}` : null}
     </span>
   );
