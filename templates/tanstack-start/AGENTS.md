@@ -12,9 +12,10 @@ store, `files` and `secrets`; built assets are served statically. Ships with ema
 - `src/server/` — server code. `*.server.ts` files are server-only (import protection keeps them out of the client).
   - `auth.ts` — `getUser`, `signUp`, `signIn`, `signOut` server functions; `authed` middleware (`context.user`).
   - `auth.server.ts` — PBKDF2 passwords, sessions in `kv` (cookie `sid`, 30 days), `rateLimit` (kv counters).
-  - `db.server.ts` — versioned migrations; call `await migrate()` before queries. Append, never edit shipped ones.
+  - `db.server.ts` — versioned migrations (append, never edit shipped ones), run before every request by `src/start.ts`:
+    the tables exist from the app's first request, so queries don't call `migrate()` themselves.
   - `todos.ts` — example CRUD server functions scoped to the user.
-- `src/start.ts` — request middleware (CSRF check for non-GET requests).
+- `src/start.ts` — request middleware: CSRF check for non-GET requests, then the schema migrations.
 - `public/` — copied as-is to the site root. Add each top-level file to the `!` routes in `cresslet.json`.
 - `cresslet.json` — `name` (subdomain), `routes` (`/*` to the server except `!/assets/*` and public files),
   `build` (how `cresslet build`/`dev` run Vite; `dist/client` is served, `dist/server/server.js` is the server).

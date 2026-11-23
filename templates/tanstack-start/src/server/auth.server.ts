@@ -3,7 +3,6 @@
 // live sessions. Passwords: PBKDF2-SHA256 via Web Crypto (100k iterations is the most workerd allows).
 import { db, kv } from "cresslet";
 import { deleteCookie, getCookie, getRequestHeader, getRequestUrl, setCookie } from "@tanstack/react-start/server";
-import { migrate } from "./db.server";
 
 export type User = { id: number; email: string; name: string };
 
@@ -64,7 +63,6 @@ export async function currentUser(): Promise<User | null> {
   if (!token) return null;
   const session = await kv.get<{ userId: number }>(await sessionKey(token));
   if (!session) return null;
-  await migrate();
   return db.first(db.sql<User>`SELECT id, email, name FROM users WHERE id = ${session.userId}`);
 }
 

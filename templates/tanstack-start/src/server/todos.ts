@@ -2,7 +2,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { db } from "cresslet";
 import { authed } from "./auth";
-import { migrate } from "./db.server";
 
 export type Todo = { id: number; title: string; done: boolean; createdAt: number };
 
@@ -15,7 +14,6 @@ const id = (d: unknown) => {
 export const listTodos = createServerFn({ method: "GET" })
   .middleware([authed])
   .handler(async ({ context }) => {
-    await migrate();
     const rows = await db.query(db.sql<{ id: number; title: string; done: number; created_at: number }>`
       SELECT id, title, done, created_at FROM todos WHERE user_id = ${context.user.id} ORDER BY done, created_at DESC`);
     return rows.map((r): Todo => ({ id: r.id, title: r.title, done: !!r.done, createdAt: r.created_at }));
@@ -29,7 +27,6 @@ export const addTodo = createServerFn({ method: "POST" })
     return { title };
   })
   .handler(async ({ data, context }) => {
-    await migrate();
     await db.run(db.sql`INSERT INTO todos (user_id, title, created_at) VALUES (${context.user.id}, ${data.title}, ${Date.now()})`);
   });
 

@@ -3,7 +3,6 @@
 import { createMiddleware, createServerFn } from "@tanstack/react-start";
 import { db } from "cresslet";
 import { currentUser, endSession, hashPassword, rateLimit, startSession, UserError, verifyPassword } from "./auth.server";
-import { migrate } from "./db.server";
 
 export type { User } from "./auth.server";
 
@@ -50,7 +49,6 @@ export const signUp = createServerFn({ method: "POST" })
       if (password.length < 8) throw new UserError("Password must be at least 8 characters");
       if (password.length > 200) throw new UserError("Password is too long");
       await rateLimit("signup", 10, 3600);
-      await migrate();
       const hash = await hashPassword(password);
       const row = await db.first(db.sql<{ id: number }>`
         INSERT INTO users (email, name, password_hash, created_at) VALUES (${email}, ${name}, ${hash}, ${Date.now()})
@@ -70,7 +68,6 @@ export const signIn = createServerFn({ method: "POST" })
       const email = str(data.email, "Email", 254).toLowerCase();
       const password = typeof data.password === "string" ? data.password : "";
       await rateLimit("signin", 10, 600);
-      await migrate();
       const user = await db.first(
         db.sql<{ id: number; password_hash: string }>`SELECT id, password_hash FROM users WHERE email = ${email}`,
       );

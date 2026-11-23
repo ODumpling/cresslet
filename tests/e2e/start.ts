@@ -1,6 +1,6 @@
 // Browser e2e: the TanStack Start template in the studio (studio/start-build.ts): New project → in-browser npm install →
-// SSR preview → sign up (server functions, db, kv session cookie) → todos → a new file route → an edit reloads the
-// preview → Deploy → the same flow on the deployed app.
+// its tables in the Database view from the start → SSR preview → sign up (server functions, db, kv session cookie) →
+// todos → a new file route → an edit reloads the preview → Deploy → the same flow on the deployed app.
 // Run: start the server (CRESSLET_ADMIN_TOKEN=e2e-admin npm run dev), then:
 //   cd tests/e2e && npm i && npx playwright install chromium && node start.ts [screenshot dir]
 import { chromium, type FrameLocator, type Page } from "@playwright/test";
@@ -56,6 +56,13 @@ try {
   await page.goto(base + "/");
   await page.getByRole("button", { name: /tanstack-start/ }).click();
   await page.waitForURL(/\/p\//);
+  // The Database view, open from the start: the app's tables are listed as soon as its first request (the preview's
+  // page load) has made them, before anyone signs up (the view relists on the app's writes).
+  await page.getByRole("button", { name: "Database", exact: true }).click();
+  for (const t of ["users", "todos", "_schema"]) await page.locator(`#db-tables-pane button[data-table="${t}"]`).waitFor({ timeout: 240000 });
+  console.log("database initialized from the start:", (await page.locator("#db-tables-pane [data-table]").evaluateAll((b) => b.map((e) => e.getAttribute("data-table")))).join(", "));
+  await page.screenshot({ path: `${shots}/start-database.png` });
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await frame.getByRole("heading", { name: "TanStack Start on Cresslet" }).waitFor({ timeout: 240000 });
   console.log("preview rendered");
 
