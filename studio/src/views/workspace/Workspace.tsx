@@ -137,6 +137,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const [gitOn, setGitOn] = useState(false);
   const [gitState, setGitState] = useState<ProjectGitState | undefined>(project.git);
   const gitDialog = useRef<GitDialogHandle>(null);
+  const [connectedAgent, setConnectedAgent] = useState<string | null>(null);
 
   const editorEl = useRef<HTMLDivElement>(null), termEl = useRef<HTMLDivElement>(null), drawerEl = useRef<HTMLElement>(null);
   const iframe = useRef<HTMLIFrameElement>(null), previewEmpty = useRef<HTMLDivElement>(null);
@@ -214,6 +215,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       git: setGitState,
       dbChanged: () => setDbChanges((n) => n + 1),
       builderRunning: () => builder.current?.running() ?? false,
+      builderActor: () => builder.current?.actor() ?? "Claude",
       builderTurn: () => builder.current?.turn() ?? null,
       approveDeploy: (text, signal) => builder.current?.approve(text, signal) ?? Promise.resolve(false),
     }, editorEl.current!); // mounted
@@ -533,6 +535,13 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
               {`PR #${pull.number}`}<span className="muted small">{` · ${pull.review.replace("_", " ")} · checks ${pull.checks}`}</span>
             </ExtLink>
           ) : null}
+          {connectedAgent ? (
+            <span className="bridge-pill" id="topbar-bridge">
+              <Icon name="link" />
+              <span className="bridge-pill-name">{connectedAgent}</span>
+              <button className="btn sm" id="topbar-bridge-disconnect" type="button" onClick={() => builder.current?.disconnectAgent()}>Disconnect</button>
+            </span>
+          ) : null}
           <button className="icon-btn" id="drawer-btn" type="button" ref={drawerBtn} aria-expanded={dock} aria-controls="drawer" title={`Terminal (${MOD}J)`} aria-label="Terminal" onClick={() => setDrawer(!dock)}>
             <Icon name="terminal" />
           </button>
@@ -573,7 +582,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         </div>
         {container ? (
           <Builder ref={builder} c={container} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
-            onStackStale={() => setGitTick((n) => n + 1)} appName={name}
+            onStackStale={() => setGitTick((n) => n + 1)} appName={name} onAgentChange={setConnectedAgent}
             ship={{ url: deploy?.url, at: deploy?.at, deploying, pending, line: deploying ? lastLine : deployFailed ?? undefined, failed: !!deployFailed }}
             onTurnEnd={(changed) => changed && setTurnsSince((n) => n + 1)}
             stack={stack && gitState && stackShown ? (

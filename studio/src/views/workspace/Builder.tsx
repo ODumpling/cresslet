@@ -8,7 +8,8 @@
 import { type Ref, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { Container } from "../../../vendor/cresslet-container/cresslet-container.js";
-import { anthropicClient, apiKey, createAgent, createTools, creditsClient, errorText, type AgentEvent } from "../../../builder.ts";
+import { anthropicClient, apiKey, createAgent, createTools, creditsClient, errorText, type AgentEvent, type ToolResult } from "../../../builder.ts";
+import { connectBridge, createBridgeDispatcher, type BridgeState } from "../../../mcp-bridge.ts";
 import type * as API from "../../../api-types.ts";
 import { commitMessage, gitCode, type GitWorkspace } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
@@ -16,13 +17,14 @@ import { logIn, session, useLoginButton, useSession } from "../../lib/session.ts
 import { TimeAgo } from "../../ui/bits.tsx";
 import { ExtLink, Icon, SrOnly } from "../../ui/icons.tsx";
 
-const STEP_ICON: Record<string, string> = { run_command: "terminal", read_dev_log: "terminal" };
+const STEP_ICON: Record<string, string> = { run_command: "terminal", read_dev_log: "terminal", commit_change: "branch" };
 /** A tool call's input as the model sent it (not validated yet). */
-type ToolInput = { path?: string; command?: string } | null | undefined;
+type ToolInput = { path?: string; command?: string; title?: string } | null | undefined;
 const runningText = (name: string, input: unknown) => ({
   list_files: "Listing files", read_file: `Reading ${(input as ToolInput)?.path ?? "a file"}`, write_file: `Writing ${(input as ToolInput)?.path ?? "a file"}`,
   edit_file: `Editing ${(input as ToolInput)?.path ?? "a file"}`, delete_file: `Deleting ${(input as ToolInput)?.path ?? "a file"}`,
   run_command: `Running ${(input as ToolInput)?.command ?? "a command"}`, read_dev_log: "Reading the dev server output",
+  commit_change: `Committing ${(input as ToolInput)?.title ?? "change"}`,
 } as Record<string, string>)[name] ?? name;
 
 /** One entry in the chat log. */
@@ -41,6 +43,10 @@ export interface BuilderHandle {
   approve(text: string, signal?: AbortSignal): Promise<boolean>;
   /** One of its commands is running (in a process it started). */
   running(): boolean;
+  /** Who is driving the builder ("Claude" or a connected desktop agent). */
+  actor(): string;
+  /** Disconnect a paired desktop agent, if any. */
+  disconnectAgent(): void;
   /** A request is being worked on. */
   busy(): boolean;
   /** The request being worked on, as a change's title and prompt (null when none is). */
@@ -65,13 +71,15 @@ export interface Ship {
   pending: number;
 }
 
-export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, appName, ship, onTurnEnd = () => {}, ref }: {
+export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, appName, ship, onTurnEnd = () => {}, onAgentChange = () => {}, ref }: {
   c: Container;
   /** The project's name (the empty chat asks what it should do). */
   appName: string;
   ship: Ship;
   /** A request finished: whether it changed the workspace (a change not live yet). */
   onTurnEnd?: (changed: boolean) => void;
+  /** A desktop agent paired or disconnected (`null` when none). */
+  onAgentChange?: (agent: string | null) => void;
   /** Source control: the project's repository, when linked (a finished turn is committed as a change of its stack). */
   git: GitWorkspace | null;
   /** The stack panel (StackPanel.tsx), on the rail under the ship line. */
@@ -98,10 +106,15 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
   const [keyValue, setKeyValue] = useState("");
   const [keyError, setKeyError] = useState("");
   const [input, setInput] = useState("");
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [bridgeCode, setBridgeCode] = useState("");
+  const [bridgeError, setBridgeError] = useState("");
+  const [bridgeState, setBridgeState] = useState<BridgeState | null>(null);
+  const [bridgeBusy, setBridgeBusy] = useState(false);
 
   const inputRef = useRef<HTMLTextAreaElement>(null), logRef = useRef<HTMLDivElement>(null);
   const keyRef = useRef<HTMLInputElement>(null), loginRef = useRef<HTMLButtonElement>(null);
-  const formRef = useRef<HTMLFormElement>(null);
+  const formRef = useRef<HTMLFormElement>(null), bridgeCodeRef = useRef<HTMLInputElement>(null);
   // This request's state: the agent, whether a deploy was approved, Stop pressed; the assistant text and tool step
   // being written; the latest reply text (read out when it ends) and its error.
   const r = useRef({
@@ -115,12 +128,28 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     // `commandRev`, studio/src/views/workspace/engine.ts).
     turnChanged: false, cmdRev: 0,
     gone: false, // unmounted (the user left the project): no more UI updates
+    // Live Link (`cresslet connect`): paired desktop agent state.
+    bridge: null as ReturnType<typeof connectBridge> | null,
+    bridgeToken: null as string | null,
+    remoteAgent: null as string | null,
+    remoteChanged: false,
+    remoteCmdRev: 0,
+    remoteSteps: new Map<string, number>(),
+    onAgentChange,
+    onTurnEnd,
+    onStackStale,
+    commandRev,
   }).current;
   r.git = git;
+  r.onAgentChange = onAgentChange;
+  r.onTurnEnd = onTurnEnd;
+  r.onStackStale = onStackStale;
+  r.commandRev = commandRev;
   const [tools] = useState(() => createTools(c, {
     devLog,
     onChange: (path) => {
       r.turnChanged = true;
+      r.remoteChanged = true;
       return onChange(path);
     },
     paused: () => r.approvals.size > 0,
@@ -156,9 +185,19 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
       r.gone = true;
       r.stopped = true;
       r.agent?.stop();
+      r.bridge?.disconnect();
+      r.bridge = null;
       for (const decline of r.approvals) decline();
     };
   }, [r]);
+
+  // Disconnect an active desktop agent if the user logs out or switches accounts.
+  useEffect(() => {
+    if (r.bridge && r.bridgeToken !== token) {
+      r.bridge.disconnect();
+      r.bridge = null;
+    }
+  }, [token, r]);
 
   // Stick to the bottom when new output arrives and the log was already there.
   const nearBottom = () => {
@@ -177,6 +216,136 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     return id;
   };
   const update = (id: number, fn: (i: Item) => Item) => setItems((xs) => xs.map((x) => (x.id === id ? fn(x) : x)));
+
+  /** Explicit `commit_change(title)` from a paired desktop agent. */
+  async function commitRemoteChange(title: string): Promise<ToolResult & { summary: string }> {
+    const g = r.git;
+    if (g?.connected) {
+      await g.idle();
+      await new Promise((res) => setTimeout(res, 500));
+      if (r.gone) return { error: true, text: "Project closed.", summary: "Project closed" };
+      if (!g.state?.dirty) {
+        return { text: "No changes to commit.", summary: `No changes to commit (${title})` };
+      }
+      try {
+        const onto = g.state.activeBranch;
+        const out = await g.commitChange(commitMessage(title), title);
+        r.remoteChanged = false;
+        r.remoteCmdRev = r.commandRev();
+        if (!out.changed) {
+          return { text: "No changes to commit.", summary: `No changes to commit (${title})` };
+        }
+        r.onTurnEnd(true);
+        const s = { ...g.state, ...(out.restacked ? { activeBranch: onto } : {}) };
+        const msg = out.joined
+          ? `The stack has ${out.change?.position} changes, its most: this change joined the top one, on ${s.activeBranch}.`
+          : out.change
+            ? `Committed as change ${out.change.position} of the stack, on ${s.activeBranch} (${out.sha.slice(0, 7)}).`
+            : `Committed to ${s.activeBranch} (${out.sha.slice(0, 7)}).`;
+        add({ kind: "notice", text: msg });
+        return { text: msg, summary: `Committed: ${title}` };
+      } catch (e) {
+        if (gitCode(e) === "moved") {
+          r.onStackStale();
+          const msg = `Not committed: ${errorMessage(e)}. Pull it in or carry on from it in Source control first.`;
+          add({ kind: "notice", text: msg, error: true });
+          return { error: true, text: msg, summary: `Commit failed: ${title}` };
+        }
+        const msg = `Couldn't commit to GitHub: ${errorMessage(e)}`;
+        add({ kind: "notice", text: msg, error: true });
+        return { error: true, text: msg, summary: `Commit failed: ${title}` };
+      }
+    }
+    await new Promise((res) => setTimeout(res, 500));
+    const changed = r.remoteChanged || r.commandRev() !== r.remoteCmdRev;
+    r.remoteChanged = false;
+    r.remoteCmdRev = r.commandRev();
+    if (changed) r.onTurnEnd(true);
+    const msg = changed
+      ? `Recorded local change "${title}" (project is not linked to GitHub).`
+      : `No file changes since last commit_change ("${title}").`;
+    add({ kind: "notice", text: msg });
+    return { text: msg, summary: `Committed: ${title}` };
+  }
+
+  const [dispatcher] = useState(() => createBridgeDispatcher({
+    tools,
+    commitChange: (title) => commitRemoteChange(title),
+    onEvent(ev) {
+      if (r.gone) return;
+      if (ev.type === "tool") {
+        const label = runningText(ev.name, ev.input);
+        const stepId = add({ kind: "step", state: "running", icon: STEP_ICON[ev.name] ?? "file", text: label });
+        r.remoteSteps.set(ev.id, stepId);
+        setWorking(`${label}…`);
+        setBridgeBusy(true);
+      } else if (ev.type === "tool-done") {
+        const stepId = r.remoteSteps.get(ev.id);
+        r.remoteSteps.delete(ev.id);
+        if (stepId !== undefined) {
+          update(stepId, (x) => ({ id: x.id, kind: "step", state: ev.error ? "error" : "ok", icon: ev.error ? "x" : STEP_ICON[ev.name] ?? "check", text: ev.summary, failed: ev.error }));
+        }
+        if (ev.name === "run_command" && !r.stopped) r.approved = false;
+        setStatus(ev.error ? `${ev.summary} (failed)` : ev.summary);
+        setBridgeBusy(dispatcher.busy);
+        if (!dispatcher.busy) setWorking("");
+      }
+    },
+    onCallEnd() {
+      for (const decline of r.approvals) decline();
+    },
+  }));
+
+  function startBridge(e: React.FormEvent) {
+    e.preventDefault();
+    const code = bridgeCode.trim();
+    if (!code || !token || r.busy || r.bridge) return;
+    setBridgeError("");
+    const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/workspace/relay`;
+    r.bridgeToken = token;
+    r.bridge = connectBridge({
+      wsUrl,
+      token,
+      code,
+      projectName: appName,
+      dispatcher,
+      onState(st) {
+        if (r.gone) return;
+        setBridgeState(st);
+        if (st.phase === "paired") {
+          r.remoteAgent = st.agent;
+          r.remoteChanged = false;
+          r.remoteCmdRev = r.commandRev();
+          setConnectOpen(false);
+          setBridgeCode("");
+          setBridgeError("");
+          r.onAgentChange(st.agent);
+          add({ kind: "notice", text: `Connected to ${st.agent}. Tool calls appear here; deploys still ask for your approval.` });
+          setStatus(`Connected to ${st.agent}`);
+        } else if (st.phase === "closed") {
+          const wasAgent = r.remoteAgent;
+          const hadUncommitted = !!wasAgent && (r.remoteChanged || r.commandRev() !== r.remoteCmdRev);
+          r.remoteAgent = null;
+          r.bridge = null;
+          r.bridgeToken = null;
+          setBridgeBusy(false);
+          setWorking("");
+          for (const decline of r.approvals) decline();
+          r.onAgentChange(null);
+          if (st.error) setBridgeError(st.error);
+          if (wasAgent) {
+            add({
+              kind: "notice",
+              text: hadUncommitted
+                ? `Disconnected from ${wasAgent}. Workspace changes since the last commit_change are kept locally (not committed).`
+                : `Disconnected from ${wasAgent}.`,
+            });
+            setStatus(`Disconnected from ${wasAgent}`);
+          }
+        }
+      },
+    });
+  }
 
   // Where focus goes in the chat: the message field.
   const chatFocus = () => inputRef.current?.focus();
@@ -329,8 +498,18 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
 
   useImperativeHandle(ref, () => ({
     running: () => tools.running > 0,
-    busy: () => r.busy,
-    turn: () => (r.busy && r.prompt ? { title: commitMessage(r.prompt), prompt: r.prompt } : null),
+    actor: () => r.remoteAgent ?? "Claude",
+    disconnectAgent: () => {
+      r.bridge?.disconnect();
+    },
+    busy: () => r.busy || dispatcher.busy,
+    turn: () => {
+      if (r.busy && r.prompt) return { title: commitMessage(r.prompt), prompt: r.prompt };
+      if (r.remoteAgent && (r.remoteChanged || r.commandRev() !== r.remoteCmdRev)) {
+        return { title: `Changes from ${r.remoteAgent}`, prompt: `Deployed by ${r.remoteAgent}` };
+      }
+      return null;
+    },
     focusIn: () => (sourceRef.current ? chatFocus() : setupFocus()),
     prefill(text) {
       setOpen(true, { focus: false });
@@ -367,7 +546,10 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     },
   }));
 
-  const setupShown = !source, credited = source === "credits";
+  const remotePaired = bridgeState?.phase === "paired";
+  const remotePending = bridgeState?.phase === "connecting" || bridgeState?.phase === "awaiting_approval";
+  const showFeed = !!source || remotePaired || items.length > 0;
+  const setupShown = !showFeed, credited = source === "credits";
   // The chat as turns: a request and what followed it (notices before the first request stand alone).
   type Turn = { user: Extract<Item, { kind: "user" }> | null; items: Item[] };
   const turns: Turn[] = [];
@@ -453,7 +635,19 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
       <div className="pane-head">
         <Icon name="sparkles" className="icon builder-mark" />
         <h2 id="builder-title" className="pane-title">Build with Claude</h2>
-        <button className="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat" disabled={busy} onClick={() => {
+        <button className="icon-btn" id="builder-connect" type="button"
+          aria-label="Connect desktop agent"
+          title={!token ? "Log in to connect a desktop agent" : remotePaired ? `Connected to ${bridgeState.agent}` : "Connect desktop agent (cresslet connect)"}
+          aria-expanded={connectOpen}
+          disabled={!token || busy || remotePaired || remotePending}
+          onClick={() => {
+            setConnectOpen((v) => !v);
+            setBridgeError("");
+            setTimeout(() => bridgeCodeRef.current?.focus(), 0);
+          }}>
+          <Icon name="link" />
+        </button>
+        <button className="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat" disabled={busy || bridgeBusy} onClick={() => {
           if (r.busy) return;
           // A new feature starts from the default branch: offer to go back to it (this branch stays on GitHub).
           const g = r.git, s = g?.connected ? g.state : undefined;
@@ -486,6 +680,45 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         </button>
       </div>
       <p className="sr-only" id="builder-status" role="status">{status}</p>
+      {remotePaired ? (
+        <div className="bridge-banner" id="bridge-connected" role="status">
+          <span className="bridge-banner-text"><Icon name="link" /><span>Connected to <strong>{bridgeState.agent}</strong></span></span>
+          <button className="btn sm" id="bridge-disconnect" type="button" onClick={() => r.bridge?.disconnect()}>Disconnect</button>
+        </div>
+      ) : null}
+      {bridgeState?.phase === "awaiting_approval" ? (
+        <div className="bridge-panel approval" id="bridge-approve-card">
+          <p><strong>{bridgeState.agent}</strong> wants to control <strong>{appName}</strong>.</p>
+          <p className="muted small">It can read and edit files and run commands in this project. Deploys still ask for your approval here.</p>
+          <div className="row start">
+            <button className="btn primary sm" id="bridge-allow" type="button" onClick={() => r.bridge?.decide(true)}>Allow</button>
+            <button className="btn sm" id="bridge-deny" type="button" onClick={() => r.bridge?.decide(false)}>Deny</button>
+          </div>
+        </div>
+      ) : connectOpen && !remotePaired ? (
+        <form className="bridge-panel" id="bridge-code-form" onSubmit={startBridge}>
+          <div className="field">
+            <label htmlFor="bridge-code">Pairing code from <code className="mono">cresslet connect</code></label>
+            <div className="row start">
+              <input id="bridge-code" ref={bridgeCodeRef} className="input mono" required placeholder="XXXX-XXXX" maxLength={16} autoComplete="off" autoCapitalize="characters" spellCheck={false}
+                disabled={bridgeState?.phase === "connecting"}
+                value={bridgeCode} onChange={(e) => {
+                  setBridgeCode(e.target.value);
+                  setBridgeError("");
+                }} />
+              <button className="btn primary sm" id="bridge-submit" type="submit" disabled={bridgeState?.phase === "connecting" || !bridgeCode.trim()}>
+                {bridgeState?.phase === "connecting" ? "Connecting…" : "Connect"}
+              </button>
+              <button className="btn sm" type="button" onClick={() => {
+                r.bridge?.disconnect();
+                setConnectOpen(false);
+                setBridgeError("");
+              }}>Cancel</button>
+            </div>
+          </div>
+          {bridgeError ? <p className="error small" id="bridge-error" role="alert">{bridgeError}</p> : null}
+        </form>
+      ) : null}
       <div id="builder-setup" className="builder-setup" hidden={!setupShown}>
         <p>Ask Claude to change this project. It edits files, runs commands in this tab's terminal and, when you ask, deploys with your session, like the CLI.</p>
         <div id="builder-credits-offer" className="builder-offer" hidden={!creditsOn || !!token}>
@@ -551,7 +784,10 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
           </ol>
         </div>
         <div className="working" id="builder-working" hidden={!working}><span className="spinner" aria-hidden="true" /><span id="builder-working-text">{working || "Working…"}</span></div>
-        <form id="builder-form" className="builder-form" ref={formRef} onSubmit={(e) => void send(e)}>
+        {remotePaired ? (
+          <p className="bridge-foot muted small">Controlled by {bridgeState.agent}. Disconnect to chat with built-in Claude.</p>
+        ) : (
+        <form id="builder-form" className="builder-form" ref={formRef} hidden={!source} onSubmit={(e) => void send(e)}>
           <label className="sr-only" htmlFor="builder-input">Message to Claude</label>
           <div className="composer">
             <textarea id="builder-input" ref={inputRef} rows={2} placeholder="Describe a change…"
@@ -584,10 +820,11 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
                 r.agent?.stop();
                 inputRef.current?.focus(); // the Stop button hides
               }}><Icon name="x" />Stop</button>
-              <button className="btn primary sm" id="builder-send" type="submit" disabled={busy} hidden={busy}><Icon name="arrow-up" />Send</button>
+              <button className="btn primary sm" id="builder-send" type="submit" disabled={busy || bridgeBusy} hidden={busy}><Icon name="arrow-up" />Send</button>
             </div>
           </div>
         </form>
+        )}
       </div>
     </section>
   );
