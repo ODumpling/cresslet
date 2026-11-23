@@ -1,8 +1,9 @@
 // /p/<id>: a project, as the Shipline: the AI builder's rail (what's live, the ship line, the changes not live yet and
 // the chat) beside a stage with the app's preview, its code, both side by side (Split), or the preview's database.
 // Two modes, one layout: Guided (light; preview and database, nothing to decode) and Studio (dark and dense; code,
-// Split, the terminal and deploy log in a dock, source control, a status bar). Guided's dock starts closed but opens on
-// request (the Terminal button, ⌘J). ⌘K runs any action. What was last shown is remembered in this browser.
+// Split, the terminal and deploy log in a dock, source control, a status bar). Both show the repo's branch (the topbar
+// pill). Guided's dock starts closed but opens on request (the Terminal button, ⌘J). ⌘K runs any action. What was last
+// shown is remembered in this browser.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
@@ -486,7 +487,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         <div className="topbar-right">
           {gitReady ? (
             gitState ? (
-              <button className="btn git-pill s-only" id="git-btn" type="button" title={`${gitState.owner}/${gitState.repo}`} onClick={() => gitDialog.current?.open()}>
+              <button className="btn git-pill" id="git-btn" type="button" title={`${gitState.owner}/${gitState.repo}`} onClick={() => gitDialog.current?.open()}>
                 <Icon name="branch" /><span id="git-btn-branch" className="mono">{gitState.activeBranch}</span>
                 {gitState.dirty ? <span className="git-dirty" aria-hidden="true" /> : null}
                 {upstreamMoved ? <span className="git-upstream" title={`${gitState.defaultBranch} was updated on GitHub`}>{`↓ ${gitState.defaultBranch}`}</span> : null}
