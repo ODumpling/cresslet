@@ -38,12 +38,13 @@ Artifacts: deploy a static HTML file or folder (studio **Artifacts**, or `cressl
 
 Templates: `react`, `vanilla`, and `tanstack-start` (TanStack Start SSR + server functions, email/password auth with `db` + `kv` sessions; CLI only: `cresslet new my-app --template tanstack-start`).
 
-Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`. Raw API: [docs/api.md](docs/api.md). Server also serves `/llms.txt`.
+Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`. A desktop agent (Claude Code, Codex, T3 Code) can build a project open in the studio through `cresslet connect` ([docs/live-link.md](docs/live-link.md)). Raw API: [docs/api.md](docs/api.md). Server also serves `/llms.txt`.
 
 ## Docs
 
 - [App format + server Env](docs/app-format.md)
 - [HTTP API](docs/api.md)
+- [Live Link: build in the studio from a desktop agent](docs/live-link.md)
 - [Architecture, isolation, roadmap](docs/architecture.md)
 - [Self-hosting](docs/self-hosting.md) (GitHub login, source control, env vars)
 - [Metadata database: SQLite or Postgres, migrations](docs/database.md)

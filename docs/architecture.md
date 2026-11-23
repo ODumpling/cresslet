@@ -114,7 +114,7 @@ Both ways:
 
 ### Live Link (`cresslet connect`)
 
-A desktop coding agent (Claude Code, Codex, T3 Code) can drive an open Studio project over stdio MCP without copying files out of the browser:
+A desktop coding agent (Claude Code, Codex, T3 Code) can drive an open Studio project over stdio MCP without copying files out of the browser (setup: [live-link.md](live-link.md)):
 
 ```
 desktop agent ──stdio MCP──> cresslet connect (CLI, CLI token)
