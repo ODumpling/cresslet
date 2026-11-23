@@ -65,15 +65,17 @@ try {
   // The app writing while the view is open: a failed sign-in in the (hidden) preview counts the attempt in kv, a table
   // the app hasn't made yet; the view lists it without being reloaded.
   if (await page.locator('#db-tables-pane button[data-table="_cresslet_kv"]').count()) throw new Error("kv table made before any kv write");
-  await (await previewFrame()).evaluate(() => (location.href = "/login"));
-  await frame.locator("form input[name=password]").waitFor({ state: "attached", timeout: 30000 });
+  // A client navigation (once the router is up): the form it renders is React's, its submit handler committed with it.
+  // (A server-rendered one may not be hydrated yet, and its submit would be the browser's own, calling nothing.)
   await (await previewFrame()).evaluate(async () => {
-    // hydrated first (React's handler on the form): before that, a submit is the browser's own, which calls no server function
-    const hydrated = () => Object.keys(document.querySelector("form")!).some((k) => k.startsWith("__reactProps"));
-    for (let i = 0; !hydrated(); i++) {
-      if (i > 150) throw new Error("the login form never hydrated");
+    for (let i = 0; !window.__TSR_ROUTER__; i++) {
+      if (i > 150) throw new Error("the preview's router never started");
       await new Promise((r) => setTimeout(r, 200));
     }
+    await window.__TSR_ROUTER__.navigate({ to: "/login" });
+  });
+  await frame.locator("form input[name=password]").waitFor({ state: "attached", timeout: 30000 });
+  await (await previewFrame()).evaluate(() => {
     const form = document.querySelector("form")!;
     (form.querySelector("input[name=email]") as HTMLInputElement).value = "nobody@example.com";
     (form.querySelector("input[name=password]") as HTMLInputElement).value = "wrong password";
@@ -81,7 +83,7 @@ try {
   });
   await page.locator('#db-tables-pane button[data-table="_cresslet_kv"]').waitFor({ timeout: 30000 });
   console.log("database view relisted on the app's write");
-  await (await previewFrame()).evaluate(() => (location.href = "/"));
+  await (await previewFrame()).evaluate(() => window.__TSR_ROUTER__.navigate({ to: "/" }));
   await page.getByRole("button", { name: "Preview", exact: true }).click();
   await frame.getByRole("heading", { name: "TanStack Start on Cresslet" }).waitFor({ timeout: 240000 });
   console.log("preview rendered");
