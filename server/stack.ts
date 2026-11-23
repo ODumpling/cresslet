@@ -745,7 +745,7 @@ async function atCommit(ctx: Ctx, c: StackChange) {
  * dismissed its approval).
  */
 export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
-  landed: ChangeView; sha: string; stack: string; deleted: string[]; next?: { change: string; pull: PullInfo | null }; pullErrors?: PullError[];
+  landed: ChangeView; sha: string; stack: string; deleted: string[]; next?: { change: string; pull: PullInfo | null }; pullErrors?: PullError[]; before?: boolean;
 }> {
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo, appId } = ctx;
@@ -759,6 +759,11 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
       // (Merged at another commit, say before a push since: that push isn't in the default branch.)
       if (p.headSha && p.headSha !== c.sha) throw new HttpError(409, `pull request #${p.number} was merged at another commit than change ${c.position}'s: what's on ${c.branch} since isn't in ${def} (carry on from it as a branch of its own)`, "merged_elsewhere");
       merged = p.mergeSha ?? await provider.branchHead(r, def) ?? c.sha;
+      // (Squashed or rebased on GitHub: the change's commit isn't in the default branch's history, so the next pull
+      // request would show it again.)
+      if (!await provider.contains(r, merged, c.sha)) {
+        throw new HttpError(409, `pull request #${p.number} was merged on GitHub without its commit (squashed or rebased): the stack can't carry on from it (Cresslet issue #127)`, "merged_elsewhere");
+      }
     } else {
       await atCommit(ctx, c);
       const methods = await provider.mergeMethods(r);
@@ -793,7 +798,7 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
     }
     return {
       landed: { ...view(c), github: "ok" }, sha: merged, stack: c.stack_name, deleted,
-      ...(next ? { next: { change: next.id, pull } } : {}), ...(pullErrors.length ? { pullErrors } : {}),
+      ...(next ? { next: { change: next.id, pull } } : {}), ...(pullErrors.length ? { pullErrors } : {}), ...(p?.merged ? { before: true } : {}),
     };
   });
 }

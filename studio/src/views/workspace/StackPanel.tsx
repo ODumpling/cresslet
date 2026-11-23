@@ -54,10 +54,10 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
             {aside ? <span className="sr-only"> (set aside)</span> : null}
             {here ? <span className="pill" data-s="here">workspace</span> : null}
             {c.github !== "ok" ? <span className="pill" data-s="warn">{c.github === "gone" ? "gone on GitHub" : "moved on GitHub"}</span> : null}
-            {!aside && on ? (
+            {!aside && (on || (guarded && c === bottom)) ? (
               <span className="stack-actions">
-                {c !== top ? <button className="btn sm" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button> : null}
-                {state.activeBranch === top.branch && (c !== top || stack.changes.length > 1) ? (
+                {on && c !== top ? <button className="btn sm" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button> : null}
+                {on && state.activeBranch === top.branch && (c !== top || stack.changes.length > 1) ? (
                   <button className="btn sm" type="button" disabled={busy} onClick={() => onUndo(c)} aria-label={`Undo change ${c.position}, ${c.title}`}>Undo</button>
                 ) : null}
                 {c !== stack.changes[0] && state.activeBranch === top.branch ? (

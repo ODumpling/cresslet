@@ -549,7 +549,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                     : p.review === "approved" ? ` Change ${next?.position} is the bottom now (approved).`
                     : ` Change ${next?.position} is the bottom now, waiting for review (an approval given before may have been dismissed when its pull request moved onto ${gitState.defaultBranch}).`;
                   toast(`Landed change ${change.position} in ${gitState.defaultBranch} @ ${r.sha.slice(0, 7)}.${then} Not deployed yet.${pullsSaid(r.pullErrors, "moved onto " + gitState.defaultBranch)}`, 15000);
-                }, (e) => toast(`Not landed: ${errorMessage(e)}`, 12000)).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+                }, (e) => toast((e as { landed?: unknown }).landed ? `${errorMessage(e)}.` : `Not landed: ${errorMessage(e)}`, 12000)).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
               onUpdate={(change) => {
                 const g = engine.current?.git;

@@ -53,6 +53,9 @@ function fakeProvider() {
     push(branch: string, files: Record<string, string>): string;
   } = {
     refs, commits, pulls, refuse, keep, guarded, failUpdate, comments, methods, unmergeable, status, gh,
+    async contains(_r: Repo, sha: string, of: string) {
+      return contains(sha, of);
+    },
     async mergeMethods() {
       return { ...methods };
     },
@@ -732,8 +735,12 @@ test("stack: on a protected default branch, Land next merges the bottom's pull r
   [s] = await readStacks(t.ctx);
   assert.deepEqual(s.changes.map((c) => c.position), [3]);
   // Merged on GitHub already, its branch deleted with it: recorded as landed (into main only).
-  const mergeSha = t.provider.push("main", { merged: "3" });
-  t.provider.push("main", { later: "x" }); // merged since: the landing is at its merge commit, not main's head
+  // (A merge commit on main holding change 3, then more merged since: the landing is at its merge commit.)
+  const squash = t.provider.push("main", { merged: "3" });
+  t.provider.refs.set("tmp", c3.sha);
+  const mergeSha = t.provider.push("tmp", { merged: "3" });
+  t.provider.refs.set("main", mergeSha);
+  t.provider.push("main", { later: "x" });
   Object.assign(pr[2], { base: c2.branch, state: "closed", merged: true, mergeSha, mergedHead: c3.sha });
   await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere");
   pr[2].base = "main";
@@ -741,6 +748,10 @@ test("stack: on a protected default branch, Land next merges the bottom's pull r
   pr[2].mergedHead = c2.sha;
   await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /another commit/.test((e as Error).message));
   pr[2].mergedHead = c3.sha;
+  // Squashed on GitHub (its commit not in main's history): not carried on from.
+  pr[2].mergeSha = squash;
+  await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /squashed or rebased/.test((e as Error).message));
+  pr[2].mergeSha = mergeSha;
   t.provider.refs.delete(c3.branch);
   const l3 = await landNext(t.ctx, c3.change.id);
   assert.equal(l3.sha, mergeSha);

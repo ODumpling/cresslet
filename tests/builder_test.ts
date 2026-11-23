@@ -486,6 +486,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       if (merge?.error) throw Object.assign(new Error(merge.error), { status: merge.status, code: merge.error, body: merge.body ?? {} });
       return merge ?? { mergedSha: "c".repeat(40), fastForward: true, treeChanged: false, branch: "main", deletedBranch: true };
     }
+    if (path.endsWith("/git/stack/land-next") && body.change === "chg_edit") rev.n++; // an edit while it lands
     if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } } };
     if (path.endsWith("/git/stack/update")) {
       if (body.change === "chg_edit") rev.n++; // an edit while it's on GitHub
@@ -747,6 +748,11 @@ test("git: Land next lands the bottom through its pull request (the workspace on
   const r = await g.git.landNext(bottom, "feat/s/3-three");
   assert.deepEqual([g.calls[0].body, r.next.pull.review], [{ change: "chg_1", sha: bottom.sha }, "pending"]);
   assert.equal(g.state.activeBranch, "main");
+  // An edit made while it lands: not overwritten (landed all the same, said).
+  const e = fakeGit({ onDefault: false });
+  e.state.activeBranch = bottom.branch;
+  await assert.rejects(e.git.landNext({ ...bottom, id: "chg_edit" }, "feat/s/3-three"), (x: Json) => x.landed?.sha === "e".repeat(40) && /landed in main, but main isn't loaded here/.test(x.message));
+  assert.deepEqual([e.state.activeBranch, e.hydrated], [bottom.branch, []]);
   // Changes not pushed on it: refused (its branch goes).
   const d = fakeGit({ onDefault: false });
   d.state.activeBranch = bottom.branch;

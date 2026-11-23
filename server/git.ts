@@ -98,6 +98,8 @@ export interface SourceControlProvider {
   branchProtection(r: Repo, branch: string): Promise<string | null>;
   /** Moves `branch` from `from` to `to`, a fast-forward (never forced). Moved meanwhile: 409 `conflict`. */
   moveBranch(r: Repo, branch: string, from: string, to: string): Promise<void>;
+  /** Whether `sha` holds `of` (it's `of`, or `of` is one of its ancestors). */
+  contains(r: Repo, sha: string, of: string): Promise<boolean>;
   /** The merge methods the repository allows for pull requests. */
   mergeMethods(r: Repo): Promise<{ merge: boolean; squash: boolean; rebase: boolean }>;
   /**
@@ -678,6 +680,12 @@ export class GitHub implements SourceControlProvider {
     await this.ok("POST", this.#path(r, `/issues/${number}/comments`), { body });
   }
 
+  async contains(r: Repo, sha: string, of: string) {
+    if (sha === of) return true;
+    const cmp = await this.ok<{ status: string }>("GET", this.#path(r, `/compare/${of}...${sha}`));
+    return cmp.status === "ahead" || cmp.status === "identical";
+  }
+
   async mergeMethods(r: Repo) {
     // (Not said, as for a user who can't push: allowed, and GitHub refuses at the merge if not.)
     const g = await this.ok<{ allow_merge_commit?: boolean; allow_squash_merge?: boolean; allow_rebase_merge?: boolean }>("GET", this.#path(r));
@@ -717,15 +725,18 @@ export class GitHub implements SourceControlProvider {
 
   /** A pull request with its review decision (latest review per reviewer) and its head's checks. */
   async #pullInfo(r: Repo, p: GhPull): Promise<PullInfo> {
-    const [reviews, checks] = await Promise.all([
+    const [reviews, checks, status] = await Promise.all([
       this.ok<{ user: { login: string } | null; state: string }[]>("GET", this.#path(r, `/pulls/${p.number}/reviews?per_page=100`)).catch(() => []),
       // Needs the GitHub App's Checks: read permission; without it, unknown rather than "none".
       this.ok<{ check_runs: { status: string; conclusion: string | null }[] }>("GET", this.#path(r, `/commits/${p.head.sha}/check-runs?per_page=100`)).catch(() => null),
+      // Commit statuses (the older kind of check, as some CI still reports).
+      this.ok<{ statuses?: { state: string }[] }>("GET", this.#path(r, `/commits/${p.head.sha}/status`)).catch(() => null),
     ]);
     const latest = new Map<string, string>();
     for (const x of reviews) if (x.user && x.state !== "COMMENTED") latest.set(x.user.login, x.state);
     const states = [...latest.values()];
-    const runs = checks?.check_runs ?? [];
+    // (A commit status as a check run: pending, or completed with its outcome.)
+    const runs = [...checks?.check_runs ?? [], ...(status?.statuses ?? []).map((x) => (x.state === "pending" ? { status: "queued", conclusion: null } : { status: "completed", conclusion: x.state }))];
     return {
       number: p.number, url: p.html_url, title: p.title, draft: !!p.draft, headSha: p.head.sha,
       review: states.includes("CHANGES_REQUESTED") ? "changes_requested" : states.includes("APPROVED") ? "approved" : "pending",
@@ -1349,7 +1360,8 @@ export function gitRoutes(
     const input = await body<{ change?: unknown; sha?: unknown } | null>(c) ?? {};
     if (typeof input.change !== "string") throw new HttpError(400, "change must be a change's id");
     const out = await landNext({ provider: client, store, appId: a.id, repo, r }, input.change, input.sha != null ? shaOf(input.sha, "sha") : undefined);
-    await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha }).catch((e) => console.error(e));
+    // (Merged here: the default branch is there now. One merged on GitHub before: a webhook may have said where since.)
+    if (!out.before) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha }).catch((e) => console.error(e));
     return c.json(out);
   });
   app.post("/apps/:name/git/stack/update", async (c) => {
