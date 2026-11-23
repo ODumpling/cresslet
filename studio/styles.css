@@ -406,8 +406,12 @@ a.deploy-link:hover { color: var(--accent-text); }
 .topbar-right .btn { min-height: 32px; padding: 4px 11px; }
 #builder-btn[aria-expanded="true"], #drawer-btn[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-text); }
 .git-pill .mono { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; }
-/* Short of room (the top bar wraps only at 900px and below): the PR pill drops its review and checks. */
-@media (max-width: 1279px) { .git-pr .small { display: none; } }
+/* Short of room (the top bar wraps only at 900px and below): a shorter branch, and the PR pill's review and checks
+   are for screen readers only. */
+@media (max-width: 1279px) {
+  .git-pill .mono { max-width: 8rem; }
+  .git-pr .small { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
 .git-dirty { width: 7px; height: 7px; border-radius: 50%; background: var(--draft); }
 .git-upstream { font: 600 11px var(--mono); color: var(--draft); background: var(--draft-soft); padding: 0 5px; border-radius: 5px; }
 .topbar .seg, .workspace .seg { flex: none; display: inline-flex; gap: 2px; padding: 2px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface-2); }

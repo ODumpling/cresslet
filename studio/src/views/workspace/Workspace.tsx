@@ -488,7 +488,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (deploy?.url) add("live", "Actions", "globe", "Open the live app", () => void open(deploy.url, "_blank", "noopener"));
     if (gitReady) add("git", "Actions", "branch", gitState ? "Source control" : "Connect Git", () => gitDialog.current?.open());
     add("mode", "Layout", studio ? "sparkles" : "code", studio ? "Switch to Guided" : "Switch to Studio", () => setMode(studio ? "guided" : "studio"), `${MOD}.`);
-    add("theme", "Layout", theme === "dark" ? "sun" : "moon", theme === "dark" ? "Switch to light theme" : "Switch to dark theme", toggleTheme);
+    add("theme", "Layout", "moon", "Toggle dark theme", toggleTheme);
     for (const v of VIEWS) if (v !== shown) add(`view-${v}`, "Layout", VIEW_ICON[v], `Show ${VIEW_LABEL[v]}`, () => setView(v));
     add("dock", "Layout", "terminal", dock ? "Hide the terminal" : "Show the terminal", () => setDrawer(!dock, { focus: !dock }), `${MOD}J`);
     for (const f of tree) if (!f.dir) add(`file-${f.path}`, "Files", "file", f.path, () => (shown !== "code" && shown !== "split" && setView("code"), void engine.current?.openFile(f.path)));
