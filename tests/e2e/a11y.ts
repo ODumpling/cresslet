@@ -81,8 +81,8 @@ try {
   await lp.route("**/v1/me", (r) => r.fulfill({ json: { account: { email, github: null, role: null } } }));
   await lp.route("**/v1/apps", (r) => r.fulfill({ json: { apps: [] } }));
   await lp.route("**/v1/me/invites", (r) => r.fulfill({ json: { invites: [] } }));
-  await lp.route("**/v1/orgs", (r) => r.fulfill({ json: { orgs: [] } })); // else its 401 logs the mocked token out
-  await lp.addInitScript(([e]) => { localStorage.setItem("cresslet.token", "clv_mocked"); localStorage.setItem("cresslet.email", e); }, [email]);
+  await lp.route("**/v1/orgs", (r) => r.fulfill({ json: { orgs: [] } })); // else its 401 logs the mocked session out
+  await lp.addInitScript(([e]) => { localStorage.setItem("cresslet.user", "mocked"); localStorage.setItem("cresslet.email", e); }, [email]);
   await lp.goto(base + "/");
   await lp.locator("#account-label").filter({ hasText: "@example.com" }).waitFor();
   const aw = await lp.evaluate(() => document.documentElement.scrollWidth);
@@ -132,7 +132,7 @@ try {
   await dup.route("**/v1/apps", (r) => r.fulfill({ json: { apps: [] } }));
   await dup.route("**/v1/me/tokens", (r) => r.fulfill({ json: { tokens: toks } }));
   await dup.route("**/v1/me/tokens/*", (r) => (toks = toks.filter((t) => !r.request().url().endsWith(`/${t.id}`)), r.fulfill({ json: {} })));
-  await dup.addInitScript(() => localStorage.setItem("cresslet.token", "clv_mocked"));
+  await dup.addInitScript(() => localStorage.setItem("cresslet.user", "mocked"));
   await dup.goto(base + "/settings/tokens");
   await dup.locator("#revoke-t1").focus();
   await dup.keyboard.press("Enter");

@@ -6,7 +6,7 @@ import { meta, mustLogIn } from "../lib/api.ts";
 import { focusView, navigated } from "../lib/focus.ts";
 import { ViewContext, type ViewInfo } from "../lib/hooks.ts";
 import { onProjectsChanged } from "../lib/projects.ts";
-import { finishLogin, logIn, refreshAccount, useLoginButton, useSession } from "../lib/session.ts";
+import { finishLogin, logIn, refreshAccount, useLoginButton, useMovingSession, useSession } from "../lib/session.ts";
 import { Toast } from "../lib/toast.tsx";
 import { Icon, Sprite, SrOnly } from "./icons.tsx";
 
@@ -25,6 +25,7 @@ export function Layout() {
   const [view, setViewState] = useState<ViewInfo>({ view: "" });
   const setView = useCallback((v: ViewInfo) => setViewState((o) => (o.view === v.view && o.nav === v.nav ? o : v)), []);
   const s = useSession();
+  const moving = useMovingSession();
   const login = useLoginButton();
   const navigate = useNavigate();
   const [credits, setCredits] = useState(false);
@@ -41,8 +42,8 @@ export function Layout() {
 
   // Role can change server-side, and the token can change under the page (another tab): load its account.
   useEffect(() => {
-    if (s.token && !s.accountId) void refreshAccount();
-  }, [s.token, s.accountId]);
+    if (s.user && !s.accountId) void refreshAccount();
+  }, [s.user, s.accountId]);
 
   // Recent projects (not when projects need a login this browser doesn't have).
   const inProject = view.view === "workspace";
@@ -59,7 +60,7 @@ export function Layout() {
       live = false;
       off();
     };
-  }, [inProject, s.token, href]);
+  }, [inProject, s.user, href]);
 
   // In-app navigation: the new view's heading gets focus (the first page load keeps the browser's own).
   const first = useRef(true);
@@ -94,7 +95,7 @@ export function Layout() {
               <NavLink to="/" nav="home" current={nav} icon="folder">Projects</NavLink>
               <NavLink to="/artifacts" nav="pages" current={nav} icon="file">Artifacts</NavLink>
               {s.orgs.length ? <NavLink to="/orgs" nav="orgs" current={nav} icon="users">Organizations</NavLink> : null}
-              {s.token ? <NavLink to="/settings" nav="settings" current={nav} icon="settings">Settings</NavLink> : null}
+              {s.user ? <NavLink to="/settings" nav="settings" current={nav} icon="settings">Settings</NavLink> : null}
             </ul>
             {recent.length ? (
               <div id="recent-wrap">
@@ -124,15 +125,15 @@ export function Layout() {
             </ul>
           </nav>
           <div className="sidebar-foot">
-            <button className="account" id="account-btn" type="button" onClick={() => (s.token ? navigate({ to: "/settings" }) : void logIn())}>
-              <Icon name={s.token ? "github" : login.icon} />
-              <span id="account-label">{s.token ? <>{s.email ?? "Account"}<SrOnly>: account settings</SrOnly></> : login.label}</span>
+            <button className="account" id="account-btn" type="button" onClick={() => (s.user ? navigate({ to: "/settings" }) : void logIn())}>
+              <Icon name={s.user ? "github" : login.icon} />
+              <span id="account-label">{s.user ? <>{s.email ?? "Account"}<SrOnly>: account settings</SrOnly></> : login.label}</span>
             </button>
           </div>
         </aside>
         <div className="content" id="content" tabIndex={-1}>
           <ViewContext value={setView}>
-            <Outlet />
+            {moving ? null : <Outlet />}
           </ViewContext>
         </div>
       </div>

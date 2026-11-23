@@ -8,7 +8,7 @@ import { randomInt } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
-import { type Config, rootUrl } from "./config.ts";
+import { type Config, rootUrl, sessionCookieValue } from "./config.ts";
 import { ipKey, RateLimit } from "./limits.ts";
 import { type Account, AccountDisabledError, ROLES, type Store, type Token } from "./store.ts";
 
@@ -254,7 +254,8 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
   }, tokenCheckMs);
   tokenTimer.unref();
 
-  function attachConnection(ws: WebSocket, ip: string, hasStudioOrigin: boolean) {
+  /** `studioSession`: the studio's session cookie (a studio-origin upgrade only): the studio's hello needs no token. */
+  function attachConnection(ws: WebSocket, ip: string, hasStudioOrigin: boolean, studioSession?: string) {
     alive.set(ws, true);
     ws.on("pong", () => alive.set(ws, true));
 
@@ -387,7 +388,7 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
         return sendErrorAndClose(ws, "rate_limited", "Too many connection attempts; wait a few minutes.", 4029);
       }
       if (ws.readyState !== WebSocket.OPEN) return;
-      const verified = await verifyToken(msg.token);
+      const verified = await verifyToken(msg.role === "studio" && studioSession ? studioSession : msg.token);
       if (ws.readyState !== WebSocket.OPEN) return;
       if (!verified) {
         return sendErrorAndClose(ws, "unauthorized", "Valid account-wide deploy or admin token required.", 4001);
@@ -507,8 +508,9 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
       return httpReject(socket, 429, "Too Many Requests");
     }
     const hasStudioOrigin = origin === studioOrigin;
+    const studioSession = hasStudioOrigin ? sessionCookieValue(cfg, req.headers.cookie) : undefined;
     wss.handleUpgrade(req, socket, head, (ws) => {
-      attachConnection(ws, ip, hasStudioOrigin);
+      attachConnection(ws, ip, hasStudioOrigin, studioSession);
     });
   }
 

@@ -268,7 +268,7 @@ export class Engine {
         : `deploy ${target ? `to ${target}` : "this project as a new app"}${g ? ` from ${g.defaultBranch}` : ""}`;
     };
     this.cresslet = createCresslet(c, {
-      auth: () => ({ token: session().token }),
+      user: () => session().user,
       project: () => project,
       onDeployed: async (r) => {
         const deploy: Deploy = project.deploy = { name: r.app.name, deployKey: r.deployKey ?? project.deploy?.deployKey, url: r.app.url };
@@ -302,7 +302,7 @@ export class Engine {
         }
         // Linked to a repository elsewhere (another browser, the CLI), not here: deploying this workspace would skip it.
         const name = app ?? project.deploy?.name;
-        const linked = name && session().token
+        const linked = name && session().user
           ? await api<{ repo?: { fullName: string } | null }>(`/v1/apps/${encodeURIComponent(name)}`).then((d) => d.repo, () => null)
           : null;
         if (linked) throw new Error(`${name} is linked to ${linked.fullName}, but this workspace isn't: open Source control (the branch button) to load it first`);

@@ -19,7 +19,7 @@ import { copyCommand, TEMPLATE_ICONS, Templates } from "../ui/templates.tsx";
 export function Home() {
   useView("home", "");
   useLayoutEffect(viewShown, []);
-  const { token } = useSession();
+  const { user } = useSession();
   const cliCmd = useRef<HTMLElement>(null);
   return (
     <main id="home" className="page" aria-labelledby="home-title">
@@ -43,7 +43,7 @@ export function Home() {
         </div>
         <Projects />
       </section>
-      {token ? <Shared key={token} /> : null}
+      {user ? <Shared key={user} /> : null}
       <section className="block" aria-labelledby="cli-label">
         <div className="panel split cli-panel">
           <div>

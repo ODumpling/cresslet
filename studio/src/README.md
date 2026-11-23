@@ -16,10 +16,10 @@ from `views/`. Code that isn't UI stays in the plain modules beside `src/` (`sto
 - **`useLoad(load, deps)`**: loads on mount and when `deps` change; only the latest result is shown, and nothing that
   resolves after the view is gone. `reload()` resolves `true` once the new data is in the page (it commits with
   `flushSync`), so a caller can move focus right after.
-- **`api<T>(path, init)`** (`lib/api.ts`): JSON in and out, the session's token sent; throws an `ApiError`
-  (`message`, `status`). A 401 for the session's token logs out and retries logged out (a 401 for a token the tab has since left is just thrown). `meta()`: `GET /v1`, once per page.
-- **`useSession()`** (`lib/session.ts`): `{ token, email, accountId, siteAdmin, orgs }`. Key a view's data on `token`
-  (pass it in `useLoad` deps, or `key={token}`) so another account's data never stays shown. `logIn(after?)` goes to
+- **`api<T>(path, init)`** (`lib/api.ts`): JSON in and out, with the session cookie while logged in; throws an `ApiError`
+  (`message`, `status`). A 401 for the session logs out and retries logged out (a 401 for a login the tab has since left is just thrown). `meta()`: `GET /v1`, once per page.
+- **`useSession()`** (`lib/session.ts`): `{ user, email, accountId, siteAdmin, orgs }` (`user`: the logged-in account's id as
+  stored at login; the credential is an HttpOnly cookie). Key a view's data on `user` (pass it in `useLoad` deps, or `key={user}`) so another account's data never stays shown. `logIn(after?)` goes to
   GitHub and comes back to `after` (a studio path, `/…`); `logOut()`.
 - **`toast(content, ms?)`** (`lib/toast.tsx`): the one toast. It stays open while hovered or focused (WCAG 2.2.1),
   Escape or × closes it, and it moves off the focused control (2.4.11). Form errors go beside their form instead

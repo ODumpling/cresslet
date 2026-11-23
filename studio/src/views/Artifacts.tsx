@@ -53,10 +53,10 @@ const upload = { active: false, gen: 0 };
 
 export function Artifacts() {
   useView("pages", "Artifacts");
-  const { token } = useSession();
+  const { user } = useSession();
   const login = useLoginButton();
   const dialog = useRef<DialogHandle>(null);
-  const list = useLoad(() => (token ? api<{ pages: API.Page[] }>("/v1/pages").then((r) => r.pages) : Promise.resolve(null)), [token]);
+  const list = useLoad(() => (user ? api<{ pages: API.Page[] }>("/v1/pages").then((r) => r.pages) : Promise.resolve(null)), [user]);
   const openDialog = () => dialog.current?.open();
   const pages = list.data;
   return (
@@ -66,9 +66,9 @@ export function Artifacts() {
           <h1 id="pages-title" tabIndex={-1}>Artifacts</h1>
           <p className="muted">Static HTML you share: one file, or a folder with an index.html. You choose who can open it and how long it's kept. Need a server, a database or rollback? Make a <Link to="/">project</Link> and deploy it as an app.</p>
         </div>
-        {token ? <button className="btn primary" id="page-new" type="button" aria-haspopup="dialog" onClick={openDialog}><Icon name="plus" />New artifact</button> : null}
+        {user ? <button className="btn primary" id="page-new" type="button" aria-haspopup="dialog" onClick={openDialog}><Icon name="plus" />New artifact</button> : null}
       </header>
-      {token ? (
+      {user ? (
         <section className="block first" id="pages-main">
           <div id="page-list" className="pages-list">
             {list.error ? <p className="error">Could not load artifacts: {list.error.message}</p>
@@ -94,7 +94,7 @@ export function Artifacts() {
           </div>
         </section>
       )}
-      {token ? <NewArtifactDialog key={token} ref={dialog} reload={list.reload} /> : null}
+      {user ? <NewArtifactDialog key={user} ref={dialog} reload={list.reload} /> : null}
     </main>
   );
 }
@@ -192,7 +192,7 @@ function PageRow({ p, reload }: { p: API.Page; reload: () => Promise<boolean> })
   /** New files at the same link: one HTML file, or a folder (all of the page's files are replaced). */
   async function replace(input: HTMLInputElement, folder: boolean) {
     if (!input.files?.length) return;
-    const account = session().token;
+    const account = session().user;
     try {
       let content;
       if (folder) {
@@ -200,7 +200,7 @@ function PageRow({ p, reload }: { p: API.Page; reload: () => Promise<boolean> })
         if (!files.some((x) => x.path === "index.html")) throw new Error("that folder has no index.html at its top level");
         content = await folderBody(files);
       } else content = { html: await input.files[0]!.text() }; // at least one (above)
-      if (session().token !== account) throw new Error("another account logged in meanwhile");
+      if (session().user !== account) throw new Error("another account logged in meanwhile");
       await api(`/v1/pages/${encodeURIComponent(page.name)}`, { method: "PUT", body: JSON.stringify({ ...content, source: "studio" }) });
       toast(`Replaced ${pageName(page)} (same link)`);
     } catch (e) {
@@ -378,7 +378,7 @@ function NewArtifactDialog({ ref, reload }: { ref: Ref<DialogHandle>; reload: ()
     const dlg = dlgRef.current!; // mounted
     const mine = ++upload.gen;
     const chosen = pick; // what was chosen when Deploy was pressed (the file inputs are disabled meanwhile)
-    const account = session().token;
+    const account = session().user;
     upload.active = true;
     flushSync(() => setBusy(true));
     try {
@@ -389,7 +389,7 @@ function NewArtifactDialog({ ref, reload }: { ref: Ref<DialogHandle>; reload: ()
       }
       const content = chosen.html ? { html: await chosen.html.text() } : await folderBody(chosen.files);
       // Left the page (or another account logged in) before it was sent: don't act on it. (Once sent, it finishes.)
-      if (session().token !== account) throw new Error("another account logged in meanwhile, so it wasn't deployed");
+      if (session().user !== account) throw new Error("another account logged in meanwhile, so it wasn't deployed");
       if (!alive.current || !dlg.open || leaving.current) throw new Error("you left the page before it was sent, so it wasn't deployed");
       const { page } = await api<{ page: API.Page }>("/v1/pages", {
         method: "POST",

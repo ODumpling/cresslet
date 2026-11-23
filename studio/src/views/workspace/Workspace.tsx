@@ -31,7 +31,7 @@ import { Engine, type TreeItem } from "./engine.ts";
 export function Workspace() {
   const { id } = useParams({ from: "/p/$id" });
   const navigate = useNavigate();
-  const { token } = useSession();
+  const { user } = useSession();
   const [project, setProject] = useState<StoredProject | null>(null);
   useEffect(() => {
     let live = true;
@@ -48,7 +48,7 @@ export function Workspace() {
       setProject((old) => (old?.id === p.id ? old : p));
     })();
     return () => void (live = false);
-  }, [id, token, navigate]);
+  }, [id, user, navigate]);
   useView("workspace", project ? project.name : null);
   return project?.id === id ? <ProjectWorkspace key={id} project={project} /> : <main id="workspace" className="workspace" aria-labelledby="workspace-title"><h1 className="sr-only" id="workspace-title" tabIndex={-1}>Project</h1></main>;
 }
@@ -147,7 +147,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const engine = useRef<Engine | null>(null);
   const previewBase = useRef<string | null>(null);
   const navigate = useNavigate();
-  const { token } = useSession();
+  const { user } = useSession();
   // The preview's database, through the running `cresslet dev` (null until the container is up).
   const runSql = useCallback<RunSql>(async (sql) => {
     const e = engine.current;
@@ -160,13 +160,13 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   // Logged out (or the session expired) on a server where projects need it: back to the landing page.
   useEffect(() => {
     let live = true;
-    if (!token) {
+    if (!user) {
       void mustLogIn().then((must) => {
         if (live && must) void navigate({ to: "/" });
       });
     }
     return () => void (live = false);
-  }, [token, navigate]);
+  }, [user, navigate]);
 
   const loadPreview = useCallback(() => {
     if (!previewBase.current || !iframe.current) return;
@@ -243,7 +243,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   useEffect(() => {
     const name = deploy?.name;
     setPull(null);
-    if (!gitState || !token || !name) return;
+    if (!gitState || !user || !name) return;
     let live = true;
     const check = () => {
       void api<API.AppDetail>(`/v1/apps/${encodeURIComponent(name)}`).then((d) => live && setUpstream(d.repo?.upstreamSha ?? null), () => {});
@@ -255,7 +255,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       live = false;
       clearInterval(t);
     };
-  }, [gitState?.owner, gitState?.repo, gitState?.activeBranch, token, deploy?.name, gitTick]);
+  }, [gitState?.owner, gitState?.repo, gitState?.activeBranch, user, deploy?.name, gitTick]);
   const upstreamMoved = !!gitState && !!upstream && ![gitState.baseSha, gitState.headSha, gitState.mergeParent].includes(upstream);
   // The app's stack (server/stack.ts): the one the workspace is on, else the newest open one. Read again when the
   // workspace moves (a turn committed a change) and with the checks above.
@@ -281,11 +281,11 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   }, [stack?.id, pulled, gitTick, gitState?.headSha]);
   useEffect(() => {
     const g = engine.current?.git;
-    if (!gitState || !token || !deploy?.name || !g) return setStack(null);
+    if (!gitState || !user || !deploy?.name || !g) return setStack(null);
     let live = true;
     void g.stacks().then((r) => live && setStack(r.current ?? r.stacks[0] ?? null), () => {});
     return () => void (live = false);
-  }, [gitState?.owner, gitState?.repo, gitState?.activeBranch, gitState?.headSha, token, deploy?.name, gitTick, upstream]); // (main moved: Update stack)
+  }, [gitState?.owner, gitState?.repo, gitState?.activeBranch, gitState?.headSha, user, deploy?.name, gitTick, upstream]); // (main moved: Update stack)
 
   // Back from connecting GitHub (server/git.ts redirects here with the outcome in the hash): once the project runs,
   // the dialog opens again where it left off.
@@ -434,7 +434,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     try {
       // A shared app you only view: say so before building (the API would refuse the upload).
       const target = project.deploy?.name;
-      if (target && session().token && !project.deploy!.deployKey) { // target: it has a deploy
+      if (target && session().user && !project.deploy!.deployKey) { // target: it has a deploy
         const info = await api<API.AppDetail>(`/v1/apps/${encodeURIComponent(target)}`).catch(() => null);
         if (info?.app.access === "viewer") throw new Error(`you're a viewer of ${target}: only its owner and admins can deploy it`);
       }
@@ -459,10 +459,10 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   }
 
   // Not live yet: the stack's changes when linked, else the requests that changed something since the last deploy.
-  const stackShown = !!(stack && gitState && gitOn && token);
+  const stackShown = !!(stack && gitState && gitOn && user);
   const pending = stackShown ? stack!.changes.length : turnsSince;
   const lastLine = deployLog.trimEnd().split("\n").at(-1) ?? "";
-  const gitReady = gitOn && !!token && !!container;
+  const gitReady = gitOn && !!user && !!container;
 
   // Shortcuts: ⌘K commands, ⌘. Guided/Studio, ⌘J the dock, ⌘B the AI builder.
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});

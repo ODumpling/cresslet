@@ -14,15 +14,15 @@ import { Icon } from "../ui/icons.tsx";
 
 export function CliLogin() {
   useView("cli-login", "Log in the CLI");
-  const { token } = useSession();
+  const { user } = useSession();
   const login = useLoginButton();
   const alive = useAlive();
-  // Name the account this session's token belongs to, and approve only with that same token. The session changed
+  // Name the account this session belongs to, and approve only while it's still the session. The session changed
   // meanwhile (another tab): this starts over with the current one.
-  const acct = useLoad(() => (token
-    ? api<{ account: API.Account }>("/v1/me").then((r) => ({ token, account: r.account, error: "" }), (e) => ({ token, account: null, error: errorMessage(e) }))
-    : Promise.resolve(null)), [token]);
-  const mine = acct.data?.token === token ? acct.data : null; // not the previous session's, while it reloads
+  const acct = useLoad(() => (user
+    ? api<{ account: API.Account }>("/v1/me").then((r) => ({ user, account: r.account, error: "" }), (e) => ({ user, account: null, error: errorMessage(e) }))
+    : Promise.resolve(null)), [user]);
+  const mine = acct.data?.user === user ? acct.data : null; // not the previous session's, while it reloads
   const account = mine?.account ?? null;
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
@@ -32,20 +32,20 @@ export function CliLogin() {
   useEffect(() => {
     setCode("");
     setError("");
-  }, [token]);
-  const done = !!token && doneFor === token;
+  }, [user]);
+  const done = !!user && doneFor === user;
 
   async function approve(e: FormEvent) {
     e.preventDefault();
-    if (!token || auth.token !== token) return; // another tab changed the session: the view follows it
+    if (!user || auth.user !== user) return; // another tab changed the session: the view follows it
     setBusy(true);
     try {
       await api("/v1/auth/cli/approve", json("POST", { userCode: code }));
       if (!alive.current) return;
-      flushSync(() => setDoneFor(token));
+      flushSync(() => setDoneFor(user));
       focusView();
     } catch (err) {
-      if (!alive.current || !auth.token) return; // session expired: the view offers the login
+      if (!alive.current || !auth.user) return; // session expired: the view offers the login
       flushSync(() => setError(`Could not authorize: ${errorMessage(err)}`));
       codeInput.current?.focus();
     } finally {
@@ -53,7 +53,7 @@ export function CliLogin() {
     }
   }
 
-  const text = !token ? "Log in to let the Cresslet CLI use your account."
+  const text = !user ? "Log in to let the Cresslet CLI use your account."
     : done ? "CLI logged in. You can close this tab and go back to your terminal."
     : mine?.error ? `Could not load your account: ${mine.error}`
     : account ? `Enter the code that cresslet auth login shows in your terminal. The CLI gets full access to ${account.github ?? account.email}. Only enter a code from a terminal you're using.`
@@ -80,7 +80,7 @@ export function CliLogin() {
         <div className="row start"><button className="btn primary" id="cli-login-approve" type="submit" disabled={busy}>Authorize CLI</button></div>
       </form>
       <div className="row start" id="cli-login-actions">
-        {token ? null : <button className="btn primary" type="button" onClick={() => void logIn("/cli")}><Icon name={login.icon} />{login.label}</button>}
+        {user ? null : <button className="btn primary" type="button" onClick={() => void logIn("/cli")}><Icon name={login.icon} />{login.label}</button>}
       </div>
     </main>
   );

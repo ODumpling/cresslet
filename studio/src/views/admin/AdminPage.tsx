@@ -32,16 +32,16 @@ export function AdminPage({ title, sub = "", actions, children }: { title: React
 const firstAction = () => document.querySelector<HTMLElement>("#admin-actions button");
 
 /**
- * A page's data, loaded for the logged-in account (logged out: to the home page). Keyed on the session token, so
+ * A page's data, loaded for the logged-in account (logged out: to the home page). Keyed on the logged-in account, so
  * another account's data is never shown.
  */
 export function useAdminLoad<T>(load: () => Promise<T>, deps: DependencyList = []): Loaded<T> {
-  const { token } = useSession();
+  const { user } = useSession();
   const navigate = useNavigate();
   useEffect(() => {
-    if (!token) void navigate({ to: "/", replace: true });
-  }, [token, navigate]);
-  return useLoad(() => (token ? load() : new Promise<T>(() => {})), [token, ...deps]);
+    if (!user) void navigate({ to: "/", replace: true });
+  }, [user, navigate]);
+  return useLoad(() => (user ? load() : new Promise<T>(() => {})), [user, ...deps]);
 }
 
 /** After a change: load again, then (if the page is still here) move focus to `focus()`, else its twin or the heading. */

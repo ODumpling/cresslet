@@ -278,7 +278,7 @@ test("AI builder on credits: the studio's agent loop through the real endpoint w
     t.replies.push(t.streamed(sse("claude-opus-5-5", { input_tokens: 100, output_tokens: 1 }, { output_tokens: 50 }, "Done.")));
     const events: { type: string; text?: string; delta?: string }[] = [];
     const agent = createAgent({
-      client: () => creditsClient(tok, origin),
+      client: () => creditsClient({ token: tok }, origin),
       errorText: (e: unknown) => errorText(e, { credits: true }),
       tools: { execute: async () => ({ text: "" }) },
       on: (e: { type: string }) => events.push(e),
@@ -302,7 +302,7 @@ test("AI builder on credits: the studio's agent loop through the real endpoint w
 
     // A session that's gone: says to log in again.
     const gone = createAgent({
-      client: () => creditsClient("clv_acct_revoked", origin),
+      client: () => creditsClient({ token: "clv_acct_revoked" }, origin),
       errorText: (e: unknown) => errorText(e, { credits: true }),
       tools: { execute: async () => ({ text: "" }) },
       on: (e: { type: string }) => events.push(e),

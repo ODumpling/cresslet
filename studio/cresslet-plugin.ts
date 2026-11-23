@@ -168,7 +168,8 @@ export interface Target {
 }
 
 export interface CressletOptions {
-  auth: () => { token?: string | null };
+  /** The account logged in to the studio (its id): deploys go with its session cookie (else only a deploy key). */
+  user?: () => string | null;
   project: () => Pick<Project, "deploy"> | null | undefined;
   onDeployed?: (r: DeployResult) => void;
   builderRunning?: () => boolean;
@@ -332,8 +333,6 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       files.push({ path: rel, data: toBase64(typeof bytes === "string" ? enc.encode(bytes) : bytes), encoding: "base64" });
     }
     const headers: Record<string, string> = { "content-type": "application/json" };
-    const token = opts.auth().token;
-    if (token) headers.authorization = `Bearer ${token}`;
     if (target.deployKey) headers["x-cresslet-deploy-key"] = target.deployKey;
     // Project source too, so the CLI (`cresslet pull`) or another browser can open it. Never local secrets.
     const sources = await projectSources(c);
@@ -351,12 +350,15 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       sources,
       ...(git ? { git } : {}),
     };
-    let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload), signal });
+    const user = opts.user?.();
+    if (user) headers["x-cresslet-user"] = user; // the account the tab shows (server/api.ts)
+    const credentials: RequestCredentials = user ? "same-origin" : "omit";
+    let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload), signal, credentials });
     // An error from a proxy in front of the server may not be JSON: then the status says it.
     let body: DeployResult & { error?: string; message?: string } = await res.json().catch(() => ({}));
     if (res.status === 413 && body?.error === "body_too_large" && sources.length) {
       log("warning: project source omitted (request exceeded server upload limit)");
-      res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }), signal });
+      res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }), signal, credentials });
       body = await res.json().catch(() => ({}));
     }
     if (!res.ok) throw new Error(body.message ?? `deploy failed (${res.status})`);

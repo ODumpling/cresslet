@@ -13,14 +13,14 @@ export function PrivateView() {
   useView("view", "Private artifact");
   const { name } = useParams({ from: "/view/$name" });
   const { path } = useSearch({ from: "/view/$name" });
-  const { token } = useSession();
+  const { user } = useSession();
   const login = useLoginButton();
   const [state, setState] = useState<State>({ text: "Opening…", action: null });
   const [attempt, setAttempt] = useState(0); // Try again
   const key = `cresslet.view.${name}`;
 
   useEffect(() => {
-    if (!token) return;
+    if (!user) return;
     let live = true;
     // A browser that drops the page's cookie would bounce between here and the page forever.
     let tries: number[] = [];
@@ -46,9 +46,9 @@ export function PrivateView() {
       });
     });
     return () => void (live = false);
-  }, [token, name, path, key, attempt]);
+  }, [user, name, path, key, attempt]);
 
-  const text = token ? state.text : "This artifact is private. Log in to open it, if its owner shared it with you.";
+  const text = user ? state.text : "This artifact is private. Log in to open it, if its owner shared it with you.";
   return (
     <main id="view" className="page narrow" aria-labelledby="view-title">
       <header className="page-head">
@@ -58,7 +58,7 @@ export function PrivateView() {
         </div>
       </header>
       <div className="row start" id="view-actions">
-        {!token ? <button className="btn primary" type="button" onClick={() => void logIn(location.pathname + location.search)}><Icon name={login.icon} />{login.label}</button>
+        {!user ? <button className="btn primary" type="button" onClick={() => void logIn(location.pathname + location.search)}><Icon name={login.icon} />{login.label}</button>
           : state.action === "retry" ? (
             <button className="btn" type="button" onClick={() => {
               try {

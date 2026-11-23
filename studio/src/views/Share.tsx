@@ -22,14 +22,14 @@ const appPath = (name: string, rest = "") => `/v1/apps/${encodeURIComponent(name
 
 export function Share() {
   const { name } = useParams({ from: "/share/$name" });
-  const { token } = useSession();
+  const { user } = useSession();
   const navigate = useNavigate();
   useView("share", `Share ${name}`);
   useEffect(() => {
-    if (!token) void navigate({ to: "/", replace: true });
-  }, [token, navigate]);
+    if (!user) void navigate({ to: "/", replace: true });
+  }, [user, navigate]);
   // Another app's page (or account) starts afresh: its form, its updates in flight.
-  return token ? <SharePage key={`${token}\n${name}`} name={name} /> : null;
+  return user ? <SharePage key={`${user}\n${name}`} name={name} /> : null;
 }
 
 function SharePage({ name }: { name: string }) {

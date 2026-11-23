@@ -25,15 +25,16 @@ try {
   const frame = page.frameLocator("#preview");
   await frame.getByRole("heading", { name: "Todos" }).waitFor({ timeout: 120000 });
   console.log("preview rendered");
-  // Previews run on their own origin: preview code can't read the studio's storage (API token).
+  // Previews run on their own origin: preview code can't read the studio's storage (an Anthropic key), nor act with
+  // its session (the same site: its requests carry the cookie, the server refuses it from there).
   const { previewOrigin } = await (await fetch(base + "/v1")).json();
   const src = await page.locator("#preview").getAttribute("src");
   if (!previewOrigin || !src!.startsWith(previewOrigin)) throw new Error(`preview not on the preview origin: ${src}`);
-  await page.evaluate(() => localStorage.setItem("cresslet.token", "clv_acct_studio_secret"));
+  await page.evaluate(() => localStorage.setItem("cresslet.anthropicKey", "sk-ant-studio-secret"));
   const pf = (await (await page.locator("#preview").elementHandle())!.contentFrame())!; // the preview frame (shown)
-  const [origin, seen] = await pf.evaluate(() => [location.origin, localStorage.getItem("cresslet.token")]);
+  const [origin, seen] = await pf.evaluate(() => [location.origin, localStorage.getItem("cresslet.anthropicKey")]);
   if (origin !== previewOrigin) throw new Error(`preview frame origin ${origin} ≠ ${previewOrigin}`);
-  if (seen !== null) throw new Error("preview could read the studio's token");
+  if (seen !== null) throw new Error("preview could read the studio's storage");
   // Sandboxed: no top-level navigation (e.g. to a studio-origin blob: URL) and no popups.
   const before = page.url();
   const [topNav, popup] = await pf.evaluate(() => {
@@ -56,14 +57,25 @@ try {
     setTimeout(() => r(null), 3000);
   }));
   const blob = await page.evaluate(() => URL.createObjectURL(new Blob(
-    ["<script>parent.postMessage('token=' + localStorage.getItem('cresslet.token'), '*')</script>"], { type: "text/html" })));
+    ["<script>parent.postMessage('token=' + localStorage.getItem('cresslet.anthropicKey'), '*')</script>"], { type: "text/html" })));
   await Promise.race([pf.evaluate((u) => { location.href = u; }, blob).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   const got = await leaked;
-  if (got && got.includes("clv_acct_studio_secret")) throw new Error("studio-origin blob URL ran with the studio's origin inside the preview frame");
+  if (got && got.includes("sk-ant-studio-secret")) throw new Error("studio-origin blob URL ran with the studio's origin inside the preview frame");
   if ((await pf.evaluate(() => location.origin)) !== previewOrigin) throw new Error("preview frame left the preview origin");
+  await page.evaluate(() => localStorage.removeItem("cresslet.anthropicKey"));
   // Logged in for real from here: deploying needs an account.
   const deployer = await newAccount(`deployer-${Date.now()}@example.com`);
-  await page.evaluate((t) => localStorage.setItem("cresslet.token", t), deployer.token);
+  await page.evaluate(async (t) => { // as a login does: the session cookie, and the studio told who's logged in
+    const r = await fetch("/v1/auth/session", { method: "POST", headers: { authorization: `Bearer ${t}` } });
+    localStorage.setItem("cresslet.user", (await r.json()).account.id);
+  }, deployer.token);
+  // The preview's page sends the studio a request that would make a token (no-cors: it goes, with the cookie): refused.
+  // The same request from the studio's page makes one (so the refusal is the origin's).
+  const mint = ([root, name]: string[]) => fetch(root + "/v1/me/tokens", { method: "POST", mode: "no-cors", credentials: "include", body: JSON.stringify({ name }) }).then(() => {}, () => {}); // the preview's COEP blocks the answer, not the request
+  await pf.evaluate(mint, [base, "from-preview"]);
+  await page.evaluate(mint, [base, "from-studio"]);
+  const minted = (await (await fetch(base + "/v1/me/tokens", { headers: { authorization: `Bearer ${deployer.token}` } })).json()).tokens.map((t: { name: string }) => t.name);
+  if (minted.includes("from-preview") || !minted.includes("from-studio")) throw new Error(`the preview acted with the studio's session (tokens: ${minted})`);
   console.log("preview isolated on", previewOrigin);
   await frame.getByPlaceholder("Add a todo").fill("from studio");
   await frame.getByRole("button", { name: "Add" }).click();
