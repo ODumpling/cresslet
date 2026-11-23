@@ -210,17 +210,19 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
   }));
 
   /** `snap`: files already read (and the revision before), to commit exactly those. */
-  async function syncNow(message: string, snap?: { files: GitFile[]; rev: number }): Promise<{ sha: string; changed: boolean; files: GitFile[]; restacked?: Restacked }> {
+  async function syncNow(message: string, snap?: { files: GitFile[]; rev: number }, signal?: AbortSignal): Promise<{ sha: string; changed: boolean; files: GitFile[]; restacked?: Restacked }> {
+    signal?.throwIfAborted();
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
     // An undo being finished is a change of its own (its title, its markers checked), never a commit onto the top.
     if (s.undo && !s.mergeParent) {
       // (Landed or carried on from in another browser: no stack to put it on.)
       if (snap) throw Object.assign(new Error(`${s.activeBranch} isn't a stack's top any more, so the undo held here can't be committed: pull the branch to drop it`), { code: "stack_gone" });
-      return changeNow(message, "", false);
+      return changeNow(message, "", false, signal);
     }
     const rev = snap?.rev ?? revision(); // before the snapshot: a change after it keeps the workspace dirty
     const files = snap?.files ?? await o.files();
+    signal?.throwIfAborted();
     // A merge being resolved: not committed while a conflicted file still has its markers.
     const left = markersLeft(s.conflicts ?? [], files);
     if (left.length) throw Object.assign(new Error(`resolve the merge conflicts first (markers left in ${left.join(", ")})`), { code: "conflicts_left" });
@@ -295,15 +297,17 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
    * the edits kept.
    */
   /** `submit: false`: a change made on the way somewhere (going back, deploying): the app's auto-submit skips it. */
-  async function changeNow(title: string, prompt: string, submit = true): Promise<{
+  async function changeNow(title: string, prompt: string, submit = true, signal?: AbortSignal): Promise<{
     sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string };
     submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean; restacked?: Restacked;
   }> {
+    signal?.throwIfAborted();
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
-    if (s.mergeParent) return syncNow(title);
+    if (s.mergeParent) return syncNow(title, undefined, signal);
     const rev = revision();
     const files = await o.files();
+    signal?.throwIfAborted();
     // An undo being finished: its title, and not while its conflicts have markers left.
     if (s.undo) {
       const left = markersLeft(s.undo.conflicts, files);
@@ -317,7 +321,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       r = await post("/stack", { from: s.activeBranch, baseSha: s.headSha, files, title, prompt, ...(submit ? {} : { submit: false }) });
     } catch (e) {
       if (gitCode(e) !== "not_on_stack") throw e; // not_on_top: kept here (the stack has changes above this one)
-      return syncNow(title, { files, rev }); // what was read: an edit since stays here
+      signal?.throwIfAborted();
+      return syncNow(title, { files, rev }, signal); // what was read: an edit since stays here
     }
     if (!r.changed || !r.branch) {
       await set({ dirty: revision() !== rev, undo: undefined });
@@ -657,7 +662,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     /** Resolves once the steps queued so far have run (the AI builder sends a request on the workspace they leave). */
     idle: () => serial(async () => {}),
     /** Commits the workspace as a new change of the app's stack (see changeNow). */
-    commitChange: (title: string, prompt = "") => serial(() => changeNow(title, prompt)),
+    commitChange: (title: string, prompt = "", signal?: AbortSignal) => serial(() => changeNow(title, prompt, true, signal)),
     /** The app's open stacks, newest first, and the one the workspace is on (its active branch is one of its changes). */
     stacks: async () => {
       const r0 = await o.api<{ defaultBranch: string; protected?: string | null; stacks: Stack[] }>(path("/stack"));

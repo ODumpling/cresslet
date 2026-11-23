@@ -30,6 +30,8 @@ export interface Callbacks {
   deployed(d: Deploy): void;
   /** The AI builder: whether one of its commands runs, and asking the user to approve a deploy. */
   builderRunning(): boolean;
+  /** Who is currently driving the builder (built-in "Claude", or a connected desktop agent). */
+  builderActor?(): string;
   /**
    * The request it's working on: a deploy while one of its commands runs commits that turn as a change first (one
    * started by hand meanwhile too: the turn's edits are in it).
@@ -277,9 +279,9 @@ export class Engine {
         }
         cb.deployed(deploy);
       },
-      // `cresslet deploy` in a command the AI builder started: the user says yes first.
+      // `cresslet deploy` in a command the AI builder (or a connected desktop agent) started: the user says yes first.
       builderRunning: () => cb.builderRunning(),
-      approveDeploy: (target, signal) => cb.approveDeploy(`Claude wants to ${deploying(target)}. It goes live at once.`, signal),
+      approveDeploy: (target, signal) => cb.approveDeploy(`${cb.builderActor?.() ?? "Claude"} wants to ${deploying(target)}. It goes live at once.`, signal),
       // `cresslet deploy` from the terminal or the project's own code (which runs as it opens): the user types "deploy"
       // to say yes, so an Enter meant for something else (the editor, the terminal) can't. Once declined, the rest are
       // refused until the project is opened again: code that keeps asking gets one try. The Deploy button still deploys.

@@ -18,6 +18,7 @@ import { pruneOldPageVersions } from "./deploys.ts";
 import { settled as sandboxSettled } from "./sandbox.ts";
 import { bindingsSettled } from "./bindings.ts";
 import { type Cluster, singleNode } from "./cluster.ts";
+import { createRelay } from "./relay.ts";
 
 const RETIRE_SW = `self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil((async () => {
@@ -48,6 +49,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
   const control = api(cfg, store, runtime, cluster, scheduler);
   const serveApp = host(cfg, store, runtime);
   const upgradeApp = upgrader(cfg, store, runtime);
+  const relay = createRelay(cfg, store);
   const suffix = "." + cfg.domain;
   const shadowed = previewAppName(cfg);
   if ((shadowed && await store.appByName(shadowed)) || await store.appByDomain(cfg.previewHost)) {
@@ -136,12 +138,22 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
     return res ?? RESPONSE_ALREADY_SENT;
   }
 
-  /** `upgrade` event of the HTTP server: WebSockets to app servers. */
+  /** `upgrade` event of the HTTP server: workspace relay on the root host, and WebSockets to app servers. */
   function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer) {
     // Node detaches its own error handler before emitting `upgrade`: install ours first.
     socket.on("error", () => socket.destroy());
     const hostname = normDomain((req.headers.host ?? "").replace(/:\d+$/, ""));
     if (hostname === cfg.previewHost) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+    if (hostname === cfg.domain) {
+      let pathname = "";
+      try {
+        pathname = new URL(req.url ?? "/", "http://x").pathname;
+      } catch {
+        return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+      }
+      if (pathname === "/v1/workspace/relay") return relay.upgrade(req, socket, head);
+      return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+    }
     void (async () => {
       let name = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : "";
       const custom = !name && hostname !== cfg.domain ? await store.appByDomain(hostname) : undefined;
@@ -156,6 +168,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
   return {
     cfg,
     upgrade,
+    relay,
     store,
     runtime,
     scheduler,
@@ -163,6 +176,7 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
     handler,
     async close() {
       clearInterval(reaper);
+      relay.close();
       await ui.close();
       scheduler.stop();
       runtime.close();

@@ -112,6 +112,21 @@ Both ways:
 - Every project runs as it opens (`npm install && cresslet dev` in its terminal), one opened from a deployed app (**Open in studio**) too, ready to work on. Its code isn't vouched for (a collaborator, whoever holds the deploy key or can push to the repository may have written it): what keeps it from the studio's token and storage is the preview origin (above), and it can't deploy on its own: a `cresslet deploy` in the terminal, typed or run by the project's scripts, goes ahead only when the user types `deploy` in the dialog it opens (an Enter alone refuses it; the Deploy button doesn't ask), and once refused the rest are too until the project is opened again, and its files (an `AGENTS.md`, say) can carry instructions for the model, which is why deploys the builder starts need the user's yes too.
 - The conversation lives in the page (a reload or **New chat** starts over). The SDK bundle (`studio/vendor/anthropic.js`, from `scripts/vendor`) loads on the first message.
 
+### Live Link (`cresslet connect`)
+
+A desktop coding agent (Claude Code, Codex, T3 Code) can drive an open Studio project over stdio MCP without copying files out of the browser:
+
+```
+desktop agent ──stdio MCP──> cresslet connect (CLI, CLI token)
+   ──WebSocket──> server /v1/workspace/relay (stateless JSON frame relay, same-account pairing)
+   ──WebSocket──> studio tab (studio/mcp-bridge.ts) ──> builder tools.execute() ──> container
+```
+
+- **Same-account pairing:** `cresslet connect` authenticates with an account-wide `deploy` or `admin` token (never `read` tokens, app-scoped tokens, or deploy keys) and receives a short one-time code (`XXXX-XXXX`, 5-minute TTL, rate-limited). The user enters the code in the project tab's **Connect agent** panel and explicitly clicks **Allow** on `"<agent> wants to control <project>"` (with an always-visible **Disconnect** button in the builder banner and topbar). The server (`server/relay.ts`) pairs the CLI and Studio sockets only when both belong to the same enabled account, re-checks token liveness on approval and periodically while paired, and requires the Studio's canonical `Origin` on Studio sockets.
+- **Same tools and guards:** [`studio/mcp-bridge.ts`](../studio/mcp-bridge.ts) reuses the 7 tool definitions from `studio/builder.ts` and dispatches them through the same `tools.execute()` instance in the Studio's top frame (never on the preview origin), plus an explicit `commit_change(title)` tool that ends a turn and commits a stack change on GitHub-linked apps through `git.commitChange()`. File tools keep their project-relative and local-secrets (`.env*`, `.envrc`, `.dev.vars`) guards; `run_command` keeps its 120 s timeout and `CRESSLET_AI_BUILDER=1` / `tools.running` markers, so `cresslet deploy` still requires **Approve deploy** in the tab and cannot be bypassed over MCP. As with the built-in AI builder, `run_command` runs in the user's container shell, so pairing grants trusted workspace execution for that one project tab.
+- **Activity and isolation:** Tool calls appear live in the AI builder pane (even when no browser Anthropic key or AI credits are configured), and preview-origin isolation is unchanged (`/v1/workspace/relay` is served only on the root host, never on `preview.<domain>`).
+- **Single-node limit:** Like CLI login and GitHub OAuth state, pending codes and active relay pairs live in memory on one server process (`server/relay.ts`). Multi-node relay routing is out of scope for v1.
+
 ## Scaling out
 
 v1 runs one server process. [`server/cluster.ts`](../server/cluster.ts) is the seam a second node would plug into; the default (`singleNode`) owns every app, so nothing changes until another implementation is passed to `createServer`.
@@ -126,7 +141,7 @@ What is node-local today:
 | Logs | `Logs`: in-memory ring buffer per app |
 | Crons, reaping (expired and long-deleted apps) | timers in this process |
 | Hourly abuse limits (new apps and pages, deploys), password login tries | `rate_hits` in the metadata database |
-| CLI login limits, GitHub OAuth state and exchange codes | in memory |
+| CLI login limits, GitHub OAuth state and exchange codes, workspace relay sessions | in memory |
 
 Design: app affinity. Each app has one owner node. The owner holds `data/apps/<appId>/`, runs the sandbox, keeps the app's logs, fires its crons and reaps it. Any node takes any request; one for an app it doesn't own goes to the owner unchanged, and the owner answers it with today's code. `Runtime`, `Logs`, `Scheduler` and `host.ts` stay node-local. Forwarding whole requests, rather than sandbox calls, keeps static files, logging and the per-app deploy limit on the owner, and avoids sending `AppSpec` (it carries closures over the store).
 
