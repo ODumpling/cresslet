@@ -68,13 +68,25 @@ function fakeProvider() {
     async mergeMethods() {
       return { ...methods };
     },
-    async mergePull(_r: Repo, n: number, input: { sha: string; title: string }) {
+    async commitParents(_r: Repo, sha: string) {
+      const c = commits.get(sha)!;
+      return [c.parent, c.parent2].filter((x): x is string => !!x);
+    },
+    async syncCommit(_r: Repo, input: { branch: string; from: string; with: string; message: string }) {
+      if (refs.get(input.branch) !== input.from) throw new HttpError(409, `${input.branch} moved on GitHub meanwhile: try again`, "conflict");
+      const sha = make(new Map(commits.get(input.from)!.files), input.from);
+      commits.get(sha)!.parent2 = input.with;
+      refs.set(input.branch, sha);
+      return sha;
+    },
+    async mergePull(_r: Repo, n: number, input: { sha: string; title: string; method?: "merge" | "squash" }) {
       const x = pullOf(n);
       if (x.state !== "open") throw new HttpError(409, `GitHub didn't merge pull request #${n}: Pull Request is not mergeable`, "merge_refused");
       if (unmergeable.has(n)) throw new HttpError(409, `GitHub didn't merge pull request #${n}: ${unmergeable.get(n)}`, "merge_refused");
       if (refs.get(x.head) !== input.sha) throw new HttpError(409, `GitHub didn't merge pull request #${n}: Head branch was modified. Review and try the merge again.`, "merge_refused");
-      // A merge commit: the head's files, on the head (this fake's commits have one parent).
-      const sha = make(new Map(commits.get(input.sha)!.files), input.sha);
+      // A merge commit: the head's files, on the base and the head. Squashed: the head's files, on the base only.
+      const sha = make(new Map(commits.get(input.sha)!.files), refs.get(x.base) ?? null);
+      if (input.method !== "squash") commits.get(sha)!.parent2 = input.sha;
       refs.set(x.base, sha);
       Object.assign(x, { state: "closed", merged: true, mergeSha: sha, mergedHead: input.sha });
       if (gh.deleteOnMerge) {
@@ -784,11 +796,6 @@ test("stack: on a protected default branch, Land next merges the bottom's pull r
   const kept = t.provider.refs.get("main")!;
   t.provider.refs.set("main", squash);
   await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /reset/.test((e as Error).message));
-  // Squashed on GitHub (its commit not in main's history): not carried on from.
-  // (main at the squash commit too.)
-  pr[2].mergeSha = squash;
-  await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /squashed or rebased/.test((e as Error).message));
-  pr[2].mergeSha = mergeSha;
   t.provider.refs.set("main", kept);
   t.provider.refs.delete(c3.branch);
   const l3 = await landNext(t.ctx, c3.change.id);
@@ -796,7 +803,7 @@ test("stack: on a protected default branch, Land next merges the bottom's pull r
   assert.deepEqual(await readStacks(t.ctx), []);
 });
 
-test("stack: Land next needs merge commits (squash-only refused), a pull request, and the bottom at its commit; Update merges the default branch into it", async () => {
+test("stack: Land next needs merge commits or squash (rebase-only refused), a pull request, and the bottom at its commit; Update merges the default branch into it", async () => {
   await using t = await setup();
   const main = t.provider.refs.get("main")!;
   const code = (e: unknown) => (e as HttpError).code;
@@ -804,9 +811,9 @@ test("stack: Land next needs merge commits (squash-only refused), a pull request
   const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
   await assert.rejects(landNext(t.ctx, c1.change.id), (e) => code(e) === "no_pull");
   await submitStack(t.ctx, c1.stack.id);
-  Object.assign(t.provider.methods, { merge: false, rebase: false });
-  await assert.rejects(landNext(t.ctx, c1.change.id), (e) => code(e) === "merge_method" && /only allows squash merges/.test((e as Error).message));
-  Object.assign(t.provider.methods, { merge: true, rebase: true });
+  Object.assign(t.provider.methods, { merge: false, squash: false });
+  await assert.rejects(landNext(t.ctx, c1.change.id), (e) => code(e) === "merge_method" && /only allows rebase merges/.test((e as Error).message));
+  Object.assign(t.provider.methods, { merge: true, squash: true });
   t.provider.push(c1.branch, { x: "outside" });
   await assert.rejects(landNext(t.ctx, c1.change.id), (e) => code(e) === "moved");
   t.provider.refs.set(c1.branch, c1.sha);
@@ -822,6 +829,81 @@ test("stack: Land next needs merge commits (squash-only refused), a pull request
   assert.ok(moved);
   const l = await landNext(t.ctx, c1.change.id, u.change.sha);
   assert.equal(t.provider.refs.get("main"), l.sha);
+});
+
+test("stack: squash-only, Land next squashes the bottom and gives the next change one sync commit (its files as they are) before its pull request moves onto main", async () => {
+  await using t = await setup();
+  const code = (e: unknown) => (e as HttpError).code;
+  const author = { name: "octo", email: "o@x" };
+  const base = { "index.html": "<h1>hi</h1>", "a.txt": "a", "b.txt": "b", "c.txt": "c" };
+  const main0 = t.provider.push("main", base);
+  const put = (from: string, baseSha: string, title: string, files: Record<string, string>) => commitChange(t.ctx, {
+    from, baseSha, title, prompt: "", author, by: null,
+    files: Object.entries(files).map(([p, d]) => [p, new TextEncoder().encode(d)] as [string, Uint8Array]),
+  }).then(ok);
+  const c1 = await put("main", main0, "A", { ...base, "a.txt": "a1" });
+  const c2 = await put(c1.branch, c1.sha, "B", { ...base, "a.txt": "a1", "b.txt": "b2" });
+  const c3 = await put(c2.branch, c2.sha, "C", { ...base, "a.txt": "a1", "b.txt": "b2", "c.txt": "c3" });
+  await submitStack(t.ctx, c1.stack.id);
+  t.provider.guarded.add("main");
+  Object.assign(t.provider.methods, { merge: false, squash: true, rebase: false });
+  const pr = t.provider.pulls;
+
+  await goBack(t.ctx, c2.change.id); // change 3 set aside meanwhile
+  const l1 = await landNext(t.ctx, c1.change.id);
+  const s1 = t.provider.commits.get(l1.sha)!;
+  assert.deepEqual([s1.parent, s1.parent2, pr[0].merged], [main0, undefined, true]); // a squash: one commit on main
+  // Change 2: one sync commit (main's squash as its second parent, its files unchanged), recorded; then on main.
+  let [s] = await readStacks(t.ctx);
+  const sync = t.provider.commits.get(s.changes[0].sha)!;
+  assert.deepEqual([sync.parent, sync.parent2, s.changes[0].github, s.changes[0].baseSha], [c2.sha, l1.sha, "ok", l1.sha]);
+  assert.deepEqual([...sync.files], [...t.provider.commits.get(c2.sha)!.files]);
+  assert.equal(pr[1].base, "main");
+  // (A change set aside above a synced one stays restorable: same files.)
+  assert.equal(s.setAside.length, 1);
+  await restore(t.ctx, c1.stack.id);
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((x) => x.position), [2, 3]);
+  // Change 3 is left alone until it's the bottom, and the stack isn't behind for it (it holds what 2 was synced from).
+  assert.equal(s.changes[1].sha, c3.sha);
+  assert.equal(s.behind, undefined);
+  assert.deepEqual((await restack(t.ctx, c1.stack.id)).updated, []);
+  // (Merged as one, though, it must hold the sync commit itself: refused.)
+  await assert.rejects(assertLinked(t.ctx, s.changes[1].id), (e) => code(e) === "stack_behind" && /Land next on change 2 first/.test((e as Error).message));
+  // …but folding it into change 2 would put its pull request on main without the squash: refused, as is landing
+  // past change 2 as fast-forwards.
+  await assert.rejects(fold(t.ctx, s.changes[1].id, s.changes[0].id), (e) => code(e) === "stack_behind" && /synced with a squash/.test((e as Error).message));
+  t.provider.guarded.delete("main");
+  await assert.rejects(landUpTo(t.ctx, s.changes[1].id), (e) => code(e) === "stack_behind" && /Land next on change 2 first/.test((e as Error).message));
+  t.provider.guarded.add("main");
+
+  // main moved meanwhile (another commit): refused before the squash (Update stack first).
+  const before = t.provider.refs.get("main")!;
+  t.provider.push("main", { "d.txt": "d" });
+  await assert.rejects(landNext(t.ctx, s.changes[0].id), (e) => code(e) === "stack_behind");
+  assert.equal(pr[1].merged, false);
+  t.provider.refs.set("main", before);
+
+  // main brought into change 2 only ("Update branch"): change 3 doesn't hold that, so its sync would undo it: refused.
+  const moved = t.provider.push("main", { "e.txt": "e" });
+  const up = await updateBottom(t.ctx, s.changes[0].id);
+  await assert.rejects(landNext(t.ctx, s.changes[0].id), (e) => code(e) === "stack_behind" && /doesn't hold change 2/.test((e as Error).message));
+  // (A push to change 3 meanwhile: refused before the squash too.)
+  const c3now = t.provider.refs.get(c3.branch)!;
+  t.provider.push(c3.branch, { "z.txt": "z" });
+  await assert.rejects(landNext(t.ctx, s.changes[0].id), (e) => code(e) === "moved" || code(e) === "stack_behind");
+  t.provider.refs.set(c3.branch, c3now);
+  assert.equal(pr[1].merged, false);
+  // Update stack brings it into change 3; then it lands.
+  assert.deepEqual((await restack(t.ctx, c1.stack.id)).updated.map((x) => x.position), [3]);
+  assert.ok(moved && up);
+  [s] = await readStacks(t.ctx);
+  const l2 = await landNext(t.ctx, s.changes[0].id);
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual([t.provider.commits.get(s.changes[0].sha)!.parent2, pr[2].base, t.provider.refs.get("main")], [l2.sha, "main", l2.sha]);
+  await landNext(t.ctx, s.changes[0].id);
+  assert.deepEqual(await readStacks(t.ctx), []);
+  assert.equal(t.provider.commits.get(t.provider.refs.get("main")!)!.files.get("c.txt"), "c3");
 });
 
 test("stack: Update stack merges the default branch into each change from the bottom up; stops at a conflict, carries on once it's resolved; then lands as a fast-forward", async () => {

@@ -55,6 +55,15 @@ const view = (c: StackChange): Omit<ChangeView, "github"> => ({
   author: c.author, createdAt: new Date(c.created_at).toISOString(), pull: c.pr_number ?? null,
 });
 
+/**
+ * `upper` holds `lower`: its commit, or, `lower` at a sync commit (squash-only landing), the commit that was made from
+ * (the same files): the changes above a synced one are left as they are.
+ */
+async function holds(ctx: Ctx, upper: string, lower: { sha: string; synced_from?: string | null }) {
+  if (await ctx.provider.contains(ctx.r, upper, lower.sha)) return true;
+  return !!lower.synced_from && ctx.provider.contains(ctx.r, upper, lower.synced_from);
+}
+
 /** Open changes by stack, each bottom first; stacks oldest first. */
 function byStack(changes: StackChange[]) {
   const out = new Map<string, StackChange[]>();
@@ -209,7 +218,7 @@ export async function readStacks(ctx: Ctx): Promise<StackView[]> {
   const def = stacks.length ? await ctx.provider.branchHead(ctx.r, ctx.repo.default_branch).catch(() => null) : null;
   const behind = await pool(stacks, 2, async (s) => {
     if (!def) return false;
-    const links = await pool(s.map((c, i) => [c.sha, i ? s[i - 1].sha : def] as const), 4, ([sha, of]) => ctx.provider.contains(ctx.r, sha, of).catch(() => true));
+    const links = await pool(s.map((c, i) => [c.sha, i ? s[i - 1] : { sha: def }] as const), 4, ([sha, below]) => holds(ctx, sha, below).catch(() => true));
     return links.some((x) => !x);
   });
   const show = (c: StackChange): ChangeView => {
@@ -713,7 +722,9 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
     }
     // Each change holds the one below it (an Update stack stopped part way: not yet), so each move is a fast-forward.
     for (let i = from; i <= k; i++) {
+      // (Moved as fast-forwards: each must hold the one below's commit itself, a synced one's too.)
       if (!await provider.contains(r, s[i].sha, i === from ? at : s[i - 1].sha)) {
+        if (i > from && s[i - 1].synced_from) throw new HttpError(409, `change ${s[i].position} doesn't hold change ${s[i - 1].position}'s sync commit: Land next on change ${s[i - 1].position} first (nothing was landed)`, "stack_behind");
         throw new HttpError(409, `change ${s[i].position} doesn't hold ${i === from ? def : `change ${s[i - 1].position}`} yet (an Update stack stopped there): run Update stack first, nothing was landed`, "stack_behind");
       }
     }
@@ -776,8 +787,8 @@ async function atCommit(ctx: Ctx, c: StackChange) {
 
 /**
  * Lands the stack's bottom change through its pull request, for a default branch that needs one (reviews, checks,
- * rules): GitHub merges it as the user (a merge commit: the repository must allow them; squash-only isn't supported
- * yet), only while its head is the change's commit and its base the default branch (else 409 `pull_base`: moving it
+ * rules): GitHub merges it as the user (a merge commit; squashed where the repository allows only that, the change
+ * above then synced with the squash before its pull request moves), only while its head is the change's commit and its base the default branch (else 409 `pull_base`: moving it
  * may dismiss its approval). Refused (not approved, checks, rules, conflicts): 409 `merge_refused` with GitHub's
  * reason, nothing changed. Merged into the default branch on GitHub already (its branch maybe gone): recorded as
  * landed; merged elsewhere: 409 `merged_elsewhere`. Then the change
@@ -788,6 +799,8 @@ async function atCommit(ctx: Ctx, c: StackChange) {
  */
 export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
   landed: ChangeView; sha: string; stack: string; deleted: string[]; next?: { change: string; pull: PullInfo | null }; pullErrors?: PullError[]; before?: boolean;
+  /** The change above's sync commit (squashed): its branch, the commit it was at, and the sync commit (same files). */
+  synced?: { branch: string; from: string; sha: string };
 }> {
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo, appId } = ctx;
@@ -795,38 +808,76 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
     const { c, s } = await bottom(ctx, changeId, sha, false);
     const p = await pullOf(ctx, c);
     let merged: string;
+    // Squash-only: the default branch's head before (it must hold nothing the bottom doesn't, so the squash holds just
+    // this turn on top of it).
+    let squashed = false, squashedOn: string | null = null;
     if (p?.merged) {
       // Merged on GitHub already (its branch maybe deleted with it): landed, if into the default branch.
       if (p.base !== def) throw new HttpError(409, `pull request #${p.number} was merged into ${p.base}, not ${def}: change ${c.position} isn't in ${def}`, "merged_elsewhere");
       // (Merged at another commit, say before a push since: that push isn't in the default branch.)
       if (p.headSha && p.headSha !== c.sha) throw new HttpError(409, `pull request #${p.number} was merged at another commit than change ${c.position}'s: what's on ${c.branch} since isn't in ${def} (carry on from it as a branch of its own)`, "merged_elsewhere");
       merged = p.mergeSha ?? await provider.branchHead(r, def) ?? c.sha;
-      // (Squashed or rebased on GitHub: the change's commit isn't in the default branch's history, so the next pull
-      // request would show it again.)
-      if (!await provider.contains(r, merged, c.sha)) {
-        throw new HttpError(409, `pull request #${p.number} was merged on GitHub without its commit (squashed or rebased): the stack can't carry on from it (Cresslet issue #127)`, "merged_elsewhere");
-      }
+      // (Squashed on GitHub: the change's commit isn't in the default branch's history; carried on as a squash, the
+      // next change synced with it.)
+      if (!await provider.contains(r, merged, c.sha)) [squashed, squashedOn] = [true, (await provider.commitParents(r, merged))[0] ?? null];
       // (…nor in it now: the default branch reset since.)
       const now = await provider.branchHead(r, def);
-      if (now && !await provider.contains(r, now, c.sha)) throw new HttpError(409, `change ${c.position} isn't in ${def} any more (reset on GitHub since pull request #${p.number} was merged)`, "merged_elsewhere");
+      if (now && !await provider.contains(r, now, squashed ? merged : c.sha)) throw new HttpError(409, `change ${c.position} isn't in ${def} any more (reset on GitHub since pull request #${p.number} was merged)`, "merged_elsewhere");
     } else {
       await atCommit(ctx, c);
+      // A merge commit where the repository allows them; else a squash (the next change then gets a sync commit).
       const methods = await provider.mergeMethods(r);
-      if (!methods.merge) {
-        throw new HttpError(422, methods.squash && !methods.rebase
-          ? `${repo.owner}/${repo.name} only allows squash merges: landing a stack there isn't supported yet (Cresslet issue #127; merge it on GitHub)`
-          : `${repo.owner}/${repo.name} doesn't allow merge commits: landing a stack needs them (merge it on GitHub)`, "merge_method");
+      if (!methods.merge && !methods.squash) {
+        throw new HttpError(422, `${repo.owner}/${repo.name} only allows rebase merges: landing a stack needs merge commits or squash merges (merge it on GitHub)`, "merge_method");
       }
       if (!p || p.state !== "open") throw new HttpError(409, `change ${c.position} has no open pull request: submit the stack first`, "no_pull");
       // (Not moved here: a move may dismiss its approval, and GitHub could then refuse the merge.)
       if (p.base !== def) throw new HttpError(409, `pull request #${p.number} is on ${p.base}, not ${def}: Update pull requests first (its review may need giving again)`, "pull_base");
-      merged = (await provider.mergePull(r, p.number, { sha: c.sha, title: `${c.title} (#${p.number})` })).sha;
+      if (!methods.merge) {
+        squashed = true;
+        squashedOn = await provider.branchHead(r, def);
+        if (squashedOn && !await provider.contains(r, c.sha, squashedOn)) {
+          throw new HttpError(409, `${def} has commits change ${c.position} doesn't: run Update stack first (squashed, its pull request would take them in unseen)`, "stack_behind");
+        }
+        // (The change above synced with the squash takes its files as they are: it must hold all of this one, an
+        // Update made only here not left out of it, which its pull request would then show as undone.)
+        // (…and at its commit: a push to it found only after the squash would leave the sync undone, its pull request
+        // moved onto the default branch already where GitHub deletes the landed branch itself.)
+        if (s[1]) await atCommit(ctx, s[1]);
+        if (s[1] && !await holds(ctx, s[1].sha, c)) {
+          throw new HttpError(409, `change ${s[1].position} doesn't hold change ${c.position} yet: run Update stack first, nothing was merged`, "stack_behind");
+        }
+      }
+      merged = (await provider.mergePull(r, p.number, { sha: c.sha, title: `${c.title} (#${p.number})`, method: methods.merge ? "merge" : "squash" })).sha;
     }
     await store.landStack(appId, c.stack_id, c.position, merged);
     const pullErrors: PullError[] = [], deleted: string[] = [];
     let keep: string | undefined;
     const next = s[1];
-    if (next) {
+    // Squashed: the change above is based on commits the default branch doesn't have, so its pull request would show
+    // every earlier turn. One sync commit on it (the squash as a second parent, its files as they are) first, then its
+    // pull request is moved. Not when the default branch had other commits in between (Update stack brings them in),
+    // nor when it was pushed to: then its pull request stays where it is (and the branch below with it).
+    let synced: { branch: string; from: string; sha: string } | undefined;
+    if (next && squashed) {
+      try {
+        const [first] = await provider.commitParents(r, merged);
+        if (!squashedOn || first !== squashedOn || !await provider.contains(r, c.sha, squashedOn)) throw new HttpError(409, `${def} had other commits before the squash: run Update stack`, "stack_behind");
+        await atCommit(ctx, next);
+        if (!await holds(ctx, next.sha, c)) throw new HttpError(409, `change ${next.position} doesn't hold change ${c.position}: run Update stack`, "stack_behind");
+        const sha = await provider.syncCommit(r, { branch: next.branch, from: next.sha, with: merged, message: `Sync with ${def} after change ${c.position} (#${p!.number}) was squashed` });
+        // (Its files as they were: changes set aside above it still fit, and stay restorable.)
+        await store.setStackChangeSha(next.id, sha, merged, next.sha);
+        synced = { branch: next.branch, from: next.sha, sha };
+      } catch (e) {
+        keep = c.branch;
+        // (GitHub may have moved it onto the default branch already, deleting the landed branch itself.)
+        const np = await pullOf(ctx, next).catch(() => null);
+        const where = np?.base === def ? `its pull request is on ${def} already (GitHub moved it), showing earlier turns until then` : `its pull request stays on ${c.branch}, which is kept`;
+        pullErrors.push({ change: next.id, position: next.position, error: `not synced with ${def} (${why(e)}): ${where}; run Update stack, then Update pull requests, then Land next` });
+      }
+    }
+    if (next && (!squashed || synced)) {
       await retarget(ctx, next, def).catch((e) => {
         keep = c.branch;
         pullErrors.push({ change: next.id, position: next.position, error: `${why(e)} (${keep} is kept until it's on ${def}: land again)` });
@@ -844,6 +895,7 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
     return {
       landed: { ...view(c), github: "ok" }, sha: merged, stack: c.stack_name, deleted,
       ...(next ? { next: { change: next.id, pull } } : {}), ...(pullErrors.length ? { pullErrors } : {}), ...(p?.merged ? { before: true } : {}),
+      ...(synced ? { synced } : {}),
     };
   });
 }
@@ -871,8 +923,12 @@ export async function assertLinked(ctx: Ctx, topId: string) {
   const c = open.find((x) => x.id === topId);
   if (!c) return;
   const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0].filter((x) => x.position <= c.position);
+  // (A real merge: each must hold the one below's commit itself, a synced one's too.)
   const links = await pool(s.slice(1).map((x, i) => [x, s[i]] as const), 4, ([x, below]) => ctx.provider.contains(ctx.r, x.sha, below.sha));
   const i = links.findIndex((x) => !x);
+  if (i >= 0 && s[i].synced_from) {
+    throw new HttpError(409, `change ${s[i + 1].position} doesn't hold change ${s[i].position}'s sync commit: Land next on change ${s[i].position} first, nothing was merged`, "stack_behind");
+  }
   if (i >= 0) {
     throw new HttpError(409, `change ${s[i + 1].position} doesn't hold change ${s[i].position} yet (an Update stack stopped there): run Update stack first, nothing was merged`, "stack_behind");
   }
@@ -897,11 +953,11 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
     const def = await provider.branchHead(r, repo.default_branch);
     if (!def) throw new HttpError(404, `no branch ${repo.default_branch} on GitHub`, "branch_not_found");
     const updated: ChangeView[] = [];
-    let below = { branch: repo.default_branch, sha: def };
+    let below: { branch: string; sha: string; synced_from?: string | null } = { branch: repo.default_branch, sha: def };
     for (const c0 of s) {
       let c = c0;
       await atCommit(ctx, c);
-      if (!await provider.contains(r, c.sha, below.sha)) {
+      if (!await holds(ctx, c.sha, below)) {
         let m: { mergedSha: string };
         try {
           m = await provider.merge(r, { into: c.branch, head: below.branch, expect: below.sha, message: `Merge ${below.branch} into ${c.branch}` });
@@ -917,10 +973,10 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
           await store.setStackChangeSha(c.id, sha, base);
           if (c.id === s.at(-1)!.id) await store.detachSetAside(ctx.appId, stackId, id("stk"));
         });
-        c = { ...c, sha: m.mergedSha, base_sha: below.sha };
+        c = { ...c, sha: m.mergedSha, base_sha: below.sha, synced_from: null };
         updated.push({ ...view(c), github: "ok" });
       }
-      below = { branch: c.branch, sha: c.sha };
+      below = { branch: c.branch, sha: c.sha, synced_from: c.synced_from };
     }
     // `base`: the default branch's head brought in; `branches`: the stack's.
     return { updated, base: def, branches: s.map((x) => x.branch) };
@@ -1014,7 +1070,12 @@ export function fold(ctx: Ctx, changeId: string, into: string): Promise<{ change
     const off = [lower, upper].find((x, j) => heads[j] !== x.sha);
     if (off) throw new HttpError(409, `${off.branch} ${heads[[lower, upper].indexOf(off)] ? "was pushed to" : "is gone"} on GitHub: nothing was folded`, "moved");
     // (An Update stack stopped between them: the upper one doesn't hold the lower one's merge yet, which folding drops.)
-    if (!await provider.contains(r, upper.sha, lower.sha)) throw new HttpError(409, `change ${upper.position} doesn't hold change ${lower.position} yet (an Update stack stopped there): run Update stack first, nothing was folded`, "stack_behind");
+    // (Its pull request goes onto the lower one's base: it must hold the lower one's commit itself, a synced one's
+    // too, or it would show earlier turns again.)
+    if (lower.synced_from && !await provider.contains(r, upper.sha, lower.sha)) {
+      throw new HttpError(409, `change ${upper.position} can't be folded into change ${lower.position}, which was synced with a squash: land change ${lower.position} with Land next instead, nothing was folded`, "stack_behind");
+    }
+    if (!await holds(ctx, upper.sha, lower)) throw new HttpError(409, `change ${upper.position} doesn't hold change ${lower.position} yet (an Update stack stopped there): run Update stack first, nothing was folded`, "stack_behind");
     const base = i > 1 ? s[i - 2].branch : repo.default_branch;
     const [lowerPull, upperPull] = await Promise.all([pullOf(ctx, lower), pullOf(ctx, upper)]);
     // Its pull request onto the lower one's base first (before that branch goes). Refused: nothing changes.

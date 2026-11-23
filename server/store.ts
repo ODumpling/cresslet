@@ -121,6 +121,11 @@ export interface StackChange {
   pr_number: number | null;
   /** The stack it was moved out of (set aside for good, dropped, carried on from: migration 8). */
   origin_stack_id?: string | null;
+  /**
+   * At a sync commit (a squash landed below it, squash-only repositories): the commit it was made from, its files the
+   * same. The change above, cut before, holds that one (migration 9).
+   */
+  synced_from?: string | null;
   /** The provider login it was committed as. */
   author: string | null;
   created_by: string | null;
@@ -1195,9 +1200,10 @@ export class Store implements RateHits {
     return this.db.all<StackChange>("SELECT * FROM stack_changes WHERE app_id = ? AND state = ? ORDER BY created_at, stack_id, position", appId, state);
   }
   /** A change's commit, taken as it is on GitHub (pulled in after a push from outside). */
-  async setStackChangeSha(id: string, sha: string, base?: string) {
-    if (base) await this.db.run("UPDATE stack_changes SET sha = ?, base_sha = ?, updated_at = ? WHERE id = ?", sha, base, Date.now(), id);
-    else await this.db.run("UPDATE stack_changes SET sha = ?, updated_at = ? WHERE id = ?", sha, Date.now(), id);
+  /** `syncedFrom`: a sync commit's (else it's cleared: any other commit has files of its own). */
+  async setStackChangeSha(id: string, sha: string, base?: string, syncedFrom?: string) {
+    if (base) await this.db.run("UPDATE stack_changes SET sha = ?, base_sha = ?, synced_from = ?, updated_at = ? WHERE id = ?", sha, base, syncedFrom ?? null, Date.now(), id);
+    else await this.db.run("UPDATE stack_changes SET sha = ?, synced_from = NULL, updated_at = ? WHERE id = ?", sha, Date.now(), id);
   }
   /**
    * Folds `upper` into `lower` (the change below it): the lower one leaves the stack (`dropped`, its position free),
@@ -1267,7 +1273,7 @@ export class Store implements RateHits {
   /** A commit onto the top change's branch from its recorded commit (a hand edit pushed, a merge resolved): it follows. */
   async followStackTop(appId: string, branch: string, from: string, to: string): Promise<boolean> {
     return (await this.db.run(
-      `UPDATE stack_changes SET sha = ?, updated_at = ? WHERE app_id = ? AND branch = ? AND sha = ? AND state = 'open'
+      `UPDATE stack_changes SET sha = ?, synced_from = NULL, updated_at = ? WHERE app_id = ? AND branch = ? AND sha = ? AND state = 'open'
          AND position = (SELECT MAX(s.position) FROM stack_changes s WHERE s.stack_id = stack_changes.stack_id AND s.state = 'open')`,
       to, Date.now(), appId, branch, from,
     )).changes > 0;

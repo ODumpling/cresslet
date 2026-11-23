@@ -488,7 +488,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     }
     if (path.endsWith("/git/stack/land-next") && body.change === "chg_edit") rev.n++; // an edit while it lands
     if (path.endsWith("/git/stack/land-next") && body.change === "chg_dirty") state.dirty = true; // …saved as such
-    if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } } };
+    if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } }, ...(body.change === "chg_sq" ? { synced: { branch: "feat/s/2-two", from: "a".repeat(40), sha: "5".repeat(40) } } : {}) };
     if (path.endsWith("/git/stack/restack")) {
       if (body.stack === "stk_edit") rev.n++; // an edit while it's updated on GitHub
       if (body.stack === "stk_bin") return { updated: [], stopped: { change: { id: "chg_2", position: 2, branch: "feat/s/2-two", sha: "2".repeat(40) }, with: "feat/s/1-bin", withSha: "1".repeat(40), paths: ["logo.png"] } };
@@ -758,6 +758,16 @@ test("git: Land next lands the bottom through its pull request (the workspace on
   const r = await g.git.landNext(bottom, "feat/s/3-three");
   assert.deepEqual([g.calls[0].body, r.next.pull.review], [{ change: "chg_1", sha: bottom.sha }, "pending"]);
   assert.equal(g.state.activeBranch, "main");
+  // Squashed, the workspace on the change synced with it (the top): its new commit, the same files.
+  const sq = fakeGit({ onDefault: false });
+  sq.state.activeBranch = "feat/s/2-two";
+  await sq.git.landNext({ ...bottom, id: "chg_sq" }, "feat/s/2-two");
+  assert.deepEqual([sq.state.headSha, sq.hydrated], ["5".repeat(40), []]);
+  // …below the top too.
+  const sm = fakeGit({ onDefault: false });
+  sm.state.activeBranch = "feat/s/2-two";
+  await sm.git.landNext({ ...bottom, id: "chg_sq" }, "feat/s/3-three");
+  assert.deepEqual([sm.state.headSha, sm.state.baseSha], ["5".repeat(40), "e".repeat(40)]);
   // An edit made while it lands: not overwritten (landed all the same, said).
   const le = fakeGit({ onDefault: false });
   le.state.activeBranch = bottom.branch;

@@ -326,6 +326,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       if (!canPush) return json(403, { message: "Resource not accessible" });
       if (pr.state !== "open") return json(405, { message: "Pull Request is not mergeable" });
       const method = body.merge_method ?? "merge";
+      if (!["merge", "squash", "rebase"].includes(method)) return json(422, { message: "Invalid merge_method" });
       if (!(r.allow?.[method as "merge"] ?? true)) return json(405, { message: `${method === "merge" ? "Merge commits" : method} are not allowed on this repository.` });
       const head = r.refs.get(pr.head), into = r.refs.get(pr.base);
       if (!head || !into) return json(422, { message: "Head or base branch is missing" });
@@ -334,7 +335,8 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       if (r.strict && behind(pr)) return json(405, { message: "Head branch is out of date. Review and try the merge again." });
       const out = merged3(mergeBase(into, head)!, into, head);
       if (!out) return json(405, { message: "Pull Request is not mergeable" });
-      const sha = commit(out, [into, head], body.commit_title ?? `Merge pull request #${pr.number}`, null, u.login);
+      // (Squashed: one commit on the base holding the result.)
+      const sha = commit(out, method === "squash" ? [into] : [into, head], body.commit_title ?? `Merge pull request #${pr.number}`, null, u.login);
       r.refs.set(pr.base, sha);
       Object.assign(pr, { state: "closed", merged: true, mergeSha: sha, mergedHead: head });
       if (r.deleteOnMerge) {

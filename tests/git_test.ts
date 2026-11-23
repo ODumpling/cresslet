@@ -1069,11 +1069,42 @@ test("stack: on a protected default branch, Land next merges each bottom pull re
   assert.equal(l2.status, 200, JSON.stringify(l2.body));
   assert.deepEqual([pulls[1].merged, pulls[2].base], [true, "main"]);
 
-  // Squash-only: refused, pointing elsewhere.
-  repo.allow = { merge: false, squash: true, rebase: false };
+  // Rebase-only: refused.
+  repo.allow = { merge: false, squash: false, rebase: true };
   pulls[2].reviews.push({ user: { login: "rev" }, state: "APPROVED" });
   const sq = await t.send("POST", "/v1/apps/shop/git/stack/land-next", tok, { change: c3.change.id });
   assert.deepEqual([sq.status, sq.body.error], [422, "merge_method"]);
+}));
+
+test("stack: squash-only, Land next squashes the bottom; the next change's sync commit makes its pull request show only its own turn", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
+  const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
+  const c1 = await add("main", linked.sha, "A", { "a.txt": "a1\n" });
+  const c2 = await add(c1.branch, c1.sha, "B", { "a.txt": "a1\n", "b.txt": "b2\n" });
+  await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: c1.stack.id });
+  const repo = t.gh.repo("octo/shop");
+  repo.protected.add("main");
+  repo.allow = { merge: false, squash: true, rebase: false };
+  const l = await t.send("POST", "/v1/apps/shop/git/stack/land-next", tok, { change: c1.change.id, sha: c1.sha });
+  assert.equal(l.status, 200, JSON.stringify(l.body));
+  assert.deepEqual([repo.pulls[0].merged, t.gh.commit(l.body.sha).parents], [true, [linked.sha]]);
+  // Change 2: a sync commit (its files as they were, main's squash as a second parent), on main, only its own turn.
+  const head = repo.refs.get(c2.branch)!;
+  assert.deepEqual(t.gh.commit(head).parents, [c2.sha, l.body.sha]);
+  assert.deepEqual(l.body.synced, { branch: c2.branch, from: c2.sha, sha: head });
+  assert.deepEqual([...t.gh.commit(head).tree], [...t.gh.commit(c2.sha).tree]);
+  assert.equal(repo.pulls[1].base, "main");
+  const files = (await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks[0].changes[0];
+  assert.deepEqual([files.sha, files.github], [head, "ok"]);
+  // (Its pull request's files, against main: change 2's turn only, since main's squash is in it now.)
+  assert.deepEqual(Object.keys(t.gh.files("octo/shop", c2.branch)).filter((p) => t.gh.files("octo/shop", c2.branch)[p] !== t.gh.files("octo/shop")[p]), ["b.txt"]);
+  // Lands too: squashed again, the stack done.
+  const l2 = await t.send("POST", "/v1/apps/shop/git/stack/land-next", tok, { change: files.id, sha: head });
+  assert.equal(l2.status, 200, JSON.stringify(l2.body));
+  assert.equal(t.gh.files("octo/shop")["b.txt"], "b2\n");
+  assert.deepEqual((await t.send("GET", "/v1/apps/shop/git/stack", tok)).body.stacks, []);
 }));
 
 test("stack: Update stack brings main's new commits into each change; a conflict is loaded against the change below and committed there", withServer(async (t) => {

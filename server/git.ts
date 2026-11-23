@@ -103,10 +103,17 @@ export interface SourceControlProvider {
   /** The merge methods the repository allows for pull requests. */
   mergeMethods(r: Repo): Promise<{ merge: boolean; squash: boolean; rebase: boolean }>;
   /**
-   * Merges a pull request through the host (its reviews, checks and rules applied), as a merge commit, only while
-   * its head is `sha`. Resolves to the merge commit; refused: 409 `merge_refused` with the host's reason.
+   * Merges a pull request through the host (its reviews, checks and rules applied), as a merge commit (or squashed),
+   * only while its head is `sha`. Resolves to the commit made; refused: 409 `merge_refused` with the host's reason.
    */
-  mergePull(r: Repo, number: number, input: { sha: string; title: string }): Promise<{ sha: string }>;
+  mergePull(r: Repo, number: number, input: { sha: string; title: string; method?: "merge" | "squash" }): Promise<{ sha: string }>;
+  /** A commit's parents, first parent first. */
+  commitParents(r: Repo, sha: string): Promise<string[]>;
+  /**
+   * One commit on `branch` (at `from`) holding `from`'s files exactly, with `with` as a second parent: the branch then
+   * holds `with` (a squash landed below it) without a change to its files. Moved meanwhile: 409 `conflict`.
+   */
+  syncCommit(r: Repo, input: { branch: string; from: string; with: string; message: string }): Promise<string>;
 }
 export interface Pull {
   number: number;
@@ -694,9 +701,9 @@ export class GitHub implements SourceControlProvider {
     return { merge: g.allow_merge_commit !== false, squash: g.allow_squash_merge !== false, rebase: g.allow_rebase_merge !== false };
   }
 
-  async mergePull(r: Repo, number: number, input: { sha: string; title: string }) {
+  async mergePull(r: Repo, number: number, input: { sha: string; title: string; method?: "merge" | "squash" }) {
     const res = await this.req<{ sha?: string; message?: string }>("PUT", this.#path(r, `/pulls/${number}/merge`), {
-      sha: input.sha, merge_method: "merge", commit_title: input.title,
+      sha: input.sha, merge_method: input.method ?? "merge", commit_title: input.title,
     });
     if (res.status === 200 && res.body?.sha) return { sha: res.body.sha };
     // Not mergeable (reviews, checks, rules, conflicts), or its head moved: GitHub's reason.
@@ -704,6 +711,17 @@ export class GitHub implements SourceControlProvider {
       throw new HttpError(409, `GitHub didn't merge pull request #${number}: ${res.body?.message ?? "it isn't mergeable"}`, "merge_refused");
     }
     throw ghError(res.status, res.body?.message);
+  }
+
+  async commitParents(r: Repo, sha: string) {
+    return (await this.ok<{ parents: { sha: string }[] }>("GET", this.#path(r, `/git/commits/${sha}`))).parents.map((p) => p.sha);
+  }
+
+  async syncCommit(r: Repo, input: { branch: string; from: string; with: string; message: string }) {
+    const c = await this.ok<{ tree: { sha: string } }>("GET", this.#path(r, `/git/commits/${input.from}`));
+    const made = await this.ok<{ sha: string }>("POST", this.#path(r, "/git/commits"), { message: input.message, tree: c.tree.sha, parents: [input.from, input.with] });
+    await this.moveBranch(r, input.branch, input.from, made.sha);
+    return made.sha;
   }
 
   async pullStatus(r: Repo, number: number) {
