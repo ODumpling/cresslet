@@ -322,7 +322,7 @@ async function deployGitTag(db: Db) {
 /**
  * Email + password login: an account's password (server/passwords.ts), or null. An older server (after a rollback)
  * ignores it: those accounts log in with GitHub or a token, as before. If it links one to GitHub meanwhile, the
- * password stays in the column but no longer counts (it's bound to the GitHub id it was set under: bindPassword).
+ * password stays in the column but no longer counts (it's bound to the GitHub id it was set under: accountPassword).
  */
 async function passwords(db: Db) {
   if (db.dialect === "postgres") return db.exec("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_hash TEXT");

@@ -28,8 +28,8 @@ export interface Account {
   disabled_email: string | null;
   disabled_github_id: number | null;
   /**
-   * server/passwords.ts hash bound to the GitHub id the account had when it was set (`bindPassword`), or null: no
-   * password login. Never leaves the server.
+   * `<GitHub id when it was set, or "">:<server/passwords.ts hash>` (see accountPassword), or null: no password
+   * login. Never leaves the server.
    */
   password_hash: string | null;
 }
@@ -514,16 +514,19 @@ export class Store implements RateHits {
     await this.db.run("UPDATE accounts SET github_id = ?, github_login = ? WHERE id = ? AND disabled_at IS NULL", github.id, github.login, accountId);
   }
   /**
-   * Sets (or with null, removes) the account's password hash. `guard` (a request that checked the old one): only if
-   * the hash is still `was` and the caller's token is still live (not revoked by a GitHub link or a disable meanwhile).
+   * Sets the account's password (a server/passwords.ts hash, bound here to the account's GitHub id as it is at the
+   * write), or with null removes it. `guard` (a request that checked the old one): only if `password_hash` is still
+   * `was` and the caller's token is still live (not revoked by a GitHub link or a disable meanwhile).
    */
   setPasswordHash(accountId: string, hash: string | null, guard?: { was: string | null; tokenId: string }): Promise<boolean> {
+    const set = hash === null ? "password_hash = NULL" : "password_hash = COALESCE(CAST(github_id AS TEXT), '') || ':' || ?";
+    const value = hash === null ? [] : [hash];
     return this.serialized(accountLock(accountId), async () => {
-      if (!guard) return (await this.db.run("UPDATE accounts SET password_hash = ? WHERE id = ?", hash, accountId)).changes > 0;
+      if (!guard) return (await this.db.run(`UPDATE accounts SET ${set} WHERE id = ? AND disabled_at IS NULL`, ...value, accountId)).changes > 0;
       const r = await this.db.run(
-        `UPDATE accounts SET password_hash = ? WHERE id = ? AND disabled_at IS NULL AND COALESCE(password_hash, '') = ?
+        `UPDATE accounts SET ${set} WHERE id = ? AND disabled_at IS NULL AND COALESCE(password_hash, '') = ?
            AND EXISTS (SELECT 1 FROM tokens WHERE id = ? AND account_id = accounts.id)`,
-        hash, accountId, guard.was ?? "", guard.tokenId,
+        ...value, accountId, guard.was ?? "", guard.tokenId,
       );
       return r.changes > 0;
     });
@@ -534,11 +537,12 @@ export class Store implements RateHits {
    */
   linkGithubFirst(accountId: string, github: { id: number; login: string }): Promise<void> {
     return this.serialized(accountLock(accountId), async () => {
-      await this.db.run(
-        "UPDATE accounts SET github_id = ?, github_login = ?, password_hash = NULL WHERE id = ? AND disabled_at IS NULL",
+      // Linked meanwhile (another login of this person): what was issued since stays.
+      const r = await this.db.run(
+        "UPDATE accounts SET github_id = ?, github_login = ?, password_hash = NULL WHERE id = ? AND disabled_at IS NULL AND github_id IS NULL",
         github.id, github.login, accountId,
       );
-      await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+      if (r.changes) await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
     });
   }
   accountById(accountId: string): Promise<Account | undefined> {

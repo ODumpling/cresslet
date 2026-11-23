@@ -44,7 +44,7 @@ import { type Cluster, singleNode } from "./cluster.ts";
 import { github } from "./github.ts";
 import { githubSync, gitRoutes } from "./git.ts";
 import { cliLogin } from "./cli-login.ts";
-import { accountPassword, bindPassword, hashPassword, PASSWORD_MAX, passwordProblem, verifyPassword } from "./passwords.ts";
+import { accountPassword, hashPassword, PASSWORD_MAX, passwordProblem, verifyPassword } from "./passwords.ts";
 import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
 import { pausedCrons, type Scheduler, upcoming } from "./cron.ts";
@@ -433,9 +433,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (await store.disabledAccount({ emails: [email] })) throw new HttpError(409, `${email} belongs to a disabled account: enable it first`, "account_disabled");
     let account = await store.accountByEmail(email) ?? await store.createAccount(email);
     if (typeof password === "string") {
-      const hash = bindPassword(await hashPassword(password), account.github_id);
-      await store.setPasswordHash(account.id, hash);
-      account = { ...account, password_hash: hash };
+      await store.setPasswordHash(account.id, await hashPassword(password));
+      account = await store.accountById(account.id) ?? account;
     }
     const { token } = await store.issueToken(account.id, { name: "Operator-issued" });
     return c.json({ account: accountView(account), token }, 201);
@@ -522,25 +521,17 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         return c.json({ account: accountView(account), token });
       } catch (e) {
         if (e instanceof AccountDisabledError) throw new HttpError(403, "this account is disabled; ask a site admin", "account_disabled");
-        if (e instanceof PasswordChangedError) throw wrong();
+        if (e instanceof PasswordChangedError) throw new HttpError(409, "the password changed meanwhile: try again", "conflict");
         throw e;
       }
     });
 
-    /** Saves the account's new password hash (or null) if nothing changed since the request read it. */
-    const savePassword = async (c: Context<Env>, a: Account, hash: string | null) => {
-      if (!await store.setPasswordHash(a.id, hash, { was: a.password_hash, tokenId: c.get("token")!.id })) {
-        throw new HttpError(409, "your password or session changed meanwhile: reload and try again", "conflict");
-      }
-      return c.json({ account: accountView({ ...a, password_hash: hash }) });
-    };
-
-    // Set or change this account's password (changing needs the current one, so a token can't replace the owner's).
-    app.put("/me/password", async (c) => {
+    /**
+     * Sets (`password`) or removes (null) this account's password. Replacing or removing one needs the current one
+     * (`currentPassword`), so a token can't take over the owner's. Saved only if nothing changed since this read it.
+     */
+    const savePassword = async (c: Context<Env>, input: { password?: unknown; currentPassword?: unknown }, password: string | null) => {
       const a = accountWide(c, "admin");
-      const input = await body<{ password?: unknown; currentPassword?: unknown } | null>(c) ?? {};
-      const problem = passwordProblem(input.password);
-      if (problem) throw new HttpError(400, problem);
       const had = accountPassword(a);
       if (had) {
         if (!await byAccount.take(a.id)) throw new HttpError(429, "too many tries, wait a few minutes", "rate_limited");
@@ -548,11 +539,24 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         // 403, not 401: the token is fine (a 401 would log the studio out).
         if (!current || !await verifyPassword(current, had)) throw new HttpError(403, "current password is wrong", "wrong_password");
       }
-      return savePassword(c, a, bindPassword(await hashPassword(input.password as string), a.github_id));
+      if (!await store.setPasswordHash(a.id, password === null ? null : await hashPassword(password), { was: a.password_hash, tokenId: c.get("token")!.id })) {
+        throw new HttpError(409, "your password or session changed meanwhile: reload and try again", "conflict");
+      }
+      return c.json({ account: accountView((await store.accountById(a.id)) ?? a) });
+    };
+
+    app.put("/me/password", async (c) => {
+      accountWide(c, "admin");
+      const input = await body<{ password?: unknown; currentPassword?: unknown } | null>(c) ?? {};
+      const problem = passwordProblem(input.password);
+      if (problem) throw new HttpError(400, problem);
+      return savePassword(c, input, input.password as string);
     });
 
-    // Remove it (no current password needed: removing gives a token holder nothing, and undoes one a stolen token set).
-    app.delete("/me/password", async (c) => savePassword(c, accountWide(c, "admin"), null));
+    app.delete("/me/password", async (c) => {
+      accountWide(c, "admin");
+      return savePassword(c, await body<{ currentPassword?: unknown } | null>(c) ?? {}, null);
+    });
   }
 
   // ---- GitHub login (see server/github.ts)

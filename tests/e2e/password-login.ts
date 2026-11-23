@@ -91,6 +91,7 @@ try {
   await page.locator("#pw-text", { hasText: `You can log in with ${without}` }).waitFor();
   // Removed (no current password needed), then set again.
   page.once("dialog", (d) => void d.accept());
+  await page.locator("#pw-current").fill("brand-new-3");
   await page.locator("#pw-remove").click();
   await page.locator("#pw-text", { hasText: `Set a password to also log in with ${without}` }).waitFor();
   await page.locator("#pw-new").fill("brand-new-3");

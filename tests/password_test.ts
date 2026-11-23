@@ -152,11 +152,25 @@ test("rate limits: per email, and per client", withServer(async (t) => {
   assert.equal((await t.login("other@b.co", "guess-xx-1", "10.0.3.1")).status, 429);
 }));
 
-test("remove: no current password needed; then no password login", withServer(async (t) => {
+test("remove: needs the current password; then no password login", withServer(async (t) => {
   const made = await t.create({ email: "a@b.co", password: "hunter22!" });
-  const del = await t.json("/v1/me/password", { method: "DELETE", headers: t.bearer(made.body.token) });
-  assert.equal(del.status, 200);
-  assert.equal(del.body.account.password, false);
+  const del = (currentPassword?: string) =>
+    t.json("/v1/me/password", { method: "DELETE", headers: t.bearer(made.body.token), body: JSON.stringify({ currentPassword }) });
+  // Like replacing it, removing it needs the current one (a token alone can't clear the way for its own).
+  assert.equal((await del()).status, 403);
+  assert.equal((await del("not-it-123")).status, 403);
+  const ok = await del("hunter22!");
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.account.password, false);
+  assert.equal((await t.login("a@b.co", "hunter22!")).status, 401);
+}));
+
+test("operator: no current password needed to reset, and it counts on a GitHub-linked account", withServer(async (t) => {
+  const made = await t.create({ email: "a@b.co", password: "hunter22!" });
+  await t.srv.store.db.run("UPDATE accounts SET github_id = 42, github_login = 'octo' WHERE id = ?", made.body.account.id);
+  const reset = await t.create({ email: "a@b.co", password: "reset-pass-1" });
+  assert.equal(reset.body.account.password, true);
+  assert.equal((await t.login("a@b.co", "reset-pass-1")).status, 200);
   assert.equal((await t.login("a@b.co", "hunter22!")).status, 401);
 }));
 
@@ -167,14 +181,14 @@ test("in flight: a login or a password save after the password or token changed 
   const me = await t.json("/v1/me", { headers: t.bearer(made.body.token) });
   const tokenId = me.body.tokenInfo.id;
   // The password changed after a login read it: no token.
-  await store.setPasswordHash(id, "x:other");
+  await store.setPasswordHash(id, "other");
   await assert.rejects(store.issueToken(id, { name: "late", passwordHash: before }), PasswordChangedError);
   // A save that read the old hash, or whose token was revoked meanwhile, writes nothing.
-  assert.equal(await store.setPasswordHash(id, "x:mine", { was: before, tokenId }), false);
-  assert.equal(await store.setPasswordHash(id, "x:mine", { was: "x:other", tokenId }), true);
+  assert.equal(await store.setPasswordHash(id, "mine", { was: before, tokenId }), false);
+  assert.equal(await store.setPasswordHash(id, "mine", { was: ":other", tokenId }), true);
   await store.revokeTokens(id);
-  assert.equal(await store.setPasswordHash(id, "x:again", { was: "x:mine", tokenId }), false);
-  assert.equal((await store.accountById(id))!.password_hash, "x:mine");
+  assert.equal(await store.setPasswordHash(id, "again", { was: ":mine", tokenId }), false);
+  assert.equal((await store.accountById(id))!.password_hash, ":mine");
 }));
 
 test("a password set before a GitHub link stops counting (the link by a server without passwords)", withServer(async (t) => {

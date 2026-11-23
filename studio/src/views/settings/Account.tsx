@@ -73,10 +73,17 @@ function Password({ account, reload }: { account?: API.Account; reload: () => Pr
   }
 
   async function remove() {
-    if (!confirm("Remove your password? You'll log in another way until you set one again.")) return;
+    if (!current) {
+      setError("Enter your current password to remove it.");
+      form.current?.querySelector<HTMLInputElement>("#pw-current")?.focus();
+      return;
+    }
+    if (!confirm(account!.github
+      ? "Remove your password? You'll log in with GitHub until you set one again."
+      : "Remove your password? It's your only way to log in to the studio: once you log out, only this server's operator can let you back in.")) return;
     setBusy(true);
     try {
-      await api("/v1/me/password", { method: "DELETE" });
+      await api("/v1/me/password", json("DELETE", { currentPassword: current }));
       if (!alive.current) return;
       setCurrent("");
       setError("");
