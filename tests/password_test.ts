@@ -189,6 +189,13 @@ test("in flight: a login or a password save after the password or token changed 
   await store.revokeTokens(id);
   assert.equal(await store.setPasswordHash(id, "again", { was: ":mine", tokenId }), false);
   assert.equal((await store.accountById(id))!.password_hash, ":mine");
+  // A first GitHub link that lost to another one changes nothing (github.ts refuses it: not this person's account).
+  const fresh = await store.issueToken(id, { name: "after" });
+  assert.equal((await store.linkGithubFirst(id, { id: 7, login: "seven" }))!.github_id, 7);
+  const kept = await store.issueToken(id, { name: "after link" });
+  assert.equal((await store.linkGithubFirst(id, { id: 42, login: "other" }))!.github_id, 7);
+  assert.ok(await store.useToken(kept.token), "a repeat first link keeps tokens issued after the first");
+  assert.equal(await store.useToken(fresh.token), undefined);
 }));
 
 test("a password set before a GitHub link stops counting (the link by a server without passwords)", withServer(async (t) => {
