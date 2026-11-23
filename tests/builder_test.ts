@@ -455,7 +455,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     }
     if (/\/git\/stack\/(pull-in|carry-on)$/.test(path)) return { change: { id: body.change, sha: body.sha } };
     if (path.includes("/git/stack/undo?change=chg_f")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: ["a.txt"], files: [{ path: ".env", data: "VITE_THEME=light\n" }, { path: "a.txt", data: "<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n" }] };
-    if (path.includes("/git/stack/undo?change=chg_e")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: [], files: [{ path: ".env", data: "VITE_THEME=light\n" }] };
+    if (path.includes("/git/stack/undo?change=chg_e")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: [], files: [{ path: ".env", data: "VITE_THEME=light\n" }], restore: [".env"] };
     if (path.includes("/git/stack/undo")) {
       const conflicted = path.includes("chg_c");
       return {

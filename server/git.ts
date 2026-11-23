@@ -87,7 +87,7 @@ export interface SourceControlProvider {
   /** Its review decision and its head's checks. */
   pullStatus(r: Repo, number: number): Promise<PullInfo>;
   /** A change undone on `top`, file by file, for the workspace (conflicts marked); see GitHub#revert. */
-  revert(r: Repo, input: { change: string; parent: string; top: string; subdir: string; label: string }): Promise<{ conflicts: string[]; files: DeployFile[] }>;
+  revert(r: Repo, input: { change: string; parent: string; top: string; subdir: string; label: string }): Promise<{ conflicts: string[]; files: DeployFile[]; restore?: string[] }>;
   /** A comment on a pull request, as the user. */
   commentPull(r: Repo, number: number, body: string): Promise<void>;
   /**
@@ -526,7 +526,8 @@ export class GitHub implements SourceControlProvider {
       { extra: { paths } },
     );
     if (refused.length) throw refuse(refused);
-    return this.#mergeHeld(r, full, input.subdir, outside, ["now", `undo ${input.label}`], refuse);
+    // `restore`: the dotenv files it puts back (their public entries), for the studio to hold its commit to.
+    return { ...await this.#mergeHeld(r, full, input.subdir, outside, ["now", `undo ${input.label}`], refuse), restore: [...back].map((p) => p.slice(prefix.length)).sort() };
   }
 
   /** The three-way merge of what the studio holds (base, ours, theirs), conflicts marked with `labels`; `refuse`: what can't be held. */

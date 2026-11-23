@@ -1216,7 +1216,7 @@ test("stack: undo puts back a dotenv file's public entries (its private lines ke
   const u = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c1.change.id}`, tok);
   assert.equal(u.status, 200, JSON.stringify(u.body));
   const env = u.body.files.find((f: { path: string }) => f.path === ".env");
-  assert.deepEqual([env?.data, u.body.conflicts], ["VITE_THEME=light\n", []]);
+  assert.deepEqual([env?.data, u.body.conflicts, u.body.restore], ["VITE_THEME=light\n", [], [".env"]]);
   // Committed as the studio would: the parent's file exactly.
   const c3 = await add(c2.branch, c2.sha, u.body.title, { ".env": env.data, "b.txt": "b\n" });
   assert.equal(t.gh.files("octo/shop", c3.branch)[".env"], "VITE_THEME=light\nSECRET=s\n");

@@ -469,14 +469,11 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       if (o.state()!.dirty) throw Object.assign(new Error("the workspace changed while its changes were pushed: undo again"), { code: "changed" });
       const s = o.state()!;
       const rev = revision();
-      const r = await o.api<{ title: string; top: { branch: string; sha: string }; conflicts: string[]; files: GitFile[] }>(path(`/stack/undo?change=${encodeURIComponent(change.id)}&sha=${change.sha}&base=${change.baseSha}`));
+      const r = await o.api<{ title: string; top: { branch: string; sha: string }; conflicts: string[]; files: GitFile[]; restore?: string[] }>(path(`/stack/undo?change=${encodeURIComponent(change.id)}&sha=${change.sha}&base=${change.baseSha}`));
       if (r.top.branch !== s.activeBranch || r.top.sha !== s.headSha) throw stackChanged();
       unchangedSince(rev, "loading the undo");
-      // The dotenv files it puts back (others are as they are here), their public entries: checked on every commit of it.
-      const dotenvs = r.files.filter((f) => /(?:^|\/)\.env[^/]*$/i.test(f.path));
-      const before = dotenvs.length ? await o.files() : [];
-      unchangedSince(rev, "loading the undo");
-      const env = dotenvs.filter((f) => before.find((x) => x.path === f.path)?.data !== f.data).map((f) => ({ path: f.path, data: f.data }));
+      // The dotenv files it puts back (the server says which), their public entries: checked on every commit of it.
+      const env = r.files.filter((f) => r.restore?.includes(f.path)).map((f) => ({ path: f.path, data: f.data }));
       const holding = () => set({ dirty: true, undo: { title: r.title, conflicts: r.conflicts, ...(env.length ? { env } : {}) } });
       try {
         await o.hydrate(r.files);
