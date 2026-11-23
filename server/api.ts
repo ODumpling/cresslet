@@ -33,6 +33,7 @@ import {
   type Store,
   type Token,
   AccountDisabledError,
+  PasswordChangedError,
   accountLock,
   cronsLock,
   inviteLock,
@@ -43,6 +44,7 @@ import { type Cluster, singleNode } from "./cluster.ts";
 import { github } from "./github.ts";
 import { githubSync, gitRoutes } from "./git.ts";
 import { cliLogin } from "./cli-login.ts";
+import { accountPassword, hashPassword, PASSWORD_MAX, passwordProblem, verifyPassword } from "./passwords.ts";
 import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
 import { pausedCrons, type Scheduler, upcoming } from "./cron.ts";
@@ -323,6 +325,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     email: a.email,
     github: a.github_login,
     role: isSiteAdmin(cfg, a) ? SITE_ADMIN : null,
+    password: !!accountPassword(a),
   });
   const iso = (ms: number | null) => ms ? new Date(ms).toISOString() : null;
   const tokenView = async (t: Token, current?: Token) => {
@@ -407,22 +410,34 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       previewOrigin: previewOrigin(cfg),
       openSignup: cfg.openSignup,
       customDomains: cfg.customDomains,
-      auth: { github: !!cfg.github, cli: !!cfg.github }, // cli: browser login via the studio, which logs in with GitHub
+      // cli: browser login via the studio (which logs in with GitHub or a password)
+      auth: { github: !!cfg.github, password: cfg.passwordLogin, cli: !!cfg.github || cfg.passwordLogin },
       git: { github: !!githubSync(cfg) }, // apps can sync with GitHub repositories (docs/api.md#source-control)
       ai: { credits: !!cfg.ai, monthlyCredits: cfg.ai?.monthlyCredits ?? 0 }, // the AI builder can use credits (docs/api.md#ai-credits)
       limits: cfg.limits,
       docs: "https://github.com/ODumpling/cresslet/blob/main/docs/api.md",
     }));
 
-  // ---- accounts (users log in with GitHub; this is the operator's escape hatch)
+  // ---- accounts (users log in with GitHub or a password; this is the operator's escape hatch)
   // Admin-only: pre-create an account (a later GitHub login with the same verified email links to it)
-  // or issue a token for it.
+  // or issue a token for it. `password`: set its password (password login; also how the operator resets one).
   app.post("/accounts", async (c) => {
-    if (!isAdmin(c.get("bearer"))) throw new HttpError(403, "log in with GitHub", "forbidden");
-    const { email } = await body<{ email?: unknown } | null>(c) ?? {};
-    if (typeof email !== "string" || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
+    if (!isAdmin(c.get("bearer"))) throw new HttpError(403, "log in with GitHub or a password", "forbidden");
+    const { email, password } = await body<{ email?: unknown; password?: unknown } | null>(c) ?? {};
+    if (typeof email !== "string" || email.length > 254 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
+    if (password !== undefined) {
+      if (!cfg.passwordLogin) throw new HttpError(400, "password login is off on this server (CRESSLET_PASSWORD_LOGIN)", "password_login_disabled");
+      const problem = passwordProblem(password);
+      if (problem) throw new HttpError(400, problem);
+    }
     if (await store.disabledAccount({ emails: [email] })) throw new HttpError(409, `${email} belongs to a disabled account: enable it first`, "account_disabled");
-    const account = await store.accountByEmail(email) ?? await store.createAccount(email);
+    let account = await store.accountByEmail(email) ?? await store.createAccount(email);
+    if (typeof password === "string") {
+      if (!await store.setPasswordHash(account.id, await hashPassword(password))) {
+        throw new HttpError(409, `${email} was disabled meanwhile: enable it first`, "account_disabled");
+      }
+      account = await store.accountById(account.id) ?? account;
+    }
     const { token } = await store.issueToken(account.id, { name: "Operator-issued" });
     return c.json({ account: accountView(account), token }, 201);
   });
@@ -482,6 +497,70 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.json({ revoked: c.req.param("id") });
   });
 
+  // ---- email + password login (server/passwords.ts). No signup this way: nothing here proves who owns an email, and
+  // emails pick site admins, invites and GitHub links. An account gets a password in Settings or from the operator.
+  if (cfg.passwordLogin) {
+    const byIp = new RateLimit(30, 10 * 60_000, { hits: store, bucket: "password_ip" });
+    const byEmail = new RateLimit(10, 10 * 60_000, { hits: store, bucket: "password_email" });
+    const byAccount = new RateLimit(10, 10 * 60_000, { hits: store, bucket: "password_change" });
+    const wrong = () => new HttpError(401, "wrong email or password", "invalid_credentials");
+
+    app.post("/auth/password", async (c) => {
+      const input = await body<{ email?: unknown; password?: unknown } | null>(c) ?? {};
+      const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
+      const password = typeof input.password === "string" ? input.password : "";
+      if (!email || !password) throw new HttpError(400, "email and password required");
+      if (email.length > 254 || password.length > PASSWORD_MAX) throw wrong();
+      if (!await byIp.take(ipKey(clientIp(c))) || !await byEmail.take(email)) {
+        throw new HttpError(429, "too many tries, wait a few minutes", "rate_limited");
+      }
+      const account = await store.accountByEmail(email); // a disabled account's email is moved aside: not found
+      const hash = account ? accountPassword(account) : null;
+      if (!await verifyPassword(password, hash) || !account || !hash) throw wrong();
+      try {
+        // Only while it still has that password (not dropped by a GitHub link meanwhile).
+        const { token } = await store.issueToken(account.id, { name: "Studio (password login)", passwordHash: account.password_hash! });
+        return c.json({ account: accountView(account), token });
+      } catch (e) {
+        if (e instanceof AccountDisabledError) throw new HttpError(403, "this account is disabled; ask a site admin", "account_disabled");
+        if (e instanceof PasswordChangedError) throw new HttpError(409, "the password changed meanwhile: try again", "conflict");
+        throw e;
+      }
+    });
+
+    /**
+     * Sets (`password`) or removes (null) this account's password. Replacing or removing one needs the current one
+     * (`currentPassword`), so a token can't take over the owner's. Saved only if nothing changed since this read it.
+     */
+    const savePassword = async (c: Context<Env>, input: { password?: unknown; currentPassword?: unknown }, password: string | null) => {
+      const a = accountWide(c, "admin");
+      const had = accountPassword(a);
+      if (had) {
+        if (!await byAccount.take(a.id)) throw new HttpError(429, "too many tries, wait a few minutes", "rate_limited");
+        const current = typeof input.currentPassword === "string" && input.currentPassword.length <= PASSWORD_MAX ? input.currentPassword : "";
+        // 403, not 401: the token is fine (a 401 would log the studio out).
+        if (!current || !await verifyPassword(current, had)) throw new HttpError(403, "current password is wrong", "wrong_password");
+      }
+      if (!await store.setPasswordHash(a.id, password === null ? null : await hashPassword(password), { was: a.password_hash, tokenId: c.get("token")!.id })) {
+        throw new HttpError(409, "your password or session changed meanwhile: reload and try again", "conflict");
+      }
+      return c.json({ account: accountView((await store.accountById(a.id)) ?? a) });
+    };
+
+    app.put("/me/password", async (c) => {
+      accountWide(c, "admin");
+      const input = await body<{ password?: unknown; currentPassword?: unknown } | null>(c) ?? {};
+      const problem = passwordProblem(input.password);
+      if (problem) throw new HttpError(400, problem);
+      return savePassword(c, input, input.password as string);
+    });
+
+    app.delete("/me/password", async (c) => {
+      accountWide(c, "admin");
+      return savePassword(c, await body<{ currentPassword?: unknown } | null>(c) ?? {}, null);
+    });
+  }
+
   // ---- GitHub login (see server/github.ts)
   if (cfg.github) {
     const gh = github(cfg, store);
@@ -535,8 +614,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       if ("token" in r) return c.json({ status: "complete", account: accountView(r.account), token: r.token });
       return c.json(r);
     });
+  }
 
-    // CLI browser login (server/cli-login.ts): start → studio approves at verificationUri → poll for the token.
+  // CLI browser login (server/cli-login.ts): start → the studio (logged in with GitHub or a password) approves at
+  // verificationUri → poll for the token.
+  if (cfg.github || cfg.passwordLogin) {
     const cli = cliLogin(store);
     const cliStarts = new RateLimit(20, 10 * 60_000);
     const cliApproves = new RateLimit(10, 10 * 60_000);

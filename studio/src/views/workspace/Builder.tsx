@@ -12,7 +12,7 @@ import { anthropicClient, apiKey, createAgent, createTools, creditsClient, error
 import type * as API from "../../../api-types.ts";
 import { commitMessage, gitCode, type GitWorkspace } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
-import { logIn, session, useSession } from "../../lib/session.ts";
+import { logIn, session, useLoginButton, useSession } from "../../lib/session.ts";
 import { TimeAgo } from "../../ui/bits.tsx";
 import { ExtLink, Icon, SrOnly } from "../../ui/icons.tsx";
 
@@ -87,6 +87,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
   ref: Ref<BuilderHandle>;
 }) {
   const { token } = useSession();
+  const loginIcon = useLoginButton().icon;
   const [creditsOn, setCreditsOn] = useState(false);
   const [keyVersion, setKeyVersion] = useState(0); // bumped when the stored key changes
   const [credits, setCredits] = useState<{ text: string; title: string; low: boolean } | null>(null);
@@ -490,7 +491,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         <div id="builder-credits-offer" className="builder-offer" hidden={!creditsOn || !!token}>
           <p id="builder-credits-text">Log in to use AI credits: no API key needed.</p>
           <div className="row start">
-            <button className="btn primary" id="builder-login" type="button" ref={loginRef} onClick={() => void logIn(location.pathname + location.search)}><Icon name="github" />Log in</button>
+            <button className="btn primary" id="builder-login" type="button" ref={loginRef} onClick={() => void logIn(location.pathname + location.search)}><Icon name={loginIcon} />Log in</button>
           </div>
           <p className="muted small or" id="builder-or">Or use your own Anthropic API key:</p>
         </div>

@@ -140,7 +140,8 @@ const octo: FakeUser = { id: 42, login: "octo", emails: [{ email: "Octo@Example.
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
 
 test("meta advertises GitHub login", withServer(async (t) => {
-  assert.deepEqual((await t.json("/v1")).body.auth, { github: true, cli: true });
+  // Password login comes on with GitHub's unless CRESSLET_PASSWORD_LOGIN says otherwise.
+  assert.deepEqual((await t.json("/v1")).body.auth, { github: true, password: true, cli: true });
 }));
 
 test("studio web flow: one-time code → token, account by GitHub id", withServer(async (t) => {
@@ -354,3 +355,20 @@ test("site admin invites: closed signup, any verified email links; disabled acco
   assert.equal(back.body.account.id, inv.body.account.id);
   assert.equal((await t.json("/v1/me", { headers: bearer(back.body.token) })).status, 200);
 }, { openSignup: false }));
+
+test("GitHub linking an operator-created account drops the password set before it (not proven theirs)", withServer(async (t) => {
+  const pre = await t.json("/v1/accounts", { method: "POST", headers: bearer("adm"), body: '{"email":"octo@example.com","password":"operator-set-1"}' });
+  assert.equal(pre.status, 201);
+  assert.equal(pre.body.account.password, true);
+  const pw = () => t.json("/v1/auth/password", { method: "POST", body: '{"email":"octo@example.com","password":"operator-set-1"}' });
+  assert.equal((await pw()).status, 200);
+  const d = await deviceLogin(t, octo);
+  assert.equal(d.body.account.id, pre.body.account.id);
+  assert.equal(d.body.account.password, false);
+  assert.equal((await pw()).status, 401);
+  // Set again by its (now GitHub-proven) owner: a later GitHub login keeps it.
+  const set = await t.json("/v1/me/password", { method: "PUT", headers: bearer(d.body.token), body: '{"password":"mine-now-123"}' });
+  assert.equal(set.status, 200);
+  assert.equal((await deviceLogin(t, octo)).body.account.password, true);
+  assert.equal((await t.json("/v1/auth/password", { method: "POST", body: '{"email":"octo@example.com","password":"mine-now-123"}' })).status, 200);
+}));

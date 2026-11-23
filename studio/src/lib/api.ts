@@ -46,5 +46,5 @@ export const meta = (): Promise<API.Meta> => metaReq ??= fetch("/v1").then((r) =
   return {};
 });
 /** Projects need a session when this server offers login; without login set up the studio stays usable logged out. */
-export const loginRequired = () => meta().then((m) => !!m.auth?.github);
+export const loginRequired = () => meta().then((m) => !!m.auth?.github || !!m.auth?.password);
 export const mustLogIn = async () => !auth.token && await loginRequired();

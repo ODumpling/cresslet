@@ -125,7 +125,7 @@ What is node-local today:
 | Sandboxes | `Runtime`: one process per app on this host |
 | Logs | `Logs`: in-memory ring buffer per app |
 | Crons, reaping (expired and long-deleted apps) | timers in this process |
-| Hourly abuse limits (new apps and pages, deploys) | `rate_hits` in the metadata database |
+| Hourly abuse limits (new apps and pages, deploys), password login tries | `rate_hits` in the metadata database |
 | CLI login limits, GitHub OAuth state and exchange codes | in memory |
 
 Design: app affinity. Each app has one owner node. The owner holds `data/apps/<appId>/`, runs the sandbox, keeps the app's logs, fires its crons and reaps it. Any node takes any request; one for an app it doesn't own goes to the owner unchanged, and the owner answers it with today's code. `Runtime`, `Logs`, `Scheduler` and `host.ts` stay node-local. Forwarding whole requests, rather than sandbox calls, keeps static files, logging and the per-app deploy limit on the owner, and avoids sending `AppSpec` (it carries closures over the store).

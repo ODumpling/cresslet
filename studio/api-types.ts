@@ -10,7 +10,8 @@ export interface Meta {
   appUrlTemplate?: string;
   previewOrigin?: string;
   customDomains?: boolean;
-  auth?: { github?: boolean };
+  /** `password`: email + password login. `cli`: the CLI's browser login (studio /cli). */
+  auth?: { github?: boolean; password?: boolean; cli?: boolean };
   ai?: { credits?: boolean };
   /** Source control: apps can sync with GitHub. */
   git?: { github?: boolean };
@@ -21,6 +22,8 @@ export interface Account {
   email: string;
   github: string | null;
   role: "SiteAdmin" | null;
+  /** It has a password (email + password login). */
+  password?: boolean;
 }
 /** Someone named by email and GitHub login (owners, inviters). */
 export interface Owner {

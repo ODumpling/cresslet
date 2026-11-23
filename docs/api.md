@@ -38,13 +38,16 @@ Creating apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin`
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/v1` | server info, limits, app URL template, `customDomains` (whether apps can add custom domains), `auth: {github, cli}` (`cli`: the browser login below), `ai: {credits, monthlyCredits}` ([AI credits](#ai-credits)), `git: {github}` ([source control](#source-control)) |
-| POST | `/v1/accounts` | **admin token only**: `{email}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it). 409 `account_disabled` for a disabled account's email |
-| GET | `/v1/me` | `{account: {id, email, github, role}, tokenInfo}` (`github` = login or null; `role` = `"SiteAdmin"` or null); `tokenInfo: {id, name, role, apps, createdAt, lastUsedAt}` for the calling token (any scope) |
+| GET | `/v1` | server info, limits, app URL template, `customDomains` (whether apps can add custom domains), `auth: {github, password, cli}` (`password`: email + password login; `cli`: the browser login below), `ai: {credits, monthlyCredits}` ([AI credits](#ai-credits)), `git: {github}` ([source control](#source-control)) |
+| POST | `/v1/accounts` | **admin token only**: `{email, password?}` → `{account, token}`. Pre-create an account (GitHub login with that verified email links to it, and drops a password set here). `password` (8-256 characters; password login on): sets its password, also how the operator resets one. 409 `account_disabled` for a disabled account's email |
+| GET | `/v1/me` | `{account: {id, email, github, role, password}, tokenInfo}` (`github` = login or null; `role` = `"SiteAdmin"` or null; `password`: it has one); `tokenInfo: {id, name, role, apps, createdAt, lastUsedAt}` for the calling token (any scope) |
 | GET | `/v1/me/tokens` | `{tokens: [{id, name, role, apps, createdAt, lastUsedAt, current}]}`; never the secret |
 | POST | `/v1/me/tokens` | `{name, role?: read\|deploy\|admin (default admin), apps?: ["name", …] \| null}` → `{token, info}` (201). The secret is only in this response. Scoped tokens start `clv_scoped_` |
 | DELETE | `/v1/me/tokens/:id` | revoke one token |
-| POST | `/v1/me/token` | revoke all of this account's tokens → `{account, token}` (new full-access one) |
+| POST | `/v1/me/token` | revoke all of this account's tokens → `{account, token}` (new full-access one). A password stays (the operator can reset one you didn't set) |
+| POST | `/v1/auth/password` | password login on: `{email, password}` → `{account, token}` (a new full-access token); 401 `invalid_credentials` for a wrong email or password alike. No signup: only accounts that have a password. 10 tries per email and 30 per client per 10 min (429 `rate_limited`) |
+| PUT | `/v1/me/password` | password login on, full-access token: `{password, currentPassword?}` → `{account}`. Sets the password (8-256 characters); changing one needs `currentPassword` (403 `wrong_password`; 10 tries per account per 10 min). 409 `conflict` if the password or the calling token changed meanwhile. Other tokens stay valid: revoke them to end other sessions |
+| DELETE | `/v1/me/password` | password login on, full-access token: `{currentPassword}` → `{account}`: removes the password (403 `wrong_password`, 409 as above) |
 | GET | `/v1/auth/github` | browser: GitHub web flow → redirects to `/#cresslet_login=<code>` (or `#cresslet_login_error=…`) |
 | POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` |
 | POST | `/v1/auth/github/device` | CLI/agents: → `{deviceCode, userCode, verificationUri, expiresIn, interval}` |

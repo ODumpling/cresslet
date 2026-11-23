@@ -319,6 +319,16 @@ async function deployGitTag(db: Db) {
   if (!(await cols(db, "deploys")).includes("git_tag")) await db.exec("ALTER TABLE deploys ADD COLUMN git_tag TEXT");
 }
 
+/**
+ * Email + password login: an account's password (server/passwords.ts), or null. An older server (after a rollback)
+ * ignores it: those accounts log in with GitHub or a token, as before. If it links one to GitHub meanwhile, the
+ * password stays in the column but no longer counts (it's bound to the GitHub id it was set under: accountPassword).
+ */
+async function passwords(db: Db) {
+  if (db.dialect === "postgres") return db.exec("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_hash TEXT");
+  if (!(await cols(db, "accounts")).includes("password_hash")) await db.exec("ALTER TABLE accounts ADD COLUMN password_hash TEXT");
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
@@ -331,6 +341,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 8, name: "stack_origin", up: stackOrigin },
   { version: 9, name: "stack_synced_from", up: stackSyncedFrom },
   { version: 10, name: "deploy_git_tag", up: deployGitTag },
+  { version: 11, name: "passwords", up: passwords },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */

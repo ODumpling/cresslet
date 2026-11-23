@@ -1,9 +1,11 @@
-// /settings: the account (its GitHub login and email), and logging this browser out.
+// /settings: the account (its GitHub login and email), its password, and logging this browser out.
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type * as API from "../../../api-types.ts";
-import { api, errorMessage } from "../../lib/api.ts";
-import { useLoad, useView } from "../../lib/hooks.ts";
+import { api, errorMessage, json, meta } from "../../lib/api.ts";
+import { useAlive, useLoad, useView } from "../../lib/hooks.ts";
+import { FormError } from "../../ui/bits.tsx";
 import { toast } from "../../lib/toast.tsx";
 import { connectGithub } from "../workspace/GitDialog.tsx";
 import { logOut } from "../../lib/session.ts";
@@ -23,6 +25,7 @@ export function SettingsAccount() {
           <dt>Email</dt><dd id="set-email">{account.data?.email ?? "—"}</dd>
         </dl>
       </section>
+      <Password account={account.data} reload={account.reload} />
       <SourceControl />
       <section className="block" aria-labelledby="session-title">
         <div className="block-head"><h2 id="session-title">Session</h2></div>
@@ -35,6 +38,94 @@ export function SettingsAccount() {
         </div>
       </section>
     </>
+  );
+}
+
+/** Sets or changes the account's password (email + password login), when the server has that login. */
+function Password({ account, reload }: { account?: API.Account; reload: () => Promise<unknown> }) {
+  const [on, setOn] = useState(false);
+  const [github, setGithub] = useState(false);
+  useEffect(() => void meta().then((m) => (setOn(!!m.auth?.password), setGithub(!!m.auth?.github))), []);
+  const alive = useAlive();
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const form = useRef<HTMLFormElement>(null);
+  if (!on || !account) return null;
+  const has = !!account.password;
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api("/v1/me/password", json("PUT", has ? { password: next, currentPassword: current } : { password: next }));
+      if (!alive.current) return;
+      setCurrent("");
+      setNext("");
+      await reload();
+      toast(has ? "Password changed" : "Password set: you can log in with your email and it");
+    } catch (err) {
+      if (alive.current) flushSync(() => setError(errorMessage(err)));
+      form.current?.querySelector<HTMLInputElement>(has ? "#pw-current" : "#pw-new")?.focus();
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (!current) {
+      setError("Enter your current password to remove it.");
+      form.current?.querySelector<HTMLInputElement>("#pw-current")?.focus();
+      return;
+    }
+    if (!confirm(account!.github && github
+      ? "Remove your password? You'll log in with GitHub until you set one again."
+      : "Remove your password? It's your only way to log in to the studio: once you log out, only this server's operator can let you back in.")) return;
+    setBusy(true);
+    try {
+      await api("/v1/me/password", json("DELETE", { currentPassword: current }));
+      if (!alive.current) return;
+      setCurrent("");
+      setError("");
+      await reload();
+      toast("Password removed");
+    } catch (err) {
+      if (alive.current) setError(errorMessage(err));
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  }
+
+  return (
+    <section className="block" aria-labelledby="pw-title">
+      <div className="block-head"><h2 id="pw-title">Password</h2></div>
+      <form className="panel form" id="pw-form" ref={form} onSubmit={(e) => void save(e)}>
+        <p className="muted small" id="pw-text">{has
+          ? `You can log in with ${account.email} and your password.`
+          : `Set a password to also log in with ${account.email}.`}</p>
+        {/* For password managers: the account this password is for. */}
+        <input type="email" hidden readOnly autoComplete="username" value={account.email} />
+        {has ? (
+          <div className="field">
+            <label htmlFor="pw-current">Current password</label>
+            <input className="input" id="pw-current" type="password" required autoComplete="current-password" aria-describedby="pw-error"
+              value={current} onChange={(e) => (setCurrent(e.target.value), setError(""))} />
+          </div>
+        ) : null}
+        <div className="field">
+          <label htmlFor="pw-new">{has ? "New password" : "Password"}</label>
+          <input className="input" id="pw-new" type="password" required minLength={8} maxLength={256} autoComplete="new-password" aria-describedby="pw-hint pw-error"
+            value={next} onChange={(e) => (setNext(e.target.value), setError(""))} />
+          <p className="muted small" id="pw-hint">At least 8 characters.</p>
+        </div>
+        <FormError id="pw-error" text={error} />
+        <div className="row start">
+          <button className="btn primary" id="pw-save" type="submit" disabled={busy}>{has ? "Change password" : "Set password"}</button>
+          {has ? <button className="btn" id="pw-remove" type="button" disabled={busy} onClick={() => void remove()}>Remove password</button> : null}
+        </div>
+      </form>
+    </section>
   );
 }
 

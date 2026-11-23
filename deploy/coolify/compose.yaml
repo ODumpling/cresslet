@@ -37,6 +37,8 @@ services:
       CRESSLET_CUSTOM_DOMAINS: ${CRESSLET_CUSTOM_DOMAINS:-false}
       CRESSLET_GITHUB_CLIENT_ID: ${CRESSLET_GITHUB_CLIENT_ID:-}
       CRESSLET_GITHUB_CLIENT_SECRET: ${CRESSLET_GITHUB_CLIENT_SECRET:-}
+      # Email + password login: empty = on with GitHub login (docs/self-hosting.md#configuration).
+      CRESSLET_PASSWORD_LOGIN: ${CRESSLET_PASSWORD_LOGIN:-}
       # Source control (docs/self-hosting.md#source-control): off while the GitHub App's client id/secret are empty.
       CRESSLET_GITHUB_APP_ID: ${CRESSLET_GITHUB_APP_ID:-}
       CRESSLET_GITHUB_APP_CLIENT_ID: ${CRESSLET_GITHUB_APP_CLIENT_ID:-}
