@@ -83,6 +83,7 @@ export function github(cfg: Config, store: Store) {
       if (linkable) {
         // Tokens and a password set before this link (operator-created accounts) weren't proven to belong to this person.
         const linked = await store.linkGithubFirst(linkable.id, ident);
+        if (linked?.disabled_at) throw new HttpError(403, "this account is disabled; ask a site admin", "account_disabled");
         // Linked to another GitHub account meanwhile: not this person's.
         if (linked?.github_id !== ident.id) throw new HttpError(409, "this account changed meanwhile: log in again", "conflict");
         account = linked;
