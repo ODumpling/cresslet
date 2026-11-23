@@ -122,11 +122,11 @@ function Body({ m }: { m: API.Metrics }) {
 
 /**
  * The live deploy's commit: short sha (linked when it's on GitHub), its version tag, and where it's from when that
- * isn't the linked repository's default branch (another branch, or a repository linked before this one).
+ * isn't the linked repository's default branch (another branch, another repository, or none linked).
  */
 function Commit({ git, repo }: { git: NonNullable<API.DeployInfo["git"]>; repo: API.AppRepo | null | undefined }) {
   const sha = git.sha.slice(0, 7);
-  const other = !!repo && !!git.repo && git.repo !== repo.fullName;
+  const other = !!git.repo && git.repo !== repo?.fullName;
   const extra = [git.tag, other ? `from ${git.repo}` : null, git.branch && (other || git.branch !== repo?.defaultBranch) ? `on ${git.branch}` : null]
     .filter(Boolean).join(" · ");
   return (
