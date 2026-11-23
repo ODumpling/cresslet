@@ -15,6 +15,7 @@ import { Route as AdminOrgsRouteImport } from './routes/admin-orgs'
 import { Route as AdminUsersRouteImport } from './routes/admin-users'
 import { Route as ArtifactsRouteImport } from './routes/artifacts'
 import { Route as CliRouteImport } from './routes/cli'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as PagesRouteImport } from './routes/pages'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as AdminCreditsIndexRouteImport } from './routes/admin-credits.index'
@@ -66,6 +67,11 @@ const ArtifactsRoute = ArtifactsRouteImport.update({
 const CliRoute = CliRouteImport.update({
   id: '/cli',
   path: '/cli',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PagesRoute = PagesRouteImport.update({
@@ -187,6 +193,7 @@ export interface FileRoutesByFullPath {
   '/admin-users': typeof AdminUsersRoute
   '/artifacts': typeof ArtifactsRoute
   '/cli': typeof CliRoute
+  '/login': typeof LoginRoute
   '/pages': typeof PagesRoute
   '/settings': typeof SettingsRouteWithChildren
   '/admin-credits/$id': typeof AdminCreditsIdRoute
@@ -217,6 +224,7 @@ export interface FileRoutesByTo {
   '/admin-users': typeof AdminUsersRoute
   '/artifacts': typeof ArtifactsRoute
   '/cli': typeof CliRoute
+  '/login': typeof LoginRoute
   '/pages': typeof PagesRoute
   '/admin-credits/$id': typeof AdminCreditsIdRoute
   '/admin/$name': typeof AdminNameRoute
@@ -246,6 +254,7 @@ export interface FileRoutesById {
   '/admin-users': typeof AdminUsersRoute
   '/artifacts': typeof ArtifactsRoute
   '/cli': typeof CliRoute
+  '/login': typeof LoginRoute
   '/pages': typeof PagesRoute
   '/settings': typeof SettingsRouteWithChildren
   '/admin-credits/$id': typeof AdminCreditsIdRoute
@@ -278,6 +287,7 @@ export interface FileRouteTypes {
     | '/admin-users'
     | '/artifacts'
     | '/cli'
+    | '/login'
     | '/pages'
     | '/settings'
     | '/admin-credits/$id'
@@ -308,6 +318,7 @@ export interface FileRouteTypes {
     | '/admin-users'
     | '/artifacts'
     | '/cli'
+    | '/login'
     | '/pages'
     | '/admin-credits/$id'
     | '/admin/$name'
@@ -336,6 +347,7 @@ export interface FileRouteTypes {
     | '/admin-users'
     | '/artifacts'
     | '/cli'
+    | '/login'
     | '/pages'
     | '/settings'
     | '/admin-credits/$id'
@@ -367,6 +379,7 @@ export interface RootRouteChildren {
   AdminUsersRoute: typeof AdminUsersRoute
   ArtifactsRoute: typeof ArtifactsRoute
   CliRoute: typeof CliRoute
+  LoginRoute: typeof LoginRoute
   PagesRoute: typeof PagesRoute
   SettingsRoute: typeof SettingsRouteWithChildren
   AdminCreditsIdRoute: typeof AdminCreditsIdRoute
@@ -423,6 +436,13 @@ declare module '@tanstack/react-router' {
       path: '/cli'
       fullPath: '/cli'
       preLoaderRoute: typeof CliRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/pages': {
@@ -630,6 +650,7 @@ const rootRouteChildren: RootRouteChildren = {
   AdminUsersRoute: AdminUsersRoute,
   ArtifactsRoute: ArtifactsRoute,
   CliRoute: CliRoute,
+  LoginRoute: LoginRoute,
   PagesRoute: PagesRoute,
   SettingsRoute: SettingsRouteWithChildren,
   AdminCreditsIdRoute: AdminCreditsIdRoute,

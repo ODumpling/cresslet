@@ -81,10 +81,11 @@ export function github(cfg: Config, store: Store) {
       }
       const email = verified[0] ?? `${user.id}+${user.login}@users.noreply.github.com`;
       if (linkable) {
-        // Tokens issued before this link (operator-created accounts) weren't proven to belong to this person.
+        // Tokens and a password set before this link (operator-created accounts) weren't proven to belong to this person.
         await store.linkGithub(linkable.id, ident);
         await store.revokeTokens(linkable.id);
-        account = { ...linkable, github_id: ident.id, github_login: ident.login };
+        await store.setPasswordHash(linkable.id, null);
+        account = { ...linkable, github_id: ident.id, github_login: ident.login, password_hash: null };
       } else {
         if (!cfg.openSignup) throw new HttpError(403, "signup is closed; ask a site admin for an invite", "forbidden");
         // Email already taken by another GitHub-linked account: fall back to the GitHub noreply address.

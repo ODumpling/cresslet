@@ -1,6 +1,6 @@
 // Who's logged in: the token (localStorage, store.ts `auth`) and what /v1/me says about its account. A store outside
 // React (the API client and non-React modules change it too), read in components with useSession().
-import { useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { auth } from "../../store.ts";
 import type * as API from "../../api-types.ts";
 import { api, meta, setOnExpired } from "./api.ts";
@@ -113,11 +113,32 @@ export function takeAfterLogin() {
   }
 }
 
-/** To GitHub (the server redirects back to /#cresslet_login=<one-time code>); `after`: where to come back to. */
+/**
+ * To the login page (/login: email + password, and GitHub if the server has both), or straight to GitHub (the server
+ * redirects back to /#cresslet_login=<one-time code>); `after`: where to come back to.
+ */
 export async function logIn(after?: string) {
   if (after) rememberAfterLogin(after);
-  if ((await meta()).auth?.github) location.href = "/v1/auth/github";
-  else toast("Login isn't set up on this server (operator: set CRESSLET_GITHUB_CLIENT_ID / _SECRET).");
+  const m = await meta();
+  if (m.auth?.password) location.href = "/login";
+  else if (m.auth?.github) location.href = "/v1/auth/github";
+  else toast("Login isn't set up on this server (operator: set CRESSLET_GITHUB_CLIENT_ID / _SECRET, or CRESSLET_PASSWORD_LOGIN).");
+}
+
+/**
+ * How a login button reads: "Log in" when the server has password login (the login page offers the rest), else
+ * "Log in with GitHub" (GitHub's icon), as before GET /v1 answers.
+ */
+export function useLoginButton(): { icon: string; label: string } {
+  const [password, setPassword] = useState(false);
+  useEffect(() => void meta().then((m) => setPassword(!!m.auth?.password)), []);
+  return password ? { icon: "login", label: "Log in" } : { icon: "github", label: "Log in with GitHub" };
+}
+
+/** Where a finished login goes back to (what needed it: a private page, a project, the CLI login, artifacts), if anywhere. */
+export function afterLoginPath(): string | null {
+  const after = takeAfterLogin();
+  return after?.startsWith("/view/") || after?.startsWith("/p/") || after === "/cli" || after === "/artifacts" || after === "/settings" || after?.startsWith("/settings/") ? after : null;
 }
 
 /** The login callback's hash, read (and removed from the address) before the router starts: src/router.tsx. */
@@ -144,9 +165,8 @@ export async function finishLogin(): Promise<string | null> {
     toast(`GitHub login failed: ${(e as Error).message}`);
     return null;
   }
-  // Back to what needed the login (a private page, a project, the CLI login, artifacts).
-  const after = takeAfterLogin();
-  if (after?.startsWith("/view/") || after?.startsWith("/p/") || after === "/cli" || after === "/artifacts" || after === "/settings" || after?.startsWith("/settings/")) return after;
+  const after = afterLoginPath();
+  if (after) return after;
   toast(`Logged in as ${auth.email}`);
   return null;
 }

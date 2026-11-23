@@ -4,7 +4,7 @@ import { Link, useParams, useSearch } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { api, errorMessage, json, statusOf } from "../lib/api.ts";
 import { useView } from "../lib/hooks.ts";
-import { logIn, session, useSession } from "../lib/session.ts";
+import { logIn, session, useLoginButton, useSession } from "../lib/session.ts";
 import { Icon } from "../ui/icons.tsx";
 
 type State = { text: string; action: "retry" | "home" | null };
@@ -14,6 +14,7 @@ export function PrivateView() {
   const { name } = useParams({ from: "/view/$name" });
   const { path } = useSearch({ from: "/view/$name" });
   const { token } = useSession();
+  const login = useLoginButton();
   const [state, setState] = useState<State>({ text: "Opening…", action: null });
   const [attempt, setAttempt] = useState(0); // Try again
   const key = `cresslet.view.${name}`;
@@ -57,7 +58,7 @@ export function PrivateView() {
         </div>
       </header>
       <div className="row start" id="view-actions">
-        {!token ? <button className="btn primary" type="button" onClick={() => void logIn(location.pathname + location.search)}><Icon name="github" />Log in with GitHub</button>
+        {!token ? <button className="btn primary" type="button" onClick={() => void logIn(location.pathname + location.search)}><Icon name={login.icon} />{login.label}</button>
           : state.action === "retry" ? (
             <button className="btn" type="button" onClick={() => {
               try {

@@ -26,9 +26,10 @@ export function Landing() {
   // This server's own app domain, and what visitors can do without an account.
   const url = m.appUrlTemplate ? m.appUrlTemplate.replace("{name}", "my-app") : "https://my-app.cresslet.dev";
   const host = url.replace(/^https?:\/\//, "");
-  const note = m.auth?.github ? "Free and open source. Log in with GitHub to start building."
+  const login = m.auth?.password ? "Log in to start building." : m.auth?.github ? "Log in with GitHub to start building." : null;
+  const note = login ? `Free and open source. ${login}`
     : m.auth ? "Free and open source. Try it without an account." : "Free and open source. No account needed to try it.";
-  const ctaNote = m.auth?.github ? "Free and open source. Log in with GitHub to start building." : "Free and open source. Start in the browser, no account needed.";
+  const ctaNote = login ? `Free and open source. ${login}` : "Free and open source. Start in the browser, no account needed.";
 
   /** "Start building": to the templates, with focus on their heading so keyboard users land there too. */
   const start = () => {
@@ -50,7 +51,7 @@ export function Landing() {
           <Ext href="https://github.com/ODumpling/cresslet">GitHub</Ext>
         </nav>
         <div className="spacer" />
-        <button className="btn" id="landing-login" type="button" hidden={!m.auth?.github} onClick={() => void logIn()}><Icon name="github" />Log in</button>
+        <button className="btn" id="landing-login" type="button" hidden={!m.auth?.github && !m.auth?.password} onClick={() => void logIn()}><Icon name={m.auth?.password ? "login" : "github"} />Log in</button>
         <button className="btn primary site-start" type="button" data-start onClick={start}>Start building</button>
       </header>
 

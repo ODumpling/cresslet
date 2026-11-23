@@ -23,7 +23,7 @@ cresslet config set api http://localhost:8787   # the CLI talks to https://cress
 cresslet new my-app
 cd my-app && npm install
 npm run dev                            # http://localhost:3000
-npx cresslet auth login                  # browser login (if GitHub login is configured); every app belongs to an account
+npx cresslet auth login                  # browser login (if GitHub or password login is configured); every app belongs to an account
 npx cresslet deploy                      # → http://<name>.localhost:8787
 npx cresslet logs -f
 ```

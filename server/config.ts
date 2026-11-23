@@ -67,6 +67,11 @@ export interface Config {
   adminToken: string | null;
   /** Emails / GitHub logins (lowercase) that are always SiteAdmin (`CRESSLET_SITE_ADMINS`, comma-separated). */
   siteAdmins: string[];
+  /**
+   * Email + password login (`CRESSLET_PASSWORD_LOGIN`; default: on when GitHub login is). No signup by password:
+   * an account gets one from Settings (signed in another way) or from the operator (`POST /v1/accounts`).
+   */
+  passwordLogin: boolean;
   /** GitHub OAuth App (web flow for the studio, device flow for the CLI). Null = disabled. */
   github: { clientId: string; clientSecret: string; webUrl: string; apiUrl: string } | null;
   /**
@@ -182,6 +187,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     workerdPath: process.env.CRESSLET_WORKERD ?? bundledWorkerd(),
     openSignup: env("CRESSLET_OPEN_SIGNUP", "true") === "true",
     adminToken: process.env.CRESSLET_ADMIN_TOKEN || null,
+    passwordLogin: false, // the default follows `github`, below
     siteAdmins: env("CRESSLET_SITE_ADMINS", "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
     github: githubId && githubSecret
       ? {
@@ -255,6 +261,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     },
   };
   const merged = { ...base, ...overrides };
+  const pw = process.env.CRESSLET_PASSWORD_LOGIN?.trim();
+  if (overrides.passwordLogin === undefined) merged.passwordLogin = pw ? pw === "true" : !!merged.github;
   if (overrides.domain && !overrides.previewHost && !process.env.CRESSLET_PREVIEW_HOST) merged.previewHost = `preview.${overrides.domain}`;
   merged.domain = merged.domain.trim().toLowerCase().replace(/\.$/, "");
   merged.previewHost = merged.previewHost.trim().toLowerCase().replace(/\.$/, "");

@@ -237,7 +237,8 @@ On a clean host (or the same one), as root, with Docker and rclone (from rclone.
 | `CRESSLET_AI_CREDITS_PER_USD` | 100 | credits charged per US dollar of Anthropic list price (100: a credit is a cent at cost; above 100 is your margin) |
 | `CRESSLET_AI_MAX_CONCURRENT` | 2 | AI requests one account may have in flight (429 past it); the request that runs out of credits is charged in full, so this bounds how far below 0 an account can go |
 | `CRESSLET_ANTHROPIC_BASE_URL` | https://api.anthropic.com | where those requests go (a gateway, or a stub in tests) |
-| `CRESSLET_GITHUB_CLIENT_ID` / `_SECRET` | — | GitHub OAuth App: the only user login (studio + CLI). Unset = no GitHub login: accounts only from the admin token (`POST /v1/accounts`) |
+| `CRESSLET_GITHUB_CLIENT_ID` / `_SECRET` | — | GitHub OAuth App: user login (studio + CLI). Unset = no GitHub login: accounts only from the admin token (`POST /v1/accounts`) |
+| `CRESSLET_PASSWORD_LOGIN` | on with GitHub login, else false | email + password login (studio `/login`, and the CLI's browser login through it). No signup by password: nothing proves who owns an email. An account gets a password in **Settings → Account** (logged in another way) or from the operator (`POST /v1/accounts` with `password`, also the reset). A GitHub login that links an operator-created account drops the password set before it |
 | `CRESSLET_GITHUB_URL` / `CRESSLET_GITHUB_API_URL` | github.com / api.github.com | GitHub Enterprise Server |
 | `CRESSLET_GITHUB_APP_ID` / `_CLIENT_ID` / `_CLIENT_SECRET` / `_SLUG` | — | GitHub App for [source control](#source-control): apps sync with GitHub repositories as the signed-in user. Unset = off (unless the fallback below) |
 | `CRESSLET_GITHUB_SYNC_OAUTH_FALLBACK` | false | true, without a GitHub App: source control through the login OAuth App with the `repo` scope (every repository the user can push to) |
@@ -265,11 +266,14 @@ On a clean host (or the same one), as root, with Docker and rclone (from rclone.
 | `CRESSLET_APP_DB_MB` / `CRESSLET_APP_FILES_MB` | 512 / 1024 | per-app database size (SQLite `max_page_count`; apps can't change it) / total size of its files |
 | `CRESSLET_CLIENT_IP_HEADER` | — | header with the real client IP for per-IP limits, e.g. `cf-connecting-ip` behind Cloudflare (the [Caddy setup](#production) uses `x-forwarded-for`, which Caddy overwrites with the client's address). Without it the TCP peer is used (behind a proxy that's the proxy, so every client shares one allowance). The proxy must set it to the one client address (Cloudflare does for `cf-connecting-ip`); a request that reaches the server some other way can send any value, so set it only if every request comes through that proxy |
 
-Closed instance (`CRESSLET_OPEN_SIGNUP=false`): pre-create accounts with the admin token; users then log in with GitHub using that (verified) email. Without GitHub configured, hand out the returned token (`CRESSLET_TOKEN` / `cresslet login --token`).
+Closed instance (`CRESSLET_OPEN_SIGNUP=false`): pre-create accounts with the admin token; users then log in with GitHub using that (verified) email. Without GitHub configured, set `CRESSLET_PASSWORD_LOGIN=true` and give each account a password (below), or hand out the returned token (`CRESSLET_TOKEN` / `cresslet login --token`).
 
 ```sh
 curl -X POST https://cresslet.example.com/v1/accounts -H "authorization: Bearer $CRESSLET_ADMIN_TOKEN" \
   -H 'content-type: application/json' -d '{"email":"you@example.com"}'   # → { token: "clv_acct_…" }
+# with a password (password login): they log in at <root URL>/login
+curl -X POST https://cresslet.example.com/v1/accounts -H "authorization: Bearer $CRESSLET_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"email":"you@example.com","password":"…"}'
 ```
 
 ## GitHub login
@@ -278,7 +282,7 @@ curl -X POST https://cresslet.example.com/v1/accounts -H "authorization: Bearer 
 2. Tick **Enable Device Flow** (the CLI uses it; the server proxies it, so the secret never leaves the server).
 3. Set `CRESSLET_GITHUB_CLIENT_ID` and `CRESSLET_GITHUB_CLIENT_SECRET`.
 
-Accounts are keyed by GitHub user id. First GitHub login links to an existing (operator-created) account with the same **verified** GitHub email and revokes its older tokens; otherwise it creates one, if `CRESSLET_OPEN_SIGNUP` allows. Users create named API tokens in the studio under **Settings** (read / deploy / admin, optionally limited to some apps; revoke each one alone) or run `cresslet login`. The CLI talks to https://cresslet.dev by default: point it at your server with `cresslet config set api https://<domain>` (or `--api` / `CRESSLET_API`).
+Accounts are keyed by GitHub user id. First GitHub login links to an existing (operator-created) account with the same **verified** GitHub email and revokes its older tokens (and drops a password set before it); otherwise it creates one, if `CRESSLET_OPEN_SIGNUP` allows. Users create named API tokens in the studio under **Settings** (read / deploy / admin, optionally limited to some apps; revoke each one alone) or run `cresslet login`. The CLI talks to https://cresslet.dev by default: point it at your server with `cresslet config set api https://<domain>` (or `--api` / `CRESSLET_API`).
 
 ## Source control
 

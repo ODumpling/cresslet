@@ -27,6 +27,8 @@ export interface Account {
   /** While disabled: its real email and GitHub id (`email` is a placeholder and `github_id` null meanwhile). */
   disabled_email: string | null;
   disabled_github_id: number | null;
+  /** server/passwords.ts hash, or null: no password login. Never leaves the server. */
+  password_hash: string | null;
 }
 
 /** An account's own defaults; a key left out uses the server's (Config.pages). */
@@ -405,6 +407,7 @@ export class Store implements RateHits {
       invited_by: invite?.by ?? null,
       disabled_email: null,
       disabled_github_id: null,
+      password_hash: null,
     };
     await this.db.run(
       "INSERT INTO accounts (id, email, created_at, github_id, github_login, invited_at, invited_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -506,6 +509,10 @@ export class Store implements RateHits {
   /** Not on a disabled account (disabled meanwhile: its GitHub id stays aside, see disableAccount). */
   async linkGithub(accountId: string, github: { id: number; login: string }) {
     await this.db.run("UPDATE accounts SET github_id = ?, github_login = ? WHERE id = ? AND disabled_at IS NULL", github.id, github.login, accountId);
+  }
+  /** Sets (or with null, removes) the account's password hash. */
+  async setPasswordHash(accountId: string, hash: string | null) {
+    await this.db.run("UPDATE accounts SET password_hash = ? WHERE id = ?", hash, accountId);
   }
   accountById(accountId: string): Promise<Account | undefined> {
     return this.db.get<Account>("SELECT * FROM accounts WHERE id = ?", accountId);

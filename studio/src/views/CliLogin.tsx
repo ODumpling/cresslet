@@ -8,13 +8,14 @@ import type * as API from "../../api-types.ts";
 import { api, errorMessage, json } from "../lib/api.ts";
 import { focusView } from "../lib/focus.ts";
 import { useAlive, useLoad, useView } from "../lib/hooks.ts";
-import { logIn, useSession } from "../lib/session.ts";
+import { logIn, useLoginButton, useSession } from "../lib/session.ts";
 import { FormError } from "../ui/bits.tsx";
 import { Icon } from "../ui/icons.tsx";
 
 export function CliLogin() {
   useView("cli-login", "Log in the CLI");
   const { token } = useSession();
+  const login = useLoginButton();
   const alive = useAlive();
   // Name the account this session's token belongs to, and approve only with that same token. The session changed
   // meanwhile (another tab): this starts over with the current one.
@@ -79,7 +80,7 @@ export function CliLogin() {
         <div className="row start"><button className="btn primary" id="cli-login-approve" type="submit" disabled={busy}>Authorize CLI</button></div>
       </form>
       <div className="row start" id="cli-login-actions">
-        {token ? null : <button className="btn primary" type="button" onClick={() => void logIn("/cli")}><Icon name="github" />Log in with GitHub</button>}
+        {token ? null : <button className="btn primary" type="button" onClick={() => void logIn("/cli")}><Icon name={login.icon} />{login.label}</button>}
       </div>
     </main>
   );

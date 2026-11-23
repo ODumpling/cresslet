@@ -6,7 +6,7 @@ import { meta, mustLogIn } from "../lib/api.ts";
 import { focusView, navigated } from "../lib/focus.ts";
 import { ViewContext, type ViewInfo } from "../lib/hooks.ts";
 import { onProjectsChanged } from "../lib/projects.ts";
-import { finishLogin, logIn, refreshAccount, useSession } from "../lib/session.ts";
+import { finishLogin, logIn, refreshAccount, useLoginButton, useSession } from "../lib/session.ts";
 import { Toast } from "../lib/toast.tsx";
 import { Icon, Sprite, SrOnly } from "./icons.tsx";
 
@@ -25,6 +25,7 @@ export function Layout() {
   const [view, setViewState] = useState<ViewInfo>({ view: "" });
   const setView = useCallback((v: ViewInfo) => setViewState((o) => (o.view === v.view && o.nav === v.nav ? o : v)), []);
   const s = useSession();
+  const login = useLoginButton();
   const navigate = useNavigate();
   const [credits, setCredits] = useState(false);
   const [recent, setRecent] = useState<StoredProject[]>([]);
@@ -124,8 +125,8 @@ export function Layout() {
           </nav>
           <div className="sidebar-foot">
             <button className="account" id="account-btn" type="button" onClick={() => (s.token ? navigate({ to: "/settings" }) : void logIn())}>
-              <Icon name="github" />
-              <span id="account-label">{s.token ? <>{s.email ?? "Account"}<SrOnly>: account settings</SrOnly></> : "Log in with GitHub"}</span>
+              <Icon name={s.token ? "github" : login.icon} />
+              <span id="account-label">{s.token ? <>{s.email ?? "Account"}<SrOnly>: account settings</SrOnly></> : login.label}</span>
             </button>
           </div>
         </aside>

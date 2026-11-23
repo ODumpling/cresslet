@@ -8,7 +8,7 @@ import { api, errorMessage } from "../lib/api.ts";
 import { refocus } from "../lib/focus.ts";
 import { bareUrl, keepOptions, keepParse, keepText, keepValue, pageName, untilText, VIS_LABEL } from "../lib/format.ts";
 import { useAlive, useLoad, useView } from "../lib/hooks.ts";
-import { logIn, session, useSession } from "../lib/session.ts";
+import { logIn, session, useLoginButton, useSession } from "../lib/session.ts";
 import { toast } from "../lib/toast.tsx";
 import { SlugField, useSlug } from "../ui/SlugField.tsx";
 import { ExtLink, Icon, SrOnly } from "../ui/icons.tsx";
@@ -54,6 +54,7 @@ const upload = { active: false, gen: 0 };
 export function Artifacts() {
   useView("pages", "Artifacts");
   const { token } = useSession();
+  const login = useLoginButton();
   const dialog = useRef<DialogHandle>(null);
   const list = useLoad(() => (token ? api<{ pages: API.Page[] }>("/v1/pages").then((r) => r.pages) : Promise.resolve(null)), [token]);
   const openDialog = () => dialog.current?.open();
@@ -89,7 +90,7 @@ export function Artifacts() {
         <section className="block first" id="pages-login">
           <div className="panel split">
             <p className="muted small">Log in to deploy artifacts: private to the people you share them with, link-only, or public, and kept for as long as you choose.</p>
-            <button className="btn primary" id="pages-login-btn" type="button" onClick={() => void logIn("/artifacts")}><Icon name="github" />Log in with GitHub</button>
+            <button className="btn primary" id="pages-login-btn" type="button" onClick={() => void logIn("/artifacts")}><Icon name={login.icon} />{login.label}</button>
           </div>
         </section>
       )}
