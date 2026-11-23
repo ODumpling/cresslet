@@ -1457,10 +1457,19 @@ export function gitRoutes(
         // pushed to, a commit other than the one synced (the merge checks it against GitHub).
         const asBefore = ["default_moved", "moved", "not_synced"].includes((e as HttpError).code);
         if (!(e instanceof HttpError) || !asBefore) throw e;
-        // (As one merge, the top must hold every change below it: an Update stack stopped part way would leave out
-        // what's merged below.)
-        await assertLinked(ctx, top.id);
       }
+    }
+    // A stack's top as one merge: checked, merged and recorded with the app's stack changes held (an Update stack's
+    // merge pushed below meanwhile isn't left out unseen): the top must hold every change below it.
+    let recorded: Awaited<ReturnType<typeof landed>> | undefined;
+    if (top && !m) {
+      const one = await locked(a.id, async () => {
+        await assertLinked(ctx, top.id);
+        const mm = await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
+        return { mm, st: await landed(ctx, { branch, headSha: mm.headSha, mergedSha: mm.mergedSha, deleteBelow: false }).catch((e) => (console.error(e), null)) };
+      });
+      m = one.mm;
+      recorded = one.st;
     }
     m ??= await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });
     if (into === repo.default_branch) await store.updateAppRepoSync(repo, { sha: m.mergedSha, upstream: m.mergedSha }).catch((e) => console.error(e));
@@ -1476,9 +1485,11 @@ export function gitRoutes(
     }
     // A stack's top change merged: the stack is in. Its lower branches go with the top's (not when the files didn't
     // load: the branch is kept to retry from).
-    const stack = stackLanded ?? (into === repo.default_branch
+    // (Recorded already: its branches looked at now, the files in.)
+    const again = into === repo.default_branch && (!recorded || !filesError)
       ? await landed(ctx, { branch, headSha: m.headSha, mergedSha: m.mergedSha, deleteBelow: !filesError }).catch((e) => (console.error(e), null))
-      : null);
+      : null;
+    const stack = stackLanded ?? (recorded ? { ...recorded, ...(again ? { deleted: again.deleted, pullErrors: again.pullErrors } : {}) } : again);
     // A stack's own cleanup decided about its branches (the merged one too: not under a pull request still open).
     let deletedBranch = !!stack?.deleted.includes(branch);
     // Only while it's still the commit that was merged: a push since then keeps it. (GitHub can't delete a ref
