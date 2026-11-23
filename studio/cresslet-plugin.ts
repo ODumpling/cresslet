@@ -155,7 +155,8 @@ export interface CressletConfig {
 /** POST /v1/deploys's answer (docs/api.md), the parts read here. */
 export interface DeployResult {
   app: { name: string; url: string; claimed?: boolean; expiresAt?: string | number };
-  deploy?: { warning?: string };
+  /** `tag`: the version tag its commit got (built from the linked repository's default branch). */
+  deploy?: { warning?: string; tag?: string };
   deployKey?: string;
 }
 
@@ -177,6 +178,11 @@ export interface CressletOptions {
    * new one.
    */
   approveDeploy?: (target: string | null, signal: AbortSignal) => Promise<boolean>;
+  /**
+   * Asked before any other `cresslet deploy` command runs (typed in the terminal, or run by the project's own code: a
+   * script it runs as it opens): false refuses it. The Deploy button doesn't come through here.
+   */
+  confirmDeploy?: (target: string | null) => Promise<boolean>;
   /**
    * Source control (studio/git.ts): runs after any approval and before the build. A project linked to a repository
    * commits and merges its branch here (it may change the workspace's files), and resolves to the commit to build
@@ -358,6 +364,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     const now = await config().catch(() => null);
     if (!cfg.name && now && !now.name) await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...now, name: body.app.name }, null, 2) + "\n");
     log(`deployed ${body.app.name} → ${body.app.url}`);
+    if (body.deploy?.tag && git) log(`tagged ${git.sha.slice(0, 7)} as ${body.deploy.tag}`);
     if (body.deploy?.warning) log(`warning: ${body.deploy.warning}`);
     // An anonymous app from before every app needed an account: it expires, and can't be kept.
     if (!body.app.claimed && body.app.expiresAt) log(`no owner: expires ${new Date(body.app.expiresAt).toLocaleString()}`);
@@ -818,8 +825,14 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         // to: cresslet.json is read once, before asking.
         const cfg = await config();
         const target = targetOf(cfg);
-        if ((opts.builderRunning?.() || ctx.env.CRESSLET_AI_BUILDER) && !(await opts.approveDeploy?.(target.app ?? null, ctx.signal))) {
+        const fromBuilder = opts.builderRunning?.() || !!ctx.env.CRESSLET_AI_BUILDER;
+        if (fromBuilder && !(await opts.approveDeploy?.(target.app ?? null, ctx.signal))) {
           err("deploy not approved by the user");
+          return 1;
+        }
+        // Anything else in the container (the user, or the project's own code: it runs as the project opens) asks too.
+        if (!fromBuilder && opts.confirmDeploy && !(await opts.confirmDeploy(target.app ?? null))) {
+          err("deploy not confirmed by the user");
           return 1;
         }
         await deploy(out, ctx.signal, cfg, target);

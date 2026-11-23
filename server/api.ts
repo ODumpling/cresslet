@@ -55,6 +55,7 @@ import {
   deploysLock,
   type DeployFile,
   type DeployInput,
+  gitProvenance,
   HttpError,
   KEEP_DEPLOYS,
   randomName,
@@ -651,7 +652,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       target = created.app;
       createdKey = created.deployKey;
     }
-    let deploy;
+    let deploy: Awaited<ReturnType<typeof writeDeploy>> & { warning?: string; tag?: string };
     try {
       if (createdKey) await appDeploys.take(target.id);
       deploy = await writeDeploy(cfg, store, target, input);
@@ -663,7 +664,18 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       throw e;
     }
     runtime.stop(target.id); // next request boots the new version
-    runtime.logs.push(target.id, "system", `deployed ${deploy.id} (${deploy.files} files${deploy.server ? ", server" : ""})`);
+    // Built from the linked repository's default branch: its commit gets the next version tag (`v3`). The deploy is
+    // live whatever GitHub says; a tag it refused is a warning.
+    let tag: string | null = null;
+    try {
+      tag = await git.tagDeploy(c, target, deploy.id, gitProvenance(input.git));
+    } catch (e) {
+      if (!(e instanceof HttpError)) console.error(e);
+      const why = `commit not tagged: ${e instanceof HttpError ? e.message : "couldn't tag it"}`;
+      deploy.warning = deploy.warning ? `${deploy.warning}; ${why}` : why;
+    }
+    if (tag) deploy.tag = tag;
+    runtime.logs.push(target.id, "system", `deployed ${deploy.id} (${deploy.files} files${deploy.server ? ", server" : ""})${tag ? ` as ${tag}` : ""}`);
     return c.json({
       app: view((await store.appById(target.id))!),
       deploy,
@@ -756,7 +768,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         source: d.source,
         hasSource: existsSync(join(paths(cfg, a.id).deploy(d.id), "source")), // the project source came with it
         current: d.id === a.current_deploy_id,
-        git: d.git_sha ? { sha: d.git_sha, branch: d.git_branch, repo: d.git_repo, url: d.git_repo ? `${githubSync(cfg)?.webUrl ?? cfg.git.webUrl}/${d.git_repo}/commit/${d.git_sha}` : null } : null,
+        git: d.git_sha ? { sha: d.git_sha, branch: d.git_branch, repo: d.git_repo, tag: d.git_tag ?? null, url: d.git_repo ? `${githubSync(cfg)?.webUrl ?? cfg.git.webUrl}/${d.git_repo}/commit/${d.git_sha}` : null } : null,
       })),
       repo: (r => r ? git.repoView(r) : null)(await store.getAppRepo(a.id)),
       runtime: { running: runtime.status(a.id).running }, // no pid or host details for app users

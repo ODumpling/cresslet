@@ -105,7 +105,8 @@ export interface DeployInfo {
   /** The project source was uploaded with it (GET /v1/apps/:name/source). */
   hasSource?: boolean;
   /** The commit it was built from (source control). */
-  git?: { sha: string; branch: string | null; repo: string | null; url: string | null } | null;
+  /** `tag`: the version tag the commit got when it deployed (`v3`). */
+  git?: { sha: string; branch: string | null; repo: string | null; tag?: string | null; url: string | null } | null;
 }
 
 /** An app's linked repository (source control). */

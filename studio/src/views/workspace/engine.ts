@@ -88,8 +88,6 @@ export class Engine {
   /** A file changed (a command, the AI builder) and the save that follows hasn't started yet. */
   private dirty = false;
   private input: WritableStreamDefaultWriter<string> | null = null;
-  /** An untrusted project's shell takes no input until "Run it" (a command could run its code). */
-  locked: boolean;
   private cleanups: (() => void)[] = [];
 
   private project: StoredProject;
@@ -102,6 +100,8 @@ export class Engine {
   private hand = new Map<string, number>();
   /** Changes the watcher saw that weren't hand edits (a command's, or the AI builder's tools'). */
   commandRev = 0;
+  /** A `cresslet deploy` command was declined: the rest are refused (until the project is opened again). */
+  private deploysRefused = false;
   /** The last hydrate's npm install failed. */
   private installFailed = false;
   /** Counts the workspace's changes (studio/git.ts: a sync is clean only if none came in meanwhile). */
@@ -110,7 +110,6 @@ export class Engine {
   constructor(project: StoredProject, cb: Callbacks, editorEl: HTMLElement) {
     this.project = project;
     this.cb = cb;
-    this.locked = project.trusted === false;
     this.git = createGitWorkspace({
       app: () => project.deploy?.name,
       api: (path, init) => api(path, init),
@@ -146,7 +145,7 @@ export class Engine {
       return true;
     });
     this.term.onData((d) => {
-      if (!this.locked) void this.input?.write(d);
+      void this.input?.write(d);
     });
 
     this.view = new EditorView({
@@ -257,6 +256,13 @@ export class Engine {
     await c.mount(toTree(project.files));
     if (this.disposed) return;
 
+    /** What a `cresslet deploy` command will do, as the user is asked it. */
+    const deploying = (target: string | null) => {
+      const g = this.git.connected ? project.git! : null;
+      return g && target && g.activeBranch !== g.defaultBranch
+        ? `merge ${g.activeBranch} into ${g.defaultBranch} and deploy ${target} from ${g.defaultBranch}`
+        : `deploy ${target ? `to ${target}` : "this project as a new app"}${g ? ` from ${g.defaultBranch}` : ""}`;
+    };
     this.cresslet = createCresslet(c, {
       auth: () => ({ token: session().token }),
       project: () => project,
@@ -271,11 +277,15 @@ export class Engine {
       },
       // `cresslet deploy` in a command the AI builder started: the user says yes first.
       builderRunning: () => cb.builderRunning(),
-      approveDeploy: (target, signal) => {
-        const g = this.git.connected ? project.git! : null;
-        return cb.approveDeploy(g && target && g.activeBranch !== g.defaultBranch
-          ? `Claude wants to merge ${g.activeBranch} into ${g.defaultBranch} and deploy ${target} from ${g.defaultBranch}. It goes live at once.`
-          : `Claude wants to deploy ${target ? `to ${target}` : "this project as a new app"}${g ? ` from ${g.defaultBranch}` : ""}. It goes live at once.`, signal);
+      approveDeploy: (target, signal) => cb.approveDeploy(`Claude wants to ${deploying(target)}. It goes live at once.`, signal),
+      // `cresslet deploy` from the terminal or the project's own code (which runs as it opens): the user types "deploy"
+      // to say yes, so an Enter meant for something else (the editor, the terminal) can't. Once declined, the rest are
+      // refused until the project is opened again: code that keeps asking gets one try. The Deploy button still deploys.
+      confirmDeploy: async (target) => {
+        if (this.deploysRefused) return false;
+        const ok = prompt(`A command in this project's terminal wants to ${deploying(target)}. It goes live at once.\n\nType deploy to go ahead. (Anything else refuses terminal deploys until the project is opened again; the Deploy button still works.)`)?.trim().toLowerCase() === "deploy";
+        this.deploysRefused = !ok;
+        return ok;
       },
       // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
       beforeDeploy: async (log, signal, app) => {
@@ -339,14 +349,14 @@ export class Engine {
     } })).catch(() => {});
     this.input = shell.input.getWriter();
     cb.booted(c, this.cresslet);
-    if (project.trusted !== false) this.start();
+    this.start();
   }
   private previewBase: string | null = null;
   /** The port the preview shows (the one `cresslet dev` starts on, until a server is ready). */
   previewPort = 3000;
 
-  /** Installs the dependencies and starts the dev server (the preview). */
-  start() {
+  /** Installs the dependencies and starts the dev server (the preview): every project runs as it opens. */
+  private start() {
     this.cb.status("Installing");
     void this.input?.write("npm install && cresslet dev\r");
   }

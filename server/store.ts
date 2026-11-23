@@ -91,6 +91,8 @@ export interface Deploy {
   git_branch?: string | null;
   /** `owner/name`. */
   git_repo?: string | null;
+  /** The version tag the commit was given in that repository when it deployed (`v3`). */
+  git_tag?: string | null;
 }
 
 /** Source control providers (server/git.ts). */
@@ -1042,6 +1044,9 @@ export class Store implements RateHits {
       d.git_sha ?? null, d.git_branch ?? null, d.git_repo ?? null,
     );
   }
+  setDeployTag(deployId: string, tag: string) {
+    return this.db.run("UPDATE deploys SET git_tag = ? WHERE id = ?", tag, deployId);
+  }
   deploys(appId: string, limit = 20): Promise<Deploy[]> {
     return this.db.all<Deploy>(`SELECT ${DEPLOY} FROM deploys WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`, appId, limit);
   }
@@ -1449,7 +1454,7 @@ export class AccountDisabledError extends Error {
 export const inviteLock = (appId: string) => `cresslet:invite:${appId}`;
 
 /** Explicit columns where Postgres has a `rowid` column (SQLite's is implicit): rows look the same in both. */
-const DEPLOY = "id, app_id, created_at, bytes, file_count, has_server, source, git_sha, git_branch, git_repo";
+const DEPLOY = "id, app_id, created_at, bytes, file_count, has_server, source, git_sha, git_branch, git_repo, git_tag";
 /** SecretBox binding for an account's source control tokens (app secrets use the app id: `app_…`). */
 const gitScope = (accountId: string) => `acct:${accountId}`;
 const gitKey = (provider: string, which: "access" | "refresh") => `git:${provider}:${which}`;

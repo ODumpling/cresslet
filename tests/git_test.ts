@@ -430,6 +430,10 @@ test("a linked repository is followed by its id: renamed, it's still the one; a 
   assert.equal(t.gh.files("octo/store").a, "1");
   assert.equal(t.gh.files("octo/shop").a, undefined);
   assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.repo.fullName, "octo/store");
+  // Opening it in the studio (the tree, no ref) names it as it is now, so its deploys record (and tag) that.
+  const opened = await t.send("GET", "/v1/apps/shop/git/tree", tok);
+  assert.equal(opened.body.ref, "main");
+  assert.equal(opened.body.repo.fullName, "octo/store");
 }));
 
 test("a merge that worked is reported even if its files can't be loaded; the branch stays", withServer(async (t) => {
@@ -551,7 +555,7 @@ test("deploys record the commit they were built from", withServer(async (t) => {
   assert.equal(d.status, 201);
   await t.deploy(tok, "shop");
   const app = await t.send("GET", "/v1/apps/shop", tok);
-  assert.deepEqual(app.body.deploys.map((x: { git: unknown }) => x.git), [null, { sha, branch: "main", repo: "octo/shop", url: `${t.gh.base}/octo/shop/commit/${sha}` }]);
+  assert.deepEqual(app.body.deploys.map((x: { git: unknown }) => x.git), [null, { sha, branch: "main", repo: "octo/shop", tag: null, url: `${t.gh.base}/octo/shop/commit/${sha}` }]);
   assert.equal(app.body.repo, null);
   for (const git of [{ sha: "nope" }, { sha, branch: "a b" }, { sha, repo: "no-slash" }, "x"]) {
     assert.equal((await t.deploy(tok, "shop", { git })).status, 400, JSON.stringify(git));
@@ -597,12 +601,89 @@ test("migration 4 re-runs cleanly, and an older server's deploy rows (no git col
 
 async function linkedShop(t: T) {
   const tok = await t.account("octo@b.co");
-  await t.deploy(tok, "shop");
+  const deployKey = (await t.deploy(tok, "shop")).body.deployKey as string;
   await t.connect(tok, t.gh.user("octo"));
   t.gh.addRepo("octo", "shop", ["octo"]);
   const linked = await t.send("POST", "/v1/apps/shop/git/connect", tok, { owner: "octo", repo: "shop", initialSync: "pull" });
-  return { tok, linked: linked.body as { sha: string; files: { path: string; data: string }[] } };
+  return { tok, deployKey, linked: linked.body as { sha: string; files: { path: string; data: string }[] } };
 }
+
+test("a deploy from the linked repository's default branch tags its commit with the next version (as the user)", withServer(async (t) => {
+  const { tok, deployKey, linked } = await linkedShop(t);
+  const repo = t.gh.repo("octo/shop");
+  const git = (sha: string, branch = "main", name = "octo/shop") => ({ git: { sha, branch, repo: name } });
+  const d1 = await t.deploy(tok, "shop", git(linked.sha));
+  assert.equal(d1.status, 201);
+  assert.equal(d1.body.deploy.tag, "v1");
+  assert.equal(repo.tags.get("v1"), linked.sha);
+  // The same commit again keeps its version.
+  assert.equal((await t.deploy(tok, "shop", git(linked.sha))).body.deploy.tag, "v1");
+  assert.equal(repo.tags.size, 1);
+  // One more than the highest v<n> tag; other tags (semver, names) don't count.
+  const next = t.gh.write(repo, "main", { "a.txt": "2" });
+  repo.tags.set("v7", linked.sha).set("v1.2.3", linked.sha).set("v99-rc", linked.sha).set("release", linked.sha);
+  const d2 = await t.deploy(tok, "shop", git(next));
+  assert.equal(d2.body.deploy.tag, "v8");
+  // Past what a float holds exactly: still one more, and read back (the same commit again keeps it).
+  const big = new Map(repo.tags);
+  repo.tags.set("v999999999999999999", linked.sha);
+  const huge = t.gh.write(repo, "main", { "h.txt": "1" });
+  assert.equal((await t.deploy(tok, "shop", git(huge))).body.deploy.tag, "v1000000000000000000");
+  assert.equal((await t.deploy(tok, "shop", git(huge))).body.deploy.tag, "v1000000000000000000");
+  repo.tags.clear();
+  for (const [k, v] of big) repo.tags.set(k, v);
+  assert.equal(repo.tags.get("v8"), next);
+  // Not the default branch, another repository, no commit: nothing tagged.
+  const branch = t.gh.write(repo, "main", { "b.txt": "3" });
+  for (const extra of [git(branch, "feat/x"), git(branch, "main", "octo/other"), {}]) {
+    const d = await t.deploy(tok, "shop", extra);
+    assert.equal(d.status, 201);
+    assert.equal(d.body.deploy.tag, undefined, JSON.stringify(extra));
+  }
+  assert.equal(repo.tags.size, 6);
+  // A deploy key (no person, no GitHub of its own), and a collaborator who never connected GitHub: deployed, not
+  // tagged, nothing said, GitHub not called.
+  const collab = await t.account("collab@b.co");
+  const inv = await t.send("POST", "/v1/apps/shop/collaborators", tok, { email: "collab@b.co", role: "admin" });
+  assert.equal((await t.send("POST", `/v1/me/invites/${inv.body.invite.id}/accept`, collab)).status, 200);
+  const calls = t.gh.stats.calls.length;
+  for (const who of [deployKey, collab]) {
+    const d = await t.deploy(who, "shop", git(branch));
+    assert.equal(d.status, 201);
+    assert.equal(d.body.deploy.tag, undefined);
+    assert.equal(d.body.deploy.warning, undefined);
+  }
+  assert.equal(t.gh.stats.calls.length, calls);
+  // A tag taken between the listing and the create (GitHub: 422 already exists): the next number.
+  const listed = new Map(repo.tags);
+  repo.tags.set("v9", linked.sha);
+  const hidden = t.gh.hideTagsOnce(listed);
+  assert.equal((await t.deploy(tok, "shop", git(branch))).body.deploy.tag, "v10");
+  assert.ok(hidden());
+  repo.tags.delete("v10");
+  repo.tags.delete("v9");
+  // A commit that isn't on the default branch, said to be: not a version.
+  repo.refs.set("feat/y", branch);
+  const off = t.gh.write(repo, "feat/y", { "c.txt": "4" });
+  const offMain = await t.deploy(tok, "shop", git(off));
+  assert.equal(offMain.status, 201);
+  assert.equal(offMain.body.deploy.tag, undefined);
+  assert.match(offMain.body.deploy.warning, /^commit not tagged: .* isn't on main/);
+  // Another deploy takes the next number meanwhile (GitHub: 409): the one after it.
+  repo.raceTag = linked.sha;
+  assert.equal((await t.deploy(tok, "shop", git(branch))).body.deploy.tag, "v10");
+  assert.equal(repo.tags.get("v9"), linked.sha);
+  assert.equal(repo.tags.get("v10"), branch);
+  // GitHub refusing the tag (a ruleset) doesn't stop the deploy: it says so.
+  repo.lockTags = true;
+  const locked = await t.deploy(tok, "shop", git(t.gh.write(repo, "main", { "d.txt": "5" })));
+  assert.equal(locked.status, 201);
+  assert.equal(locked.body.deploy.tag, undefined);
+  assert.match(locked.body.deploy.warning, /^commit not tagged: /);
+  // The app's deploys say which version each was.
+  const app = await t.send("GET", "/v1/apps/shop", tok);
+  assert.deepEqual(app.body.deploys.slice(0, 5).map((x: { git: { tag: string | null } | null }) => x.git?.tag ?? null), [null, "v10", null, "v10", null]);
+}));
 
 test("pull requests: opened once from a branch as the user, with its review and checks", withServer(async (t) => {
   const { tok, linked } = await linkedShop(t);

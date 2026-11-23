@@ -198,7 +198,7 @@ function Shared() {
                     <td className="muted"><TimeAgo iso={a.updatedAt} /></td>
                     <td className="actions">
                       <a className="btn sm" href={a.url} target="_blank" rel="noopener"><Icon name="external" />Visit<SrOnly>{` ${a.name} (opens in a new tab)`}</SrOnly></a>
-                      <button className="btn sm" type="button" title="Open the deployed source as a new project" onClick={() => void openSource(a)}><Icon name="download" />Open source</button>
+                      <button className="btn sm" type="button" title="Open the app as a new project in the studio: its repository's default branch when it's linked, else its deployed source" onClick={() => void openSource(a)}><Icon name="code" />Open in studio</button>
                       {a.access === "viewer" ? null : <Link className="btn sm" to="/share/$name" params={{ name: a.name }}><Icon name="users" />Share<SrOnly>{` ${a.name}`}</SrOnly></Link>}
                       {a.access === "owner" || a.org ? null /* org apps: leave the organization instead */
                         : <button className="btn sm danger" type="button" id={`leave-${a.id}`} aria-label={`Leave ${a.name}`} onClick={() => void leave(a)}>Leave</button>}

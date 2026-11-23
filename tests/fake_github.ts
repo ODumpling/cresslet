@@ -13,6 +13,11 @@ type Repo = {
   id: number; owner: string; name: string; private: boolean; default_branch: string; push: Set<string>; refs: Map<string, string>;
   protected: Set<string>; rulesets?: boolean; pulls: Pull[];
   /**
+   * Lightweight tags (name → commit); `lockTags`: a ruleset refuses creating them; `raceTag`: the next tag created is
+   * taken first by that commit (another deploy), answered 409 as GitHub can.
+   */
+  tags: Map<string, string>; lockTags?: boolean; raceTag?: string;
+  /**
    * Pull request merging: the methods allowed (default all), an approving review required, approvals dismissed when a
    * pull request's base changes, branches up to date with their base required, the head deleted on merge (and the
    * pull requests on it moved to its base), as GitHub's settings.
@@ -33,6 +38,8 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
   const commits = new Map<string, Commit>();
   const repos = new Map<string, Repo>(); // "owner/name"
   const stats = { refreshes: 0, calls: [] as { login: string; method: string; path: string }[] };
+  /** The next tag listing shows these instead (a tag made between a listing and a create). */
+  let tagListing: Map<string, string> | null = null;
   let expiresIn = 0; // seconds; 0 = tokens don't expire
   let badSecret = false;
   const checks = new Map<string, { status: string; conclusion: string | null }[]>(); // commit → check runs
@@ -107,7 +114,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
     allow_merge_commit: r.allow?.merge ?? true, allow_squash_merge: r.allow?.squash ?? true, allow_rebase_merge: r.allow?.rebase ?? true,
   });
   const addRepo = (owner: string, name: string, push: string[], init = true) => {
-    const r: Repo = { id: ++n, owner, name, private: true, default_branch: "main", push: new Set(push), refs: new Map(), protected: new Set(), pulls: [] };
+    const r: Repo = { id: ++n, owner, name, private: true, default_branch: "main", push: new Set(push), refs: new Map(), protected: new Set(), pulls: [], tags: new Map() };
     if (init) {
       const b = Buffer.from("# " + name + "\n");
       blobs.set(blobId(b), b);
@@ -214,6 +221,26 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
     }
     if (rest.startsWith("/branches")) {
       return json(200, [...r.refs].map(([name, sha]) => ({ name, commit: { sha }, protected: r.protected.has(name) })));
+    }
+    if ((x = /^\/git\/matching-refs\/tags\/(.*)$/.exec(rest))) {
+      const prefix = decodeURIComponent(x[1]);
+      const tags = tagListing ?? r.tags;
+      tagListing = null;
+      return json(200, [...tags].filter(([n]) => n.startsWith(prefix)).map(([n, sha]) => ({ ref: `refs/tags/${n}`, object: { sha, type: "commit" } })));
+    }
+    if (rest === "/git/refs" && req.method === "POST" && body.ref.startsWith("refs/tags/")) {
+      if (!canPush) return json(403, { message: "Resource not accessible" });
+      if (r.lockTags) return json(422, { message: "Repository rule violations found\n\nCannot create ref due to creations being restricted." });
+      const name = body.ref.slice("refs/tags/".length);
+      if (r.raceTag) {
+        r.tags.set(name, r.raceTag);
+        r.raceTag = undefined;
+        return json(409, { message: "Conflict" });
+      }
+      if (r.tags.has(name)) return json(422, { message: "Reference already exists" });
+      if (!commits.has(body.sha)) return json(422, { message: "Object does not exist" });
+      r.tags.set(name, body.sha);
+      return json(201, { ref: body.ref, object: { sha: body.sha } });
     }
     if (rest === "/git/refs" && req.method === "POST") {
       if (!canPush) return json(403, { message: "Resource not accessible" });
@@ -386,6 +413,11 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
   return {
     base,
     stats,
+    /** The next tag listing shows `tags` (as of earlier); resolves to whether it was used. */
+    hideTagsOnce(tags: Map<string, string>) {
+      tagListing = tags;
+      return () => tagListing === null;
+    },
     user(login: string, id = ++n) {
       const u = { id, login, email: `${login}@users.example` };
       users.set(login, u);

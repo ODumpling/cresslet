@@ -332,7 +332,7 @@ function Repository() {
       <h2 id="repo-title">Source control</h2>
       {linked ? (
         <>
-          <p id="repo-linked">{"Linked to "}<ExtLink href={linked.url}>{linked.fullName}</ExtLink>{` (${linked.defaultBranch}).${deployed ? ` To work on it in the studio: Open source, then Source control → Load ${linked.defaultBranch}.` : ""}`}</p>
+          <p id="repo-linked">{"Linked to "}<ExtLink href={linked.url}>{linked.fullName}</ExtLink>{` (${linked.defaultBranch}).${deployed ? ` Open in studio starts on ${linked.defaultBranch}.` : ""}`}</p>
           <div className="row start">
             <button className="btn danger sm" type="button" id="repo-unlink" disabled={!!busy} onClick={() => {
               if (!confirm(`Unlink ${name} from ${linked.fullName}? The repository is left as it is.`)) return;
