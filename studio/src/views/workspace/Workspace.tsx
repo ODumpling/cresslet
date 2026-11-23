@@ -529,7 +529,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             )
           ) : null}
           {pull && gitReady ? (
-            <ExtLink className="btn git-pr s-only" id="git-pr-link" href={pull.url} title={pull.title}>
+            <ExtLink className="btn git-pr s-only" id="git-pr-link" href={pull.url} title={`${pull.title} · ${pull.review.replace("_", " ")} · checks ${pull.checks}`}>
               {`PR #${pull.number}`}<span className="muted small">{` · ${pull.review.replace("_", " ")} · checks ${pull.checks}`}</span>
             </ExtLink>
           ) : null}
