@@ -693,6 +693,11 @@ test("git: undoing a change loads the result; clean, it's committed at once as \
   k.files.list = [{ path: ".env", data: "VITE_THEME=dark\n" }];
   await assert.rejects(k.git.undo({ id: "chg_e", position: 1 }, top), (x: Json) => x.held === true && x.code === "dotenv_kept" && /\.env/.test(x.message));
   assert.deepEqual([k.state.undo?.title, k.calls.some((x: Json) => x.path.endsWith("/git/stack"))], ["Undo: Theme", false]);
+  // Committing it (Push, a request): refused until the file is put back, then committed.
+  await assert.rejects(k.git.commitChange("Commit the undo"), (x: Json) => x.code === "dotenv_kept");
+  k.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }];
+  await k.git.commitChange("Commit the undo");
+  assert.deepEqual([k.calls.at(-1)!.body.title, k.state.undo], ["Undo: Theme", undefined]);
   const kk = fakeGit({ onDefault: false });
   kk.state.activeBranch = "feat/s/1-one";
   kk.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }]; // put back: committed

@@ -30,9 +30,10 @@ export interface ProjectGitState {
   back?: { position: number; title: string; setAside: string[] };
   /**
    * Undoing a change (the workspace holds the undo, not committed yet): the next change is titled `title`, and isn't
-   * committed while a conflicted file still has its markers.
+   * committed while a conflicted file still has its markers, or a dotenv file it puts back (`env`, its public entries)
+   * isn't as it should be.
    */
-  undo?: { title: string; conflicts: string[] };
+  undo?: { title: string; conflicts: string[]; env?: { path: string; data: string }[] };
 }
 
 /** An open pull request (GET /v1/apps/:name/git/pulls). */
@@ -152,6 +153,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
 
   const revision = () => o.revision?.() ?? 0;
 
+  /** Dotenv files whose public entries aren't `env`'s (as the workspace exports them). */
+  const envKept = (env: { path: string; data: string }[], files: GitFile[]) => env.filter((e) => files.find((f) => f.path === e.path)?.data !== e.data).map((e) => e.path);
   /** Conflicted `paths` still holding their markers (text the workspace exports as base64 too). */
   const markersLeft = (paths: string[], files: GitFile[]) => paths.filter((p) => files.some((f) => {
     if (f.path !== p) return false;
@@ -221,6 +224,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     if (s.undo) {
       const left = markersLeft(s.undo.conflicts, files);
       if (left.length) throw Object.assign(new Error(`resolve the undo's conflicts first (markers left in ${left.join(", ")})`), { code: "conflicts_left" });
+      const kept = envKept(s.undo.env ?? [], files);
+      if (kept.length) throw Object.assign(new Error(`${kept.join(", ")} isn't put back yet (this workspace's own lines in it were in the way): give it the public entries the undo puts back first`), { code: "dotenv_kept" });
       title = s.undo.title;
     }
     let r: { changed: boolean; sha: string; branch?: string; change?: StackChange; stack?: { id: string; name: string }; submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean };
@@ -467,7 +472,9 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       const r = await o.api<{ title: string; top: { branch: string; sha: string }; conflicts: string[]; files: GitFile[] }>(path(`/stack/undo?change=${encodeURIComponent(change.id)}&sha=${change.sha}&base=${change.baseSha}`));
       if (r.top.branch !== s.activeBranch || r.top.sha !== s.headSha) throw stackChanged();
       unchangedSince(rev, "loading the undo");
-      const holding = () => set({ dirty: true, undo: { title: r.title, conflicts: r.conflicts } });
+      // Its dotenv files' public entries: checked on every commit of it.
+      const env = r.files.filter((f) => /(?:^|\/)\.env[^/]*$/i.test(f.path)).map((f) => ({ path: f.path, data: f.data }));
+      const holding = () => set({ dirty: true, undo: { title: r.title, conflicts: r.conflicts, ...(env.length ? { env } : {}) } });
       try {
         await o.hydrate(r.files);
       } catch (e) {
@@ -478,10 +485,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       }
       await holding();
       // A dotenv file the workspace kept as it was (its own local lines in the way): not put back, so not committed.
-      const envs = r.files.filter((f) => /(?:^|\/)\.env[^/]*$/i.test(f.path));
-      if (envs.length) {
-        const now = await o.files();
-        const kept = envs.filter((f) => now.find((x) => x.path === f.path)?.data !== f.data).map((f) => f.path);
+      if (env.length) {
+        const kept = envKept(env, await o.files());
         if (kept.length) {
           throw Object.assign(new Error(`${kept.join(", ")} couldn't be put back here (this workspace's own lines in it are in the way): give it the public entries it had in change ${change.position}`), { code: "dotenv_kept", held: true });
         }
