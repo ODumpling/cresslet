@@ -95,6 +95,19 @@ try {
   await page.locator(".stat", { hasText: "Granted left" }).locator(".value", { hasText: /^40$/ }).waitFor();
   const me = await call("/v1/me/credits", u.token);
   if (me.balance !== 40) fail(`balance via API: ${me.balance}`);
+
+  // The activity a page at a time (25): 30 more grants, then Older and Newer.
+  for (let i = 0; i < 30; i++) await call("/v1/admin/accounts/credits", admin, { email: user, credits: 1, note: `bulk ${i}` });
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.locator("#activity-pager [role=status]", { hasText: "Entries 1–25 of 33" }).waitFor();
+  if (!(await page.locator("#activity-prev").isDisabled())) fail("Newer enabled on the first page");
+  await page.locator("#activity-next").click();
+  await page.locator("#activity-pager [role=status]", { hasText: "Entries 26–33 of 33" }).waitFor();
+  await page.locator("tbody tr", { hasText: "claude-opus-5-5" }).waitFor();
+  if (!(await page.locator("#activity-prev").evaluate((e) => e === document.activeElement))) fail("focus not on Newer after the last page");
+  await page.locator("#activity-prev").click();
+  await page.locator("#activity-pager [role=status]", { hasText: "Entries 1–25 of 33" }).waitFor();
+  await page.locator("tbody tr", { hasText: "bulk 29" }).waitFor();
   await page.screenshot({ path: `${out}/admin-credits-account.png`, fullPage: true });
 
   // Reflow: no horizontal page scroll at 320 CSS px, on both pages.

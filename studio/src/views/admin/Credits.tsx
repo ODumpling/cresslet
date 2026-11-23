@@ -7,7 +7,7 @@ import { useView } from "../../lib/hooks.ts";
 import { DataTable, Stat, TimeAgo } from "../../ui/bits.tsx";
 import { Icon } from "../../ui/icons.tsx";
 import { AdminView, RefreshButton, shownText, useAdminLoad, useAgain } from "./AdminPage.tsx";
-import { CreditsOff, creditNum, DayChart, GrantForm, LedgerTable, resetsText, signed, tokenNum, usd } from "./credits-parts.tsx";
+import { Activity, useReloads, CreditsOff, creditNum, DayChart, GrantForm, resetsText, signed, tokenNum, usd } from "./credits-parts.tsx";
 
 /** The search, kept across visits. */
 const adminCreditsView = { q: "" };
@@ -15,14 +15,15 @@ const adminCreditsView = { q: "" };
 export function AdminCredits() {
   useView("admin", "AI credits · Admin", "admin-credits");
   const loaded = useAdminLoad(() => api<API.AdminCredits>("/v1/admin/credits"));
+  const { reload, gen } = useReloads(loaded);
   return (
-    <AdminView loaded={loaded} title="AI credits" sub="Credit use across every account on this server" actions={() => <RefreshButton reload={loaded.reload} />}>
-      {(d) => (d.enabled ? <Credits d={d} reload={loaded.reload} /> : <CreditsOff />)}
+    <AdminView loaded={{ ...loaded, reload }} title="AI credits" sub="Credit use across every account on this server" actions={() => <RefreshButton reload={reload} />}>
+      {(d) => (d.enabled ? <Credits d={d} reload={reload} gen={gen} /> : <CreditsOff />)}
     </AdminView>
   );
 }
 
-function Credits({ d, reload }: { d: API.AdminCredits; reload: () => Promise<boolean> }) {
+function Credits({ d, reload, gen }: { d: API.AdminCredits; reload: () => Promise<boolean>; gen: number }) {
   const again = useAgain(reload);
   const fill = useRef<((email: string) => void) | null>(null);
   const [q, setQState] = useState(adminCreditsView.q);
@@ -90,7 +91,7 @@ function Credits({ d, reload }: { d: API.AdminCredits; reload: () => Promise<boo
       </DataTable>
       <p className="muted small">Available: this month's free credits left plus granted credits left. Accounts appear here once they use AI credits or are given some.</p>
       <h2 className="section-title">Recent activity</h2>
-      <LedgerTable rows={d.recent} account />
+      <Activity gen={gen} />
     </>
   );
 }

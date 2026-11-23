@@ -6,22 +6,23 @@ import { ago } from "../../lib/format.ts";
 import { useView } from "../../lib/hooks.ts";
 import { Stat } from "../../ui/bits.tsx";
 import { AdminView, RefreshButton, useAdminLoad, useAgain } from "./AdminPage.tsx";
-import { CreditsOff, creditNum, GrantForm, LedgerTable, resetsText } from "./credits-parts.tsx";
+import { Activity, useReloads, CreditsOff, creditNum, GrantForm, resetsText } from "./credits-parts.tsx";
 
 export function AdminCreditsAccount() {
   const { id } = useParams({ from: "/admin-credits/$id" });
   const loaded = useAdminLoad(() => api<API.AdminCreditsAccount>(`/v1/admin/credits/accounts/${encodeURIComponent(id)}`), [id]);
-  const again = useAgain(loaded.reload);
+  const { reload, gen } = useReloads(loaded);
+  const again = useAgain(reload);
   const d = loaded.data;
   const a = d?.enabled ? d.account : null;
   useView("admin", a ? `${a.email} · AI credits · Admin` : "AI credits · Admin", "admin-credits");
   return (
     <AdminView
-      loaded={loaded}
+      loaded={{ ...loaded, reload }}
       title={loaded.error || (d && !d.enabled) ? "AI credits" : <><Link to="/admin-credits">AI credits</Link>{" / "}{a ? a.email : "…"}</>}
       sub={a ? [a.github && `@${a.github}`, a.siteAdmin && "Site admin"].filter(Boolean).join(" · ") || "Account" : ""}
       retryFocus="heading"
-      actions={() => <RefreshButton reload={loaded.reload} />}
+      actions={() => <RefreshButton reload={reload} />}
     >
       {(d) => (d.enabled ? (
         <>
@@ -34,8 +35,7 @@ export function AdminCreditsAccount() {
           <div className="detail-grid">
             <div className="stack">
               <h2 className="section-title flush">Activity</h2>
-              <LedgerTable rows={d.history} />
-              {d.history.length === 200 ? <p className="muted small">The latest 200 entries.</p> : null}
+              <Activity account={d.account.id} gen={gen} />
             </div>
             <GrantForm email={d.account.email} after={() => void again()} />
           </div>

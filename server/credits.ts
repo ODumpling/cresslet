@@ -101,6 +101,23 @@ export function ledgerEntry(r: AiLedgerRow, { admin = false } = {}) {
   };
 }
 
+/**
+ * A ledger page from the query: `limit` (default 50, 1–100) entries after skipping `offset`, counting from entry `upTo`
+ * (null: the newest). Paging from the same newest entry (the last response's upTo) keeps pages put while use is added.
+ */
+export function ledgerPage(c: Context) {
+  const int = (k: string, def: number, min: number, max: number) => {
+    const v = c.req.query(k)?.trim();
+    const n = v ? Math.trunc(Number(v)) : def;
+    return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : def;
+  };
+  return {
+    limit: int("limit", 50, 1, 100),
+    offset: int("offset", 0, 0, Number.MAX_SAFE_INTEGER),
+    upTo: Number.isFinite(Number(c.req.query("upTo")?.trim() || "x")) ? int("upTo", 0, 0, Number.MAX_SAFE_INTEGER) : null,
+  };
+}
+
 /** Betas a request may ask for (the AI builder's); others could reach features that aren't metered. */
 export const ALLOWED_BETAS = new Set(["server-side-fallback-2026-07-01"]);
 const FIELDS = new Set([
@@ -226,15 +243,7 @@ export function aiRoutes(
     const acct = accountWide(c, "read");
     const ai = cfg.ai;
     if (!ai) return c.json({ enabled: false });
-    const int = (k: string, def: number, min: number, max: number) => {
-      const v = c.req.query(k)?.trim();
-      const n = v ? Math.trunc(Number(v)) : def;
-      return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : def;
-    };
-    const limit = int("limit", 50, 1, 100);
-    const offset = int("offset", 0, 0, Number.MAX_SAFE_INTEGER);
-    // Paging from the same newest entry (upTo: the last response's historyUpTo) keeps pages put while use is added.
-    const upTo = Number.isFinite(Number(c.req.query("upTo")?.trim() || "x")) ? int("upTo", 0, 0, Number.MAX_SAFE_INTEGER) : null;
+    const { limit, offset, upTo } = ledgerPage(c);
     const w = await wallet(ai, acct);
     const n = await store.aiLedgerCount(acct.id, upTo);
     const top = upTo ?? n.last;
