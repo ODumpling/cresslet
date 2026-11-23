@@ -432,7 +432,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     // Each request goes the way chosen when it's sent (the key can be forgotten or entered mid-chat).
     r.agent ??= createAgent({
       // ("key": a stored key; "credits": this browser's session cookie)
-      client: () => (sourceRef.current === "key" ? anthropicClient(apiKey.get()!) : creditsClient()),
+      client: () => (sourceRef.current === "key" ? anthropicClient(apiKey.get()!) : creditsClient({ user: session().user ?? "" })),
       errorText: (x) => errorText(x, { credits: sourceRef.current !== "key" }),
       tools,
       on,

@@ -496,15 +496,18 @@ export async function anthropicClient(key: string) {
  * An Anthropic client that goes through this server on the account's AI credits: the same Messages API at
  * `<origin>/v1/ai`, authenticated with the Cresslet session token (it never reaches Anthropic).
  */
-/** `token`: an API token (tests); without one, the studio's session cookie (the page's fetch sends it). */
-export async function creditsClient(token?: string, origin: string | undefined = globalThis.location?.origin) {
+/**
+ * `token`: an API token (tests); `user`: the account the studio shows, whose session cookie the page's fetch sends
+ * (server/api.ts checks it's that account's).
+ */
+export async function creditsClient(by: { token: string } | { user: string }, origin: string | undefined = globalThis.location?.origin) {
   const { Anthropic } = await import("./vendor/anthropic.js");
   return new Anthropic({
     apiKey: null,
-    // Without a token: a placeholder (else the SDK looks for credentials of its own), taken off again (null): no
-    // Authorization header, the cookie is the credential.
-    authToken: token ?? "session",
-    ...(token ? {} : { defaultHeaders: { authorization: null } }),
+    // The cookie: a placeholder token (else the SDK looks for credentials of its own), taken off again (null): no
+    // Authorization header.
+    authToken: "token" in by ? by.token : "session",
+    ...("user" in by ? { defaultHeaders: { authorization: null, "x-cresslet-user": by.user } } : {}),
     baseURL: `${origin}/v1/ai`,
     dangerouslyAllowBrowser: true,
   });

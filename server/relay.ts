@@ -8,7 +8,7 @@ import { randomInt } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
-import { type Config, rootUrl, sessionCookie } from "./config.ts";
+import { type Config, rootUrl, sessionCookieValue } from "./config.ts";
 import { ipKey, RateLimit } from "./limits.ts";
 import { type Account, AccountDisabledError, ROLES, type Store, type Token } from "./store.ts";
 
@@ -78,13 +78,6 @@ const rawToString = (data: RawData): string => {
   if (Buffer.isBuffer(data)) return data.toString("utf8");
   if (Array.isArray(data)) return Buffer.concat(data).toString("utf8");
   return Buffer.from(data).toString("utf8");
-};
-
-const cookieValue = (header: string | undefined, name: string): string | undefined => {
-  for (const part of (header ?? "").split(";")) {
-    const i = part.indexOf("=");
-    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
-  }
 };
 
 const httpReject = (socket: Duplex, status: number, text: string) => {
@@ -515,7 +508,7 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
       return httpReject(socket, 429, "Too Many Requests");
     }
     const hasStudioOrigin = origin === studioOrigin;
-    const studioSession = hasStudioOrigin ? cookieValue(req.headers.cookie, sessionCookie(cfg)) : undefined;
+    const studioSession = hasStudioOrigin ? sessionCookieValue(cfg, req.headers.cookie) : undefined;
     wss.handleUpgrade(req, socket, head, (ws) => {
       attachConnection(ws, ip, hasStudioOrigin, studioSession);
     });

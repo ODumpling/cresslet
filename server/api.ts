@@ -15,6 +15,7 @@ import {
   previewOrigin,
   rootUrl,
   sessionCookie,
+  sessionCookieValue,
   type Visibility,
   VISIBILITIES,
 } from "./config.ts";
@@ -242,20 +243,30 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
 
   // ---- the studio's session: an account token in an HttpOnly cookie (page script never sees it). Apps under the
   // domain are the same *site* (SameSite lets their requests carry it), so it only counts on requests the studio's
-  // own pages sent (`fromStudio`).
+  // own pages sent (`fromStudio`). The studio names the account it shows (`x-cresslet-user`): a cookie for another
+  // one (another tab logged in meanwhile) doesn't act for it.
   const SESSION_COOKIE = sessionCookie(cfg);
   const SESSION_MAX_AGE = 400 * 86_400; // browsers' cap; the token itself lasts until logout or revocation
-  /** Sent by a studio page (this origin), not another site or an app under the domain. */
+  const USER_HEADER = "x-cresslet-user";
+  /**
+   * Sent by a studio page (this origin), not another site or an app under the domain. Without Fetch Metadata (only
+   * sent to https and localhost): the Origin, or the studio's header (another origin's page can't send it: CORS).
+   */
   const fromStudio = (c: Context<Env>) => {
     const site = c.req.header("sec-fetch-site");
-    return site ? site === "same-origin" : c.req.header("origin") === rootUrl(cfg);
+    return site ? site === "same-origin" : c.req.header("origin") === rootUrl(cfg) || c.req.header(USER_HEADER) !== undefined;
   };
   const setSession = (c: Context<Env>, token: string) =>
     setCookie(c, SESSION_COOKIE, token, { path: "/", httpOnly: true, secure: cfg.scheme === "https", sameSite: "Strict", maxAge: SESSION_MAX_AGE });
   const clearSession = (c: Context<Env>) => deleteCookie(c, SESSION_COOKIE, { path: "/", secure: cfg.scheme === "https" });
-  /** Logged in from the studio: the token goes in the session cookie, never to the page. Anyone else gets the token. */
-  const loggedIn = (c: Context<Env>, account: Account, token: string) => {
+  /**
+   * Logged in from the studio: the token goes in the session cookie, never to the page (the session it replaces is
+   * revoked). Anyone else gets the token.
+   */
+  const loggedIn = async (c: Context<Env>, account: Account, token: string) => {
     if (!fromStudio(c)) return c.json({ account: accountView(account), token });
+    const was = c.get("session") ? c.get("token") : undefined;
+    if (was) await store.revokeToken(was.account_id, was.id);
     setSession(c, token);
     return c.json({ account: accountView(account) });
   };
@@ -272,18 +283,16 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         c.set("token", found.token);
       }
     }
-    const cookie = !c.get("account") && fromStudio(c) ? getCookie(c, SESSION_COOKIE) : undefined;
-    if (cookie) {
-      const found = cookie.startsWith("clv_acct_") ? await store.useToken(cookie) : undefined;
-      if (found) {
-        c.set("account", found.account);
-        c.set("token", found.token);
-        c.set("session", true);
-      } else {
-        // Revoked (logged out elsewhere, or in API tokens): dropped, and the request goes on logged out (a login
-        // still works; what needs one answers 401, and the studio logs the tab out).
-        clearSession(c);
-      }
+    // A revoked one (logged out elsewhere, or in API tokens): the request goes on logged out (a login still works;
+    // what needs one answers 401, and the studio logs the tab out). Not cleared here: a login since may have replaced it.
+    const cookie = !bearer && fromStudio(c) ? sessionCookieValue(cfg, c.req.header("cookie")) : undefined;
+    const found = cookie?.startsWith("clv_acct_") ? await store.useToken(cookie) : undefined;
+    const claimed = c.req.header(USER_HEADER);
+    if (found && (claimed === undefined || claimed === found.account.id)) {
+      c.set("account", found.account);
+      c.set("token", found.token);
+      c.set("session", true);
+      c.header("cache-control", "private, no-store"); // no Authorization header to keep shared caches off it
     }
     await next();
   });
@@ -538,7 +547,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.post("/auth/session", async (c) => {
     if (!fromStudio(c)) throw new HttpError(403, "only the studio can start a session", "forbidden");
     const a = accountWide(c, "admin");
-    if (c.get("session") || !c.get("bearer")?.startsWith("clv_acct_")) throw new HttpError(400, "send the token to keep as a bearer");
+    if (!c.get("bearer")?.startsWith("clv_acct_")) throw new HttpError(403, "only an account token can be a session", "forbidden");
     setSession(c, c.get("bearer")!);
     return c.json({ account: accountView(a) });
   });
@@ -546,9 +555,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   /** Logs this browser out: its session's token is revoked, not just forgotten. */
   app.post("/auth/logout", async (c) => {
     if (!fromStudio(c)) throw new HttpError(403, "only the studio can end its session", "forbidden");
+    // Only the session the request counted: another (a login since, another account's) stays.
     const a = c.get("account"), t = c.get("token");
-    if (c.get("session") && a && t) await store.revokeToken(a.id, t.id);
-    clearSession(c);
+    if (c.get("session") && a && t) {
+      await store.revokeToken(a.id, t.id);
+      clearSession(c);
+    }
     return c.json({ loggedOut: true });
   });
 

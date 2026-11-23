@@ -268,7 +268,7 @@ export class Engine {
         : `deploy ${target ? `to ${target}` : "this project as a new app"}${g ? ` from ${g.defaultBranch}` : ""}`;
     };
     this.cresslet = createCresslet(c, {
-      loggedIn: () => !!session().user,
+      user: () => session().user,
       project: () => project,
       onDeployed: async (r) => {
         const deploy: Deploy = project.deploy = { name: r.app.name, deployKey: r.deployKey ?? project.deploy?.deployKey, url: r.app.url };

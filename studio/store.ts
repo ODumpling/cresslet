@@ -183,7 +183,7 @@ const stored = (key: string) => ({
 const user = stored("cresslet.user"), email = stored("cresslet.email"), legacy = stored("cresslet.token");
 
 /**
- * This browser's login. The credential is an HttpOnly session cookie (server/api.ts) page script can't read; `login`
+ * This browser's login. The credential is an HttpOnly session cookie (server/api.ts) page script can't read; `user`
  * is the logged-in account's id, kept so every tab knows it's logged in, and as whom.
  */
 export const auth = {

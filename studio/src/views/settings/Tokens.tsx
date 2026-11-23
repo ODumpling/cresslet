@@ -53,7 +53,7 @@ export function SettingsTokens() {
       return;
     }
     if (t.current) {
-      void logOut();
+      await logOut();
       void navigate({ to: "/" });
       toast("Token revoked. You're logged out.");
       return;

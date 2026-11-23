@@ -19,7 +19,7 @@ async function setup(overrides: Partial<Config> = {}) {
     headers.set("host", "test.local");
     if (init.body) headers.set("content-type", "application/json");
     const r = await srv.handler(new Request(`http://test.local${path}`, { ...init, headers }));
-    return { status: r.status, body: await r.json().catch(() => null), cookies: r.headers.getSetCookie() };
+    return { status: r.status, body: await r.json().catch(() => null), cookies: r.headers.getSetCookie(), cacheControl: r.headers.get("cache-control"), headers: r.headers };
   };
   const made = await req("/v1/accounts", { method: "POST", headers: { authorization: "Bearer adm" }, body: '{"email":"a@b.co","password":"hunter22!"}' });
   assert.equal(made.status, 201);
@@ -56,6 +56,12 @@ test("a login the studio sends: the token goes in an HttpOnly cookie, not the an
   assert.equal(me.status, 200);
   assert.equal(me.body.account.id, t.account);
   assert.equal(me.body.tokenInfo.name, "Studio (password login)");
+  assert.equal(me.cacheControl, "private, no-store"); // no Authorization header: shared caches kept off by this
+
+  // Logging in again: the session it replaces is revoked.
+  const again = await t.req("/v1/auth/password", { method: "POST", headers: { ...STUDIO, cookie: sessionOf(r.cookies) }, body: '{"email":"a@b.co","password":"hunter22!"}' });
+  assert.equal((await t.req("/v1/me", { headers: { ...STUDIO, cookie: sessionOf(r.cookies) } })).status, 401);
+  assert.equal((await t.req("/v1/me", { headers: { ...STUDIO, cookie: sessionOf(again.cookies) } })).status, 200);
 
   // Anyone else (a script, another client) gets the token, and no cookie.
   const other = await t.login({});
@@ -74,11 +80,28 @@ test("the cookie counts only from the studio's origin: not an app's under the do
   assert.equal(await me({ origin: "http://test.local" }), 200);
   assert.equal(await me({ origin: "http://evil.test.local" }), 401);
   assert.equal(await me({}), 401);
+  // Or the studio's header (another origin's page can't send it: CORS doesn't allow it).
+  assert.equal(await me({ "x-cresslet-user": t.account }), 200);
+  const preflight = await t.req("/v1/me", { method: "OPTIONS", headers: { origin: "http://evil.test.local", "access-control-request-method": "GET", "access-control-request-headers": "x-cresslet-user" } });
+  assert.doesNotMatch(preflight.headers.get("access-control-allow-headers") ?? "", /x-cresslet-user/i);
   // Changes too: an app's page can't act as the user.
   const mint = await t.req("/v1/me/tokens", { method: "POST", headers: { ...APP, cookie }, body: '{"name":"stolen"}' });
   assert.equal(mint.status, 401);
   // Nor log the user in to its own account (login CSRF): its login gets no cookie.
   assert.deepEqual((await t.login(APP)).cookies, []);
+}));
+
+test("the cookie acts only for the account the studio shows, and only when it's there once", withServer(async (t) => {
+  const cookie = sessionOf((await t.login()).cookies);
+  const me = (headers: Record<string, string>) => t.req("/v1/me", { headers: { ...STUDIO, ...headers } }).then((r) => r.status);
+  assert.equal(await me({ cookie, "x-cresslet-user": t.account }), 200);
+  // Another tab logged in as someone else meanwhile: this tab's requests don't act as them.
+  assert.equal(await me({ cookie, "x-cresslet-user": "ac_someone_else" }), 401);
+  // Twice (over http an app under the domain can set one for the whole domain): neither counts.
+  const other = (await t.login({})).body.token;
+  assert.equal(await me({ cookie: `${cookie}; cresslet_session=${other}` }), 401);
+  // A bearer (an operator's, a deploy key) is the request's credential: the cookie isn't added to it.
+  assert.equal(await me({ cookie, authorization: "Bearer adm" }), 401);
 }));
 
 test("logging out revokes the session's token; a page elsewhere can't log the user out", withServer(async (t) => {
@@ -96,14 +119,14 @@ test("logging out revokes the session's token; a page elsewhere can't log the us
   assert.deepEqual(tokens.body.tokens.map((x: { name: string }) => x.name), ["Operator-issued"]);
 }));
 
-test("a revoked session's cookie: dropped, the request goes on logged out, and a login still works", withServer(async (t) => {
+test("a revoked session's cookie: the request goes on logged out, and a login still works", withServer(async (t) => {
   const cookie = sessionOf((await t.login()).cookies);
   const me = await t.req("/v1/me", { headers: { ...STUDIO, cookie } });
   await t.req(`/v1/me/tokens/${me.body.tokenInfo.id}`, { method: "DELETE", headers: { authorization: `Bearer ${t.adminToken}` } });
 
   const after = await t.req("/v1/me", { headers: { ...STUDIO, cookie } });
   assert.equal(after.status, 401);
-  assert.ok(after.cookies.some((c) => /^cresslet_session=;/.test(c)));
+  assert.deepEqual(after.cookies, []); // not cleared: a login in another tab may have replaced it meanwhile
   assert.equal((await t.req("/v1/templates", { headers: { ...STUDIO, cookie } })).status, 200);
   const again = await t.req("/v1/auth/password", { method: "POST", headers: { ...STUDIO, cookie }, body: '{"email":"a@b.co","password":"hunter22!"}' });
   assert.equal(again.status, 200);

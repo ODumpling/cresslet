@@ -352,6 +352,18 @@ export function previewOrigin(cfg: Config): string {
  * it (not an app under the domain).
  */
 export const sessionCookie = (cfg: Config) => cfg.scheme === "https" ? "__Host-cresslet_session" : "cresslet_session";
+/**
+ * The session cookie in a `Cookie` header, if it's there once. Twice: over http an app under the domain can set one
+ * for the whole domain (no `__Host-`), and which one the studio set can't be told, so neither counts.
+ */
+export function sessionCookieValue(cfg: Config, header: string | undefined): string | undefined {
+  const name = sessionCookie(cfg);
+  const values = (header ?? "").split(";").flatMap((part) => {
+    const i = part.indexOf("=");
+    return i > 0 && part.slice(0, i).trim() === name ? [part.slice(i + 1).trim()] : [];
+  });
+  return values.length === 1 ? values[0] : undefined;
+}
 
 export function rootUrl(cfg: Config): string {
   const defaultPort = cfg.scheme === "https" ? 443 : 80;

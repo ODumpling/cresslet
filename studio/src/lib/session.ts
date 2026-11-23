@@ -4,7 +4,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { auth } from "../../store.ts";
 import type * as API from "../../api-types.ts";
-import { api, meta, setOnExpired } from "./api.ts";
+import { api, meta, setOnExpired, USER_HEADER } from "./api.ts";
 import { toast } from "./toast.tsx";
 
 export interface Session {
@@ -61,7 +61,7 @@ if (typeof window !== "undefined") {
  */
 export function setAccount(account: API.Account, sentWith?: string | null) {
   if (sentWith !== undefined && sentWith !== auth.user) return;
-  auth.user = account.id;
+  if (sentWith === undefined) auth.user = account.id; // a login (else /v1/me answered for this one)
   auth.email = account.github ?? account.email;
   const changed = state.user !== auth.user;
   set({ user: auth.user, email: auth.email, accountId: account.id, siteAdmin: account.role === "SiteAdmin", ...(changed ? { orgs: [] } : {}) });
@@ -75,11 +75,19 @@ function forget() {
   set({ user: null, email: null, accountId: null, siteAdmin: false, orgs: [] });
 }
 
-/** Logs this browser out: the server revokes the session's token and drops its cookie. */
-export async function logOut() {
-  forget();
-  const res = await fetch("/v1/auth/logout", { method: "POST", credentials: "same-origin" }).catch(() => null);
-  if (!res?.ok) toast("Couldn't end the session on the server: revoke it in Settings › API tokens.");
+/**
+ * Logs this browser out: the server revokes the session's token and drops its cookie. Resolves to whether it did (if
+ * the server can't be reached, the session stays, so Log out can be tried again).
+ */
+export async function logOut(): Promise<boolean> {
+  const user = auth.user;
+  const res = await fetch("/v1/auth/logout", { method: "POST", credentials: "same-origin", headers: user ? { [USER_HEADER]: user } : {} }).catch(() => null);
+  if (!res?.ok) {
+    toast("Couldn't log out: the server didn't answer. Try again.");
+    return false;
+  }
+  if (auth.user === user) forget(); // (another tab's login since stays)
+  return true;
 }
 let expired = false;
 /**
@@ -107,9 +115,8 @@ function moveLegacyToken(): Promise<void> | undefined {
       if (res.ok) {
         auth.legacyToken = null;
         setAccount(((await res.json()) as { account: API.Account }).account);
-      } else if (res.status === 401 || res.status === 403) {
+      } else if (res.status < 500) {
         auth.legacyToken = null; // revoked, or not a full-access token: log in again
-        if (auth.user) forget();
       }
       // Otherwise (the server's down): kept for the next page load.
     } catch { /* offline: next time */ }
@@ -120,7 +127,10 @@ if (typeof window !== "undefined") void moveLegacyToken();
 /** True while a stored token moves to the session cookie (see moveLegacyToken). */
 export function useMovingSession() {
   const [moving, setMoving] = useState(!!migrating);
-  useEffect(() => void migrating?.then(() => setMoving(false)), []);
+  useEffect(() => {
+    if (migrating) void migrating.then(() => setMoving(false));
+    else setMoving(false); // done between the render and now
+  }, []);
   return moving;
 }
 
@@ -196,6 +206,7 @@ export async function finishLogin(): Promise<string | null> {
   const p = pending;
   pending = null;
   if (!p) return null;
+  await migrating; // a stored token's move ends first, so it can't replace this login
   if ("error" in p) {
     toast(`GitHub login failed: ${p.error}`);
     return null;

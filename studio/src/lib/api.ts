@@ -12,6 +12,12 @@ export const statusOf = (e: unknown): number | undefined => (e as Partial<ApiErr
 let onExpired = () => {};
 export const setOnExpired = (fn: () => void) => void (onExpired = fn);
 
+/**
+ * Names the account the tab shows on each request with the session cookie: the server refuses a cookie for another
+ * one (another tab logged in meanwhile), and another origin's page can't send it.
+ */
+export const USER_HEADER = "x-cresslet-user";
+
 type Init = Omit<RequestInit, "headers"> & { headers?: Record<string, string> };
 /** A JSON API call; `T`: the response's shape (api-types.ts). Throws an ApiError when it isn't ok. */
 export function api<T = unknown>(path: string, init: Init = {}): Promise<T> {
@@ -24,6 +30,7 @@ export function api<T = unknown>(path: string, init: Init = {}): Promise<T> {
 async function call<T>(path: string, init: Init, anonymous: boolean): Promise<T> {
   const headers: Record<string, string> = { "content-type": "application/json", ...init.headers };
   const sent = anonymous ? null : auth.user;
+  if (sent) headers[USER_HEADER] = sent;
   const res = await fetch(path, { ...init, headers, credentials: init.credentials ?? (sent ? "same-origin" : "omit") });
   // GitHub access expired (source control): the Cresslet session is fine, the user reconnects GitHub.
   const gitReauth = res.status === 401 && (await res.clone().json().catch(() => null))?.error === "git_reauth_required";

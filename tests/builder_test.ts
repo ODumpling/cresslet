@@ -371,7 +371,7 @@ test("cresslet deploy from the builder: asks first, deploys to the app it named,
   const asked: Json[] = [];
   let answer = (_ok: boolean) => {};
   const cresslet = createCresslet(c, {
-    loggedIn: () => false,
+    user: () => null,
     project: () => project,
     builderRunning: () => running,
     approveDeploy: (target: string | null) => {

@@ -32,8 +32,9 @@ export function SettingsAccount() {
         <div className="panel split">
           <p className="muted small">Logs this browser out and ends its session.</p>
           <button className="btn" id="logout-btn" type="button" onClick={() => {
-            void logOut();
-            void navigate({ to: "/" });
+            void logOut().then((out) => {
+              if (out) void navigate({ to: "/" });
+            });
           }}><Icon name="logout" />Log out</button>
         </div>
       </section>

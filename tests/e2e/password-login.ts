@@ -76,7 +76,7 @@ try {
   // Log out: the session's token is revoked, not just forgotten. Then the CLI login page: its Log in goes to /login
   // and comes back.
   await page.locator("#logout-btn").click();
-  await page.locator("#account-label", { hasText: "Log in" }).waitFor();
+  await page.waitForFunction(() => !localStorage.getItem("cresslet.user"));
   const revoked = async () => (await fetch(`${base}/v1/me`, { headers: { authorization: `Bearer ${session!.value}` } })).status === 401;
   for (let i = 0; !await revoked(); i++) if (i > 50) fail("Log out left the session's token valid"); else await page.waitForTimeout(100);
   if ((await page.context().cookies()).some((c) => c.name === session!.name)) fail("Log out left the session cookie");
@@ -115,6 +115,7 @@ try {
   await page.locator("#pw-save").click();
   await page.locator("#pw-text", { hasText: `You can log in with ${without}` }).waitFor();
   await page.locator("#logout-btn").click();
+  await page.waitForFunction(() => !localStorage.getItem("cresslet.user")); // the server's answer first
   await page.goto(base + "/login");
   await logIn(without, "brand-new-3");
   await page.waitForURL((u) => u.pathname === "/");

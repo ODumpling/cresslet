@@ -35,7 +35,6 @@ try {
   const [origin, seen] = await pf.evaluate(() => [location.origin, localStorage.getItem("cresslet.anthropicKey")]);
   if (origin !== previewOrigin) throw new Error(`preview frame origin ${origin} ≠ ${previewOrigin}`);
   if (seen !== null) throw new Error("preview could read the studio's storage");
-  await page.evaluate(() => localStorage.removeItem("cresslet.anthropicKey"));
   // Sandboxed: no top-level navigation (e.g. to a studio-origin blob: URL) and no popups.
   const before = page.url();
   const [topNav, popup] = await pf.evaluate(() => {
@@ -63,6 +62,7 @@ try {
   const got = await leaked;
   if (got && got.includes("sk-ant-studio-secret")) throw new Error("studio-origin blob URL ran with the studio's origin inside the preview frame");
   if ((await pf.evaluate(() => location.origin)) !== previewOrigin) throw new Error("preview frame left the preview origin");
+  await page.evaluate(() => localStorage.removeItem("cresslet.anthropicKey"));
   // Logged in for real from here: deploying needs an account.
   const deployer = await newAccount(`deployer-${Date.now()}@example.com`);
   await page.evaluate(async (t) => { // as a login does: the session cookie, and the studio told who's logged in

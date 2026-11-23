@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type * as API from "../../../api-types.ts";
-import { errorMessage } from "../../lib/api.ts";
+import { errorMessage, USER_HEADER } from "../../lib/api.ts";
 import { useSession } from "../../lib/session.ts";
 import { Seg } from "../../ui/bits.tsx";
 import { appPath, useApp, useTabReload } from "./AppLayout.tsx";
@@ -40,7 +40,7 @@ export function AppLogs() {
     };
     void (async () => {
       try {
-        const res = await fetch(appPath(name, "/logs?n=200&follow=1"), { credentials: user ? "same-origin" : "omit", signal: ctrl.signal });
+        const res = await fetch(appPath(name, "/logs?n=200&follow=1"), { credentials: user ? "same-origin" : "omit", headers: user ? { [USER_HEADER]: user } : {}, signal: ctrl.signal });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message ?? `${res.status}`);
         setState("Live");
         const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader(); // an ok GET's body

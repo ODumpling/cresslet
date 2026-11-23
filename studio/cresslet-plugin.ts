@@ -168,8 +168,8 @@ export interface Target {
 }
 
 export interface CressletOptions {
-  /** Logged in to the studio: deploys go with its session cookie (else only a deploy key). */
-  loggedIn?: () => boolean;
+  /** The account logged in to the studio (its id): deploys go with its session cookie (else only a deploy key). */
+  user?: () => string | null;
   project: () => Pick<Project, "deploy"> | null | undefined;
   onDeployed?: (r: DeployResult) => void;
   builderRunning?: () => boolean;
@@ -350,7 +350,9 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       sources,
       ...(git ? { git } : {}),
     };
-    const credentials: RequestCredentials = opts.loggedIn?.() ? "same-origin" : "omit";
+    const user = opts.user?.();
+    if (user) headers["x-cresslet-user"] = user; // the account the tab shows (server/api.ts)
+    const credentials: RequestCredentials = user ? "same-origin" : "omit";
     let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload), signal, credentials });
     // An error from a proxy in front of the server may not be JSON: then the status says it.
     let body: DeployResult & { error?: string; message?: string } = await res.json().catch(() => ({}));
