@@ -101,7 +101,7 @@ function Body({ m }: { m: API.Metrics }) {
             ["Domains", domains.length ? <span>{domains.map((x, i) => <span key={x.domain}>{i ? ", " : null}<ExtLink href={`https://${x.domain}`}>{x.domain}</ExtLink></span>)}</span> : "—"],
             ["Repository", d.repo ? <ExtLink href={d.repo.url} id="app-repo">{d.repo.fullName}</ExtLink> : "Not linked"],
             d.repo ? ["Default branch", <span className="mono" id="app-branch">{d.repo.defaultBranch}</span>] : null,
-            d.repo || git ? ["Commit", git ? <Commit git={git} repo={d.repo} /> : dep ? "Live deploy isn't from a commit" : "—"] : null,
+            d.repo || git ? ["Commit", git ? <Commit git={git} repo={d.repo} /> : dep ? "No commit recorded" : "—"] : null,
             ["Server", a.config?.server ? `Yes${a.config.crons?.length ? ` · ${plural(a.config.crons.length, "cron")}` : ""}` : "Static only"],
             ["Secrets", <Link to="/apps/$name/secrets" params={{ name }}>{d.secrets.length ? plural(d.secrets.length, "secret") : "None"}</Link>],
             ["Egress", a.egress === null ? "Any public host" : a.egress.length ? a.egress.join(", ") : "None"],
@@ -126,7 +126,7 @@ function Body({ m }: { m: API.Metrics }) {
  */
 function Commit({ git, repo }: { git: NonNullable<API.DeployInfo["git"]>; repo: API.AppRepo | null | undefined }) {
   const sha = git.sha.slice(0, 7);
-  const other = !!git.repo && git.repo !== repo?.fullName;
+  const other = !!git.repo && git.repo.toLowerCase() !== repo?.fullName.toLowerCase(); // GitHub names ignore case
   const extra = [git.tag, other ? `from ${git.repo}` : null, git.branch && (other || git.branch !== repo?.defaultBranch) ? `on ${git.branch}` : null]
     .filter(Boolean).join(" · ");
   return (
