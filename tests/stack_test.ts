@@ -26,7 +26,7 @@ function fakeProvider() {
   const no = () => { throw new Error("not used here"); };
   // A name in the way: an existing branch, or one that's a folder of it (or the other way), as git refuses.
   const taken = (b: string) => [...refs.keys()].some((x) => x === b || b.startsWith(x + "/") || x.startsWith(b + "/"));
-  const pulls: (Pull & { title: string; body: string })[] = [];
+  const pulls: (Pull & { title: string; body: string; mergedHead?: string })[] = [];
   const refuse = new Set<string>(); // branches GitHub won't open a pull request from
   const keep = new Set<string>(); // branches GitHub won't delete (a rule)
   const guarded = new Set<string>(); // protected branches
@@ -64,7 +64,7 @@ function fakeProvider() {
       // A merge commit: the head's files, on the head (this fake's commits have one parent).
       const sha = make(new Map(commits.get(input.sha)!.files), input.sha);
       refs.set(x.base, sha);
-      Object.assign(x, { state: "closed", merged: true, mergeSha: sha });
+      Object.assign(x, { state: "closed", merged: true, mergeSha: sha, mergedHead: input.sha });
       if (gh.deleteOnMerge) {
         refs.delete(x.head);
         for (const y of pulls) if (y.state === "open" && y.base === x.head) y.base = x.base;
@@ -89,7 +89,8 @@ function fakeProvider() {
       for (const x of pulls) if (x.state === "open" && x.base === branch && contains(to, refs.get(x.head) ?? "")) Object.assign(x, { state: "closed", merged: true });
     },
     async getPull(_r: Repo, n: number) {
-      return { ...pullOf(n) };
+      const x = pullOf(n);
+      return { ...x, headSha: x.mergedHead ?? refs.get(x.head) };
     },
     async findPull(_r: Repo, head: string) {
       const x = pulls.find((y) => y.head === head && y.state === "open");
@@ -733,9 +734,13 @@ test("stack: on a protected default branch, Land next merges the bottom's pull r
   // Merged on GitHub already, its branch deleted with it: recorded as landed (into main only).
   const mergeSha = t.provider.push("main", { merged: "3" });
   t.provider.push("main", { later: "x" }); // merged since: the landing is at its merge commit, not main's head
-  Object.assign(pr[2], { base: c2.branch, state: "closed", merged: true, mergeSha });
+  Object.assign(pr[2], { base: c2.branch, state: "closed", merged: true, mergeSha, mergedHead: c3.sha });
   await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere");
   pr[2].base = "main";
+  // Merged at an earlier commit (a push since): not landed.
+  pr[2].mergedHead = c2.sha;
+  await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /another commit/.test((e as Error).message));
+  pr[2].mergedHead = c3.sha;
   t.provider.refs.delete(c3.branch);
   const l3 = await landNext(t.ctx, c3.change.id);
   assert.equal(l3.sha, mergeSha);

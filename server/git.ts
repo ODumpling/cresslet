@@ -115,6 +115,8 @@ export interface Pull {
   head: string;
   /** Merged: its merge commit. */
   mergeSha?: string | null;
+  /** Its head commit (merged: the one merged). */
+  headSha?: string;
 }
 
 /** GitHub's REST API with one user's token. `unauthorized`: GitHub rejected the token (revoked meanwhile). */
@@ -609,7 +611,7 @@ export class GitHub implements SourceControlProvider {
 
   #pull = (p: GhPull): Pull => ({
     number: p.number, url: p.html_url, state: p.state === "closed" ? "closed" : "open", merged: !!p.merged_at || !!p.merged,
-    base: p.base?.ref ?? "", head: p.head.ref ?? "", mergeSha: p.merge_commit_sha ?? null,
+    base: p.base?.ref ?? "", head: p.head.ref ?? "", mergeSha: p.merge_commit_sha ?? null, headSha: p.head.sha,
   });
   /** A refused pull request call: GitHub's own reason (422), else as any other call. */
   #pullError(res: { status: number; body: { message?: string; errors?: { message?: string }[] } | null }) {
