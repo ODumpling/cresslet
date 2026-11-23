@@ -27,7 +27,10 @@ export interface Account {
   /** While disabled: its real email and GitHub id (`email` is a placeholder and `github_id` null meanwhile). */
   disabled_email: string | null;
   disabled_github_id: number | null;
-  /** server/passwords.ts hash, or null: no password login. Never leaves the server. */
+  /**
+   * server/passwords.ts hash bound to the GitHub id the account had when it was set (`bindPassword`), or null: no
+   * password login. Never leaves the server.
+   */
   password_hash: string | null;
 }
 
@@ -510,9 +513,33 @@ export class Store implements RateHits {
   async linkGithub(accountId: string, github: { id: number; login: string }) {
     await this.db.run("UPDATE accounts SET github_id = ?, github_login = ? WHERE id = ? AND disabled_at IS NULL", github.id, github.login, accountId);
   }
-  /** Sets (or with null, removes) the account's password hash. */
-  async setPasswordHash(accountId: string, hash: string | null) {
-    await this.db.run("UPDATE accounts SET password_hash = ? WHERE id = ?", hash, accountId);
+  /**
+   * Sets (or with null, removes) the account's password hash. `guard` (a request that checked the old one): only if
+   * the hash is still `was` and the caller's token is still live (not revoked by a GitHub link or a disable meanwhile).
+   */
+  setPasswordHash(accountId: string, hash: string | null, guard?: { was: string | null; tokenId: string }): Promise<boolean> {
+    return this.serialized(accountLock(accountId), async () => {
+      if (!guard) return (await this.db.run("UPDATE accounts SET password_hash = ? WHERE id = ?", hash, accountId)).changes > 0;
+      const r = await this.db.run(
+        `UPDATE accounts SET password_hash = ? WHERE id = ? AND disabled_at IS NULL AND COALESCE(password_hash, '') = ?
+           AND EXISTS (SELECT 1 FROM tokens WHERE id = ? AND account_id = accounts.id)`,
+        hash, accountId, guard.was ?? "", guard.tokenId,
+      );
+      return r.changes > 0;
+    });
+  }
+  /**
+   * First GitHub login of an account set up by email: links it, and drops the tokens and password issued before (not
+   * proven to be this person's), at once under the account's lock (a password login in flight gets no token after).
+   */
+  linkGithubFirst(accountId: string, github: { id: number; login: string }): Promise<void> {
+    return this.serialized(accountLock(accountId), async () => {
+      await this.db.run(
+        "UPDATE accounts SET github_id = ?, github_login = ?, password_hash = NULL WHERE id = ? AND disabled_at IS NULL",
+        github.id, github.login, accountId,
+      );
+      await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+    });
   }
   accountById(accountId: string): Promise<Account | undefined> {
     return this.db.get<Account>("SELECT * FROM accounts WHERE id = ?", accountId);
@@ -535,7 +562,8 @@ export class Store implements RateHits {
   /** Returns the secret (shown once; only its hash is stored) and the token's metadata. */
   async issueToken(
     accountId: string,
-    opts: { name: string; role?: Role; apps?: string[] | null },
+    /** `passwordHash`: a password login's, only while the account still has that one. */
+    opts: { name: string; role?: Role; apps?: string[] | null; passwordHash?: string },
   ): Promise<{ token: string; info: Token }> {
     const scoped = (opts.role ?? "admin") !== "admin" || !!opts.apps;
     // Scoped tokens get their own prefix: a server from before scoped tokens (after a rollback) would
@@ -553,12 +581,16 @@ export class Store implements RateHits {
     const hash = await sha256(token);
     await this.serialized(accountLock(accountId), async () => {
       // Disabled meanwhile (a login in flight): no token. The insert refuses it in the same statement.
+      const pw = opts.passwordHash !== undefined;
       const r = await this.db.run(
         `INSERT INTO tokens (hash, id, account_id, name, role, apps, created_at)
-         SELECT ?, ?, id, ?, ?, ?, ? FROM accounts WHERE id = ? AND disabled_at IS NULL`,
-        hash, info.id, info.name, info.role, info.apps, info.created_at, accountId,
+         SELECT ?, ?, id, ?, ?, ?, ? FROM accounts WHERE id = ? AND disabled_at IS NULL${pw ? " AND password_hash = ?" : ""}`,
+        hash, info.id, info.name, info.role, info.apps, info.created_at, accountId, ...(pw ? [opts.passwordHash!] : []),
       );
-      if (!r.changes) throw new AccountDisabledError();
+      if (!r.changes) {
+        if (pw && !(await this.accountById(accountId))?.disabled_at) throw new PasswordChangedError();
+        throw new AccountDisabledError();
+      }
       await this.db.run("UPDATE accounts SET invited_at = NULL WHERE id = ? AND invited_at IS NOT NULL", accountId);
     });
     return { token, info };
@@ -1455,6 +1487,13 @@ export const accountLock = (accountId: string) => `cresslet:account:${accountId}
 export const cronsLock = (appId: string) => `cresslet:crons:${appId}`;
 /** Held while an organization's members change (the last admin can't leave). */
 export const orgLock = (orgId: string) => `cresslet:org:${orgId}`;
+
+/** issueToken for a password login whose password changed (or was dropped) meanwhile. */
+export class PasswordChangedError extends Error {
+  constructor() {
+    super("password changed");
+  }
+}
 
 /** issueToken for a disabled (or deleted) account. */
 export class AccountDisabledError extends Error {

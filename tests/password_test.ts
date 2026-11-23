@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createServer } from "../server/main.ts";
 import { type Config, loadConfig } from "../server/config.ts";
 import { hashPassword, verifyPassword } from "../server/passwords.ts";
+import { PasswordChangedError } from "../server/store.ts";
 
 async function setup(overrides: Partial<Config> = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "cresslet-pw-"));
@@ -124,6 +125,9 @@ test("settings: set a password, change it only with the current one", withServer
   assert.equal((await t.login("a@b.co", "first-pass-1")).status, 401);
   assert.equal((await t.login("a@b.co", "second-pass-2")).status, 200);
 
+  // An over-long current password is just wrong.
+  assert.equal((await put({ password: "third-pass-3", currentPassword: "x".repeat(257) })).status, 403);
+
   // A scoped token can't.
   const scoped = (await t.json("/v1/me/tokens", { method: "POST", headers: t.bearer(tok), body: '{"name":"ci","role":"deploy"}' })).body.token;
   assert.equal((await put({ password: "third-pass-3", currentPassword: "second-pass-2" }, scoped)).status, 403);
@@ -146,4 +150,41 @@ test("rate limits: per email, and per client", withServer(async (t) => {
   assert.equal((await t.login("a@b.co", "hunter22!", "10.0.2.1")).status, 429);
   for (let i = 0; i < 30; i++) assert.equal((await t.login(`u${i}@b.co`, "guess-xx-1", "10.0.3.1")).status, 401);
   assert.equal((await t.login("other@b.co", "guess-xx-1", "10.0.3.1")).status, 429);
+}));
+
+test("remove: no current password needed; then no password login", withServer(async (t) => {
+  const made = await t.create({ email: "a@b.co", password: "hunter22!" });
+  const del = await t.json("/v1/me/password", { method: "DELETE", headers: t.bearer(made.body.token) });
+  assert.equal(del.status, 200);
+  assert.equal(del.body.account.password, false);
+  assert.equal((await t.login("a@b.co", "hunter22!")).status, 401);
+}));
+
+test("in flight: a login or a password save after the password or token changed gets nothing", withServer(async (t) => {
+  const made = await t.create({ email: "a@b.co", password: "hunter22!" });
+  const store = t.srv.store, id = made.body.account.id;
+  const before = (await store.accountById(id))!.password_hash!;
+  const me = await t.json("/v1/me", { headers: t.bearer(made.body.token) });
+  const tokenId = me.body.tokenInfo.id;
+  // The password changed after a login read it: no token.
+  await store.setPasswordHash(id, "x:other");
+  await assert.rejects(store.issueToken(id, { name: "late", passwordHash: before }), PasswordChangedError);
+  // A save that read the old hash, or whose token was revoked meanwhile, writes nothing.
+  assert.equal(await store.setPasswordHash(id, "x:mine", { was: before, tokenId }), false);
+  assert.equal(await store.setPasswordHash(id, "x:mine", { was: "x:other", tokenId }), true);
+  await store.revokeTokens(id);
+  assert.equal(await store.setPasswordHash(id, "x:again", { was: "x:mine", tokenId }), false);
+  assert.equal((await store.accountById(id))!.password_hash, "x:mine");
+}));
+
+test("a password set before a GitHub link stops counting (the link by a server without passwords)", withServer(async (t) => {
+  const made = await t.create({ email: "a@b.co", password: "hunter22!" });
+  // What an older server's GitHub link does: id set, tokens gone, the password column left alone.
+  await t.srv.store.db.run("UPDATE accounts SET github_id = 42, github_login = 'octo' WHERE id = ?", made.body.account.id);
+  assert.equal((await t.login("a@b.co", "hunter22!")).status, 401);
+  const tok = (await t.create({ email: "a@b.co" })).body.token;
+  assert.equal((await t.json("/v1/me", { headers: t.bearer(tok) })).body.account.password, false);
+  // Set again now: it counts (bound to that GitHub id).
+  assert.equal((await t.json("/v1/me/password", { method: "PUT", headers: t.bearer(tok), body: '{"password":"after-link-1"}' })).status, 200);
+  assert.equal((await t.login("a@b.co", "after-link-1")).status, 200);
 }));

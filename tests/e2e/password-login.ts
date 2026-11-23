@@ -34,12 +34,9 @@ try {
   if (!/Log in to start building/.test((await page.locator("#landing-note").textContent())!)) fail("landing doesn't offer the login");
   await page.locator("#landing-login").click();
   await page.waitForURL((u) => u.pathname === "/login");
+  await page.locator("#login-form").waitFor();
   if (await page.locator("#account-label").textContent() !== "Log in") fail("the sidebar still offers only GitHub");
   if (await page.locator("#login-github").count()) fail("GitHub offered on a server without it");
-  await page.goto(base + "/");
-  await page.locator("#landing-login").click();
-  await page.waitForURL((u) => u.pathname === "/login");
-  await page.locator("#login-form").waitFor();
   await shot(page, "login");
 
   // Wrong password: said beside the form, still logged out.
@@ -89,6 +86,13 @@ try {
   await page.goto(base + "/settings");
   await page.locator("#pw-text", { hasText: `Set a password to also log in with ${without}` }).waitFor();
   if (await page.locator("#pw-current").count()) fail("asked for a current password it doesn't have");
+  await page.locator("#pw-new").fill("brand-new-3");
+  await page.locator("#pw-save").click();
+  await page.locator("#pw-text", { hasText: `You can log in with ${without}` }).waitFor();
+  // Removed (no current password needed), then set again.
+  page.once("dialog", (d) => void d.accept());
+  await page.locator("#pw-remove").click();
+  await page.locator("#pw-text", { hasText: `Set a password to also log in with ${without}` }).waitFor();
   await page.locator("#pw-new").fill("brand-new-3");
   await page.locator("#pw-save").click();
   await page.locator("#pw-text", { hasText: `You can log in with ${without}` }).waitFor();

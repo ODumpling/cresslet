@@ -38,3 +38,15 @@ export async function verifyPassword(password: string, hash: string | null | und
   const got = await derive(password, Buffer.from(salt, "base64"), want.length, { N: Number(n), r: Number(r), p: Number(p) });
   return timingSafeEqual(got, want) && !!hash;
 }
+
+/**
+ * The stored form: the hash with the GitHub id the account had when it was set. A GitHub link by a server without
+ * passwords (a rollback) doesn't drop the column, so a password set before the link must stop counting after it.
+ */
+export const bindPassword = (hash: string, githubId: number | null) => `${githubId ?? ""}:${hash}`;
+
+/** The account's password hash, or null if it has none (or one set before its GitHub link). */
+export function accountPassword(a: { password_hash: string | null; github_id: number | null }): string | null {
+  const s = a.password_hash, i = s?.indexOf(":") ?? -1;
+  return s && i >= 0 && s.slice(0, i) === String(a.github_id ?? "") ? s.slice(i + 1) : null;
+}

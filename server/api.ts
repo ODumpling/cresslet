@@ -33,6 +33,7 @@ import {
   type Store,
   type Token,
   AccountDisabledError,
+  PasswordChangedError,
   accountLock,
   cronsLock,
   inviteLock,
@@ -43,7 +44,7 @@ import { type Cluster, singleNode } from "./cluster.ts";
 import { github } from "./github.ts";
 import { githubSync, gitRoutes } from "./git.ts";
 import { cliLogin } from "./cli-login.ts";
-import { hashPassword, passwordProblem, verifyPassword } from "./passwords.ts";
+import { accountPassword, bindPassword, hashPassword, PASSWORD_MAX, passwordProblem, verifyPassword } from "./passwords.ts";
 import { inspect, INSPECT_LIMITS } from "./inspect.ts";
 import { normalizeEgress } from "./egress.ts";
 import { pausedCrons, type Scheduler, upcoming } from "./cron.ts";
@@ -324,7 +325,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     email: a.email,
     github: a.github_login,
     role: isSiteAdmin(cfg, a) ? SITE_ADMIN : null,
-    password: !!a.password_hash,
+    password: !!accountPassword(a),
   });
   const iso = (ms: number | null) => ms ? new Date(ms).toISOString() : null;
   const tokenView = async (t: Token, current?: Token) => {
@@ -423,7 +424,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.post("/accounts", async (c) => {
     if (!isAdmin(c.get("bearer"))) throw new HttpError(403, "log in with GitHub or a password", "forbidden");
     const { email, password } = await body<{ email?: unknown; password?: unknown } | null>(c) ?? {};
-    if (typeof email !== "string" || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
+    if (typeof email !== "string" || email.length > 254 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "valid email required");
     if (password !== undefined) {
       if (!cfg.passwordLogin) throw new HttpError(400, "password login is off on this server (CRESSLET_PASSWORD_LOGIN)", "password_login_disabled");
       const problem = passwordProblem(password);
@@ -432,7 +433,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (await store.disabledAccount({ emails: [email] })) throw new HttpError(409, `${email} belongs to a disabled account: enable it first`, "account_disabled");
     let account = await store.accountByEmail(email) ?? await store.createAccount(email);
     if (typeof password === "string") {
-      const hash = await hashPassword(password);
+      const hash = bindPassword(await hashPassword(password), account.github_id);
       await store.setPasswordHash(account.id, hash);
       account = { ...account, password_hash: hash };
     }
@@ -508,37 +509,50 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
       const password = typeof input.password === "string" ? input.password : "";
       if (!email || !password) throw new HttpError(400, "email and password required");
-      if (email.length > 254 || password.length > 256) throw wrong();
+      if (email.length > 254 || password.length > PASSWORD_MAX) throw wrong();
       if (!await byIp.take(ipKey(clientIp(c))) || !await byEmail.take(email)) {
         throw new HttpError(429, "too many tries, wait a few minutes", "rate_limited");
       }
       const account = await store.accountByEmail(email); // a disabled account's email is moved aside: not found
-      if (!await verifyPassword(password, account?.password_hash) || !account) throw wrong();
+      const hash = account ? accountPassword(account) : null;
+      if (!await verifyPassword(password, hash) || !account || !hash) throw wrong();
       try {
-        const { token } = await store.issueToken(account.id, { name: "Studio (password login)" });
+        // Only while it still has that password (not dropped by a GitHub link meanwhile).
+        const { token } = await store.issueToken(account.id, { name: "Studio (password login)", passwordHash: account.password_hash! });
         return c.json({ account: accountView(account), token });
       } catch (e) {
         if (e instanceof AccountDisabledError) throw new HttpError(403, "this account is disabled; ask a site admin", "account_disabled");
+        if (e instanceof PasswordChangedError) throw wrong();
         throw e;
       }
     });
 
-    // Set or change this account's password (changing needs the current one: a token alone can't take the login over).
+    /** Saves the account's new password hash (or null) if nothing changed since the request read it. */
+    const savePassword = async (c: Context<Env>, a: Account, hash: string | null) => {
+      if (!await store.setPasswordHash(a.id, hash, { was: a.password_hash, tokenId: c.get("token")!.id })) {
+        throw new HttpError(409, "your password or session changed meanwhile: reload and try again", "conflict");
+      }
+      return c.json({ account: accountView({ ...a, password_hash: hash }) });
+    };
+
+    // Set or change this account's password (changing needs the current one, so a token can't replace the owner's).
     app.put("/me/password", async (c) => {
       const a = accountWide(c, "admin");
       const input = await body<{ password?: unknown; currentPassword?: unknown } | null>(c) ?? {};
       const problem = passwordProblem(input.password);
       if (problem) throw new HttpError(400, problem);
-      if (a.password_hash) {
+      const had = accountPassword(a);
+      if (had) {
         if (!await byAccount.take(a.id)) throw new HttpError(429, "too many tries, wait a few minutes", "rate_limited");
-        const current = typeof input.currentPassword === "string" ? input.currentPassword : "";
+        const current = typeof input.currentPassword === "string" && input.currentPassword.length <= PASSWORD_MAX ? input.currentPassword : "";
         // 403, not 401: the token is fine (a 401 would log the studio out).
-        if (!current || !await verifyPassword(current, a.password_hash)) throw new HttpError(403, "current password is wrong", "wrong_password");
+        if (!current || !await verifyPassword(current, had)) throw new HttpError(403, "current password is wrong", "wrong_password");
       }
-      const hash = await hashPassword(input.password as string);
-      await store.setPasswordHash(a.id, hash);
-      return c.json({ account: accountView({ ...a, password_hash: hash }) });
+      return savePassword(c, a, bindPassword(await hashPassword(input.password as string), a.github_id));
     });
+
+    // Remove it (no current password needed: removing gives a token holder nothing, and undoes one a stolen token set).
+    app.delete("/me/password", async (c) => savePassword(c, accountWide(c, "admin"), null));
   }
 
   // ---- GitHub login (see server/github.ts)

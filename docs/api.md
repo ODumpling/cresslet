@@ -46,7 +46,8 @@ Creating apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin`
 | DELETE | `/v1/me/tokens/:id` | revoke one token |
 | POST | `/v1/me/token` | revoke all of this account's tokens → `{account, token}` (new full-access one) |
 | POST | `/v1/auth/password` | password login on: `{email, password}` → `{account, token}` (a new full-access token); 401 `invalid_credentials` for a wrong email or password alike. No signup: only accounts that have a password. 10 tries per email and 30 per client per 10 min (429 `rate_limited`) |
-| PUT | `/v1/me/password` | password login on, full-access token: `{password, currentPassword?}` → `{account}`. Sets the password (8-256 characters); changing one needs `currentPassword` (403 `wrong_password`; 10 tries per account per 10 min) |
+| PUT | `/v1/me/password` | password login on, full-access token: `{password, currentPassword?}` → `{account}`. Sets the password (8-256 characters); changing one needs `currentPassword` (403 `wrong_password`; 10 tries per account per 10 min). 409 `conflict` if the password or the calling token changed meanwhile. Other tokens stay valid: revoke them to end other sessions |
+| DELETE | `/v1/me/password` | password login on, full-access token: removes the password (no current one needed) → `{account}` |
 | GET | `/v1/auth/github` | browser: GitHub web flow → redirects to `/#cresslet_login=<code>` (or `#cresslet_login_error=…`) |
 | POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` |
 | POST | `/v1/auth/github/device` | CLI/agents: → `{deviceCode, userCode, verificationUri, expiresIn, interval}` |

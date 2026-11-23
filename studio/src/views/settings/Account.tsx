@@ -72,6 +72,23 @@ function Password({ account, reload }: { account?: API.Account; reload: () => Pr
     }
   }
 
+  async function remove() {
+    if (!confirm("Remove your password? You'll log in another way until you set one again.")) return;
+    setBusy(true);
+    try {
+      await api("/v1/me/password", { method: "DELETE" });
+      if (!alive.current) return;
+      setCurrent("");
+      setError("");
+      await reload();
+      toast("Password removed");
+    } catch (err) {
+      if (alive.current) setError(errorMessage(err));
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  }
+
   return (
     <section className="block" aria-labelledby="pw-title">
       <div className="block-head"><h2 id="pw-title">Password</h2></div>
@@ -95,7 +112,10 @@ function Password({ account, reload }: { account?: API.Account; reload: () => Pr
           <p className="muted small" id="pw-hint">At least 8 characters.</p>
         </div>
         <FormError id="pw-error" text={error} />
-        <div className="row start"><button className="btn primary" id="pw-save" type="submit" disabled={busy}>{has ? "Change password" : "Set password"}</button></div>
+        <div className="row start">
+          <button className="btn primary" id="pw-save" type="submit" disabled={busy}>{has ? "Change password" : "Set password"}</button>
+          {has ? <button className="btn" id="pw-remove" type="button" disabled={busy} onClick={() => void remove()}>Remove password</button> : null}
+        </div>
       </form>
     </section>
   );
