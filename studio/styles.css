@@ -361,7 +361,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width
 
 /* top bar */
 .topbar {
-  height: 56px; flex: none; display: flex; align-items: center; gap: 14px; padding: 0 12px;
+  min-height: 56px; flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 9px 12px 10px; /* wraps only when full */
   border-bottom: 1px solid var(--line); background: var(--surface);
 }
 .topbar-home { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: 9px; background: var(--accent); color: var(--accent-ink); }
@@ -394,7 +394,7 @@ a.deploy-link:hover { color: var(--accent-text); }
 .deploy-link .icon { width: 13px; height: 13px; }
 .deploy-url { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-btn {
-  flex: 1 1 170px; max-width: 320px; margin: 0 auto; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 11px;
+  flex: 1 1 0; min-width: 34px; max-width: 320px; margin: 0 auto; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 11px;
   border-radius: 9px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text-3); cursor: pointer; white-space: nowrap; overflow: hidden;
 }
 .palette-btn:hover { border-color: var(--line-strong); color: var(--text-2); }
@@ -402,7 +402,7 @@ a.deploy-link:hover { color: var(--accent-text); }
 .topbar kbd, .statusline kbd, .palette kbd, .builder-actions kbd {
   font: 500 11px var(--mono); padding: 0 5px; border-radius: 5px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--text-2);
 }
-.topbar-right { display: flex; align-items: center; gap: 8px; flex: none; }
+.topbar-right { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; flex: none; max-width: 100%; margin-left: auto; }
 .topbar-right .btn { min-height: 32px; padding: 4px 11px; }
 #builder-btn[aria-expanded="true"], #drawer-btn[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-text); }
 .git-pill .mono { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; }
@@ -1035,7 +1035,7 @@ button.statusline-item:hover { color: var(--text); }
   .topbar { flex-wrap: wrap; height: auto; min-height: 52px; padding: 8px 12px; }
   #project-name { width: 9rem; }
   .palette-btn { order: 3; flex-basis: 100%; max-width: none; }
-  .topbar-right { flex-wrap: wrap; max-width: 100%; }
+  .topbar-right { flex-wrap: wrap; max-width: 100%; margin-left: 0; justify-content: normal; }
   .workspace[data-mode="guided"] :is(.preview-pane, .db-pane, .db-tables-pane) { margin: 0 0 12px; border-radius: 0; }
   .workspace[data-mode="guided"] .builder-pane { margin: 0; }
   .deploy-link { min-width: 0; flex: 0 1 auto; }
