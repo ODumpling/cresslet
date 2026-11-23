@@ -25,6 +25,8 @@ const MAX_UNAUTH_GLOBAL = 200;
 const MAX_UNAUTH_PER_IP = 20;
 const DEFAULT_PING_MS = 30_000;
 const DEFAULT_TOKEN_CHECK_MS = 60_000;
+const DEFAULT_IDLE_MS = 60 * 60_000; // 1 hour idle (separate from app-sandbox 10m wsIdleMs)
+const DEFAULT_MAX_MS = 12 * 60 * 60_000; // 12 hours max session
 const MAX_ID_LEN = 128;
 
 export interface RelayOptions {
@@ -32,6 +34,9 @@ export interface RelayOptions {
   authTimeoutMs?: number;
   pingMs?: number;
   tokenCheckMs?: number;
+  idleMs?: number;
+  maxMs?: number;
+  authAttemptsPer10Min?: number;
   cliStartsPer10Min?: number;
   studioClaimsPer10Min?: number;
   clock?: () => number;
@@ -82,7 +87,7 @@ const httpReject = (socket: Duplex, status: number, text: string) => {
 const sendJson = (ws: WebSocket, msg: Record<string, unknown>) => {
   if (ws.readyState !== WebSocket.OPEN) return false;
   if (ws.bufferedAmount > MAX_BUFFERED_BYTES) {
-    ws.close(1008, "slow consumer");
+    ws.terminate();
     return false;
   }
   ws.send(JSON.stringify({ v: 1, ...msg }));
@@ -99,6 +104,8 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
   const authTimeoutMs = opts.authTimeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS;
   const pingMs = opts.pingMs ?? DEFAULT_PING_MS;
   const tokenCheckMs = opts.tokenCheckMs ?? DEFAULT_TOKEN_CHECK_MS;
+  const idleMs = opts.idleMs ?? DEFAULT_IDLE_MS;
+  const maxMs = opts.maxMs ?? DEFAULT_MAX_MS;
   const now = opts.clock ?? (() => Date.now());
   const studioOrigin = new URL(rootUrl(cfg)).origin;
 
@@ -110,6 +117,7 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
   const unauthByIp = new Map<string, number>();
   const alive = new WeakMap<WebSocket, boolean>();
 
+  const authAttempts = new RateLimit(opts.authAttemptsPer10Min ?? 60, 10 * 60_000);
   const cliStarts = new RateLimit(opts.cliStartsPer10Min ?? 20, 10 * 60_000);
   const studioClaims = new RateLimit(opts.studioClaimsPer10Min ?? 10, 10 * 60_000);
 
@@ -158,11 +166,11 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
         closeSession(s, 4002, "expired");
       }
     }
-    const idleMs = cfg.limits.wsIdleMs;
-    const maxMs = cfg.limits.wsMaxMs;
     for (const s of paired) {
       if ((idleMs > 0 && t - s.lastActivity > idleMs) || (maxMs > 0 && t - s.createdAt > maxMs)) {
-        closeSession(s, 1000, "timeout");
+        sendErrorAndClose(s.cliWs, "timeout", "Relay session timed out.", 4008);
+        if (s.studioWs) sendErrorAndClose(s.studioWs, "timeout", "Relay session timed out.", 4008);
+        closeSession(s, 4008, "timeout");
       }
     }
   }
@@ -211,17 +219,36 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
   }, pingMs);
   pingTimer.unref();
 
+  let checkingTokens = false;
   const tokenTimer = setInterval(() => {
+    if (checkingTokens || paired.size === 0) return;
+    checkingTokens = true;
     void (async () => {
-      for (const s of [...paired]) {
-        if (s.state !== "paired") continue;
-        const ids = s.studioTokenId ? [s.cliTokenId, s.studioTokenId] : [s.cliTokenId];
-        const ok = await tokensStillLive(s.accountId, ids).catch(() => false);
-        if (!ok && s.state === "paired") {
-          sendErrorAndClose(s.cliWs, "unauthorized", "Session token revoked or account disabled.", 4001);
-          if (s.studioWs) sendErrorAndClose(s.studioWs, "unauthorized", "Session token revoked or account disabled.", 4001);
-          closeSession(s, 4001, "unauthorized");
+      try {
+        const byAccount = new Map<string, Session[]>();
+        for (const s of paired) {
+          if (s.state !== "paired") continue;
+          const list = byAccount.get(s.accountId) ?? [];
+          list.push(s);
+          byAccount.set(s.accountId, list);
         }
+        for (const [accountId, sessions] of byAccount) {
+          const account = await store.accountById(accountId).catch(() => undefined);
+          const liveIds = account && !account.disabled_at
+            ? new Set((await store.tokens(accountId).catch(() => [])).map((t) => t.id))
+            : new Set<string>();
+          for (const s of sessions) {
+            if (s.state !== "paired") continue;
+            const ok = liveIds.has(s.cliTokenId) && (!s.studioTokenId || liveIds.has(s.studioTokenId));
+            if (!ok) {
+              sendErrorAndClose(s.cliWs, "unauthorized", "Session token revoked or account disabled.", 4001);
+              if (s.studioWs) sendErrorAndClose(s.studioWs, "unauthorized", "Session token revoked or account disabled.", 4001);
+              closeSession(s, 4001, "unauthorized");
+            }
+          }
+        }
+      } finally {
+        checkingTokens = false;
       }
     })();
   }, tokenCheckMs);
@@ -235,6 +262,7 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
     unauthByIp.set(ip, (unauthByIp.get(ip) ?? 0) + 1);
     let authed = false;
     let handlingHello = false;
+    let deciding = false;
     let role: "cli" | "studio" | null = null;
     let session: Session | null = null;
 
@@ -293,6 +321,8 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
 
       if (role === "studio" && session.state === "awaiting_approval") {
         if (msg.type === "pair_decision" && typeof msg.allow === "boolean") {
+          if (deciding) return;
+          deciding = true;
           void handleDecision(session, msg.allow).catch(() => {
             if (session) closeSession(session, 1011, "internal");
           });
@@ -353,6 +383,10 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
       if (msg.role === "studio" && !hasStudioOrigin) {
         return sendErrorAndClose(ws, "forbidden", "Studio connections require the studio origin.", 4003);
       }
+      if (!await authAttempts.take(ip, now())) {
+        return sendErrorAndClose(ws, "rate_limited", "Too many connection attempts; wait a few minutes.", 4029);
+      }
+      if (ws.readyState !== WebSocket.OPEN) return;
       const verified = await verifyToken(msg.token);
       if (ws.readyState !== WebSocket.OPEN) return;
       if (!verified) {
@@ -365,6 +399,7 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
         if (!await cliStarts.take(account.id, now())) {
           return sendErrorAndClose(ws, "rate_limited", "Too many pairing sessions started; wait a few minutes.", 4029);
         }
+        if (ws.readyState !== WebSocket.OPEN) return;
         if (pending.size >= MAX_PENDING || (accountSessions.get(account.id)?.size ?? 0) >= MAX_SESSIONS_PER_ACCOUNT) {
           return sendErrorAndClose(ws, "rate_limited", "Too many active relay sessions.", 4029);
         }
@@ -397,6 +432,7 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
       if (!await studioClaims.take(account.id, now())) {
         return sendErrorAndClose(ws, "rate_limited", "Too many pairing attempts; wait a few minutes.", 4029);
       }
+      if (ws.readyState !== WebSocket.OPEN) return;
       const rawCode = typeof msg.code === "string" ? normalizeCode(msg.code) : "";
       const s = rawCode ? pending.get(rawCode) : undefined;
       // Same error for missing, expired, already claimed, or another account's code (no cross-account oracle).
@@ -426,25 +462,29 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
         closeSession(s, 4003, "denied");
         return;
       }
-      // Re-check expiry, both sockets, and token/account liveness before consuming the code.
+      const ids = s.studioTokenId ? [s.cliTokenId, s.studioTokenId] : [s.cliTokenId];
+      if (!await tokensStillLive(s.accountId, ids)) {
+        if (s.state === "awaiting_approval" && s.studioWs === ws) {
+          sendErrorAndClose(s.cliWs, "unauthorized", "Session token revoked or account disabled.", 4001);
+          sendErrorAndClose(ws, "unauthorized", "Session token revoked or account disabled.", 4001);
+          closeSession(s, 4001, "unauthorized");
+        }
+        return;
+      }
+      // Re-check ownership, expiry, capacity, and both sockets after async token check.
+      if (s.state !== "awaiting_approval" || s.studioWs !== ws || s.cliWs.readyState !== WebSocket.OPEN || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
       if (s.exp <= now()) {
         sendErrorAndClose(s.cliWs, "expired", "Pairing code expired.", 4002);
         sendErrorAndClose(ws, "expired", "Pairing code expired.", 4002);
         closeSession(s, 4002, "expired");
         return;
       }
-      if (s.cliWs.readyState !== WebSocket.OPEN || ws.readyState !== WebSocket.OPEN) {
-        closeSession(s, 1000, "peer disconnected");
-        return;
-      }
-      const ids = s.studioTokenId ? [s.cliTokenId, s.studioTokenId] : [s.cliTokenId];
-      if (!await tokensStillLive(s.accountId, ids)) {
-        sendErrorAndClose(s.cliWs, "unauthorized", "Session token revoked or account disabled.", 4001);
-        sendErrorAndClose(ws, "unauthorized", "Session token revoked or account disabled.", 4001);
-        closeSession(s, 4001, "unauthorized");
-        return;
-      }
-      if (s.state !== "awaiting_approval" || s.studioWs !== ws || s.cliWs.readyState !== WebSocket.OPEN || ws.readyState !== WebSocket.OPEN) {
+      if (paired.size >= MAX_PAIRED) {
+        sendErrorAndClose(s.cliWs, "rate_limited", "Relay capacity reached; try again soon.", 4029);
+        sendErrorAndClose(ws, "rate_limited", "Relay capacity reached; try again soon.", 4029);
+        closeSession(s, 4029, "rate_limited");
         return;
       }
       // Consume one-time code and transition to paired.

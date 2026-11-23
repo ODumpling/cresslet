@@ -19,12 +19,16 @@ import { ExtLink, Icon, SrOnly } from "../../ui/icons.tsx";
 
 const STEP_ICON: Record<string, string> = { run_command: "terminal", read_dev_log: "terminal", commit_change: "branch" };
 /** A tool call's input as the model sent it (not validated yet). */
-type ToolInput = { path?: string; command?: string; title?: string } | null | undefined;
+const strField = (input: unknown, key: string): string | undefined => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const v = (input as Record<string, unknown>)[key];
+  return typeof v === "string" ? v : undefined;
+};
 const runningText = (name: string, input: unknown) => ({
-  list_files: "Listing files", read_file: `Reading ${(input as ToolInput)?.path ?? "a file"}`, write_file: `Writing ${(input as ToolInput)?.path ?? "a file"}`,
-  edit_file: `Editing ${(input as ToolInput)?.path ?? "a file"}`, delete_file: `Deleting ${(input as ToolInput)?.path ?? "a file"}`,
-  run_command: `Running ${(input as ToolInput)?.command ?? "a command"}`, read_dev_log: "Reading the dev server output",
-  commit_change: `Committing ${(input as ToolInput)?.title ?? "change"}`,
+  list_files: "Listing files", read_file: `Reading ${strField(input, "path") ?? "a file"}`, write_file: `Writing ${strField(input, "path") ?? "a file"}`,
+  edit_file: `Editing ${strField(input, "path") ?? "a file"}`, delete_file: `Deleting ${strField(input, "path") ?? "a file"}`,
+  run_command: `Running ${strField(input, "command") ?? "a command"}`, read_dev_log: "Reading the dev server output",
+  commit_change: `Committing ${strField(input, "title") ?? "change"}`,
 } as Record<string, string>)[name] ?? name;
 
 /** One entry in the chat log. */
@@ -217,13 +221,30 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
   };
   const update = (id: number, fn: (i: Item) => Item) => setItems((xs) => xs.map((x) => (x.id === id ? fn(x) : x)));
 
+  /** Abortable sleep for watcher settle. */
+  function waitSettle(ms: number, signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const t = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(t);
+        resolve(false);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
   /** Explicit `commit_change(title)` from a paired desktop agent. */
-  async function commitRemoteChange(title: string): Promise<ToolResult & { summary: string }> {
+  async function commitRemoteChange(title: string, signal?: AbortSignal): Promise<ToolResult & { summary: string }> {
+    if (signal?.aborted || r.gone) return { error: true, text: "Cancelled.", summary: `Cancelled: ${title}` };
     const g = r.git;
     if (g?.connected) {
       await g.idle();
-      await new Promise((res) => setTimeout(res, 500));
-      if (r.gone) return { error: true, text: "Project closed.", summary: "Project closed" };
+      if (signal?.aborted || r.gone) return { error: true, text: "Cancelled.", summary: `Cancelled: ${title}` };
+      if (!await waitSettle(500, signal) || r.gone) return { error: true, text: "Cancelled.", summary: `Cancelled: ${title}` };
       if (!g.state?.dirty) {
         return { text: "No changes to commit.", summary: `No changes to commit (${title})` };
       }
@@ -235,6 +256,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         if (!out.changed) {
           return { text: "No changes to commit.", summary: `No changes to commit (${title})` };
         }
+        if (r.gone) return { text: `Committed ${out.sha.slice(0, 7)}.`, summary: `Committed: ${title}` };
         r.onTurnEnd(true);
         const s = { ...g.state, ...(out.restacked ? { activeBranch: onto } : {}) };
         const msg = out.joined
@@ -246,17 +268,17 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         return { text: msg, summary: `Committed: ${title}` };
       } catch (e) {
         if (gitCode(e) === "moved") {
-          r.onStackStale();
+          if (!r.gone) r.onStackStale();
           const msg = `Not committed: ${errorMessage(e)}. Pull it in or carry on from it in Source control first.`;
-          add({ kind: "notice", text: msg, error: true });
+          if (!r.gone) add({ kind: "notice", text: msg, error: true });
           return { error: true, text: msg, summary: `Commit failed: ${title}` };
         }
         const msg = `Couldn't commit to GitHub: ${errorMessage(e)}`;
-        add({ kind: "notice", text: msg, error: true });
+        if (!r.gone) add({ kind: "notice", text: msg, error: true });
         return { error: true, text: msg, summary: `Commit failed: ${title}` };
       }
     }
-    await new Promise((res) => setTimeout(res, 500));
+    if (!await waitSettle(500, signal) || r.gone) return { error: true, text: "Cancelled.", summary: `Cancelled: ${title}` };
     const changed = r.remoteChanged || r.commandRev() !== r.remoteCmdRev;
     r.remoteChanged = false;
     r.remoteCmdRev = r.commandRev();
@@ -270,7 +292,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
 
   const [dispatcher] = useState(() => createBridgeDispatcher({
     tools,
-    commitChange: (title) => commitRemoteChange(title),
+    commitChange: (title, signal) => commitRemoteChange(title, signal),
     onEvent(ev) {
       if (r.gone) return;
       if (ev.type === "tool") {
@@ -404,7 +426,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || r.busy) return;
+    if (!text || r.busy || r.bridge || dispatcher.busy) return;
     if (!sourceRef.current) return;
     // Each request goes the way chosen when it's sent (the key can be forgotten or entered mid-chat).
     r.agent ??= createAgent({
@@ -532,7 +554,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
           flushSync(() => update(id, (x) => ({ id: x.id, kind: "step", state: ok ? "ok" : "error", icon: ok ? "rocket" : "x", text: ok ? "Deploy approved" : "Deploy not approved" })));
           if (hadFocus) chatFocus();
           setStatus(ok ? "Deploy approved" : "Deploy not approved");
-          setWorking(r.approvals.size ? "Waiting for your approval…" : !r.busy ? "" : ok ? "Deploying…" : "Thinking…");
+          setWorking(r.approvals.size ? "Waiting for your approval…" : !(r.busy || dispatcher.busy) ? "" : ok ? "Deploying…" : "Thinking…");
           resolve(ok);
         };
         const stop = () => done(false);
@@ -691,7 +713,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
           <p><strong>{bridgeState.agent}</strong> wants to control <strong>{appName}</strong>.</p>
           <p className="muted small">It can read and edit files and run commands in this project. Deploys still ask for your approval here.</p>
           <div className="row start">
-            <button className="btn primary sm" id="bridge-allow" type="button" onClick={() => r.bridge?.decide(true)}>Allow</button>
+            <button className="btn primary sm" id="bridge-allow" type="button" disabled={busy} onClick={() => !r.busy && r.bridge?.decide(true)}>Allow</button>
             <button className="btn sm" id="bridge-deny" type="button" onClick={() => r.bridge?.decide(false)}>Deny</button>
           </div>
         </div>
@@ -786,8 +808,13 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         <div className="working" id="builder-working" hidden={!working}><span className="spinner" aria-hidden="true" /><span id="builder-working-text">{working || "Working…"}</span></div>
         {remotePaired ? (
           <p className="bridge-foot muted small">Controlled by {bridgeState.agent}. Disconnect to chat with built-in Claude.</p>
+        ) : !source ? (
+          <div className="bridge-foot row between">
+            <span className="muted small">No built-in Claude key configured.</span>
+            <button className="btn sm" type="button" onClick={() => setItems([])}>Set up Claude</button>
+          </div>
         ) : (
-        <form id="builder-form" className="builder-form" ref={formRef} hidden={!source} onSubmit={(e) => void send(e)}>
+        <form id="builder-form" className="builder-form" ref={formRef} hidden={remotePending} onSubmit={(e) => void send(e)}>
           <label className="sr-only" htmlFor="builder-input">Message to Claude</label>
           <div className="composer">
             <textarea id="builder-input" ref={inputRef} rows={2} placeholder="Describe a change…"

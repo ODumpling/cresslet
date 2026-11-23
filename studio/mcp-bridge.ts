@@ -100,7 +100,9 @@ export function createBridgeDispatcher({
         continue;
       }
       active = item;
-      onEvent({ type: "tool", id: item.id, name: item.name, input: item.input });
+      try {
+        onEvent({ type: "tool", id: item.id, name: item.name, input: item.input });
+      } catch { /* UI callback must never wedge the dispatcher */ }
       let r: ToolResult & { summary: string };
       try {
         if (item.name === "commit_change") {
@@ -113,9 +115,11 @@ export function createBridgeDispatcher({
         r = { error: true, text: msg, summary: `${item.name}: ${msg}` };
       } finally {
         active = null;
-        onCallEnd();
+        try { onCallEnd(); } catch { /* ignore */ }
       }
-      onEvent({ type: "tool-done", id: item.id, name: item.name, summary: r.summary, error: !!r.error });
+      try {
+        onEvent({ type: "tool-done", id: item.id, name: item.name, summary: r.summary, error: !!r.error });
+      } catch { /* UI callback must never drop tool_result */ }
       item.resolve({ id: item.id, text: r.text || "(no output)", ...(r.error ? { error: true } : {}) });
     }
   }
