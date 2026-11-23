@@ -454,6 +454,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       return { change: { id: body.change, position: 1, branch: "feat/s/1-one", sha: "1".repeat(40), title: "One" }, stack: { id: "stk_1" }, now: ["chg_2"], setAside: [{ title: "Two" }, { title: "Three" }] };
     }
     if (/\/git\/stack\/(pull-in|carry-on)$/.test(path)) return { change: { id: body.change, sha: body.sha } };
+    if (path.includes("/git/stack/undo?change=chg_f")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: ["a.txt"], files: [{ path: ".env", data: "VITE_THEME=light\n" }, { path: "a.txt", data: "<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n" }] };
     if (path.includes("/git/stack/undo?change=chg_e")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: [], files: [{ path: ".env", data: "VITE_THEME=light\n" }] };
     if (path.includes("/git/stack/undo")) {
       const conflicted = path.includes("chg_c");
@@ -698,6 +699,15 @@ test("git: undoing a change loads the result; clean, it's committed at once as \
   k.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }];
   await k.git.commitChange("Commit the undo");
   assert.deepEqual([k.calls.at(-1)!.body.title, k.state.undo], ["Undo: Theme", undefined]);
+  // A dotenv file the undo leaves as it is: not held to it (resolving may change it).
+  const same = fakeGit({ onDefault: false });
+  same.state.activeBranch = "feat/s/1-one";
+  same.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }];
+  await same.git.undo({ id: "chg_f", position: 1 }, top);
+  assert.equal(same.state.undo?.env, undefined);
+  same.files.list = [{ path: ".env", data: "VITE_THEME=dark\n" }, { path: "a.txt", data: "x" }];
+  await same.git.commitChange("Commit the undo");
+  assert.equal(same.calls.at(-1)!.body.title, "Undo: Theme");
   const kk = fakeGit({ onDefault: false });
   kk.state.activeBranch = "feat/s/1-one";
   kk.files.list = [{ path: ".env", data: "VITE_THEME=light\n" }]; // put back: committed
