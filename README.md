@@ -30,6 +30,10 @@ npx cresslet logs -f
 
 Browser: open http://localhost:8787 → pick a template → the **AI builder** chat opens beside the live preview: ask Claude for a change, or switch to **Code** to edit it yourself (**Database**: the preview's tables, and SQL on them). `npm install`, the dev server and the preview all run in-browser on cresslet-container → **Deploy**. Claude runs on the account's AI credits when the server has an Anthropic key (`CRESSLET_ANTHROPIC_API_KEY`, metered per token: [docs/api.md#ai-credits](docs/api.md#ai-credits)), or on your own Anthropic API key, called straight from the browser ([docs/architecture.md#ai-builder](docs/architecture.md#ai-builder)).
 
+Apps: each deployed app gets a dashboard in the studio: metrics, logs, rollback (last 5 deploys), database explorer, secrets, crons, domains and egress. Apps belong to an account; organizations share apps between members.
+
+Source control (optional, [docs/architecture.md#source-control](docs/architecture.md#source-control)): link an app to a GitHub repo and the server commits, branches and merges as the signed-in user. Each AI builder request becomes its own change (a branch one commit ahead of the one below), so a chat builds a **stack**: submit it as a chain of pull requests, go back, undo or fold a change, restack when `main` moves, land it (through PRs on a protected branch). **Deploy** merges into the default branch, then deploys that commit. Nothing is force-pushed.
+
 Artifacts: deploy a static HTML file or folder (studio **Artifacts**, or `cresslet deploy report.html`; a folder with `--artifact`) and share it: private (you and people you invite), anyone with the link, or public; kept 30 days unless you or your account defaults say otherwise. Deploy it again to update the same URL; `--name` picks the address ([docs/api.md#artifacts](docs/api.md#artifacts)).
 
 Templates: `react`, `vanilla`, and `tanstack-start` (TanStack Start SSR + server functions, email/password auth with `db` + `kv` sessions; CLI only: `cresslet new my-app --template tanstack-start`).
@@ -41,7 +45,7 @@ Agents: templates ship `AGENTS.md`/`CLAUDE.md`; every CLI command takes `--json`
 - [App format + server Env](docs/app-format.md)
 - [HTTP API](docs/api.md)
 - [Architecture, isolation, roadmap](docs/architecture.md)
-- [Self-hosting](docs/self-hosting.md)
+- [Self-hosting](docs/self-hosting.md) (GitHub login, source control, env vars)
 - [Metadata database: SQLite or Postgres, migrations](docs/database.md)
 - [TypeScript: how the code runs, tsconfigs, rules](docs/typescript.md)
 
