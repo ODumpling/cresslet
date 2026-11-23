@@ -454,6 +454,7 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
       return { change: { id: body.change, position: 1, branch: "feat/s/1-one", sha: "1".repeat(40), title: "One" }, stack: { id: "stk_1" }, now: ["chg_2"], setAside: [{ title: "Two" }, { title: "Three" }] };
     }
     if (/\/git\/stack\/(pull-in|carry-on)$/.test(path)) return { change: { id: body.change, sha: body.sha } };
+    if (path.includes("/git/stack/undo?change=chg_p")) return { title: "Undo: Deps", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: ["package.json"], files: [{ path: ".env", data: "VITE_THEME=light\n" }, { path: "package.json", data: "<<<<<<< now\n{}\n=======\n>>>>>>> undo change 1\n" }] };
     if (path.includes("/git/stack/undo?change=chg_f")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: ["a.txt"], files: [{ path: ".env", data: "VITE_THEME=light\n" }, { path: "a.txt", data: "<<<<<<< now\nx\n=======\n>>>>>>> undo change 1\n" }] };
     if (path.includes("/git/stack/undo?change=chg_e")) return { title: "Undo: Theme", top: { branch: state.activeBranch, sha: state.headSha }, conflicts: [], files: [{ path: ".env", data: "VITE_THEME=light\n" }], restore: [".env"] };
     if (path.includes("/git/stack/undo")) {
@@ -705,6 +706,14 @@ test("git: undoing a change loads the result; clean, it's committed at once as \
   drift.files.list = [{ path: ".env", data: "VITE_THEME=old\n" }];
   await assert.rejects(drift.git.undo({ id: "chg_f", position: 1 }, top), (x: Json) => x.held === true && x.code === "dotenv_kept");
   assert.deepEqual(drift.state.undo?.env, [{ path: ".env", data: "VITE_THEME=light\n" }]);
+  // npm install failing after the files are in (a conflicted package.json): checked all the same.
+  const deps = fakeGit({ onDefault: false, hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  deps.state.activeBranch = "feat/s/1-one";
+  deps.files.list = [{ path: ".env", data: "VITE_THEME=old\n" }];
+  assert.deepEqual((await deps.git.undo({ id: "chg_p", position: 1 }, top)).conflicts, ["package.json"]);
+  assert.deepEqual(deps.state.undo?.env, [{ path: ".env", data: "VITE_THEME=light\n" }]);
+  deps.files.list = [{ path: ".env", data: "VITE_THEME=old\n" }, { path: "package.json", data: "{}" }];
+  await assert.rejects(deps.git.commitChange("Commit the undo"), (x: Json) => x.code === "dotenv_kept");
   // A dotenv file the undo leaves as it is: not held to it (resolving may change it).
   const same = fakeGit({ onDefault: false });
   same.state.activeBranch = "feat/s/1-one";

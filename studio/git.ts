@@ -475,21 +475,24 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       // The dotenv files it puts back (the server says which), their public entries: checked on every commit of it.
       let env = r.files.filter((f) => r.restore?.includes(f.path)).map((f) => ({ path: f.path, data: f.data }));
       const holding = () => set({ dirty: true, undo: { title: r.title, conflicts: r.conflicts, ...(env.length ? { env } : {}) } });
+      // A dotenv file the workspace kept as it was (its own local lines in the way): not as planned, so not committed
+      // until it is (one the undo puts back, or one the workspace already had otherwise than the top).
+      const dotenvs = r.files.filter((f) => /(?:^|\/)\.env[^/]*$/i.test(f.path));
+      let now: GitFile[] = [];
+      const loaded = async () => {
+        now = dotenvs.length ? await o.files() : [];
+        env = [...env, ...dotenvs.filter((f) => !r.restore?.includes(f.path) && envKept([f], now).length).map((f) => ({ path: f.path, data: f.data }))];
+        await holding();
+      };
       try {
         await o.hydrate(r.files);
       } catch (e) {
         if (!(e as { filesWritten?: boolean }).filesWritten) throw e;
-        await holding(); // its files are in: the undo is loaded either way
+        await loaded(); // its files are in: the undo is loaded either way
         if (!r.conflicts.some((p) => /(?:^|\/)package(?:-lock)?\.json$/.test(p))) throw e;
         return { conflicts: r.conflicts, title: r.title, committed: false };
       }
-      // A dotenv file the workspace kept as it was (its own local lines in the way): not as planned, so not committed
-      // until it is (one the undo puts back, or one the workspace already had otherwise than the top).
-      const dotenvs = r.files.filter((f) => /(?:^|\/)\.env[^/]*$/i.test(f.path));
-      const now = dotenvs.length ? await o.files() : [];
-      const drift = dotenvs.filter((f) => !r.restore?.includes(f.path) && envKept([f], now).length).map((f) => ({ path: f.path, data: f.data }));
-      env = [...env, ...drift];
-      await holding();
+      await loaded();
       if (env.length) {
         const kept = envKept(env, now);
         if (kept.length) {
