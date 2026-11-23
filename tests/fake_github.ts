@@ -8,10 +8,16 @@ import type { AddressInfo } from "node:net";
 export type GhUser = { id: number; login: string; email: string };
 type Entry = { mode: string; sha: string };
 type Commit = { tree: Map<string, Entry>; parents: string[]; message: string; author: { name: string; email: string } | null; by: string };
-type Pull = { number: number; head: string; base: string; title: string; body: string; state: "open" | "closed"; merged?: boolean; comments?: string[]; reviews: { user: { login: string }; state: string }[] };
+type Pull = { number: number; head: string; base: string; title: string; body: string; state: "open" | "closed"; merged?: boolean; mergeSha?: string; mergedHead?: string; comments?: string[]; reviews: { user: { login: string }; state: string }[] };
 type Repo = {
   id: number; owner: string; name: string; private: boolean; default_branch: string; push: Set<string>; refs: Map<string, string>;
   protected: Set<string>; rulesets?: boolean; pulls: Pull[];
+  /**
+   * Pull request merging: the methods allowed (default all), an approving review required, approvals dismissed when a
+   * pull request's base changes, branches up to date with their base required, the head deleted on merge (and the
+   * pull requests on it moved to its base), as GitHub's settings.
+   */
+  allow?: { merge: boolean; squash: boolean; rebase: boolean }; requireReview?: boolean; dismissStale?: boolean; strict?: boolean; deleteOnMerge?: boolean;
 };
 
 const sha1 = (s: string | Buffer) => createHash("sha1").update(s).digest("hex");
@@ -60,16 +66,25 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
     return seen;
   };
   const mergeBase = (a: string, b: string) => {
+    // The best common ancestor: one no other common ancestor descends from (as git's, past merge commits).
     const aa = ancestors(a);
-    const todo = [b], seen = new Set<string>();
-    while (todo.length) { // breadth-first from b: the nearest commit a also has
-      const s = todo.shift()!;
-      if (aa.has(s)) return s;
-      if (seen.has(s)) continue;
-      seen.add(s);
-      todo.push(...commits.get(s)!.parents);
+    const common = [...ancestors(b)].filter((x) => aa.has(x));
+    return common.find((x) => !common.some((y) => y !== x && ancestors(y).has(x))) ?? null;
+  };
+  /** The three-way merge of two commits' trees, or null on a conflict. */
+  const merged3 = (base: string, ours: string, theirs: string) => {
+    const [bt, ot, tt] = [commits.get(base)!.tree, commits.get(ours)!.tree, commits.get(theirs)!.tree];
+    const out = new Map<string, Entry>();
+    for (const path of new Set([...bt.keys(), ...ot.keys(), ...tt.keys()])) {
+      const [b, o, t] = [bt.get(path), ot.get(path), tt.get(path)];
+      let e: Entry | undefined;
+      if (o?.sha === t?.sha) e = o;
+      else if (o?.sha === b?.sha) e = t;
+      else if (t?.sha === b?.sha) e = o;
+      else return null;
+      if (e) out.set(path, e);
     }
-    return null;
+    return out;
   };
   const diff = (from: Map<string, Entry>, to: Map<string, Entry>) =>
     [...new Set([...from.keys(), ...to.keys()])].filter((p) => from.get(p)?.sha !== to.get(p)?.sha).sort().map((filename) => ({ filename }));
@@ -89,6 +104,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
   const repoJson = (r: Repo, u: GhUser) => ({
     id: r.id, name: r.name, full_name: `${r.owner}/${r.name}`, private: r.private, default_branch: r.default_branch,
     html_url: `https://github.example/${r.owner}/${r.name}`, owner: { login: r.owner }, permissions: { push: r.push.has(u.login) },
+    allow_merge_commit: r.allow?.merge ?? true, allow_squash_merge: r.allow?.squash ?? true, allow_rebase_merge: r.allow?.rebase ?? true,
   });
   const addRepo = (owner: string, name: string, push: string[], init = true) => {
     const r: Repo = { id: ++n, owner, name, private: true, default_branch: "main", push: new Set(push), refs: new Map(), protected: new Set(), pulls: [] };
@@ -279,25 +295,19 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       const ours = r.refs.get(body.base)!, theirs = body.head;
       const base = mergeBase(ours, theirs)!;
       if (base === theirs) return json(204);
-      const [bt, ot, tt] = [commits.get(base)!.tree, commits.get(ours)!.tree, commits.get(theirs)!.tree];
-      const out = new Map<string, Entry>();
-      for (const path of new Set([...bt.keys(), ...ot.keys(), ...tt.keys()])) {
-        const [b, o, t] = [bt.get(path), ot.get(path), tt.get(path)];
-        let e: Entry | undefined;
-        if (o?.sha === t?.sha) e = o;
-        else if (o?.sha === b?.sha) e = t;
-        else if (t?.sha === b?.sha) e = o;
-        else return json(409, { message: "Merge conflict" });
-        if (e) out.set(path, e);
-      }
+      const out = merged3(base, ours, theirs);
+      if (!out) return json(409, { message: "Merge conflict" });
       const sha = commit(out, [ours, theirs], body.commit_message, null, u.login);
       r.refs.set(body.base, sha);
       for (const pr of r.pulls) if (pr.state === "open" && pr.base === body.base && r.refs.has(pr.head) && ancestors(sha).has(r.refs.get(pr.head)!)) Object.assign(pr, { state: "closed", merged: true });
       return json(201, { sha, commit: { tree: { sha: treeId(out) } } });
     }
+    const approved = (pr: Pull) => pr.reviews.some((x) => x.state === "APPROVED") && !pr.reviews.some((x) => x.state === "CHANGES_REQUESTED");
+    const behind = (pr: Pull) => r.refs.has(pr.head) && r.refs.has(pr.base) && !ancestors(r.refs.get(pr.head)!).has(r.refs.get(pr.base)!);
     const pullJson = (pr: Pull) => ({
       number: pr.number, html_url: `https://github.example/${r.owner}/${r.name}/pull/${pr.number}`, title: pr.title, body: pr.body, draft: false,
-      state: pr.state, merged: !!pr.merged, head: { sha: r.refs.get(pr.head) ?? "", ref: pr.head }, base: { ref: pr.base },
+      state: pr.state, merged: !!pr.merged, head: { sha: pr.mergedHead ?? r.refs.get(pr.head) ?? "", ref: pr.head }, base: { ref: pr.base }, merge_commit_sha: pr.mergeSha ?? null,
+      mergeable_state: r.requireReview && !approved(pr) ? "blocked" : r.strict && behind(pr) ? "behind" : "clean",
     });
     if (rest === "/pulls" && req.method === "GET") {
       const head = url.searchParams.get("head")?.split(":")[1], base = url.searchParams.get("base");
@@ -310,6 +320,29 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       return json(201, pullJson(pr));
     }
     if ((x = /^\/pulls\/(\d+)\/reviews$/.exec(rest))) return json(200, r.pulls[Number(x[1]) - 1]?.reviews ?? []);
+    if ((x = /^\/pulls\/(\d+)\/merge$/.exec(rest)) && req.method === "PUT") {
+      const pr = r.pulls[Number(x[1]) - 1];
+      if (!pr) return json(404, { message: "Not Found" });
+      if (!canPush) return json(403, { message: "Resource not accessible" });
+      if (pr.state !== "open") return json(405, { message: "Pull Request is not mergeable" });
+      const method = body.merge_method ?? "merge";
+      if (!(r.allow?.[method as "merge"] ?? true)) return json(405, { message: `${method === "merge" ? "Merge commits" : method} are not allowed on this repository.` });
+      const head = r.refs.get(pr.head), into = r.refs.get(pr.base);
+      if (!head || !into) return json(422, { message: "Head or base branch is missing" });
+      if (body.sha && body.sha !== head) return json(409, { message: "Head branch was modified. Review and try the merge again." });
+      if (r.requireReview && !approved(pr)) return json(405, { message: "At least 1 approving review is required by reviewers with write access." });
+      if (r.strict && behind(pr)) return json(405, { message: "Head branch is out of date. Review and try the merge again." });
+      const out = merged3(mergeBase(into, head)!, into, head);
+      if (!out) return json(405, { message: "Pull Request is not mergeable" });
+      const sha = commit(out, [into, head], body.commit_title ?? `Merge pull request #${pr.number}`, null, u.login);
+      r.refs.set(pr.base, sha);
+      Object.assign(pr, { state: "closed", merged: true, mergeSha: sha, mergedHead: head });
+      if (r.deleteOnMerge) {
+        r.refs.delete(pr.head);
+        for (const y of r.pulls) if (y.state === "open" && y.base === pr.head) y.base = pr.base;
+      }
+      return json(200, { sha, merged: true, message: "Pull Request successfully merged" });
+    }
     if ((x = /^\/issues\/(\d+)\/comments$/.exec(rest)) && req.method === "POST") {
       const pr = r.pulls[Number(x[1]) - 1];
       if (!pr) return json(404, { message: "Not Found" });
@@ -322,6 +355,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       if (req.method === "PATCH") {
         if (body.base !== undefined) {
           if (!r.refs.has(body.base)) return json(422, { message: "Validation Failed", errors: [{ message: `Proposed base branch '${body.base}' was not found` }] });
+          if (r.dismissStale && pr.base !== body.base) pr.reviews = pr.reviews.filter((x) => x.state !== "APPROVED");
           pr.base = body.base;
         }
         if (body.state === "open" && (!r.refs.has(pr.base) || !r.refs.has(pr.head))) return json(422, { message: "state cannot be changed. The branch has been deleted." });
@@ -330,6 +364,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       return json(200, pullJson(pr));
     }
     if ((x = /^\/commits\/([0-9a-f]+)\/check-runs$/.exec(rest))) return json(200, { check_runs: checks.get(x[1]) ?? [] });
+    if ((x = /^\/commits\/([0-9a-f]+)\/status$/.exec(rest))) return json(200, { state: "pending", statuses: [] });
     if (rest.startsWith("/contents/") && req.method === "PUT") {
       const path = decodeURIComponent(rest.slice("/contents/".length));
       const b = Buffer.from(body.content, "base64");

@@ -389,7 +389,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       // A merge that can't go through (conflict, protected branch): nothing was deployed. A conflict can be resolved
       // here (the AI builder, or by hand); a protected branch takes a pull request.
       const code = (err as { code?: string }).code;
-      if (code === "merge_conflict" || code === "branch_protected") {
+      if (code === "land_next") toast(errorMessage(err), 15000);
+      else if (code === "merge_conflict" || code === "branch_protected") {
         toast(<span>{`Not deployed: ${errorMessage(err).split(". ")[0]}. `}
           {code === "merge_conflict" ? <><button type="button" className="btn sm" onClick={() => void resolveConflicts()}>Resolve with the AI builder</button>{" "}</> : null}
           <button type="button" className="btn sm" onClick={() => void openPullRequest()}>Open a pull request</button>
@@ -531,6 +532,34 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
                 void g.land(change, stack.changes.at(-1)!.branch).then(
                   (r) => toast(`Landed ${r.landed.length} ${r.landed.length === 1 ? "change" : "changes"} in ${gitState.defaultBranch} @ ${r.sha.slice(0, 7)}. Not deployed yet: ${gitState.defaultBranch} is ahead of what's live (Deploy puts it live).${pullsSaid(r.pullErrors, "moved onto " + gitState.defaultBranch)}`, 12000),
                   (e) => toast(`Not landed: ${errorMessage(e)}`, 12000),
+                ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+              }}
+              onLandNext={(change) => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                const next = stack.changes[1];
+                if (!confirm(`Land change ${change.position} in ${gitState.defaultBranch} through pull request #${change.pull}?\n\n` +
+                  `GitHub merges it (a merge commit), with ${gitState.defaultBranch}'s reviews, checks and rules applied, and its branch goes.` +
+                  `${next ? ` Change ${next.position}'s pull request moves onto ${gitState.defaultBranch}.` : ""} Nothing is deployed: Deploy puts ${gitState.defaultBranch} live.`)) return;
+                setStackBusy(true);
+                void g.landNext(change, stack.changes.at(-1)!.branch).then((r) => {
+                  const p = r.next?.pull;
+                  const then = !r.next ? "" : !p ? ` Change ${next?.position} is the bottom now.`
+                    : p.review === "approved" ? ` Change ${next?.position} is the bottom now (approved).`
+                    : ` Change ${next?.position} is the bottom now, waiting for review (an approval given before may have been dismissed when its pull request moved onto ${gitState.defaultBranch}).`;
+                  toast(`Landed change ${change.position} in ${gitState.defaultBranch} @ ${r.sha.slice(0, 7)}.${then} Not deployed yet.${pullsSaid(r.pullErrors, "moved onto " + gitState.defaultBranch)}`, 15000);
+                }, (e) => toast((e as { landed?: unknown }).landed ? `${errorMessage(e)}.` : `Not landed: ${errorMessage(e)}`, 12000)).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
+              }}
+              onUpdate={(change) => {
+                const g = engine.current?.git;
+                if (!g) return;
+                if (builder.current?.busy()) return void toast("Wait for the AI builder to finish this request first.", 6000);
+                if (!confirm(`Update change ${change.position} with ${gitState.defaultBranch}? ${gitState.defaultBranch} is merged into its branch (a merge commit, nothing forced), as GitHub's "Update branch" does.`)) return;
+                setStackBusy(true);
+                void g.updateBottom(change).then(
+                  (c) => toast(`Change ${change.position} is up to date with ${gitState.defaultBranch} @ ${c.sha.slice(0, 7)}. Its checks run again on GitHub.`, 10000),
+                  (e) => toast((e as { updated?: unknown }).updated ? `${errorMessage(e)}.` : `Not updated: ${errorMessage(e)}`, 12000),
                 ).finally(() => (setStackBusy(false), setGitTick((n) => n + 1)));
               }}
               onOutside={(how, change) => {

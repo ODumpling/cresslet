@@ -1,11 +1,13 @@
 // The app's stack of changes (server/stack.ts), above the AI builder's chat: each builder turn that changed files is a
 // change on a branch of its own, newest on top, the default branch at the bottom. The change the workspace is on is
 // marked, and a branch that moved or is gone on GitHub says so. Any change below the top can be gone back to (the
-// ones above are set aside, shown struck through), and set-aside changes restored.
-import type { ProjectGitState, PullRequest, Stack, StackChange } from "../../../git.ts";
+// ones above are set aside, shown struck through), and set-aside changes restored. On a default branch that needs pull
+// requests (protected), the stack lands from the bottom up: Land next on the bottom change, disabled with the reason
+// while GitHub wouldn't merge its pull request yet.
+import { landBlocked, type ProjectGitState, type PullRequest, type Stack, type StackChange } from "../../../git.ts";
 import { ExtLink } from "../../ui/icons.tsx";
 
-export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside, onLand, onFold, onUndo }: {
+export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack, onRestore, onSubmit, onOutside, onLand, onLandNext, onUpdate, onFold, onUndo }: {
   stack: Stack;
   state: ProjectGitState;
   busy: boolean;
@@ -19,6 +21,10 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
   onFold: (change: StackChange) => void;
   /** Lands a change and the ones below it into the default branch. */
   onLand: (change: StackChange) => void;
+  /** Lands the bottom change through its pull request (a protected default branch). */
+  onLandNext: (change: StackChange) => void;
+  /** Merges the default branch into the bottom change (its pull request must be up to date). */
+  onUpdate: (change: StackChange) => void;
   /** A change pushed to on GitHub: pulled in as the stack's top, or carried on from as a branch of its own. */
   onOutside: (how: "pull-in" | "carry-on", change: StackChange) => void;
   /** Loads the stack's top change into the workspace (it's on another branch). */
@@ -32,6 +38,10 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
   if (!top) return null;
   const on = stack.changes.some((c) => c.branch === state.activeBranch);
   const n = stack.changes.length;
+  const bottom = stack.changes[0];
+  // A default branch that needs pull requests: landed from the bottom, one at a time.
+  const guarded = !!stack.guarded;
+  const blocked = guarded ? landBlocked(bottom, pulls[bottom.id], state.defaultBranch) : null;
   const tree = (branch: string) => `${state.url}/tree/${branch.split("/").map(encodeURIComponent).join("/")}`;
   const row = (c: StackChange, aside: boolean) => {
     const here = !aside && c.branch === state.activeBranch;
@@ -44,18 +54,25 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
             {aside ? <span className="sr-only"> (set aside)</span> : null}
             {here ? <span className="pill" data-s="here">workspace</span> : null}
             {c.github !== "ok" ? <span className="pill" data-s="warn">{c.github === "gone" ? "gone on GitHub" : "moved on GitHub"}</span> : null}
-            {!aside && on ? (
+            {!aside && (on || (guarded && c === bottom)) ? (
               <span className="stack-actions">
-                {c !== top ? <button className="btn sm" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button> : null}
-                {state.activeBranch === top.branch && (c !== top || stack.changes.length > 1) ? (
+                {on && c !== top ? <button className="btn sm" type="button" disabled={busy} onClick={() => onBack(c)} aria-label={`Go back to change ${c.position}, ${c.title}`}>Go back</button> : null}
+                {on && state.activeBranch === top.branch && (c !== top || stack.changes.length > 1) ? (
                   <button className="btn sm" type="button" disabled={busy} onClick={() => onUndo(c)} aria-label={`Undo change ${c.position}, ${c.title}`}>Undo</button>
                 ) : null}
                 {c !== stack.changes[0] && state.activeBranch === top.branch ? (
                   <button className="btn sm" type="button" disabled={busy} onClick={() => onFold(c)}
                     aria-label={`Fold change ${c.position}, ${c.title}, into change ${stack.changes[stack.changes.indexOf(c) - 1].position}`}>Fold</button>
                 ) : null}
-                {state.activeBranch === top.branch ? <button className="btn sm" type="button" disabled={busy} onClick={() => onLand(c)}
+                {state.activeBranch === top.branch && !guarded ? <button className="btn sm" type="button" disabled={busy} onClick={() => onLand(c)}
                   aria-label={c === stack.changes[0] ? `Land change ${c.position} in ${state.defaultBranch}` : `Land changes ${stack.changes[0].position} to ${c.position} in ${state.defaultBranch}`}>Land</button> : null}
+                {guarded && c === bottom && pulls[c.id]?.mergeable === "behind" ? (
+                  <button className="btn sm" type="button" disabled={busy} onClick={() => onUpdate(c)} aria-label={`Update change ${c.position} with ${state.defaultBranch}`}>Update</button>
+                ) : null}
+                {guarded && c === bottom ? (
+                  <button className="btn sm" type="button" disabled={busy || !!blocked} onClick={() => onLandNext(c)} aria-describedby={blocked ? `land-next-why-${c.id}` : undefined}
+                    aria-label={`Land change ${c.position} in ${state.defaultBranch} through its pull request`}>Land next</button>
+                ) : null}
               </span>
             ) : null}
           </span>
@@ -67,6 +84,7 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
               <button className="btn sm" type="button" disabled={busy} onClick={() => onOutside("carry-on", c)} aria-label={`Carry on from change ${c.position} as a branch of its own`}>Carry on from it</button>
             </span>
           ) : null}
+          {guarded && !aside && c === bottom && blocked ? <span className="stack-why small muted" id={`land-next-why-${c.id}`}>{`Can't land yet: ${blocked}.`}</span> : null}
           {!aside && c.pull ? (
             <span className="stack-pull small">
               <ExtLink href={`${state.url}/pull/${c.pull}`}>{`Pull request #${c.pull}`}</ExtLink>
@@ -91,6 +109,11 @@ export function StackPanel({ stack, state, busy, pulls = {}, onContinue, onBack,
         <div className="stack-note small">
           <span className="muted">{stack.changes.some((c) => c.pull) ? "Pull requests: one per change, each on the one below." : "Review it on GitHub as a chain of pull requests, one per change."}</span>
           <button className="btn sm" type="button" id="stack-submit" disabled={busy} onClick={onSubmit}>{stack.changes.some((c) => c.pull) ? "Update pull requests" : "Submit stack"}</button>
+        </div>
+      ) : null}
+      {on && guarded ? (
+        <div className="stack-note small">
+          <span className="muted">{`${state.defaultBranch} needs pull requests, so changes land one at a time from the bottom (Land next).${n > 1 ? " Reviewers: approve the bottom change first. An approval of a change above it may not carry over once it becomes the bottom." : ""}`}</span>
         </div>
       ) : null}
       {aside.length ? (

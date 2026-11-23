@@ -1021,6 +1021,61 @@ test("stack: a change pushed to on GitHub is pulled in or carried on from; chang
   assert.equal((await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c1.branch, baseSha: again, files: files("3") })).status, 200);
 }));
 
+test("stack: on a protected default branch, Land next merges each bottom pull request through GitHub (reviews, up to date), then the next is on it", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];
+  const add = async (from: string, baseSha: string, title: string, x: string) =>
+    (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: files(x), title })).body;
+  const c1 = await add("main", linked.sha, "One", "1");
+  const c2 = await add(c1.branch, c1.sha, "Two", "2");
+  const c3 = await add(c2.branch, c2.sha, "Three", "3");
+  await t.send("POST", "/v1/apps/shop/git/stack/submit", tok, { stack: c1.stack.id });
+  const repo = t.gh.repo("octo/shop"), pulls = repo.pulls;
+  repo.protected.add("main");
+  Object.assign(repo, { requireReview: true, dismissStale: true, strict: true });
+  const st = await t.send("GET", "/v1/apps/shop/git/stack", tok);
+  assert.match(st.body.protected, /main is protected/);
+
+  // Not approved: GitHub's reason, nothing changes; the stack's pull requests say why.
+  const status = async () => (await t.send("GET", `/v1/apps/shop/git/stack/pulls?stack=${c1.stack.id}`, tok)).body.pulls;
+  assert.deepEqual([(await status())[c1.change.id].mergeable, (await status())[c1.change.id].review], ["blocked", "pending"]);
+  const refused = await t.send("POST", "/v1/apps/shop/git/stack/land-next", tok, { change: c1.change.id, sha: c1.sha });
+  assert.deepEqual([refused.status, refused.body.error], [409, "merge_refused"]);
+  assert.match(refused.body.message, /approving review/);
+  assert.equal(repo.refs.get("main"), linked.sha);
+  // Deploy says what's left to land.
+  const deploy = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: c3.branch, headSha: c3.sha });
+  assert.deepEqual([deploy.status, deploy.body.error, deploy.body.left], [422, "branch_protected", 3]);
+
+  // Approved (change 2 too, while above the bottom): merged through GitHub as a merge commit.
+  for (const pr of pulls.slice(0, 2)) pr.reviews.push({ user: { login: "rev" }, state: "APPROVED" });
+  const l = await t.send("POST", "/v1/apps/shop/git/stack/land-next", tok, { change: c1.change.id, sha: c1.sha });
+  assert.equal(l.status, 200, JSON.stringify(l.body));
+  assert.deepEqual([pulls[0].merged, repo.refs.get("main"), t.gh.commit(l.body.sha).parents], [true, l.body.sha, [linked.sha, c1.sha]]);
+  // Pull request 2 on main, only its own turn; its approval dismissed by the retarget: waiting for review again.
+  assert.equal(pulls[1].base, "main");
+  assert.deepEqual(t.gh.commit(c2.sha).parents, [c1.sha]); // change 1's commit is in main: the pull request shows change 2's only
+  assert.deepEqual([l.body.next.change, l.body.next.pull.review, l.body.deleted], [c2.change.id, "pending", [c1.branch]]);
+
+  // Behind main (it must be up to date): Update merges main into change 2; then it lands once approved again.
+  t.gh.write(repo, "main", { "other.txt": "o\n" });
+  pulls[1].reviews.push({ user: { login: "rev" }, state: "APPROVED" });
+  assert.equal((await status())[c2.change.id].mergeable, "behind");
+  const u = await t.send("POST", "/v1/apps/shop/git/stack/update", tok, { change: c2.change.id, sha: c2.sha });
+  assert.equal(u.status, 200, JSON.stringify(u.body));
+  assert.equal(repo.refs.get(c2.branch), u.body.change.sha);
+  assert.equal((await status())[c2.change.id].mergeable, "clean");
+  const l2 = await t.send("POST", "/v1/apps/shop/git/stack/land-next", tok, { change: c2.change.id, sha: u.body.change.sha });
+  assert.equal(l2.status, 200, JSON.stringify(l2.body));
+  assert.deepEqual([pulls[1].merged, pulls[2].base], [true, "main"]);
+
+  // Squash-only: refused, pointing elsewhere.
+  repo.allow = { merge: false, squash: true, rebase: false };
+  pulls[2].reviews.push({ user: { login: "rev" }, state: "APPROVED" });
+  const sq = await t.send("POST", "/v1/apps/shop/git/stack/land-next", tok, { change: c3.change.id });
+  assert.deepEqual([sq.status, sq.body.error], [422, "merge_method"]);
+}));
+
 test("stack: land up to a change (each pull request merged with its own turn); deploy lands the rest the same way", withServer(async (t) => {
   const { tok, linked } = await linkedShop(t);
   const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];

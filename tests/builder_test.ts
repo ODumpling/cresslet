@@ -430,7 +430,7 @@ test("cresslet deploy from the builder: asks first, deploys to the app it named,
 // ---- source control (studio/git.ts): branch first, merge then deploy
 
 const gitMod = "../studio/git.ts"; // browser module: typed by studio/tsconfig.json, not this program
-const { createGitWorkspace, branchSlug, commitMessage } = await import(gitMod);
+const { createGitWorkspace, branchSlug, commitMessage, landBlocked } = await import(gitMod);
 
 /** A linked project over a scripted /v1/apps/:name/git API: the calls it made, its state, what was loaded. */
 function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = true, hydrate = null as null | ((f: Json) => Promise<void>), duringSync = () => {}, duringStack = () => {}, duringBack = () => {}, duringRestore = () => {}, stackError = null as string | null } = {}) {
@@ -485,6 +485,13 @@ function fakeGit({ taken = [] as string[], merge = null as Json, onDefault = tru
     if (path.endsWith("/git/merge")) {
       if (merge?.error) throw Object.assign(new Error(merge.error), { status: merge.status, code: merge.error, body: merge.body ?? {} });
       return merge ?? { mergedSha: "c".repeat(40), fastForward: true, treeChanged: false, branch: "main", deletedBranch: true };
+    }
+    if (path.endsWith("/git/stack/land-next") && body.change === "chg_edit") rev.n++; // an edit while it lands
+    if (path.endsWith("/git/stack/land-next") && body.change === "chg_dirty") state.dirty = true; // …saved as such
+    if (path.endsWith("/git/stack/land-next")) return { landed: { id: body.change }, sha: "e".repeat(40), next: { change: "chg_2", pull: { review: "pending" } } };
+    if (path.endsWith("/git/stack/update")) {
+      if (body.change === "chg_edit") rev.n++; // an edit while it's on GitHub
+      return { change: { id: body.change, sha: "7".repeat(40) } };
     }
     if (path.includes("/git/tree")) return { sha: "d".repeat(40), files: [{ path: "a.txt", data: "pulled" }] };
     if (path.includes("/git/conflicts")) return { intoSha: "f".repeat(40), headSha: "9".repeat(40), conflicts: ["app.txt"], files: [{ path: "app.txt", data: "<<<<<<< feat/x\na\n=======\nb\n>>>>>>> main\n" }] };
@@ -732,6 +739,68 @@ test("git: undoing a change loads the result; clean, it's committed at once as \
   e.state.activeBranch = "feat/s/1-one";
   await assert.rejects(e.git.undo({ id: "chg_1" }, { ...top, sha: "f".repeat(40) }), (x: Json) => x.code === "changed");
   assert.deepEqual(e.calls, []);
+});
+
+test("git: Land next lands the bottom through its pull request (the workspace on it goes to the default branch); Update loads the bottom's new commit", async () => {
+  const bottom = { id: "chg_1", branch: "feat/s/1-one", sha: "1".repeat(40), pull: 1 };
+  // On the landed change: loads the default branch.
+  const g = fakeGit({ onDefault: false });
+  g.state.activeBranch = bottom.branch;
+  const r = await g.git.landNext(bottom, "feat/s/3-three");
+  assert.deepEqual([g.calls[0].body, r.next.pull.review], [{ change: "chg_1", sha: bottom.sha }, "pending"]);
+  assert.equal(g.state.activeBranch, "main");
+  // An edit made while it lands: not overwritten (landed all the same, said).
+  const le = fakeGit({ onDefault: false });
+  le.state.activeBranch = bottom.branch;
+  await assert.rejects(le.git.landNext({ ...bottom, id: "chg_edit" }, "feat/s/3-three"), (x: Json) => x.landed?.sha === "e".repeat(40) && /landed in main, but this workspace's edits made meanwhile are kept here/.test(x.message));
+  assert.deepEqual([le.state.activeBranch, le.hydrated], [bottom.branch, []]);
+  // …marked dirty already (the edit saved before the answer): the same.
+  const ld = fakeGit({ onDefault: false });
+  ld.state.activeBranch = bottom.branch;
+  await assert.rejects(ld.git.landNext({ ...bottom, id: "chg_dirty" }, "feat/s/3-three"), (x: Json) => !!x.landed && /edits made meanwhile are kept/.test(x.message));
+  // npm install failing once main's files are in: loaded, said so.
+  const li = fakeGit({ onDefault: false, hydrate: async () => { throw Object.assign(new Error("npm install failed"), { filesWritten: true }); } });
+  li.state.activeBranch = bottom.branch;
+  await assert.rejects(li.git.landNext(bottom, "feat/s/3-three"), (x: Json) => !!x.landed && /main is loaded with a problem: npm install failed/.test(x.message));
+  // Changes not pushed on it: refused (its branch goes).
+  const d = fakeGit({ onDefault: false });
+  d.state.activeBranch = bottom.branch;
+  d.state.dirty = true;
+  await assert.rejects(d.git.landNext(bottom, "feat/s/3-three"), (e: Json) => e.code === "dirty");
+  assert.deepEqual(d.calls, []);
+  // On the top above it: stays, on the merge.
+  const t = fakeGit({ onDefault: false });
+  t.state.activeBranch = "feat/s/3-three";
+  await t.git.landNext(bottom, "feat/s/3-three");
+  assert.deepEqual([t.state.activeBranch, t.state.baseSha, t.calls.length], ["feat/s/3-three", "e".repeat(40), 1]);
+
+  // Update: on it with changes not pushed, refused; on it, its new commit loaded.
+  const u = fakeGit({ onDefault: false });
+  u.state.activeBranch = bottom.branch;
+  u.state.dirty = true;
+  await assert.rejects(u.git.updateBottom(bottom), (e: Json) => e.code === "dirty");
+  u.state.dirty = false;
+  assert.equal((await u.git.updateBottom(bottom)).sha, "7".repeat(40));
+  assert.deepEqual(u.calls.map((x: Json) => x.path.split("/git")[1].split("?")[0]), ["/stack/update", "/tree"]);
+  // An edit made while it's updated on GitHub: not overwritten (updated there all the same, said).
+  const e = fakeGit({ onDefault: false });
+  e.state.activeBranch = bottom.branch;
+  await assert.rejects(e.git.updateBottom({ ...bottom, id: "chg_edit" }), (x: Json) => x.updated?.sha === "7".repeat(40) && /up to date on GitHub, but not loaded here/.test(x.message));
+  assert.deepEqual(e.hydrated, []);
+});
+
+test("git: why Land next can't land the bottom yet, from its pull request", () => {
+  const c = { pull: 1 }, p = (x: Json) => ({ review: "approved", checks: "success", mergeable: "clean", ...x });
+  assert.match(landBlocked({ pull: null }, undefined, "main"), /submit the stack/);
+  assert.equal(landBlocked(c, p({}), "main"), null);
+  assert.equal(landBlocked(c, p({ mergeable: "blocked", review: "pending" }), "main"), "waiting for review");
+  assert.equal(landBlocked(c, p({ mergeable: "blocked", review: "pending", checks: "unknown" }), "main"), "waiting for review or checks");
+  assert.equal(landBlocked(c, p({ mergeable: "blocked", review: "changes_requested" }), "main"), "changes requested");
+  assert.equal(landBlocked(c, p({ mergeable: "blocked", checks: "pending" }), "main"), "checks running");
+  assert.equal(landBlocked(c, p({ mergeable: "blocked", checks: "failure" }), "main"), "checks failing");
+  assert.match(landBlocked(c, p({ mergeable: "behind" }), "main"), /behind main.*Update/);
+  assert.match(landBlocked(c, p({ mergeable: "dirty" }), "main"), /conflicts with main/);
+  assert.equal(landBlocked(c, p({ mergeable: "unstable", checks: "failure" }), "main"), null); // (an optional check: GitHub would merge it)
 });
 
 test("git: switching away from the default branch with edits puts them on a branch of their own first", async () => {

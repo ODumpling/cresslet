@@ -43,6 +43,10 @@ export interface PullRequest {
   title: string;
   review: "approved" | "changes_requested" | "pending";
   checks: "success" | "failure" | "pending" | "none" | "unknown";
+  /** Its base branch. */
+  base?: string;
+  /** Whether GitHub would merge it now (server/git.ts PullInfo): `blocked`, `behind`, `dirty`, `draft`, `unknown`, or mergeable. */
+  mergeable?: "clean" | "unstable" | "has_hooks" | "blocked" | "behind" | "dirty" | "draft" | "unknown";
 }
 
 /** A change of the app's stack (GET /v1/apps/:name/git/stack, server/stack.ts). */
@@ -74,6 +78,8 @@ export interface Stack {
   changes: StackChange[];
   /** Changes gone back from (above the top, bottom first): restorable until a change is built on the top. */
   setAside: StackChange[];
+  /** Why the default branch takes no direct moves (the stack lands through its pull requests: Land next), or null. */
+  guarded?: string | null;
 }
 
 /** A file as the API takes and returns them (POST /v1/deploys's shape). */
@@ -87,6 +93,29 @@ export interface GitFile {
 export type GitApi = <T>(path: string, init?: { method?: string; body?: string }) => Promise<T>;
 export type GitError = Error & { status?: number; code?: string; body?: Record<string, unknown> };
 export const gitCode = (e: unknown) => (e as GitError | null)?.code;
+
+/** Why GitHub wouldn't merge the bottom change's pull request yet (Land next disabled), or null. */
+export function landBlocked(c: StackChange, p: PullRequest | undefined, defaultBranch: string): string | null {
+  if (!c.pull) return "submit the stack first: it lands through its pull request";
+  if (!p) return "its pull request isn't read yet";
+  // GitHub's own decision says whether it's blocked; its review and checks only say why (guessed: which reviews or
+  // checks are required isn't read).
+  switch (p.mergeable) {
+    case "draft": return "its pull request is a draft";
+    case "dirty": return `it conflicts with ${defaultBranch}: resolve it on GitHub`;
+    case "behind": return `it's behind ${defaultBranch}, which needs it up to date: Update first`;
+    case "blocked":
+      if (p.checks === "failure") return "checks failing";
+      if (p.review === "changes_requested") return "changes requested";
+      if (p.checks === "pending") return "checks running";
+      // (Its checks not readable: whether a review is what's missing isn't known.)
+      if (p.review === "pending") return p.checks === "unknown" ? "waiting for review or checks" : "waiting for review";
+      return `${defaultBranch}'s rules on GitHub don't allow it yet`;
+    default:
+      // (Mergeable, or not worked out yet: GitHub decides, and says why if not.)
+      return null;
+  }
+}
 
 /** A branch name from a prompt or a file: `feat/add-a-dark-mode`, lowercase words, at most 40 characters. */
 export function branchSlug(text: string, max = 40): string {
@@ -457,6 +486,47 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       return r;
     }),
     /**
+     * Lands the stack's bottom change through its pull request (server/stack.ts landNext), for a default branch that
+     * needs one. The workspace on it: on the default branch now (its files loaded, unless it has changes not pushed);
+     * on the top above it: the default branch it sits on is the merge.
+     */
+    landNext: (change: StackChange, top: string) => serial(async () => {
+      // (Changes here on it would be left on a branch that goes.)
+      if (o.state()?.activeBranch === change.branch && o.state()!.dirty) throw Object.assign(new Error("this workspace has changes not pushed yet on that change: push them first"), { code: "dirty" });
+      const rev = revision();
+      const r = await post<{ landed: StackChange; sha: string; next?: { change: string; pull: PullRequest | null }; pullErrors?: PullError[] }>("/stack/land-next", { change: change.id, sha: change.sha });
+      const s = o.state();
+      // Landed on GitHub whatever happens here: an edit made meanwhile isn't overwritten, a failed load is said as such.
+      if (s && s.activeBranch === change.branch) {
+        const landed = (why: string, e?: unknown) => Object.assign(new Error(`change ${change.position} landed in ${s.defaultBranch}, but ${why}`), { code: gitCode(e), landed: r });
+        if (s.dirty || revision() !== rev) throw landed(`this workspace's edits made meanwhile are kept here, on ${change.branch} (${s.defaultBranch} isn't loaded): push them to a branch of their own`);
+        await pullNow(s.defaultBranch, s.defaultBranch, { rev }).catch((e) => {
+          throw (e as { filesWritten?: boolean }).filesWritten
+            ? landed(`${s.defaultBranch} is loaded with a problem: ${(e as Error).message}`, e)
+            : landed(`${s.defaultBranch} isn't loaded here: ${(e as Error).message}`, e);
+        });
+      } else if (s && s.activeBranch === top && top !== change.branch) await set({ baseSha: r.sha });
+      return r;
+    }),
+    /**
+     * The default branch merged into the bottom change (server/stack.ts updateBottom), for a default branch that needs
+     * pull requests up to date. The workspace on it loads the result (refused while it has changes not pushed).
+     */
+    updateBottom: (change: StackChange) => serial(async () => {
+      const s = o.state();
+      const on = s?.activeBranch === change.branch;
+      if (on && s!.dirty) throw Object.assign(new Error("this workspace has changes not pushed yet on that change: push them first"), { code: "dirty" });
+      const rev = revision();
+      const r = await post<{ change: StackChange }>("/stack/update", { change: change.id, sha: change.sha });
+      // (An edit made meanwhile isn't overwritten: updated on GitHub all the same, loaded with Pull.)
+      if (on) {
+        await pullNow(change.branch, r.change.sha, { rev }).catch((e) => {
+          throw Object.assign(new Error(`change ${change.position} is up to date on GitHub, but not loaded here: ${(e as Error).message}`), { code: gitCode(e), updated: r.change });
+        });
+      }
+      return r.change;
+    }),
+    /**
      * Undoes a change below the stack's top (`top`, where the workspace is), keeping the later ones: changes here are
      * committed first; the server's result is loaded; with no conflicts it's committed at once as a new change ("Undo:
      * <title>"), else the workspace holds it, conflicted files with markers, until they're resolved and it's committed
@@ -520,7 +590,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     commitChange: (title: string, prompt = "") => serial(() => changeNow(title, prompt)),
     /** The app's open stacks, newest first, and the one the workspace is on (its active branch is one of its changes). */
     stacks: async () => {
-      const r = await o.api<{ defaultBranch: string; stacks: Stack[] }>(path("/stack"));
+      const r0 = await o.api<{ defaultBranch: string; protected?: string | null; stacks: Stack[] }>(path("/stack"));
+      const r = { ...r0, stacks: r0.stacks.map((x) => ({ ...x, guarded: r0.protected ?? null })) };
       const b = o.state()?.activeBranch;
       return { ...r, current: r.stacks.find((x) => x.changes.some((c) => c.branch === b)) ?? null };
     },
@@ -593,6 +664,10 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
         if (code === "merge_conflict") {
           const paths = ((e as GitError).body?.paths as string[] | undefined) ?? [];
           throw Object.assign(new Error(`${s.activeBranch} doesn't merge cleanly into ${s.defaultBranch}${paths.length ? ` (${paths.join(", ")})` : ""}. Nothing was deployed. Resolve it in a pull request: ${compare}`), { code, compare, paths });
+        }
+        // A stack to land first (one change at a time, through their pull requests): what's left, as the server says.
+        if (code === "branch_protected" && typeof (e as GitError).body?.left === "number") {
+          throw Object.assign(new Error(`Nothing was deployed: ${(e as Error).message}`), { code: "land_next" });
         }
         if (code === "branch_protected" || (e as GitError).status === 403) {
           throw Object.assign(new Error(`${s.defaultBranch} is protected on GitHub (it needs a pull request or checks). Nothing was deployed. Open a pull request: ${compare}`), { code: "branch_protected", compare });

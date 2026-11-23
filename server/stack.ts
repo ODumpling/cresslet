@@ -642,7 +642,14 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
     const def = repo.default_branch;
     // Protection first: no refusal below may let a caller fall back to a move past it.
     const guarded = await provider.branchProtection(r, def);
-    if (guarded) throw new HttpError(422, `${guarded}: land the stack through its pull requests on GitHub`, "branch_protected");
+    if (guarded) {
+      // What's left: landed one at a time, through their pull requests.
+      const left = byStack(open.filter((x) => x.stack_id === c.stack_id))[0].filter((x) => x.position <= c.position);
+      const which = left.length === 1 ? `change ${left[0].position}` : `changes ${left[0].position}–${left.at(-1)!.position}`;
+      throw Object.assign(new HttpError(422, `${guarded}: ${which} ${left.length === 1 ? "is" : "are"} left to land, one at a time through ${left.length === 1 ? "its pull request" : "their pull requests"} (Land next on the stack)`, "branch_protected"), {
+        extra: { left: left.length },
+      });
+    }
     // The commit the caller synced and will build (Deploy): the change must still be at it, checked under the lock.
     if (expect && c.sha !== expect) throw new HttpError(409, `${c.branch} isn't at the commit that was synced`, "not_synced");
     const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
@@ -698,6 +705,118 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
       landed: s.slice(0, k + 1).map((x) => ({ ...view(x), github: "ok" as const })), sha: at, stack: c.stack_name, deleted,
       ...(pullErrors.length ? { pullErrors } : {}),
     };
+  });
+}
+
+// ---- landing through pull requests: a default branch that needs them (reviews, checks, rules)
+
+/** The stack's bottom change (`sha`: as the caller saw it), at its commit on GitHub. */
+async function bottom(ctx: Ctx, changeId: string, sha?: string, atHead = true) {
+  const open = await ctx.store.openStackChanges(ctx.appId);
+  const c = open.find((x) => x.id === changeId);
+  if (!c) throw new HttpError(404, "no such change open on a stack", "not_found");
+  if (sha && c.sha !== sha) throw stackChanged();
+  const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0];
+  if (s[0].id !== c.id) throw new HttpError(409, `change ${s[0].position} is the bottom: changes land from the bottom up`, "not_bottom");
+  if (atHead) await atCommit(ctx, c);
+  return { c, s };
+}
+
+/** A change's branch on GitHub at its commit, else 409 `moved` / 404 `branch_not_found`. */
+async function atCommit(ctx: Ctx, c: StackChange) {
+  const head = await ctx.provider.branchHead(ctx.r, c.branch);
+  if (head !== c.sha) {
+    throw head
+      ? new HttpError(409, `${c.branch} was pushed to on GitHub: pull it in, or carry on from it, first`, "moved")
+      : new HttpError(404, `${c.branch} is gone on GitHub: nothing was landed`, "branch_not_found");
+  }
+}
+
+/**
+ * Lands the stack's bottom change through its pull request, for a default branch that needs one (reviews, checks,
+ * rules): GitHub merges it as the user (a merge commit: the repository must allow them; squash-only isn't supported
+ * yet), only while its head is the change's commit and its base the default branch (else 409 `pull_base`: moving it
+ * may dismiss its approval). Refused (not approved, checks, rules, conflicts): 409 `merge_refused` with GitHub's
+ * reason, nothing changed. Merged into the default branch on GitHub already (its branch maybe gone): recorded as
+ * landed; merged elsewhere: 409 `merged_elsewhere`. Then the change
+ * above is the bottom: its pull request is pointed at the default branch before the landed branch goes (an API delete
+ * of a base branch closes the pull requests on it for good; GitHub's own "delete branch on merge" may have done both,
+ * which is fine). `next`: the new bottom's pull request read again (pointing it at the default branch may have
+ * dismissed its approval).
+ */
+export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
+  landed: ChangeView; sha: string; stack: string; deleted: string[]; next?: { change: string; pull: PullInfo | null }; pullErrors?: PullError[]; before?: boolean;
+}> {
+  return locked(ctx.appId, async () => {
+    const { provider, store, r, repo, appId } = ctx;
+    const def = repo.default_branch;
+    const { c, s } = await bottom(ctx, changeId, sha, false);
+    const p = await pullOf(ctx, c);
+    let merged: string;
+    if (p?.merged) {
+      // Merged on GitHub already (its branch maybe deleted with it): landed, if into the default branch.
+      if (p.base !== def) throw new HttpError(409, `pull request #${p.number} was merged into ${p.base}, not ${def}: change ${c.position} isn't in ${def}`, "merged_elsewhere");
+      // (Merged at another commit, say before a push since: that push isn't in the default branch.)
+      if (p.headSha && p.headSha !== c.sha) throw new HttpError(409, `pull request #${p.number} was merged at another commit than change ${c.position}'s: what's on ${c.branch} since isn't in ${def} (carry on from it as a branch of its own)`, "merged_elsewhere");
+      merged = p.mergeSha ?? await provider.branchHead(r, def) ?? c.sha;
+      // (Squashed or rebased on GitHub: the change's commit isn't in the default branch's history, so the next pull
+      // request would show it again.)
+      if (!await provider.contains(r, merged, c.sha)) {
+        throw new HttpError(409, `pull request #${p.number} was merged on GitHub without its commit (squashed or rebased): the stack can't carry on from it (Cresslet issue #127)`, "merged_elsewhere");
+      }
+      // (…nor in it now: the default branch reset since.)
+      const now = await provider.branchHead(r, def);
+      if (now && !await provider.contains(r, now, c.sha)) throw new HttpError(409, `change ${c.position} isn't in ${def} any more (reset on GitHub since pull request #${p.number} was merged)`, "merged_elsewhere");
+    } else {
+      await atCommit(ctx, c);
+      const methods = await provider.mergeMethods(r);
+      if (!methods.merge) {
+        throw new HttpError(422, methods.squash && !methods.rebase
+          ? `${repo.owner}/${repo.name} only allows squash merges: landing a stack there isn't supported yet (Cresslet issue #127; merge it on GitHub)`
+          : `${repo.owner}/${repo.name} doesn't allow merge commits: landing a stack needs them (merge it on GitHub)`, "merge_method");
+      }
+      if (!p || p.state !== "open") throw new HttpError(409, `change ${c.position} has no open pull request: submit the stack first`, "no_pull");
+      // (Not moved here: a move may dismiss its approval, and GitHub could then refuse the merge.)
+      if (p.base !== def) throw new HttpError(409, `pull request #${p.number} is on ${p.base}, not ${def}: Update pull requests first (its review may need giving again)`, "pull_base");
+      merged = (await provider.mergePull(r, p.number, { sha: c.sha, title: `${c.title} (#${p.number})` })).sha;
+    }
+    await store.landStack(appId, c.stack_id, c.position, merged);
+    const pullErrors: PullError[] = [], deleted: string[] = [];
+    let keep: string | undefined;
+    const next = s[1];
+    if (next) {
+      await retarget(ctx, next, def).catch((e) => {
+        keep = c.branch;
+        pullErrors.push({ change: next.id, position: next.position, error: `${why(e)} (${keep} is kept until it's on ${def}: land again)` });
+      });
+    }
+    if (repo.delete_branch) {
+      deleted.push(...await dropLanded(ctx, c.stack_id, keep, pullErrors, new Set([c.id])));
+      await dropLandedAside(ctx, c.stack_id);
+    }
+    let pull: PullInfo | null = null;
+    if (next) {
+      const np = await pullOf(ctx, next).catch(() => null);
+      if (np?.state === "open") pull = await provider.pullStatus(r, np.number).catch(() => null);
+    }
+    return {
+      landed: { ...view(c), github: "ok" }, sha: merged, stack: c.stack_name, deleted,
+      ...(next ? { next: { change: next.id, pull } } : {}), ...(pullErrors.length ? { pullErrors } : {}), ...(p?.merged ? { before: true } : {}),
+    };
+  });
+}
+
+/**
+ * The default branch merged into the bottom change's branch (GitHub's "Update branch": a merge commit, never forced),
+ * for a default branch that needs pull requests to be up to date. The change is at that commit then. Conflicts:
+ * 409 `merge_conflict` (resolve them on GitHub, or in the studio on that change).
+ */
+export function updateBottom(ctx: Ctx, changeId: string, sha?: string): Promise<{ change: ChangeView }> {
+  return locked(ctx.appId, async () => {
+    const { c } = await bottom(ctx, changeId, sha);
+    const m = await ctx.provider.merge(ctx.r, { into: c.branch, head: ctx.repo.default_branch, message: `Merge ${ctx.repo.default_branch} into ${c.branch}` });
+    if (m.mergedSha !== c.sha) await ctx.store.setStackChangeSha(c.id, m.mergedSha);
+    return { change: { ...view({ ...c, sha: m.mergedSha }), github: "ok" } };
   });
 }
 

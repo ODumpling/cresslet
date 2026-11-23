@@ -5,10 +5,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
-import type { CommitInput, Pull, Repo, SourceControlProvider } from "../server/git.ts";
+import type { CommitInput, Pull, PullInfo, Repo, SourceControlProvider } from "../server/git.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, pullBody, undoPlan, goBack, landed, landUpTo, MAX_STACK, pullIn, readStacks, restore,
-  setAsideBranches, slug, stackPulls, submitStack,
+  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, pullBody, undoPlan, goBack, landed, landNext, landUpTo, MAX_STACK, pullIn, readStacks, restore,
+  setAsideBranches, slug, stackPulls, submitStack, updateBottom,
 } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
 
@@ -26,12 +26,18 @@ function fakeProvider() {
   const no = () => { throw new Error("not used here"); };
   // A name in the way: an existing branch, or one that's a folder of it (or the other way), as git refuses.
   const taken = (b: string) => [...refs.keys()].some((x) => x === b || b.startsWith(x + "/") || x.startsWith(b + "/"));
-  const pulls: (Pull & { title: string; body: string })[] = [];
+  const pulls: (Pull & { title: string; body: string; mergedHead?: string })[] = [];
   const refuse = new Set<string>(); // branches GitHub won't open a pull request from
   const keep = new Set<string>(); // branches GitHub won't delete (a rule)
   const guarded = new Set<string>(); // protected branches
   const failUpdate = new Set<number>(); // pull requests GitHub won't change (once)
   const comments: { n: number; body: string }[] = [];
+  // Landing through pull requests: the methods allowed, why GitHub won't merge one, what it says about one, and
+  // GitHub's own "delete branch on merge" (it deletes the head and moves the pull requests on it to the base).
+  const methods = { merge: true, squash: true, rebase: true };
+  const unmergeable = new Map<number, string>();
+  const status = new Map<number, Partial<PullInfo>>();
+  const gh = { deleteOnMerge: false };
   const contains = (sha: string, of: string) => { // `of` is `sha` or one of its ancestors
     for (let x: string | null = sha; x; x = commits.get(x)?.parent ?? null) if (x === of) return true;
     return false;
@@ -43,9 +49,39 @@ function fakeProvider() {
   };
   const p: SourceControlProvider & {
     refs: Map<string, string>; commits: typeof commits; pulls: typeof pulls; refuse: Set<string>; keep: Set<string>; guarded: Set<string>; failUpdate: Set<number>; comments: { n: number; body: string }[];
+    methods: typeof methods; unmergeable: typeof unmergeable; status: typeof status; gh: typeof gh;
     push(branch: string, files: Record<string, string>): string;
   } = {
-    refs, commits, pulls, refuse, keep, guarded, failUpdate, comments,
+    refs, commits, pulls, refuse, keep, guarded, failUpdate, comments, methods, unmergeable, status, gh,
+    async contains(_r: Repo, sha: string, of: string) {
+      return contains(sha, of);
+    },
+    async mergeMethods() {
+      return { ...methods };
+    },
+    async mergePull(_r: Repo, n: number, input: { sha: string; title: string }) {
+      const x = pullOf(n);
+      if (x.state !== "open") throw new HttpError(409, `GitHub didn't merge pull request #${n}: Pull Request is not mergeable`, "merge_refused");
+      if (unmergeable.has(n)) throw new HttpError(409, `GitHub didn't merge pull request #${n}: ${unmergeable.get(n)}`, "merge_refused");
+      if (refs.get(x.head) !== input.sha) throw new HttpError(409, `GitHub didn't merge pull request #${n}: Head branch was modified. Review and try the merge again.`, "merge_refused");
+      // A merge commit: the head's files, on the head (this fake's commits have one parent).
+      const sha = make(new Map(commits.get(input.sha)!.files), input.sha);
+      refs.set(x.base, sha);
+      Object.assign(x, { state: "closed", merged: true, mergeSha: sha, mergedHead: input.sha });
+      if (gh.deleteOnMerge) {
+        refs.delete(x.head);
+        for (const y of pulls) if (y.state === "open" && y.base === x.head) y.base = x.base;
+      }
+      return { sha };
+    },
+    async merge(_r: Repo, input: { into: string; head: string; message: string }) {
+      // The default branch merged into a change's branch ("Update branch"): its files on top of the change's.
+      const [into, head] = [refs.get(input.into)!, refs.get(input.head)!];
+      if (contains(into, head)) return { mergedSha: into, headSha: head, fastForward: false, treeChanged: false };
+      const sha = make(new Map([...commits.get(head)!.files, ...commits.get(into)!.files]), into);
+      refs.set(input.into, sha);
+      return { mergedSha: sha, headSha: head, fastForward: false, treeChanged: true };
+    },
     async branchProtection(_r: Repo, branch: string) {
       return guarded.has(branch) ? `${branch} is protected on GitHub` : null;
     },
@@ -56,7 +92,8 @@ function fakeProvider() {
       for (const x of pulls) if (x.state === "open" && x.base === branch && contains(to, refs.get(x.head) ?? "")) Object.assign(x, { state: "closed", merged: true });
     },
     async getPull(_r: Repo, n: number) {
-      return { ...pullOf(n) };
+      const x = pullOf(n);
+      return { ...x, headSha: x.mergedHead ?? refs.get(x.head) };
     },
     async findPull(_r: Repo, head: string) {
       const x = pulls.find((y) => y.head === head && y.state === "open");
@@ -93,7 +130,7 @@ function fakeProvider() {
     },
     async pullStatus(_r: Repo, n: number) {
       const x = pullOf(n);
-      return { number: n, url: x.url, title: x.title, draft: false, headSha: refs.get(x.head) ?? "", review: "approved" as const, checks: "success" as const };
+      return { number: n, url: x.url, title: x.title, draft: false, headSha: refs.get(x.head) ?? "", review: "approved" as const, checks: "success" as const, base: x.base, mergeable: "clean" as const, ...status.get(n) };
     },
     push(branch, files) {
       const head = refs.get(branch)!;
@@ -101,7 +138,7 @@ function fakeProvider() {
       refs.set(branch, sha);
       return sha;
     },
-    listRepos: no, createRepo: no, repo: no, listBranches: no, readTree: no, merge: no,
+    listRepos: no, createRepo: no, repo: no, listBranches: no, readTree: no,
     async branchHead(_r: Repo, branch: string) {
       return refs.get(branch) ?? null;
     },
@@ -656,6 +693,105 @@ test("stack: landing up to a change moves the default branch to it change by cha
   assert.deepEqual(await readStacks(t.ctx), []);
 });
 
+test("stack: on a protected default branch, Land next merges the bottom's pull request through GitHub; the next one is then on the default branch", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const code = (e: unknown) => (e as HttpError).code;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  const c3 = ok(await t.change(c2.branch, c2.sha, "Three", "3"));
+  t.provider.guarded.add("main");
+  await submitStack(t.ctx, c1.stack.id);
+  const pr = t.provider.pulls;
+  // Deploy (landing up to the top) says what's left, and moves nothing.
+  await assert.rejects(landUpTo(t.ctx, c3.change.id), (e) => code(e) === "branch_protected" && /changes 1–3 are left to land.*Land next/.test((e as Error).message) && (e as HttpError).extra?.left === 3);
+  // Only the bottom lands; GitHub refusing (review, checks, rules) is said with its reason, nothing changes.
+  await assert.rejects(landNext(t.ctx, c2.change.id), (e) => code(e) === "not_bottom");
+  t.provider.unmergeable.set(1, "At least 1 approving review is required by reviewers with write access.");
+  await assert.rejects(landNext(t.ctx, c1.change.id), (e) => code(e) === "merge_refused" && /approving review/.test((e as Error).message));
+  assert.deepEqual([(await readStacks(t.ctx))[0].changes.length, t.provider.refs.get("main"), pr[1].base], [3, main, c1.branch]);
+  t.provider.unmergeable.clear();
+  // The change as the caller saw it.
+  await assert.rejects(landNext(t.ctx, c1.change.id, "f".repeat(40)), (e) => code(e) === "conflict");
+
+  // Merged: pull request 2 on main (its own turn only), change 1's branch gone, change 2's pull request read again
+  // (pointing it at main dismissed its approval).
+  t.provider.status.set(2, { review: "pending" });
+  const l = await landNext(t.ctx, c1.change.id, c1.sha);
+  assert.deepEqual([pr[0].merged, t.provider.refs.get("main"), l.sha, pr[1].base, t.provider.refs.has(c1.branch)], [true, l.sha, l.sha, "main", false]);
+  assert.deepEqual([l.next?.change, l.next?.pull?.review, l.deleted], [c2.change.id, "pending", [c1.branch]]);
+  let [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((c) => c.position), [2, 3]);
+
+  // Its pull request not on main (a landing that left it on the branch below): refused, nothing moved (moving it may
+  // dismiss its approval; Update pull requests does it).
+  t.provider.pulls[1].base = c1.branch;
+  await assert.rejects(landNext(t.ctx, c2.change.id), (e) => code(e) === "pull_base");
+  t.provider.pulls[1].base = "main";
+  // GitHub's own "delete branch on merge" did both already: fine.
+  t.provider.gh.deleteOnMerge = true;
+  const l2 = await landNext(t.ctx, c2.change.id);
+  assert.deepEqual([l2.deleted, l2.pullErrors, pr[2].base, t.provider.refs.has(c2.branch)], [[], undefined, "main", false]);
+  [s] = await readStacks(t.ctx);
+  assert.deepEqual(s.changes.map((c) => c.position), [3]);
+  // Merged on GitHub already, its branch deleted with it: recorded as landed (into main only).
+  // (A merge commit on main holding change 3, then more merged since: the landing is at its merge commit.)
+  const squash = t.provider.push("main", { merged: "3" });
+  t.provider.refs.set("tmp", c3.sha);
+  const mergeSha = t.provider.push("tmp", { merged: "3" });
+  t.provider.refs.set("main", mergeSha);
+  t.provider.push("main", { later: "x" });
+  Object.assign(pr[2], { base: c2.branch, state: "closed", merged: true, mergeSha, mergedHead: c3.sha });
+  await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere");
+  pr[2].base = "main";
+  // Merged at an earlier commit (a push since): not landed.
+  pr[2].mergedHead = c2.sha;
+  await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /another commit/.test((e as Error).message));
+  pr[2].mergedHead = c3.sha;
+  // main reset since (it doesn't hold the change any more): not recorded.
+  const kept = t.provider.refs.get("main")!;
+  t.provider.refs.set("main", squash);
+  await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /reset/.test((e as Error).message));
+  // Squashed on GitHub (its commit not in main's history): not carried on from.
+  // (main at the squash commit too.)
+  pr[2].mergeSha = squash;
+  await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere" && /squashed or rebased/.test((e as Error).message));
+  pr[2].mergeSha = mergeSha;
+  t.provider.refs.set("main", kept);
+  t.provider.refs.delete(c3.branch);
+  const l3 = await landNext(t.ctx, c3.change.id);
+  assert.equal(l3.sha, mergeSha);
+  assert.deepEqual(await readStacks(t.ctx), []);
+});
+
+test("stack: Land next needs merge commits (squash-only refused), a pull request, and the bottom at its commit; Update merges the default branch into it", async () => {
+  await using t = await setup();
+  const main = t.provider.refs.get("main")!;
+  const code = (e: unknown) => (e as HttpError).code;
+  const c1 = ok(await t.change("main", main, "One", "1"));
+  const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
+  await assert.rejects(landNext(t.ctx, c1.change.id), (e) => code(e) === "no_pull");
+  await submitStack(t.ctx, c1.stack.id);
+  Object.assign(t.provider.methods, { merge: false, rebase: false });
+  await assert.rejects(landNext(t.ctx, c1.change.id), (e) => code(e) === "merge_method" && /only allows squash merges/.test((e as Error).message));
+  Object.assign(t.provider.methods, { merge: true, rebase: true });
+  t.provider.push(c1.branch, { x: "outside" });
+  await assert.rejects(landNext(t.ctx, c1.change.id), (e) => code(e) === "moved");
+  t.provider.refs.set(c1.branch, c1.sha);
+
+  // Behind main (it must be up to date): main merged into change 1, which is at that commit then.
+  const moved = t.provider.push("main", { "other.txt": "o" });
+  await assert.rejects(updateBottom(t.ctx, c2.change.id), (e) => code(e) === "not_bottom");
+  const u = await updateBottom(t.ctx, c1.change.id, c1.sha);
+  assert.notEqual(u.change.sha, c1.sha);
+  assert.deepEqual([t.provider.refs.get(c1.branch), t.provider.commits.get(u.change.sha)!.files.get("other.txt")], [u.change.sha, "o"]);
+  const [s] = await readStacks(t.ctx);
+  assert.deepEqual([s.changes[0].sha, s.changes[0].github, s.changes[1].sha], [u.change.sha, "ok", c2.sha]);
+  assert.ok(moved);
+  const l = await landNext(t.ctx, c1.change.id, u.change.sha);
+  assert.equal(t.provider.refs.get("main"), l.sha);
+});
+
 test("stack: landing is refused before anything moves on a protected default branch, one that moved, or a change pushed to", async () => {
   await using t = await setup();
   const main = t.provider.refs.get("main")!;
@@ -663,7 +799,7 @@ test("stack: landing is refused before anything moves on a protected default bra
   const c1 = ok(await t.change("main", main, "One", "1"));
   const c2 = ok(await t.change(c1.branch, c1.sha, "Two", "2"));
   t.provider.guarded.add("main");
-  await assert.rejects(landUpTo(t.ctx, c2.change.id), (e) => code(e) === "branch_protected" && /through its pull requests/.test((e as Error).message));
+  await assert.rejects(landUpTo(t.ctx, c2.change.id), (e) => code(e) === "branch_protected" && /through their pull requests/.test((e as Error).message));
   t.provider.guarded.clear();
   const pushed = t.provider.push(c1.branch, { x: "outside" });
   await assert.rejects(landUpTo(t.ctx, c2.change.id), (e) => code(e) === "moved");
