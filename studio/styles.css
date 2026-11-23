@@ -1029,6 +1029,7 @@ button.statusline-item:hover { color: var(--text); }
   .topbar { flex-wrap: wrap; height: auto; min-height: 52px; padding: 8px 12px; }
   #project-name { width: 9rem; }
   .palette-btn { order: 3; flex-basis: 100%; max-width: none; }
+  .topbar-right { flex-wrap: wrap; max-width: 100%; }
   .workspace[data-mode="guided"] :is(.preview-pane, .db-pane, .db-tables-pane) { margin: 0 0 12px; border-radius: 0; }
   .workspace[data-mode="guided"] .builder-pane { margin: 0; }
   .deploy-link { min-width: 0; flex: 0 1 auto; }
