@@ -870,7 +870,7 @@ export function updateBottom(ctx: Ctx, changeId: string, sha?: string): Promise<
  * then run again). A change pushed to or gone on GitHub stops it before anything's merged into it (409 `moved` / 404).
  */
 export function restack(ctx: Ctx, stackId: string): Promise<{
-  updated: ChangeView[]; stopped?: { change: ChangeView; with: string; withSha: string; paths: string[] }; base: string;
+  updated: ChangeView[]; stopped?: { change: ChangeView; with: string; withSha: string; paths: string[] }; base: string; branches: string[];
 }> {
   return locked(ctx.appId, async () => {
     const { provider, store, r, repo } = ctx;
@@ -890,7 +890,7 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
         } catch (e) {
           if (!(e instanceof HttpError) || e.code !== "merge_conflict") throw e;
           const paths = Array.isArray(e.extra?.paths) ? e.extra.paths as string[] : [];
-          return { updated, stopped: { change: { ...view(c), github: "ok" }, with: below.branch, withSha: below.sha, paths }, base: def };
+          return { updated, stopped: { change: { ...view(c), github: "ok" }, with: below.branch, withSha: below.sha, paths }, base: def, branches: s.map((x) => x.branch) };
         }
         // (Its base is the commit merged in now: what Undo takes its turn back to. The top moved: changes set aside above
         // it can't come back, as for any commit on it.)
@@ -904,8 +904,8 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
       }
       below = { branch: c.branch, sha: c.sha };
     }
-    // `base`: the default branch's head brought in.
-    return { updated, base: def };
+    // `base`: the default branch's head brought in; `branches`: the stack's.
+    return { updated, base: def, branches: s.map((x) => x.branch) };
   });
 }
 

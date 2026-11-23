@@ -257,13 +257,14 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
    */
   /** `rev`: the workspace's revision before it started (an edit since isn't overwritten: it stops, said). */
   async function restackRun(stack: string, returnTo: string, rev: number): Promise<Restacked> {
-    const r = await post<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; withSha: string; paths: string[] }; base?: string }>("/stack/restack", { stack });
+    const r = await post<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; withSha: string; paths: string[] }; base?: string; branches?: string[] }>("/stack/restack", { stack });
     if (!r.stopped) {
       await set({ restack: undefined });
       const s = o.state()!;
       if (s.activeBranch !== returnTo || r.updated.some((c) => c.branch === returnTo)) await pullNow(returnTo, returnTo, { rev });
       // (The default branch's head it brought in: what the workspace's branch sits on now.)
-      if (r.base && o.state()!.activeBranch !== o.state()!.defaultBranch) await set({ baseSha: r.base });
+      // (Only on one of the stack's changes: another branch doesn't hold it.)
+      if (r.base && r.branches?.includes(o.state()!.activeBranch)) await set({ baseSha: r.base });
       return r;
     }
     // The stopped change's merge, read first (refused: nothing here moved), then loaded once.
