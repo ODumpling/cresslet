@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 export type GhUser = { id: number; login: string; email: string };
 type Entry = { mode: string; sha: string };
 type Commit = { tree: Map<string, Entry>; parents: string[]; message: string; author: { name: string; email: string } | null; by: string };
-type Pull = { number: number; head: string; base: string; title: string; body: string; state: "open" | "closed"; merged?: boolean; comments?: string[]; reviews: { user: { login: string }; state: string }[] };
+type Pull = { number: number; head: string; base: string; title: string; body: string; state: "open" | "closed"; merged?: boolean; mergeSha?: string; comments?: string[]; reviews: { user: { login: string }; state: string }[] };
 type Repo = {
   id: number; owner: string; name: string; private: boolean; default_branch: string; push: Set<string>; refs: Map<string, string>;
   protected: Set<string>; rulesets?: boolean; pulls: Pull[];
@@ -306,7 +306,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
     const behind = (pr: Pull) => r.refs.has(pr.head) && r.refs.has(pr.base) && !ancestors(r.refs.get(pr.head)!).has(r.refs.get(pr.base)!);
     const pullJson = (pr: Pull) => ({
       number: pr.number, html_url: `https://github.example/${r.owner}/${r.name}/pull/${pr.number}`, title: pr.title, body: pr.body, draft: false,
-      state: pr.state, merged: !!pr.merged, head: { sha: r.refs.get(pr.head) ?? "", ref: pr.head }, base: { ref: pr.base },
+      state: pr.state, merged: !!pr.merged, head: { sha: r.refs.get(pr.head) ?? "", ref: pr.head }, base: { ref: pr.base }, merge_commit_sha: pr.mergeSha ?? null,
       mergeable_state: r.requireReview && !approved(pr) ? "blocked" : r.strict && behind(pr) ? "behind" : "clean",
     });
     if (rest === "/pulls" && req.method === "GET") {
@@ -336,7 +336,7 @@ export async function fakeGithub(opts: { clientId: string; clientSecret: string 
       if (!out) return json(405, { message: "Pull Request is not mergeable" });
       const sha = commit(out, [into, head], body.commit_title ?? `Merge pull request #${pr.number}`, null, u.login);
       r.refs.set(pr.base, sha);
-      Object.assign(pr, { state: "closed", merged: true });
+      Object.assign(pr, { state: "closed", merged: true, mergeSha: sha });
       if (r.deleteOnMerge) {
         r.refs.delete(pr.head);
         for (const y of r.pulls) if (y.state === "open" && y.base === pr.head) y.base = pr.base;

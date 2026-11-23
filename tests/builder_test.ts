@@ -747,6 +747,12 @@ test("git: Land next lands the bottom through its pull request (the workspace on
   const r = await g.git.landNext(bottom, "feat/s/3-three");
   assert.deepEqual([g.calls[0].body, r.next.pull.review], [{ change: "chg_1", sha: bottom.sha }, "pending"]);
   assert.equal(g.state.activeBranch, "main");
+  // Changes not pushed on it: refused (its branch goes).
+  const d = fakeGit({ onDefault: false });
+  d.state.activeBranch = bottom.branch;
+  d.state.dirty = true;
+  await assert.rejects(d.git.landNext(bottom, "feat/s/3-three"), (e: Json) => e.code === "dirty");
+  assert.deepEqual(d.calls, []);
   // On the top above it: stays, on the merge.
   const t = fakeGit({ onDefault: false });
   t.state.activeBranch = "feat/s/3-three";

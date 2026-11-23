@@ -756,7 +756,7 @@ export function landNext(ctx: Ctx, changeId: string, sha?: string): Promise<{
     if (p?.merged) {
       // Merged on GitHub already (its branch maybe deleted with it): landed, if into the default branch.
       if (p.base !== def) throw new HttpError(409, `pull request #${p.number} was merged into ${p.base}, not ${def}: change ${c.position} isn't in ${def}`, "merged_elsewhere");
-      merged = await provider.branchHead(r, def) ?? c.sha;
+      merged = p.mergeSha ?? await provider.branchHead(r, def) ?? c.sha;
     } else {
       await atCommit(ctx, c);
       const methods = await provider.mergeMethods(r);

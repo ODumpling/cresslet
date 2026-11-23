@@ -113,6 +113,8 @@ export interface Pull {
   merged: boolean;
   base: string;
   head: string;
+  /** Merged: its merge commit. */
+  mergeSha?: string | null;
 }
 
 /** GitHub's REST API with one user's token. `unauthorized`: GitHub rejected the token (revoked meanwhile). */
@@ -607,7 +609,7 @@ export class GitHub implements SourceControlProvider {
 
   #pull = (p: GhPull): Pull => ({
     number: p.number, url: p.html_url, state: p.state === "closed" ? "closed" : "open", merged: !!p.merged_at || !!p.merged,
-    base: p.base?.ref ?? "", head: p.head.ref ?? "",
+    base: p.base?.ref ?? "", head: p.head.ref ?? "", mergeSha: p.merge_commit_sha ?? null,
   });
   /** A refused pull request call: GitHub's own reason (422), else as any other call. */
   #pullError(res: { status: number; body: { message?: string; errors?: { message?: string }[] } | null }) {
@@ -752,7 +754,7 @@ type Entries = Map<string, GhEntry>;
 type Outside = { take: { path: string; mode: string; type: string; sha: string | null }[]; both: string[]; outside: Set<string> };
 type GhPull = {
   number: number; html_url: string; title: string; draft?: boolean; head: { sha: string; ref?: string }; base?: { ref: string };
-  state?: string; merged?: boolean; merged_at?: string | null; mergeable_state?: string;
+  state?: string; merged?: boolean; merged_at?: string | null; mergeable_state?: string; merge_commit_sha?: string | null;
 };
 export interface PullInfo {
   number: number;

@@ -64,7 +64,7 @@ function fakeProvider() {
       // A merge commit: the head's files, on the head (this fake's commits have one parent).
       const sha = make(new Map(commits.get(input.sha)!.files), input.sha);
       refs.set(x.base, sha);
-      Object.assign(x, { state: "closed", merged: true });
+      Object.assign(x, { state: "closed", merged: true, mergeSha: sha });
       if (gh.deleteOnMerge) {
         refs.delete(x.head);
         for (const y of pulls) if (y.state === "open" && y.base === x.head) y.base = x.base;
@@ -731,12 +731,14 @@ test("stack: on a protected default branch, Land next merges the bottom's pull r
   [s] = await readStacks(t.ctx);
   assert.deepEqual(s.changes.map((c) => c.position), [3]);
   // Merged on GitHub already, its branch deleted with it: recorded as landed (into main only).
-  Object.assign(pr[2], { base: c2.branch, state: "closed", merged: true });
+  const mergeSha = t.provider.push("main", { merged: "3" });
+  t.provider.push("main", { later: "x" }); // merged since: the landing is at its merge commit, not main's head
+  Object.assign(pr[2], { base: c2.branch, state: "closed", merged: true, mergeSha });
   await assert.rejects(landNext(t.ctx, c3.change.id), (e) => code(e) === "merged_elsewhere");
   pr[2].base = "main";
   t.provider.refs.delete(c3.branch);
   const l3 = await landNext(t.ctx, c3.change.id);
-  assert.equal(l3.sha, t.provider.refs.get("main"));
+  assert.equal(l3.sha, mergeSha);
   assert.deepEqual(await readStacks(t.ctx), []);
 });
 

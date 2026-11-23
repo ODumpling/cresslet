@@ -490,6 +490,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * on the top above it: the default branch it sits on is the merge.
      */
     landNext: (change: StackChange, top: string) => serial(async () => {
+      // (Changes here on it would be left on a branch that goes.)
+      if (o.state()?.activeBranch === change.branch && o.state()!.dirty) throw Object.assign(new Error("this workspace has changes not pushed yet on that change: push them first"), { code: "dirty" });
       const r = await post<{ landed: StackChange; sha: string; next?: { change: string; pull: PullRequest | null }; pullErrors?: PullError[] }>("/stack/land-next", { change: change.id, sha: change.sha });
       const s = o.state();
       if (s && s.activeBranch === change.branch && !s.dirty) await pullNow(s.defaultBranch);
