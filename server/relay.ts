@@ -324,7 +324,7 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
           if (deciding) return;
           deciding = true;
           void handleDecision(session, msg.allow).catch(() => {
-            if (session) closeSession(session, 1011, "internal");
+            if (session && session.studioWs === ws) closeSession(session, 1011, "internal");
           });
           return;
         }

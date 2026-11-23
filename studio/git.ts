@@ -295,15 +295,17 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
    * the edits kept.
    */
   /** `submit: false`: a change made on the way somewhere (going back, deploying): the app's auto-submit skips it. */
-  async function changeNow(title: string, prompt: string, submit = true): Promise<{
+  async function changeNow(title: string, prompt: string, submit = true, signal?: AbortSignal): Promise<{
     sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string };
     submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean; restacked?: Restacked;
   }> {
+    signal?.throwIfAborted();
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
     if (s.mergeParent) return syncNow(title);
     const rev = revision();
     const files = await o.files();
+    signal?.throwIfAborted();
     // An undo being finished: its title, and not while its conflicts have markers left.
     if (s.undo) {
       const left = markersLeft(s.undo.conflicts, files);
@@ -657,7 +659,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
     /** Resolves once the steps queued so far have run (the AI builder sends a request on the workspace they leave). */
     idle: () => serial(async () => {}),
     /** Commits the workspace as a new change of the app's stack (see changeNow). */
-    commitChange: (title: string, prompt = "") => serial(() => changeNow(title, prompt)),
+    commitChange: (title: string, prompt = "", signal?: AbortSignal) => serial(() => changeNow(title, prompt, true, signal)),
     /** The app's open stacks, newest first, and the one the workspace is on (its active branch is one of its changes). */
     stacks: async () => {
       const r0 = await o.api<{ defaultBranch: string; protected?: string | null; stacks: Stack[] }>(path("/stack"));

@@ -115,6 +115,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
   const [bridgeError, setBridgeError] = useState("");
   const [bridgeState, setBridgeState] = useState<BridgeState | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
+  const [wantSetup, setWantSetup] = useState(false);
 
   const inputRef = useRef<HTMLTextAreaElement>(null), logRef = useRef<HTMLDivElement>(null);
   const keyRef = useRef<HTMLInputElement>(null), loginRef = useRef<HTMLButtonElement>(null);
@@ -250,7 +251,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
       }
       try {
         const onto = g.state.activeBranch;
-        const out = await g.commitChange(commitMessage(title), title);
+        const out = await g.commitChange(commitMessage(title), title, signal);
         r.remoteChanged = false;
         r.remoteCmdRev = r.commandRev();
         if (!out.changed) {
@@ -267,6 +268,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         add({ kind: "notice", text: msg });
         return { text: msg, summary: `Committed: ${title}` };
       } catch (e) {
+        if (signal?.aborted) return { error: true, text: "Cancelled.", summary: `Cancelled: ${title}` };
         if (gitCode(e) === "moved") {
           if (!r.gone) r.onStackStale();
           const msg = `Not committed: ${errorMessage(e)}. Pull it in or carry on from it in Source control first.`;
@@ -570,7 +572,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
 
   const remotePaired = bridgeState?.phase === "paired";
   const remotePending = bridgeState?.phase === "connecting" || bridgeState?.phase === "awaiting_approval";
-  const showFeed = !!source || remotePaired || items.length > 0;
+  const showFeed = !!source || remotePaired || (items.length > 0 && !wantSetup);
   const setupShown = !showFeed, credited = source === "credits";
   // The chat as turns: a request and what followed it (notices before the first request stand alone).
   type Turn = { user: Extract<Item, { kind: "user" }> | null; items: Item[] };
@@ -669,7 +671,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
           }}>
           <Icon name="link" />
         </button>
-        <button className="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat" disabled={busy || bridgeBusy} onClick={() => {
+        <button className="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat" disabled={busy || bridgeBusy || remotePaired} onClick={() => {
           if (r.busy) return;
           // A new feature starts from the default branch: offer to go back to it (this branch stays on GitHub).
           const g = r.git, s = g?.connected ? g.state : undefined;
@@ -757,6 +759,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
           if (!apiKey.set(v)) return setKeyError("This browser blocked saving the key (site storage). Allow it and try again.");
           setKeyValue("");
           setKeyError("");
+          setWantSetup(false);
           flushSync(() => setKeyVersion((n) => n + 1));
           chatFocus();
         }}>
@@ -811,7 +814,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         ) : !source ? (
           <div className="bridge-foot row between">
             <span className="muted small">No built-in Claude key configured.</span>
-            <button className="btn sm" type="button" onClick={() => setItems([])}>Set up Claude</button>
+            <button className="btn sm" type="button" onClick={() => setWantSetup(true)}>Set up Claude</button>
           </div>
         ) : (
         <form id="builder-form" className="builder-form" ref={formRef} hidden={remotePending} onSubmit={(e) => void send(e)}>
