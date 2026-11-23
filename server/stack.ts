@@ -724,7 +724,7 @@ export function landUpTo(ctx: Ctx, changeId: string, expect?: string): Promise<{
     for (let i = from; i <= k; i++) {
       // (Moved as fast-forwards: each must hold the one below's commit itself, a synced one's too.)
       if (!await provider.contains(r, s[i].sha, i === from ? at : s[i - 1].sha)) {
-        if (i > from && s[i - 1].synced_from) throw new HttpError(409, `change ${s[i].position} doesn't hold change ${s[i - 1].position}'s sync commit: land up to change ${s[i - 1].position} first (nothing was landed)`, "stack_behind");
+        if (i > from && s[i - 1].synced_from) throw new HttpError(409, `change ${s[i].position} doesn't hold change ${s[i - 1].position}'s sync commit: Land next on change ${s[i - 1].position} first (nothing was landed)`, "stack_behind");
         throw new HttpError(409, `change ${s[i].position} doesn't hold ${i === from ? def : `change ${s[i - 1].position}`} yet (an Update stack stopped there): run Update stack first, nothing was landed`, "stack_behind");
       }
     }
@@ -919,8 +919,12 @@ export async function assertLinked(ctx: Ctx, topId: string) {
   const c = open.find((x) => x.id === topId);
   if (!c) return;
   const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0].filter((x) => x.position <= c.position);
-  const links = await pool(s.slice(1).map((x, i) => [x, s[i]] as const), 4, ([x, below]) => holds(ctx, x.sha, below));
+  // (A real merge: each must hold the one below's commit itself, a synced one's too.)
+  const links = await pool(s.slice(1).map((x, i) => [x, s[i]] as const), 4, ([x, below]) => ctx.provider.contains(ctx.r, x.sha, below.sha));
   const i = links.findIndex((x) => !x);
+  if (i >= 0 && s[i].synced_from) {
+    throw new HttpError(409, `change ${s[i + 1].position} doesn't hold change ${s[i].position}'s sync commit: Land next on change ${s[i].position} first, nothing was merged`, "stack_behind");
+  }
   if (i >= 0) {
     throw new HttpError(409, `change ${s[i + 1].position} doesn't hold change ${s[i].position} yet (an Update stack stopped there): run Update stack first, nothing was merged`, "stack_behind");
   }
@@ -1065,7 +1069,7 @@ export function fold(ctx: Ctx, changeId: string, into: string): Promise<{ change
     // (Its pull request goes onto the lower one's base: it must hold the lower one's commit itself, a synced one's
     // too, or it would show earlier turns again.)
     if (lower.synced_from && !await provider.contains(r, upper.sha, lower.sha)) {
-      throw new HttpError(409, `change ${upper.position} doesn't hold change ${lower.position}'s sync commit: land change ${lower.position} first, nothing was folded`, "stack_behind");
+      throw new HttpError(409, `change ${upper.position} can't be folded into change ${lower.position}, which was synced with a squash: land change ${lower.position} with Land next instead, nothing was folded`, "stack_behind");
     }
     if (!await holds(ctx, upper.sha, lower)) throw new HttpError(409, `change ${upper.position} doesn't hold change ${lower.position} yet (an Update stack stopped there): run Update stack first, nothing was folded`, "stack_behind");
     const base = i > 1 ? s[i - 2].branch : repo.default_branch;

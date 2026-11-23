@@ -861,13 +861,14 @@ test("stack: squash-only, Land next squashes the bottom and gives the next chang
   // Change 3 is left alone until it's the bottom, and the stack isn't behind for it (it holds what 2 was synced from).
   assert.equal(s.changes[1].sha, c3.sha);
   assert.equal(s.behind, undefined);
-  await assertLinked(t.ctx, s.changes[1].id);
   assert.deepEqual((await restack(t.ctx, c1.stack.id)).updated, []);
+  // (Merged as one, though, it must hold the sync commit itself: refused.)
+  await assert.rejects(assertLinked(t.ctx, s.changes[1].id), (e) => code(e) === "stack_behind" && /Land next on change 2 first/.test((e as Error).message));
   // …but folding it into change 2 would put its pull request on main without the squash: refused, as is landing
   // past change 2 as fast-forwards.
-  await assert.rejects(fold(t.ctx, s.changes[1].id, s.changes[0].id), (e) => code(e) === "stack_behind" && /sync commit/.test((e as Error).message));
+  await assert.rejects(fold(t.ctx, s.changes[1].id, s.changes[0].id), (e) => code(e) === "stack_behind" && /synced with a squash/.test((e as Error).message));
   t.provider.guarded.delete("main");
-  await assert.rejects(landUpTo(t.ctx, s.changes[1].id), (e) => code(e) === "stack_behind" && /land up to change 2 first/.test((e as Error).message));
+  await assert.rejects(landUpTo(t.ctx, s.changes[1].id), (e) => code(e) === "stack_behind" && /Land next on change 2 first/.test((e as Error).message));
   t.provider.guarded.add("main");
 
   // main moved meanwhile (another commit): refused before the squash (Update stack first).
