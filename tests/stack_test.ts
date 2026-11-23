@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { HttpError } from "../server/deploys.ts";
 import type { CommitInput, Pull, PullInfo, Repo, SourceControlProvider } from "../server/git.ts";
 import {
-  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, pullBody, undoPlan, goBack, landed, landNext, landUpTo, MAX_STACK, assertSyncable, restack, pullIn, readStacks, restore,
+  assertNotBelowTop, carryOn, changePull, commitChange, type Ctx, deleteSetAside, fold, followed, pullBody, undoPlan, goBack, landed, landNext, landUpTo, MAX_STACK, assertLinked, assertSyncable, restack, pullIn, readStacks, restore,
   setAsideBranches, slug, stackPulls, submitStack, updateBottom,
 } from "../server/stack.ts";
 import { type AppRepo, Store } from "../server/store.ts";
@@ -864,6 +864,8 @@ test("stack: Update stack merges the default branch into each change from the bo
   const mainNow = t.provider.refs.get("main");
   await assert.rejects(landUpTo(t.ctx, s.changes[2].id), (e) => code(e) === "stack_behind");
   assert.equal(t.provider.refs.get("main"), mainNow);
+  // …and merging the top as one (Deploy's fallback): it doesn't hold change 1's merge.
+  await assert.rejects(assertLinked(t.ctx, s.changes[2].id), (e) => code(e) === "stack_behind");
   // …and folding change 2 into change 1 (it doesn't hold change 1's merge: folding would drop it).
   await assert.rejects(fold(t.ctx, s.changes[1].id, s.changes[0].id), (e) => code(e) === "stack_behind");
   // Resolved in the workspace and committed onto change 2 (below the top: only as that merge), its record following.

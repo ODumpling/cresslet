@@ -11,7 +11,7 @@ import { type Config, rootUrl } from "./config.ts";
 import type { Env } from "./admin.ts";
 import { type DeployFile, deploySource, DOTENV, HttpError, mergeDotenvText, NOT_SOURCE, publicDotenv, safePath, sourceFiles } from "./deploys.ts";
 import {
-  assertNotBelowTop, assertSyncable, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landNext, landUpTo, locked, pullIn, readStacks, restore,
+  assertLinked, assertNotBelowTop, assertSyncable, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landNext, landUpTo, locked, pullIn, readStacks, restore,
   restack, setAsideBranches, stackPulls, submitStack, updateBottom,
 } from "./stack.ts";
 import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
@@ -1457,6 +1457,9 @@ export function gitRoutes(
         // pushed to, a commit other than the one synced (the merge checks it against GitHub).
         const asBefore = ["default_moved", "moved", "not_synced"].includes((e as HttpError).code);
         if (!(e instanceof HttpError) || !asBefore) throw e;
+        // (As one merge, the top must hold every change below it: an Update stack stopped part way would leave out
+        // what's merged below.)
+        await assertLinked(ctx, top.id);
       }
     }
     m ??= await client.merge(r, { into, head: branch, expect, message: message(input.message, `Merge ${branch} into ${into}`) });

@@ -860,6 +860,22 @@ export function updateBottom(ctx: Ctx, changeId: string, sha?: string): Promise<
   });
 }
 
+/**
+ * Each change up to `top` holds the one below it (an Update stack stopped part way: not yet, 409 `stack_behind`), so
+ * merging the top takes all of them, a resolved merge below included.
+ */
+export async function assertLinked(ctx: Ctx, topId: string) {
+  const open = await ctx.store.openStackChanges(ctx.appId);
+  const c = open.find((x) => x.id === topId);
+  if (!c) return;
+  const s = byStack(open.filter((x) => x.stack_id === c.stack_id))[0].filter((x) => x.position <= c.position);
+  const links = await pool(s.slice(1).map((x, i) => [x, s[i]] as const), 4, ([x, below]) => ctx.provider.contains(ctx.r, x.sha, below.sha));
+  const i = links.findIndex((x) => !x);
+  if (i >= 0) {
+    throw new HttpError(409, `change ${s[i + 1].position} doesn't hold change ${s[i].position} yet (an Update stack stopped there): run Update stack first, nothing was merged`, "stack_behind");
+  }
+}
+
 // ---- the default branch moved under a stack: brought into each change, from the bottom up
 
 /**

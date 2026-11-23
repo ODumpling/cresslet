@@ -1094,6 +1094,12 @@ test("stack: Update stack brings main's new commits into each change; a conflict
   assert.deepEqual([u.body.updated.map((x: { position: number }) => x.position), u.body.stopped.change.position, u.body.stopped.with, u.body.stopped.paths], [[1], 2, c1.branch, ["b.txt"]]);
   const c1b = u.body.updated[0];
   assert.deepEqual(t.gh.commit(c1b.sha).parents.length, 2);
+  // Deploy merging the top as one meanwhile (main moved again): refused, the stack stopped part way.
+  const mainWas = repo.refs.get("main")!;
+  t.gh.write(repo, "main", { "z.txt": "z\n" });
+  const dep = await t.send("POST", "/v1/apps/shop/git/merge", tok, { branch: c3.branch, headSha: c3.sha });
+  assert.deepEqual([dep.status, dep.body.error], [409, "stack_behind"]);
+  repo.refs.set("main", mainWas);
   // The conflict, against change 1 (not main): change 2's lines and change 1's (which holds main's).
   const cf = await t.send("GET", `/v1/apps/shop/git/conflicts?branch=${encodeURIComponent(c2.branch)}&with=${encodeURIComponent(c1.branch)}`, tok);
   assert.equal(cf.status, 200, JSON.stringify(cf.body));
