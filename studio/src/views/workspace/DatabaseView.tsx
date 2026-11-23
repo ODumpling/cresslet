@@ -46,14 +46,16 @@ export function DatabaseView({ run, shown, changes }: { run: RunSql | null; show
   const [out, setOut] = useState<Out>(null);
   const form = useRef<HTMLFormElement>(null);
   const running = !!out && "running" in out;
+  const reads = useRef(0); // table listings started: only the latest one shows (an earlier one may finish after it)
 
   const refresh = useCallback(async () => {
     if (!run) return;
+    const n = ++reads.current;
     try {
       const got = await listTables(run);
-      if (alive.current) setTables(got);
+      if (alive.current && n === reads.current) setTables(got);
     } catch (e) {
-      if (alive.current) setTables({ error: errorMessage(e) });
+      if (alive.current && n === reads.current) setTables({ error: errorMessage(e) });
     }
   }, [run, alive]);
   useEffect(() => {

@@ -67,7 +67,13 @@ try {
   if (await page.locator('#db-tables-pane button[data-table="_cresslet_kv"]').count()) throw new Error("kv table made before any kv write");
   await (await previewFrame()).evaluate(() => (location.href = "/login"));
   await frame.locator("form input[name=password]").waitFor({ state: "attached", timeout: 30000 });
-  await (await previewFrame()).evaluate(() => {
+  await (await previewFrame()).evaluate(async () => {
+    // hydrated first (React's handler on the form): before that, a submit is the browser's own, which calls no server function
+    const hydrated = () => Object.keys(document.querySelector("form")!).some((k) => k.startsWith("__reactProps"));
+    for (let i = 0; !hydrated(); i++) {
+      if (i > 150) throw new Error("the login form never hydrated");
+      await new Promise((r) => setTimeout(r, 200));
+    }
     const form = document.querySelector("form")!;
     (form.querySelector("input[name=email]") as HTMLInputElement).value = "nobody@example.com";
     (form.querySelector("input[name=password]") as HTMLInputElement).value = "wrong password";

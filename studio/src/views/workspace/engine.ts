@@ -306,7 +306,7 @@ export class Engine {
         if (linked) throw new Error(`${name} is linked to ${linked.fullName}, but this workspace isn't: open Source control (the branch button) to load it first`);
         return null;
       },
-      dbChanged: (port) => port === this.previewPort && cb.dbChanged(), // the database the preview (and Database view) shows
+      dbChanged: (port) => !this.disposed && port === this.previewPort && cb.dbChanged(), // the database the preview (and Database view) shows
     });
 
     // keep the tree in sync with terminal changes
