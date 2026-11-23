@@ -652,6 +652,28 @@ test("webhooks off: 404", withServer(async (t) => {
   assert.equal((await t.call("/v1/webhooks/github", { method: "POST", body: "{}" })).status, 404);
 }));
 
+test("conflicts: a file the branch made of main's symlink is loaded for the merge, and an edit to it there is refused, not dropped", withServer(async (t) => {
+  const { tok, linked } = await linkedShop(t);
+  const m0 = t.gh.write(t.gh.repo("octo/shop"), "main", { "x.js": "target", "app.txt": "hello\n" });
+  t.gh.commit(m0).tree.set("x.js", { ...t.gh.commit(m0).tree.get("x.js")!, mode: "120000" });
+  await t.send("POST", "/v1/apps/shop/git/branches", tok, { name: "feat/s" });
+  const mine = await t.send("POST", "/v1/apps/shop/git/sync", tok, {
+    branch: "feat/s", baseSha: m0, files: [...linked.files, { path: "app.txt", data: "branch\n" }, { path: "x.js", data: "real\n" }],
+  });
+  assert.equal(t.gh.commit(mine.body.sha).tree.get("x.js")!.mode, "100644");
+  const theirs = t.gh.write(t.gh.repo("octo/shop"), "main", { "app.txt": "main\n" });
+  const cf = await t.send("GET", "/v1/apps/shop/git/conflicts?branch=feat/s", tok);
+  assert.equal(cf.status, 200, JSON.stringify(cf.body));
+  const files = cf.body.files.map((f: { path: string; data: string }) => (f.path === "app.txt" ? { ...f, data: "both\n" } : f));
+  assert.equal(files.find((f: { path: string }) => f.path === "x.js")?.data, "real\n");
+  const edited = files.map((f: { path: string; data: string }) => (f.path === "x.js" ? { ...f, data: "edited\n" } : f));
+  const s = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/s", baseSha: mine.body.sha, files: edited, mergeParent: theirs });
+  assert.deepEqual([s.status, s.body.paths], [409, ["x.js"]]);
+  const ok = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: "feat/s", baseSha: mine.body.sha, files, mergeParent: theirs });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(t.gh.files("octo/shop", "feat/s")["x.js"], "real\n");
+}));
+
 test("conflicts: main merged into the branch with markers; resolved and committed with main as a parent, the deploy merge fast-forwards", withServer(async (t) => {
   const { tok, linked } = await linkedShop(t);
   const base = [...linked.files, { path: "app.txt", data: "hello\n" }, { path: "keep.txt", data: "k\n" }];

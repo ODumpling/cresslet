@@ -331,10 +331,19 @@ export class GitHub implements SourceControlProvider {
         }
         if (!Buffer.from(publicDotenv(await this.#blob(r, e.sha))).equals(Buffer.from(d))) throw changed(path);
       }
+      // So are the other files merged here that the workspace was given (a symlink on one side, a file on the other):
+      // as they were.
+      const given = (path: string) => { const e = result(path); return !DOTENV.test(path) && notHeld.has(path) && !!e?.sha && workspaceFile(e, path, prefix); };
+      for (const [p, d] of input.files) {
+        const path = prefix + p;
+        if (given(path) && !Buffer.from(await this.#blob(r, result(path)!.sha!)).equals(Buffer.from(d))) throw changed(path);
+      }
+      const names = new Set(input.files.map(([p]) => prefix + p));
       // …and none deleted here meanwhile.
       for (const path of new Set([...taken.keys(), ...ours.keys()])) {
         const e = result(path);
         if (e?.sha && workspaceEnv(e, path, prefix) && !sent.has(path)) throw changed(path);
+        if (given(path) && !names.has(path)) throw changed(path);
       }
     }
     const held = (path: string) => !input.mergeParent || (!DOTENV.test(path) && !notHeld.has(path));
@@ -492,7 +501,8 @@ export class GitHub implements SourceControlProvider {
     const plain = (m?: string) => m === "100644" || m === "100755";
     const moded = [...full[0].values()].filter((e) => {
       const [t, p] = [full[1].get(e.path), full[2].get(e.path)];
-      return !!t && plain(e.mode) && plain(t.mode) && t.mode !== e.mode && (p?.sha !== e.sha || p?.mode !== e.mode);
+      // (Content only put back: the commit keeps the top's mode, as a merge would.)
+      return !!t && plain(e.mode) && plain(t.mode) && t.mode !== e.mode && (!p || p.mode !== e.mode);
     });
     // A dotenv file only the change touched, on both sides: put back through the workspace's commit (its public
     // entries replaced, its private lines kept) when that gives the parent's file exactly.
