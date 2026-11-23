@@ -7,7 +7,8 @@ import { api, errorMessage, json, meta } from "../../lib/api.ts";
 import { refocus } from "../../lib/focus.ts";
 import { when } from "../../lib/format.ts";
 import { useAlive, useLoad, useView } from "../../lib/hooks.ts";
-import { logOut } from "../../lib/session.ts";
+import { sessionEnded } from "../../lib/session.ts";
+import { auth } from "../../../store.ts";
 import { toast } from "../../lib/toast.tsx";
 import { FormError } from "../../ui/bits.tsx";
 import { Icon } from "../../ui/icons.tsx";
@@ -46,6 +47,7 @@ export function SettingsTokens() {
       ? `Revoke "${t.name}"? This browser's session uses it, so you'll be logged out.`
       : `Revoke "${t.name}"? Anything using it stops working.`;
     if (!confirm(msg)) return;
+    const sent = auth.user;
     try {
       await api(`/v1/me/tokens/${encodeURIComponent(t.id)}`, { method: "DELETE" });
     } catch (e) {
@@ -53,7 +55,7 @@ export function SettingsTokens() {
       return;
     }
     if (t.current) {
-      await logOut();
+      sessionEnded(sent); // it was this session's: nothing more to end on the server
       void navigate({ to: "/" });
       toast("Token revoked. You're logged out.");
       return;

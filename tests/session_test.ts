@@ -111,7 +111,7 @@ test("logging out revokes the session's token; a page elsewhere can't log the us
 
   const out = await t.req("/v1/auth/logout", { method: "POST", headers: { ...STUDIO, cookie } });
   assert.equal(out.status, 200);
-  assert.ok(out.cookies.some((c) => /^cresslet_session=;.*Max-Age=0/i.test(c)), JSON.stringify(out.cookies));
+  assert.equal((await t.req("/v1/me", { headers: { ...STUDIO, cookie } })).status, 401);
   // The token itself is gone, not just the cookie.
   const token = decodeURIComponent(cookie.split("=")[1]);
   assert.equal((await t.req("/v1/me", { headers: { authorization: `Bearer ${token}` } })).status, 401);

@@ -254,11 +254,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
    */
   const fromStudio = (c: Context<Env>) => {
     const site = c.req.header("sec-fetch-site");
-    return site ? site === "same-origin" : c.req.header("origin") === rootUrl(cfg) || c.req.header(USER_HEADER) !== undefined;
+    if (site) return site === "same-origin";
+    const origin = c.req.header("origin");
+    return origin ? origin === rootUrl(cfg) : c.req.header(USER_HEADER) !== undefined;
   };
   const setSession = (c: Context<Env>, token: string) =>
     setCookie(c, SESSION_COOKIE, token, { path: "/", httpOnly: true, secure: cfg.scheme === "https", sameSite: "Strict", maxAge: SESSION_MAX_AGE });
-  const clearSession = (c: Context<Env>) => deleteCookie(c, SESSION_COOKIE, { path: "/", secure: cfg.scheme === "https" });
   /**
    * Logged in from the studio: the token goes in the session cookie, never to the page (the session it replaces is
    * revoked). Anyone else gets the token.
@@ -552,15 +553,15 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.json({ account: accountView(a) });
   });
 
-  /** Logs this browser out: its session's token is revoked, not just forgotten. */
+  /**
+   * Logs this browser out: its session's token is revoked, not just forgotten. The cookie isn't deleted: a login in
+   * another tab may have replaced it by the time this answers (the revoked one doesn't count, and the next login
+   * replaces it).
+   */
   app.post("/auth/logout", async (c) => {
     if (!fromStudio(c)) throw new HttpError(403, "only the studio can end its session", "forbidden");
-    // Only the session the request counted: another (a login since, another account's) stays.
     const a = c.get("account"), t = c.get("token");
-    if (c.get("session") && a && t) {
-      await store.revokeToken(a.id, t.id);
-      clearSession(c);
-    }
+    if (c.get("session") && a && t) await store.revokeToken(a.id, t.id);
     return c.json({ loggedOut: true });
   });
 
@@ -1269,7 +1270,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         unsub();
       },
     });
-    return new Response(stream, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-cache" } });
+    return new Response(stream, { headers: { "content-type": "application/x-ndjson", "cache-control": "private, no-store" } });
   });
 
   // ---- secrets (claimed apps only; values are write-only)

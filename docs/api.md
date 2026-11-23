@@ -52,7 +52,7 @@ Creating apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin`
 | GET | `/v1/auth/github` | browser: GitHub web flow → redirects to `/#cresslet_login=<code>` (or `#cresslet_login_error=…`) |
 | POST | `/v1/auth/exchange` | `{code}` (one-time, 60s) → `{account, token}` (from the studio's origin: the session cookie, and `{account}`) |
 | POST | `/v1/auth/session` | studio's origin only (else 403): a full-access account token as the bearer → `{account}`, and that token becomes the session cookie (a studio logged in before session cookies, its token in localStorage) |
-| POST | `/v1/auth/logout` | studio's origin only (else 403): revokes the session's token and clears the cookie → `{loggedOut: true}` (a cookie that doesn't count, e.g. another account's, stays) |
+| POST | `/v1/auth/logout` | studio's origin only (else 403): revokes the session's token → `{loggedOut: true}`. The cookie stays (a login in another tab may have replaced it meanwhile): revoked, it no longer counts, and the next login replaces it |
 | POST | `/v1/auth/github/device` | CLI/agents: → `{deviceCode, userCode, verificationUri, expiresIn, interval}` |
 | POST | `/v1/auth/github/device/token` | `{deviceCode}` → `{status: pending\|slow_down}` or `{status: complete, account, token}`; poll every `interval`s |
 | POST | `/v1/auth/cli` | CLI browser login: → `{deviceCode, userCode, verificationUri, expiresIn, interval}`; open `verificationUri` (the studio's `/cli`) and show `userCode`, which the user types there. 20 per client per 10 min |

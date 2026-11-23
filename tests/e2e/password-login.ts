@@ -79,7 +79,6 @@ try {
   await page.waitForFunction(() => !localStorage.getItem("cresslet.user"));
   const revoked = async () => (await fetch(`${base}/v1/me`, { headers: { authorization: `Bearer ${session!.value}` } })).status === 401;
   for (let i = 0; !await revoked(); i++) if (i > 50) fail("Log out left the session's token valid"); else await page.waitForTimeout(100);
-  if ((await page.context().cookies()).some((c) => c.name === session!.name)) fail("Log out left the session cookie");
   console.log("logged out: the session's token revoked");
   await page.goto(base + "/cli");
   await page.locator("#cli-login-actions").getByRole("button", { name: "Log in" }).click();

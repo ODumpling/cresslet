@@ -61,7 +61,11 @@ if (typeof window !== "undefined") {
  */
 export function setAccount(account: API.Account, sentWith?: string | null) {
   if (sentWith !== undefined && sentWith !== auth.user) return;
-  if (sentWith === undefined) auth.user = account.id; // a login (else /v1/me answered for this one)
+  if (sentWith === undefined) {
+    // A login (else /v1/me answered for this one): a stored token still waiting to move is older, and dropped.
+    auth.user = account.id;
+    auth.legacyToken = null;
+  }
   auth.email = account.github ?? account.email;
   const changed = state.user !== auth.user;
   set({ user: auth.user, email: auth.email, accountId: account.id, siteAdmin: account.role === "SiteAdmin", ...(changed ? { orgs: [] } : {}) });
@@ -86,8 +90,13 @@ export async function logOut(): Promise<boolean> {
     toast("Couldn't log out: the server didn't answer. Try again.");
     return false;
   }
-  if (auth.user === user) forget(); // (another tab's login since stays)
+  sessionEnded(user);
+  auth.legacyToken = null; // a stored token still waiting to move: not after a logout
   return true;
+}
+/** The session `user` logged in with ended: forgotten here, unless another login (another tab's) has replaced it. */
+export function sessionEnded(user: string | null) {
+  if (user && auth.user === user) forget();
 }
 let expired = false;
 /**
@@ -111,14 +120,19 @@ function moveLegacyToken(): Promise<void> | undefined {
   if (!token) return migrating;
   return migrating ??= (async () => {
     try {
-      const res = await fetch("/v1/auth/session", { method: "POST", headers: { authorization: `Bearer ${token}` }, credentials: "same-origin" });
+      const res = await fetch("/v1/auth/session", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+        credentials: "same-origin",
+        signal: AbortSignal.timeout(10_000), // the page waits for it
+      });
       if (res.ok) {
         auth.legacyToken = null;
         setAccount(((await res.json()) as { account: API.Account }).account);
-      } else if (res.status < 500) {
+      } else if (res.status < 500 && res.status !== 408 && res.status !== 429) {
         auth.legacyToken = null; // revoked, or not a full-access token: log in again
       }
-      // Otherwise (the server's down): kept for the next page load.
+      // Otherwise (the server's down or busy): kept for the next page load.
     } catch { /* offline: next time */ }
     migrating = undefined;
   })();
