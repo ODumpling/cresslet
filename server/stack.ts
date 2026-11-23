@@ -307,14 +307,14 @@ export async function followed(ctx: Ctx, branch: string, from: string, to: strin
  */
 /**
  * A commit onto `branch` (sync): refused below its stack's top (assertNotBelowTop), but for a restack's merge
- * resolved there (`mergeParent`: the change below's commit, or the default branch's head for the bottom one). Resolves
+ * resolved there (the top's too, for its base to follow) (`mergeParent`: the change below's commit, or the default branch's head for the bottom one). Resolves
  * to that change (its record follows the commit), or undefined.
  */
 export async function assertSyncable(ctx: Ctx, branch: string, mergeParent?: string): Promise<StackChange | undefined> {
   if (mergeParent) {
     for (const s of byStack(await ctx.store.openStackChanges(ctx.appId))) {
       const i = s.findIndex((x) => x.branch === branch);
-      if (i < 0 || i === s.length - 1) continue;
+      if (i < 0) continue;
       const with_ = i ? s[i - 1].sha : await ctx.provider.branchHead(ctx.r, ctx.repo.default_branch);
       if (with_ === mergeParent) return s[i];
     }
@@ -888,8 +888,13 @@ export function restack(ctx: Ctx, stackId: string): Promise<{
           const paths = Array.isArray(e.extra?.paths) ? e.extra.paths as string[] : [];
           return { updated, stopped: { change: { ...view(c), github: "ok" }, with: below.branch, withSha: below.sha, paths } };
         }
-        // (Its base is the commit merged in now: what Undo takes its turn back to.)
-        await store.setStackChangeSha(c.id, m.mergedSha, below.sha);
+        // (Its base is the commit merged in now: what Undo takes its turn back to. The top moved: changes set aside above
+        // it can't come back, as for any commit on it.)
+        const sha = m.mergedSha, base = below.sha;
+        await store.db.tx(async () => {
+          await store.setStackChangeSha(c.id, sha, base);
+          if (c.id === s.at(-1)!.id) await store.detachSetAside(ctx.appId, stackId, id("stk"));
+        });
         c = { ...c, sha: m.mergedSha, base_sha: below.sha };
         updated.push({ ...view(c), github: "ok" });
       }

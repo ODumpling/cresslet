@@ -90,6 +90,9 @@ export interface Stack {
   guarded?: string | null;
 }
 
+/** Where Update stack got to: the changes it merged into, and where it stopped at a conflict (held in the workspace). */
+export interface Restacked { updated: StackChange[]; stopped?: { change: StackChange; with: string; paths: string[] } }
+
 /** A file as the API takes and returns them (POST /v1/deploys's shape). */
 export interface GitFile {
   path: string;
@@ -207,7 +210,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
   }));
 
   /** `snap`: files already read (and the revision before), to commit exactly those. */
-  async function syncNow(message: string, snap?: { files: GitFile[]; rev: number }): Promise<{ sha: string; changed: boolean; files: GitFile[] }> {
+  async function syncNow(message: string, snap?: { files: GitFile[]; rev: number }): Promise<{ sha: string; changed: boolean; files: GitFile[]; restacked?: Restacked }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
     // An undo being finished is a change of its own (its title, its markers checked), never a commit onto the top.
@@ -233,12 +236,13 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       throw e;
     }
     await set({
-      headSha: r.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, ...(r.changed ? { back: undefined } : {}),
+      headSha: r.sha, dirty: revision() !== rev, mergeParent: undefined, conflicts: undefined, restack: undefined, ...(r.changed ? { back: undefined } : {}),
       // A merge of the default branch committed: the branch is on top of that now.
       ...(s.activeBranch === s.defaultBranch ? { baseSha: r.sha } : s.mergeParent ? { baseSha: s.mergeParent } : {}),
     });
-    // An Update stack merge committed: it carries on with the changes above (an edit made meanwhile: not yet).
-    if (s.restack && s.mergeParent && !o.state()!.dirty) await restackRun(s.restack.stack, s.restack.returnTo, revision());
+    // An Update stack merge committed: it carries on with the changes above (an edit made meanwhile: not yet; Update
+    // stack again carries on). Stopped again: held again (restackRun).
+    if (s.restack && s.mergeParent && !o.state()!.dirty) return { ...r, files, restacked: await restackRun(s.restack.stack, s.restack.returnTo, revision()) };
     return { ...r, files };
   }
 
@@ -248,7 +252,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
    * conflicted files), to be resolved and committed (then it carries on: syncNow).
    */
   /** `rev`: the workspace's revision before it started (an edit since isn't overwritten: it stops, said). */
-  async function restackRun(stack: string, returnTo: string, rev: number): Promise<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; paths: string[] } }> {
+  async function restackRun(stack: string, returnTo: string, rev: number): Promise<Restacked> {
     const r = await post<{ updated: StackChange[]; stopped?: { change: StackChange; with: string; withSha: string; paths: string[] } }>("/stack/restack", { stack });
     if (!r.stopped) {
       await set({ restack: undefined });
@@ -284,7 +288,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
   /** `submit: false`: a change made on the way somewhere (going back, deploying): the app's auto-submit skips it. */
   async function changeNow(title: string, prompt: string, submit = true): Promise<{
     sha: string; changed: boolean; files: GitFile[]; change?: StackChange; stack?: { id: string; name: string };
-    submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean;
+    submitted?: { pulls: Submitted[]; error?: string }; joined?: boolean; restacked?: Restacked;
   }> {
     const s = o.state();
     if (!s) throw new Error("not connected to a repository");
@@ -684,7 +688,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       // Changes here that are a change of their own first, merged like any other: an AI builder turn's (it's deploying
       // mid-turn), or edits on the default branch (by hand).
       const was = o.state()!;
-      if (was.restack) throw Object.assign(new Error("Update stack is waiting for this merge: resolve it and push it first (it carries on from there)"), { code: "restacking" });
+      if (was.restack && was.mergeParent) throw Object.assign(new Error("Update stack is waiting for this merge: resolve it and push it first (it carries on from there)"), { code: "restacking" });
       let synced: { sha: string; files: GitFile[] } | undefined;
       if (was.dirty && !was.mergeParent && (turn || was.undo || was.activeBranch === was.defaultBranch)) {
         log(`committing the changes here as a change…`);

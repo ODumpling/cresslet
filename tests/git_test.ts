@@ -1245,9 +1245,11 @@ test("stack: undo refuses a change with a merge in it, and a result holding a fi
   const with_ = (extra: Record<string, string>) => [...linked.files, ...Object.entries(extra).map(([path, data]) => ({ path, data }))];
   const add = async (from: string, baseSha: string, title: string, files: Record<string, string>) =>
     (await t.send("POST", "/v1/apps/shop/git/stack", tok, { from, baseSha, files: with_(files), title })).body;
-  // Change 1 took in main (a merge): undoing it would undo main's work too.
+  // Change 1 took in another branch (a merge not of what it's based on): undoing it would undo that work too.
   const c1 = await add("main", linked.sha, "Add a", { "a.txt": "a\n" });
-  const theirs = t.gh.write(t.gh.repo("octo/shop"), "main", { "m.txt": "m\n" });
+  const repo = t.gh.repo("octo/shop");
+  repo.refs.set("other", linked.sha);
+  const theirs = t.gh.write(repo, "other", { "m.txt": "m\n" });
   const m = await t.send("POST", "/v1/apps/shop/git/sync", tok, { branch: c1.branch, baseSha: c1.sha, files: with_({ "a.txt": "a\n", "m.txt": "m\n" }), mergeParent: theirs });
   assert.equal(m.status, 200, JSON.stringify(m.body));
   const c2 = await add(c1.branch, m.body.sha, "Add b", { "a.txt": "a\n", "m.txt": "m\n", "b.txt": "b\n" });

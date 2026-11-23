@@ -282,6 +282,10 @@ export function Builder({ c, devLog, onChange, locked, open, setOpen, git, comma
             : `Committed to ${s.activeBranch}.`,
         });
         // The app submits its stack after each change: what GitHub refused is said.
+        // A merge Update stack stopped at: it carried on (and may have stopped again).
+        const rs = out.restacked;
+        if (rs?.stopped) on({ type: "notice", text: `Update stack carried on and stopped at change ${rs.stopped.change.position}: merging ${rs.stopped.with} into it conflicts in ${rs.stopped.paths.join(", ")}. It's loaded here: resolve the conflict markers (ask me), and it carries on from there.`, error: true });
+        else if (rs) on({ type: "notice", text: `Update stack finished: ${rs.updated.length + 1} ${rs.updated.length ? "changes" : "change"} updated, the workspace back where it was.` });
         const failed = out.submitted ? [...(out.submitted.error ? [out.submitted.error] : []), ...out.submitted.pulls.filter((p) => p.error).map((p) => `change ${p.position}: ${p.error}`)] : [];
         if (failed.length) on({ type: "notice", text: `The stack's pull requests weren't all updated (${failed.join("; ")}). Submit it again from the stack.`, error: true });
       }

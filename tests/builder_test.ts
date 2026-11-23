@@ -809,7 +809,8 @@ test("git: Update stack stops at a conflict on change 2 (loaded with change 1 me
   await assert.rejects(g.git.sync("Merge"), (e: Json) => e.code === "conflicts_left");
   // Resolved and pushed: the merge committed on change 2, the update carries on, the workspace back on change 3.
   g.files.list = [{ path: "app.txt", data: "both" }];
-  await g.git.sync("Merge");
+  const pushed = await g.git.sync("Merge");
+  assert.deepEqual([pushed.restacked.updated.map((x: Json) => x.id), pushed.restacked.stopped], [["chg_3"], undefined]); // said to the caller
   const sync = g.calls.find((x: Json) => x.path.endsWith("/git/sync"))!.body;
   assert.deepEqual([sync.branch, sync.mergeParent], ["feat/s/2-two", "f".repeat(40)]);
   assert.deepEqual([g.calls.filter((x: Json) => x.path.endsWith("/stack/restack")).length, g.state.activeBranch, g.state.restack, g.state.mergeParent], [2, "feat/s/3-three", undefined, undefined]);

@@ -879,10 +879,18 @@ test("stack: Update stack merges the default branch into each change from the bo
   [s] = await readStacks(t.ctx);
   assert.equal(t.provider.commits.get(s.changes[2].sha)!.files.get("b.txt"), "b-both");
 
+  // Changes set aside above a top that Update stack moves can't come back (they don't hold the merge).
+  await goBack(t.ctx, s.changes[1].id);
+  assert.equal((await readStacks(t.ctx))[0].setAside.length, 1);
+  t.provider.push("main", { "e.txt": "e" });
+  assert.deepEqual((await restack(t.ctx, c1.stack.id)).updated.map((x) => x.position), [1, 2]);
+  assert.equal((await readStacks(t.ctx))[0].setAside.length, 0);
+  [s] = await readStacks(t.ctx);
+
   // Landing after the update: main moves to each change as a fast-forward.
-  const l = await landUpTo(t.ctx, s.changes[2].id);
-  assert.equal(t.provider.refs.get("main"), s.changes[2].sha);
-  assert.equal(l.landed.length, 3);
+  const l = await landUpTo(t.ctx, s.changes[1].id);
+  assert.equal(t.provider.refs.get("main"), s.changes[1].sha);
+  assert.equal(l.landed.length, 2);
 });
 
 test("stack: landing is refused before anything moves on a protected default branch, one that moved, or a change pushed to", async () => {

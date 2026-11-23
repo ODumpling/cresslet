@@ -212,6 +212,9 @@ export function GitDialog({ ref, git, app, files, hydrate, reserve, onPull = () 
                 const b = s.activeBranch === s.defaultBranch && s.dirty ? await git!.newBranch("edit", message.trim() || "changes") : s.activeBranch;
                 const r = await git!.sync(message.trim() || `Update ${app}`);
                 setMessage("");
+                const rs = r.restacked;
+                if (rs?.stopped) return `Pushed to ${b}; Update stack stopped at change ${rs.stopped.change.position} (conflicts in ${rs.stopped.paths.join(", ")}): resolve them, then push`;
+                if (rs) return `Pushed to ${b}; Update stack finished`;
                 return r.changed ? `Pushed to ${b}` : "Nothing to push";
               })}>{s.undo ? "Commit the undo" : s.activeBranch === s.defaultBranch && s.dirty ? "Push to a new branch" : "Push"}</button>
               <button className="btn" type="button" id="git-pull" disabled={!!busy} onClick={() => {

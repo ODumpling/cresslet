@@ -1270,8 +1270,11 @@ export function gitRoutes(
       }
       const out = await client.commitTree(r, { branch, baseSha, subdir: repo.subdir, files, author, mergeParent, message: message(input.message, mergeParent ? `Merge ${repo.default_branch} into ${branch}` : `Update ${a.name}`) });
       if (branch === repo.default_branch) await store.updateAppRepoSync(repo, { sha: out.sha, upstream: out.sha });
-      // (Its base is the commit merged in now: what Undo takes its turn back to.)
-      else if (restacked && out.changed) await store.setStackChangeSha(restacked.id, out.sha, mergeParent);
+      // An Update stack merge (the top's too): its base is the commit merged in now (what Undo takes its turn back to).
+      else if (restacked && out.changed) {
+        await followed({ provider: client, store, appId: a.id, repo, r }, branch, baseSha, out.sha);
+        await store.setStackChangeSha(restacked.id, out.sha, mergeParent);
+      }
       // Onto a stack's top change from where it's recorded (a hand edit pushed, a merge resolved): the change follows.
       else if (out.changed) await followed({ provider: client, store, appId: a.id, repo, r }, branch, baseSha, out.sha).catch((e) => console.error(e));
       return out;
