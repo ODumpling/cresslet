@@ -216,9 +216,13 @@ function withoutSessionCookie(cfg: Config, header: string): string {
 }
 
 function stripRawCookie(cfg: Config, req: IncomingMessage) {
+  const out: string[] = [];
   for (let i = 0; i < req.rawHeaders.length; i += 2) {
-    if (req.rawHeaders[i].toLowerCase() === "cookie") req.rawHeaders[i + 1] = withoutSessionCookie(cfg, req.rawHeaders[i + 1]);
+    const [k, v] = [req.rawHeaders[i], req.rawHeaders[i + 1]];
+    const rest = k.toLowerCase() === "cookie" ? withoutSessionCookie(cfg, v) : v;
+    if (rest || k.toLowerCase() !== "cookie") out.push(k, rest); // a Cookie header left empty goes
   }
+  req.rawHeaders.splice(0, req.rawHeaders.length, ...out);
 }
 
 /**
@@ -289,6 +293,8 @@ function envGate(cfg: Config, store: Store) {
 /** A private environment's response: not cached by anything shared, not indexed. */
 function privately(res: Response): Response {
   const h = new Headers(res.headers);
+  // Not framed by another app's page (browsers without Fetch Metadata can't be told apart): unless the app says otherwise.
+  if (!h.has("x-frame-options") && !/frame-ancestors/i.test(h.get("content-security-policy") ?? "")) h.set("x-frame-options", "SAMEORIGIN");
   h.set("cache-control", "private, no-store");
   h.set("x-robots-tag", "noindex, nofollow");
   h.set("referrer-policy", "no-referrer");

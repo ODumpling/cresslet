@@ -1138,8 +1138,17 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     }
     const { e, deploy } = await envSerial(a.id, async () => {
       const e = await store.ensureEnvironment(a.id, name);
-      // Never tagged: a version is what production serves (promote tags it).
-      return { e, deploy: await writeDeploy(cfg, store, a, raw as DeployInput, e) };
+      try {
+        // Never tagged: a version is what production serves (promote tags it).
+        return { e, deploy: await writeDeploy(cfg, store, a, raw as DeployInput, e) };
+      } catch (err) {
+        // Its first deploy refused (a bad body, too large): no environment with nothing deployed is left behind.
+        if (!e.current_deploy_id && !(await store.environmentById(e.id))?.current_deploy_id) {
+          await store.deleteEnvironment(e.id);
+          await removeEnvFiles(cfg, a.id, e.name);
+        }
+        throw err;
+      }
     });
     runtime.stop(e.id); // next request boots the new version
     runtime.logs.push(e.id, "system", `deployed ${deploy.id} to ${name} (${deploy.files} files${deploy.server ? ", server" : ""})`);
@@ -1185,9 +1194,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!e) throw new HttpError(400, "production can't be seeded", "bad_request");
     const src = paths(cfg, a.id).db, dst = targetData(cfg, { app: a, env: e });
     const tmp = `${dst.db}.seed-${id("t", 6)}`;
-    await mkdir(dst.data, { recursive: true });
     const bytes = await envSerial(a.id, async () => {
       if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
+      await mkdir(dst.data, { recursive: true });
       if (existsSync(src)) {
         // A consistent copy of the live database (WAL: production keeps writing), made off the event loop.
         const db = new DatabaseSync(src, { readOnly: true });
@@ -1250,25 +1259,44 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const d = await store.deploy(input.deployId);
     const file = join(paths(cfg, a.id).deploy(input.deployId), "deploy.json");
     if (!d || d.app_id !== a.id || beingRemoved(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
-    if (a.current_deploy_id === d.id) {
-      return c.json({ app: view(a), environment: envView(a, e), deploy: { id: d.id, ...(d.git_tag ? { tag: d.git_tag } : {}) }, promoted: false });
-    }
-    if (!await appDeploys.take(a.id)) {
+    if (a.current_deploy_id !== d.id && !await appDeploys.take(a.id)) {
       throw new HttpError(429, `too many deploys of ${a.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
     }
     const config = JSON.parse(await readFile(file, "utf8"));
+    // What production serves as this starts: a deploy to it meanwhile (a merge, say) isn't overwritten with this one.
+    const was = a.current_deploy_id;
     // Under the environments' lock: staging can't be redeployed, rolled back or deleted between landing its commit on
     // the default branch (refused there: production unchanged) and production's pointer moving to it.
-    const landed = await envSerial(a.id, async () => {
+    const r = await envSerial(a.id, async () => {
       const at = await store.environmentById(e.id);
       if (at?.current_deploy_id !== d.id) throw new HttpError(409, `${e.name} was deployed to meanwhile: promote again`, "stale");
-      const landed = await git.promoteCommit(c, a, d);
-      await store.serialized(deploysLock(a.id), async () => {
-        if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
-        await store.promoteDeploy(a.id, d.id, config);
-      });
-      return landed;
+      // Promoted already (another request, or an earlier one whose tag failed): only the tag is tried again.
+      const already = (await store.appById(a.id))?.current_deploy_id === d.id;
+      // (Already: only for its tag, if it has none; a default branch that moved on since isn't an error then.)
+      const landed = !already ? await git.promoteCommit(c, a, d) : d.git_tag ? null : await git.promoteCommit(c, a, d).catch(() => null);
+      if (!already) {
+        await store.serialized(deploysLock(a.id), async () => {
+          if ((await store.appById(a.id))?.current_deploy_id !== was) throw new HttpError(409, `production was deployed to meanwhile: it wasn't changed`, "stale");
+          if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
+          await store.promoteDeploy(a.id, d.id, config);
+        });
+      }
+      return { landed, already };
     });
+    const landed = r.landed;
+    if (r.already) {
+      const out: { id: string; tag?: string; warning?: string } = { id: d.id, ...(d.git_tag ? { tag: d.git_tag } : {}) };
+      if (landed && !d.git_tag) {
+        try {
+          const tag = await git.tagDeploy(c, a, d.id, landed);
+          if (tag) out.tag = tag;
+        } catch (err) {
+          out.warning = `commit not tagged: ${err instanceof HttpError ? err.message : "couldn't tag it"}`;
+        }
+      }
+      const now = (await store.appById(a.id))!;
+      return c.json({ app: view(now), environment: envView(now, e), deploy: out, promoted: false });
+    }
     runtime.stop(a.id); // next request boots the promoted bundle
     const out: { id: string; tag?: string; warning?: string } = { id: d.id };
     try {

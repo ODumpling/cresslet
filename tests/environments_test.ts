@@ -116,6 +116,7 @@ test("staging: its own deploy, private host, data, sandbox and secrets; promote 
   const r = await get();
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("cache-control"), "private, no-store");
+  assert.equal(r.headers.get("x-frame-options"), "SAMEORIGIN"); // not framed by another app (browsers without Sec-Fetch-*)
   const seen = await r.json();
   // The app never sees the platform's cookie, only its own.
   assert.deepEqual({ mark: seen.mark, env: seen.env, deployId: seen.deployId, url: seen.url, n: seen.n, cookie: seen.cookie },
@@ -240,4 +241,61 @@ test("staging: keeps its own deploys for rollback, without pushing production's 
   assert.ok(!t.srv.runtime.procs.has(envId));
   assert.ok(!existsSync(paths(t.srv.cfg, app).app));
   assert.equal(await t.srv.store.environmentById(envId), undefined);
+}));
+
+test("staging: WebSockets need a viewer's session from its own origin, and never see the platform's cookie", async () => {
+  const { randomBytes } = await import("node:crypto");
+  const { request } = await import("node:http");
+  const { serve } = await import("@hono/node-server");
+  const t = await setup();
+  const http = serve({ fetch: t.srv.handler, port: 0 });
+  http.on("upgrade", t.srv.upgrade);
+  await new Promise((r) => http.once("listening", r));
+  const port = (http.address() as { port: number }).port;
+  const WS = `export default { async fetch(req) {
+    if (req.headers.get("upgrade") !== "websocket") return new Response("plain");
+    const [client, server] = Object.values(new WebSocketPair());
+    server.accept();
+    server.addEventListener("message", () => server.send("cookie=" + (req.headers.get("cookie") ?? "none")));
+    return new Response(null, { status: 101, webSocket: client });
+  } };`;
+  /** Upgrade, send one frame, read one: the status, and the app's reply. */
+  const ws = (headers: Record<string, string>) => new Promise<{ status: number; reply?: string }>((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port, path: "/api/ws", headers: {
+      host: STAGING, upgrade: "websocket", connection: "Upgrade", "sec-websocket-key": randomBytes(16).toString("base64"), "sec-websocket-version": "13", ...headers,
+    } });
+    req.on("response", (res) => (res.resume(), resolve({ status: res.statusCode! })));
+    req.on("upgrade", (res, socket) => {
+      const mask = randomBytes(4), payload = Buffer.from("hi");
+      socket.write(Buffer.concat([Buffer.from([0x81, 0x80 | payload.length]), mask, payload.map((b, i) => b ^ mask[i % 4])]));
+      socket.once("data", (d: Buffer) => (resolve({ status: res.statusCode!, reply: d.subarray(2, 2 + (d[1] & 0x7f)).toString() }), socket.destroy()));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  try {
+    await t.deployProd("prod", "p");
+    assert.equal((await t.send("POST", "/v1/apps/shop/envs/staging/deploys", { files: [{ path: "index.html", data: "s" }], server: WS, config: { routes: ["/api/*"] } })).status, 201);
+    const cookie = await signIn(t);
+    const own = `http://${STAGING}`;
+    assert.equal((await ws({ origin: own })).status, 401); // no session
+    assert.equal((await ws({ cookie, origin: "http://evil.test.local" })).status, 401); // another app's page
+    assert.equal((await ws({ cookie })).status, 401); // no origin: not a page of its own
+    assert.deepEqual(await ws({ cookie: `${cookie}; a=1`, origin: own }), { status: 101, reply: "cookie=a=1" });
+    assert.deepEqual(await ws({ cookie, origin: own }), { status: 101, reply: "cookie=none" }); // the header goes when that's all it held
+  } finally {
+    await new Promise((r) => http.close(r));
+    await t.dispose();
+  }
+});
+
+test("staging: a refused first deploy leaves no environment behind", withServer(async (t) => {
+  await t.deployProd("prod", "p");
+  const bad = await t.send("POST", "/v1/apps/shop/envs/staging/deploys", { files: [{ path: "../x", data: "x" }] });
+  assert.equal(bad.status, 400);
+  assert.deepEqual((await t.send("GET", "/v1/apps/shop/envs")).body.environments.map((e: { name: string }) => e.name), ["production"]);
+  // Once it has a deploy, a refused one changes nothing.
+  const ok = await t.deployStaging("s", "s");
+  assert.equal((await t.send("POST", "/v1/apps/shop/envs/staging/deploys", { files: [{ path: "../x", data: "x" }] })).status, 400);
+  assert.equal((await t.send("GET", "/v1/apps/shop/envs")).body.environments[1].currentDeployId, ok.body.deploy.id);
 }));

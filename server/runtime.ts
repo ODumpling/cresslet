@@ -648,7 +648,6 @@ export class Runtime {
     proc.release();
   }
 
-  /** stop(), after a start in flight for the app is done (it would serve, and recreate files of, a purged app). */
   /**
    * Runs `fn` with `key`'s sandbox stopped, its bindings thread gone (its database and files closed: filesSettled of
    * `filesDir`), and no new one started until `fn` is done: requests for it wait meanwhile.
@@ -668,6 +667,7 @@ export class Runtime {
   }
   #held = new Map<string, Promise<void>>();
 
+  /** stop(), after a start in flight for the app is done (it would serve, and recreate files of, a purged app). */
   async stopSettled(appId: string) {
     for (let s; (s = this.#starting.get(appId));) {
       await s.p.catch(() => {});
