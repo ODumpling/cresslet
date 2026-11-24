@@ -126,6 +126,8 @@ test("staging: its own deploy, private host, data, sandbox and secrets; promote 
   assert.equal((await get({ method: "POST", headers: { "sec-fetch-site": "same-site", "sec-fetch-mode": "cors" } })).status, 401);
   // A link from elsewhere (a top-level navigation) reads.
   assert.equal((await get({ headers: { "sec-fetch-site": "same-site", "sec-fetch-mode": "navigate" } })).status, 200);
+  // A frame on another app's page is a navigation too, not a top-level one: sent to sign in, never served.
+  assert.equal((await get({ headers: { "sec-fetch-site": "same-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe" } })).status, 302);
   // Its own pages write: to staging's database, not production's.
   assert.equal((await (await get({ method: "POST", headers: { origin: `http://${STAGING}` } })).json()).n, 1);
   assert.equal((await (await t.call("/api/env", { host: "shop.test.local" })).json()).n, 0);

@@ -179,7 +179,10 @@ async function fill(store: Store) {
     handle: `ins_1:${app.id}`, projectName: "shop",
   });
   await store.setAgentPause(owner.id, `ins_1:${app.id}`, true);
-  return { owner, guest, token, app, agent, orgApp: (await store.appById(orgApp.id))! };
+  const staging = await store.ensureEnvironment(app.id, "staging");
+  await store.setEnvSecret(staging.id, "API_KEY", "staging-ünï");
+  await store.envUidSeq(staging.id);
+  return { owner, guest, token, app, agent, staging, orgApp: (await store.appById(orgApp.id))! };
 }
 
 test("SQLite → Postgres → SQLite: every row and secret copied and checked; the source untouched", { skip: needsPg }, async () => {
@@ -194,7 +197,7 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
     // A dry run checks everything and writes nothing.
     const dry = await sqliteToPostgres(dir, s.database, { dryRun: true });
     assert.equal(dry.committed, false);
-    assert.ok(dry.tables.find((t) => t.table === "secrets")!.rows === 2 && dry.secrets === 2);
+    assert.ok(dry.tables.find((t) => t.table === "secrets")!.rows === 2 && dry.secrets === 3);
     const pg = await Store.open(dir, s.database);
     assert.equal((await pg.db.get<{ n: number }>("SELECT count(*) AS n FROM accounts"))!.n, 0, "dry run wrote nothing");
     const seq = (await pg.db.get<{ s: string }>("SELECT pg_get_serial_sequence('ai_ledger', 'id') AS s"))!.s;
@@ -209,6 +212,7 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
       accounts: 2, apps: 3, tokens: 2, deploys: 3, secrets: 2, domains: 1, meta: 1, collaborators: 1, invites: 1,
       page_sessions: 1, rate_hits: 1, ai_wallets: 1, ai_ledger: 2, orgs: 1, org_members: 2, git_connections: 1, app_repos: 1,
       stack_changes: 1, browser_installs: 1, agent_credentials: 1, agent_grants: 1, agent_pauses: 1,
+      environments: 1, env_secrets: 1,
     });
 
     // The copy works as the database of a server.
@@ -219,6 +223,9 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
       assert.deepEqual(agents.map((a) => [a.id, a.grants.map((g) => g.project_name)]), [[seed.agent.id, ["shop"]]]);
       assert.ok(await store.agentPaused(seed.owner.id, `ins_1:${seed.app.id}`));
       assert.deepEqual(await store.secrets(seed.app.id), { API_KEY: "s3cret", OTHER: "ünïcode ✓" });
+      // A staging environment's overrides (sealed to it) on top of production's; its own uid.
+      assert.deepEqual(await store.envSecrets(seed.staging), { API_KEY: "staging-ünï", OTHER: "ünïcode ✓" });
+      assert.equal(await store.envUidSeq(seed.staging.id), 2);
       assert.deepEqual((await store.deploys(seed.app.id)).map((d) => d.id), ["dep_3", "dep_2", "dep_1"]);
       assert.equal((await store.deploys(seed.app.id))[2].git_repo, "own/shop");
       const conn = await store.getGitConnection(seed.owner.id, "github");

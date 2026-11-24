@@ -1513,8 +1513,13 @@ test("promote: staging deploys a stack's top unmerged; promote lands it on the d
   assert.equal(r4.status, 422);
   assert.equal(r4.body.error, "branch_protected");
   repo.protected.delete("main");
+  // A staging deploy that records no commit (uncommitted changes): not promoted on a linked app.
+  const bare = await t.send("POST", "/v1/apps/shop/envs/staging/deploys", tok, { files: [{ path: "index.html", data: "dirty" }] });
+  assert.equal((await promote(bare.body.deploy.id)).body.error, "no_commit");
+  const s4b = await stage(t.gh.repo("octo/shop").refs.get("feat/y")!, "feat/y");
+  assert.equal(s4b.body.deploy.id !== s4.body.deploy.id, true);
   // Then it goes: main fast-forwarded to exactly that commit.
-  const r5 = await promote(s4.body.deploy.id);
+  const r5 = await promote(s4b.body.deploy.id);
   assert.equal(r5.status, 200, JSON.stringify(r5.body));
   assert.equal(repo.refs.get("main"), t.gh.repo("octo/shop").refs.get("feat/y"));
   assert.equal(r5.body.deploy.tag, "v2");

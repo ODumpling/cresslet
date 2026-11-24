@@ -1087,11 +1087,14 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const config = JSON.parse(json);
     // A prune may have picked it (or moved it aside) meanwhile: checked again, under the lock a prune
     // chooses under, together with the swap.
-    await store.serialized(deploysLock(a.id), async () => {
+    const swap = () => store.serialized(deploysLock(a.id), async () => {
       if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
-      if (e) await store.setEnvDeploy(e.id, d.id, config);
-      else await store.setCurrentDeploy(a.id, d.id, config);
+      if (e) {
+        if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
+        await store.setEnvDeploy(e.id, d.id, config);
+      } else await store.setCurrentDeploy(a.id, d.id, config);
     });
+    await (e ? envSerial(a.id, swap) : swap());
     runtime.stop(keyOf(a, e));
     runtime.logs.push(keyOf(a, e), "system", `rolled back to ${d.id}`);
     const now = (await store.appById(a.id))!;
@@ -1099,6 +1102,19 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   });
 
   // ---- environments (docs/api.md#environments): staging beside production, private, made by its first deploy.
+  /**
+   * One change to an app's environments at a time (in this process: an app's requests all run on its node): a deploy
+   * to one, its rollback, seed or deletion, and a promotion from first GitHub move to production's pointer, so what a
+   * promotion landed is what production serves.
+   */
+  const envLocks = new Map<string, Promise<unknown>>();
+  const envSerial = <T,>(appId: string, fn: () => Promise<T>): Promise<T> => {
+    const p = (envLocks.get(appId) ?? Promise.resolve()).then(fn, fn);
+    const tail = p.catch(() => {});
+    envLocks.set(appId, tail);
+    void tail.then(() => envLocks.get(appId) === tail && envLocks.delete(appId));
+    return p;
+  };
   app.get("/apps/:name/envs", async (c) => {
     const a = await getApp(c.req.param("name"));
     notPage(a);
@@ -1120,9 +1136,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!await appDeploys.take(a.id)) {
       throw new HttpError(429, `too many deploys of ${a.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
     }
-    const e = await store.ensureEnvironment(a.id, name);
-    // Never tagged: a version is what production serves (promote tags it).
-    const deploy = await writeDeploy(cfg, store, a, raw as DeployInput, e);
+    const { e, deploy } = await envSerial(a.id, async () => {
+      const e = await store.ensureEnvironment(a.id, name);
+      // Never tagged: a version is what production serves (promote tags it).
+      return { e, deploy: await writeDeploy(cfg, store, a, raw as DeployInput, e) };
+    });
     runtime.stop(e.id); // next request boots the new version
     runtime.logs.push(e.id, "system", `deployed ${deploy.id} to ${name} (${deploy.files} files${deploy.server ? ", server" : ""})`);
     const now = (await store.appById(a.id))!;
@@ -1136,16 +1154,19 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     await authorize(c, a, "admin");
     const e = await envOf(c, a, c.req.param("env"));
     if (!e) throw new HttpError(400, "production can't be deleted here (delete the app)", "bad_request");
-    await store.deleteEnvironment(e.id); // first: no new request starts its sandbox
-    try {
-      await runtime.stopSettled(e.id);
-    } finally {
-      runtime.logs.drop(e.id);
-      runtime.metrics.drop(e.id);
-      runtime.cronRuns.drop(e.id);
-      await removeEnvFiles(cfg, a.id, e.name);
-    }
-    if (a.current_deploy_id) await pruneDeploys(cfg, store, a.id, a.current_deploy_id);
+    // Under the environments' lock: a deploy that would make it again (the same data dir) waits until its files are gone.
+    await envSerial(a.id, async () => {
+      await store.deleteEnvironment(e.id); // first: no new request starts its sandbox
+      try {
+        await runtime.stopSettled(e.id);
+      } finally {
+        runtime.logs.drop(e.id);
+        runtime.metrics.drop(e.id);
+        runtime.cronRuns.drop(e.id);
+        await removeEnvFiles(cfg, a.id, e.name);
+      }
+    });
+    await pruneDeploys(cfg, store, a.id, a.current_deploy_id ?? "");
     return c.json({ deleted: e.name, environments: await environmentsView(a) });
   });
 
@@ -1165,7 +1186,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const src = paths(cfg, a.id).db, dst = targetData(cfg, { app: a, env: e });
     const tmp = `${dst.db}.seed-${id("t", 6)}`;
     await mkdir(dst.data, { recursive: true });
-    const bytes = await seeding(e.id, async () => {
+    const bytes = await envSerial(a.id, async () => {
+      if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
       if (existsSync(src)) {
         // A consistent copy of the live database (WAL: production keeps writing), made off the event loop.
         const db = new DatabaseSync(src, { readOnly: true });
@@ -1175,24 +1197,16 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
           db.close();
         }
       }
-      // The environment's own connection (its bindings thread) goes with its sandbox, before the files move.
-      await runtime.stopSettled(e.id);
-      await Promise.all(["", "-wal", "-shm"].map((x) => rmFile(dst.db + x, { force: true })));
-      if (existsSync(tmp)) await rename(tmp, dst.db);
-      return (await stat(dst.db).catch(() => null))?.size ?? 0;
+      // Its sandbox stopped and its bindings thread gone (the database closed), none started until the new one's in.
+      return runtime.hold(e.id, dst.files, async () => {
+        await Promise.all(["", "-wal", "-shm"].map((x) => rmFile(dst.db + x, { force: true })));
+        if (existsSync(tmp)) await rename(tmp, dst.db);
+        return (await stat(dst.db).catch(() => null))?.size ?? 0;
+      });
     }).finally(() => rmFile(tmp, { force: true }));
     runtime.logs.push(e.id, "system", `database seeded from production (${bytes} bytes)`);
     return c.json({ seeded: e.name, from, bytes });
   });
-  /** One seed at a time per environment. */
-  const seeds = new Map<string, Promise<unknown>>();
-  const seeding = <T,>(key: string, fn: () => Promise<T>): Promise<T> => {
-    const p = (seeds.get(key) ?? Promise.resolve()).then(fn, fn);
-    const tail = p.catch(() => {});
-    seeds.set(key, tail);
-    void tail.then(() => seeds.get(key) === tail && seeds.delete(key));
-    return p;
-  };
 
   // A one-time sign-in link to a private environment (`<app>--<env>`), for the studio's /view page (as for a private artifact).
   app.post("/apps/:name/envs/:env/view", async (c) => {
@@ -1243,13 +1257,17 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       throw new HttpError(429, `too many deploys of ${a.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
     }
     const config = JSON.parse(await readFile(file, "utf8"));
-    // Landed on the default branch first (refused there: production unchanged), then production's pointer.
-    const landed = await git.promoteCommit(c, a, d);
-    await store.serialized(deploysLock(a.id), async () => {
-      const now = await store.environmentById(e.id);
-      if (now?.current_deploy_id !== d.id) throw new HttpError(409, `${e.name} was deployed to meanwhile: promote again`, "stale");
-      if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
-      await store.promoteDeploy(a.id, d.id, config);
+    // Under the environments' lock: staging can't be redeployed, rolled back or deleted between landing its commit on
+    // the default branch (refused there: production unchanged) and production's pointer moving to it.
+    const landed = await envSerial(a.id, async () => {
+      const at = await store.environmentById(e.id);
+      if (at?.current_deploy_id !== d.id) throw new HttpError(409, `${e.name} was deployed to meanwhile: promote again`, "stale");
+      const landed = await git.promoteCommit(c, a, d);
+      await store.serialized(deploysLock(a.id), async () => {
+        if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
+        await store.promoteDeploy(a.id, d.id, config);
+      });
+      return landed;
     });
     runtime.stop(a.id); // next request boots the promoted bundle
     const out: { id: string; tag?: string; warning?: string } = { id: d.id };

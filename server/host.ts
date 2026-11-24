@@ -265,7 +265,8 @@ function envGate(cfg: Config, store: Store) {
       // Other apps under the domain are the same site: their pages' requests carry the cookie (SameSite=Lax), so it
       // counts only from this origin's own pages, or on a top-level navigation (a link: it reads, it doesn't act).
       const origin = req.headers.get("origin"), site = req.headers.get("sec-fetch-site");
-      const navigation = read && req.headers.get("sec-fetch-mode") === "navigate";
+      // (Top-level only: a frame on another app's page is a navigation too, and could be clickjacked.)
+      const navigation = read && req.headers.get("sec-fetch-mode") === "navigate" && (req.headers.get("sec-fetch-dest") ?? "document") === "document";
       const trusted = (!origin || origin === own(t)) && (!site || site === "same-origin" || site === "none" || navigation);
       if (!trusted || !await viewer(t, oneCookie(req, pageCookie(cfg)))) {
         const page = read && (req.headers.get("sec-fetch-mode") === "navigate" || (req.headers.get("accept") ?? "").includes("text/html"));

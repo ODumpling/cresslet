@@ -17,7 +17,7 @@ import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
 import { Metrics } from "./metrics.ts";
 import { CronRuns } from "./cron.ts";
-import { serveBindings } from "./bindings.ts";
+import { filesSettled, serveBindings } from "./bindings.ts";
 import { createEgressProxy } from "./egress.ts";
 import { adoptListener, instanceId, jail, prepareHost, sweep } from "./sandbox.ts";
 import { stripTypes } from "./strip.ts";
@@ -397,6 +397,8 @@ export class Runtime {
 
   /** A running sandbox for `spec`, with this caller counted in-flight (it must decrement `inflight`). */
   async #get(spec: AppSpec): Promise<Proc> {
+    // Its data is being replaced (seeding an environment's database): no sandbox, nor bindings thread, until it's in.
+    for (let h; (h = this.#held.get(spec.key));) await h;
     const cur = this.procs.get(spec.key);
     // Network policy is part of the identity: a sandbox started under an old policy (e.g. a cold
     // start racing a PUT /egress) is replaced on the next request.
@@ -647,6 +649,25 @@ export class Runtime {
   }
 
   /** stop(), after a start in flight for the app is done (it would serve, and recreate files of, a purged app). */
+  /**
+   * Runs `fn` with `key`'s sandbox stopped, its bindings thread gone (its database and files closed: filesSettled of
+   * `filesDir`), and no new one started until `fn` is done: requests for it wait meanwhile.
+   */
+  async hold<T>(key: string, filesDir: string, fn: () => Promise<T>): Promise<T> {
+    for (let h; (h = this.#held.get(key));) await h;
+    let done!: () => void;
+    this.#held.set(key, new Promise<void>((r) => (done = r)));
+    try {
+      await this.stopSettled(key);
+      await filesSettled(filesDir);
+      return await fn();
+    } finally {
+      this.#held.delete(key);
+      done();
+    }
+  }
+  #held = new Map<string, Promise<void>>();
+
   async stopSettled(appId: string) {
     for (let s; (s = this.#starting.get(appId));) {
       await s.p.catch(() => {});
