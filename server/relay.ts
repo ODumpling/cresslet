@@ -349,6 +349,8 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
     if (b.agent.binding === b) b.agent.binding = null;
     if (b.presence.binding === b) b.presence.binding = null;
     b.switching = null;
+    // Unbound first: the agent then sends nothing more under this binding (its queued calls aren't run).
+    sendJson(b.agent.ws, { type: "unbound", handle: b.handle, reason, message, projectName: b.presence.projectName });
     if (b.inflight) {
       const id = b.inflight;
       b.inflight = null;
@@ -358,7 +360,6 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
         text: reason === "not_open" ? OUTCOME_UNKNOWN : `${message} This call was cancelled while running: do not assume whether a write or commit completed; check before retrying.`,
       });
     }
-    sendJson(b.agent.ws, { type: "unbound", handle: b.handle, reason, message, projectName: b.presence.projectName });
     presenceState(b.presence);
   }
 
