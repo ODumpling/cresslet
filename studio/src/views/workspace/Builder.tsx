@@ -10,6 +10,7 @@ import { flushSync } from "react-dom";
 import type { Container } from "../../../vendor/cresslet-container/cresslet-container.js";
 import { anthropicClient, apiKey, createAgent, createTools, creditsClient, errorText, type AgentEvent, type ToolResult } from "../../../builder.ts";
 import { connectBridge, createBridgeDispatcher, type BridgeState } from "../../../mcp-bridge.ts";
+import { connectPresence, installIdentity, pauses, type Install, type Presence, type PresenceState } from "../../../live-link.ts";
 import type * as API from "../../../api-types.ts";
 import { commitMessage, gitCode, type GitWorkspace } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
@@ -75,10 +76,18 @@ export interface Ship {
   pending: number;
 }
 
-export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, appName, ship, onTurnEnd = () => {}, onAgentChange = () => {}, ref }: {
+/** What the relay is told drives the project while the built-in builder works (agents can't bind meanwhile). */
+const BUILT_IN = "Claude (built-in builder)";
+const relayUrl = () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/workspace/relay`;
+
+export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, appName, ship, onTurnEnd = () => {}, onAgentChange = () => {}, owner = true, projectId, deployName = null, ref }: {
   c: Container;
   /** Whether this tab owns the project (project-lock.ts; default true): only the owner may run or save it. */
   owner?: boolean;
+  /** The local project's id (Live Link: remembered agents reach it through this tab's presence, live-link.ts). */
+  projectId?: string;
+  /** The app it deploys to (a hint in the agent's list of projects). */
+  deployName?: string | null;
   /** The project's name (the empty chat asks what it should do). */
   appName: string;
   ship: Ship;
@@ -118,6 +127,12 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
   const [bridgeState, setBridgeState] = useState<BridgeState | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [wantSetup, setWantSetup] = useState(false);
+  // Live Link v2: this tab's presence (remembered agents bind through it), Remember on the Allow card, and this
+  // browser's remembered agents not yet allowed here (Connect agent → Allow).
+  const [presence, setPresence] = useState<PresenceState | null>(null);
+  const [remember, setRemember] = useState(false);
+  const [remembered, setRemembered] = useState<API.RememberedAgent[] | null>(null);
+  const [liveBusy, setLiveBusy] = useState(false);
 
   const inputRef = useRef<HTMLTextAreaElement>(null), logRef = useRef<HTMLDivElement>(null);
   const keyRef = useRef<HTMLInputElement>(null), loginRef = useRef<HTMLButtonElement>(null);
@@ -142,6 +157,9 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     remoteChanged: false,
     remoteCmdRev: 0,
     remoteSteps: new Map<string, number>(),
+    presence: null as Presence | null,
+    install: null as Install | null,
+    v2Agent: null as string | null, // the remembered agent bound through the presence
     onAgentChange,
     onTurnEnd,
     onStackStale,
@@ -194,6 +212,8 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
       r.agent?.stop();
       r.bridge?.disconnect();
       r.bridge = null;
+      r.presence?.close();
+      r.presence = null;
       for (const decline of r.approvals) decline();
     };
   }, [r]);
@@ -333,10 +353,23 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
       wsUrl,
       code,
       projectName: appName,
+      ...(r.install && projectId ? { install: r.install, projectId } : {}),
       dispatcher,
       onState(st) {
         if (r.gone) return;
         setBridgeState(st);
+        if (st.phase === "enrolled") {
+          // Remembered: it reconnects with its credential and binds through the presence (onPresence says so).
+          r.bridge = null;
+          r.bridgeUser = null;
+          setConnectOpen(false);
+          setBridgeCode("");
+          setBridgeError("");
+          setRemember(false);
+          add({ kind: "notice", text: `Remembered ${st.agent}: it connects to this project without a code from now on. Disconnect or Forget it in the banner, or in Settings → Connected agents.` });
+          setStatus(`Remembered ${st.agent}`);
+          return;
+        }
         if (st.phase === "paired") {
           r.remoteAgent = st.agent;
           r.remoteChanged = false;
@@ -370,6 +403,137 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         }
       },
     });
+  }
+
+  /** The presence's state: a remembered agent bound or gone is told in the chat like a code-paired one. */
+  function onPresence(st: PresenceState) {
+    if (r.gone) return;
+    setPresence(st);
+    const was = r.v2Agent, now = st.binding?.agent ?? null;
+    if (now === was) return;
+    r.v2Agent = now;
+    if (was) {
+      const hadUncommitted = r.remoteChanged || r.commandRev() !== r.remoteCmdRev;
+      r.remoteAgent = null;
+      setBridgeBusy(false);
+      setWorking("");
+      for (const decline of r.approvals) decline();
+      r.onAgentChange(null);
+      add({ kind: "notice", text: hadUncommitted ? `Disconnected from ${was}. Workspace changes since the last commit_change are kept locally (not committed).` : `Disconnected from ${was}.` });
+      setStatus(`Disconnected from ${was}`);
+    }
+    if (now) {
+      r.remoteAgent = now;
+      r.remoteChanged = false;
+      r.remoteCmdRev = r.commandRev();
+      setConnectOpen(false);
+      r.onAgentChange(now);
+      add({ kind: "notice", text: `Connected to ${now} (remembered). Tool calls appear here; deploys still ask for your approval.` });
+      setStatus(`Connected to ${now}`);
+    }
+  }
+
+  // The owning tab's presence: remembered agents reach this project through it while it's open and logged in.
+  useEffect(() => {
+    if (!owner || !user || !projectId) return;
+    let live = true, p: Presence | null = null;
+    void (async () => {
+      let install: Install, paused: boolean;
+      try {
+        // The pause record first: no presence until it's known (a reload mid-Disconnect stays disconnected).
+        [install, paused] = await Promise.all([installIdentity(), pauses.get(projectId)]);
+      } catch {
+        return; // no IndexedDB (site storage blocked): code pairing still works
+      }
+      if (!live || r.gone) return;
+      r.install = install;
+      p = connectPresence({
+        wsUrl: relayUrl(), install, projectId, projectName: appName, app: deployName, paused,
+        occupiedBy: r.busy ? BUILT_IN : r.bridge ? "a desktop agent" : null,
+        dispatcher,
+        onState: (st) => live && onPresence(st),
+        onNotice: (text) => live && !r.gone && add({ kind: "notice", text }),
+      });
+      r.presence = p;
+    })();
+    return () => {
+      live = false;
+      p?.close();
+      if (r.presence === p) r.presence = null;
+      setPresence(null);
+      if (r.v2Agent) onPresence({ phase: "stopped", paused: false, binding: null, waiting: [], switches: [] });
+    };
+  }, [owner, user, projectId, r]); // eslint-disable-line react-hooks/exhaustive-deps -- name changes go through rename
+  useEffect(() => r.presence?.rename(appName, deployName), [appName, deployName, r]);
+  // The tab's own driver: while a code-paired agent works here, remembered ones can't bind.
+  useEffect(() => {
+    const ph = bridgeState?.phase;
+    if (busy) return;
+    r.presence?.setOccupied(ph === "paired" || ph === "awaiting_approval" || ph === "connecting" ? (ph === "paired" ? bridgeState!.agent : "a desktop agent") : null);
+  }, [bridgeState, busy, r]);
+
+  /** Disconnect a remembered agent: this browser's record first, then the server (paused until Resume). */
+  async function pauseAgents() {
+    if (!projectId || !r.presence) return;
+    setLiveBusy(true);
+    try {
+      await pauses.set(projectId, true);
+      await r.presence.pause();
+      setStatus("Desktop agents disconnected from this project until you click Resume");
+    } catch (e) {
+      add({ kind: "notice", text: `Couldn't tell the server about the disconnect (${errorMessage(e)}). Agents stay disconnected here; it's sent when the tab reconnects.`, error: true });
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+  /** Resume: the server first, then this browser's record. */
+  async function resumeAgents() {
+    if (!projectId || !r.presence) return;
+    setLiveBusy(true);
+    try {
+      await r.presence.resume(() => pauses.set(projectId, false));
+      setStatus("Desktop agents can connect to this project again");
+    } catch (e) {
+      add({ kind: "notice", text: `Couldn't resume: ${errorMessage(e)}`, error: true });
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+  async function forgetAgent(credentialId: string, label: string) {
+    if (!r.presence || !confirm(`Forget ${label}? It loses access to all your projects and needs a pairing code to connect again.`)) return;
+    setLiveBusy(true);
+    try {
+      if (await r.presence.forget(credentialId)) {
+        add({ kind: "notice", text: `Forgot ${label}.` });
+        setRemembered((xs) => xs?.filter((x) => x.id !== credentialId) ?? null);
+      }
+    } catch (e) {
+      add({ kind: "notice", text: `Couldn't forget ${label}: ${errorMessage(e)}`, error: true });
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+  /** Connect agent: this browser's remembered agents not yet allowed in this project. */
+  function loadRemembered() {
+    setRemembered(null);
+    void api<{ agents: API.RememberedAgent[] }>("/v1/me/agents").then(
+      ({ agents }) => !r.gone && setRemembered(agents.filter((x) => x.browserInstallId === r.install?.id && !x.projects.some((p) => p.projectId === projectId))),
+      () => !r.gone && setRemembered([]),
+    );
+  }
+  async function allowRemembered(a: API.RememberedAgent) {
+    if (!r.presence) return;
+    setLiveBusy(true);
+    try {
+      await r.presence.grant(a.id);
+      setRemembered((xs) => xs?.filter((x) => x.id !== a.id) ?? null);
+      add({ kind: "notice", text: `Allowed ${a.label} in ${appName}. It can switch here (you'll be asked to confirm in this tab) or connect here on its next session.` });
+      setStatus(`Allowed ${a.label}`);
+    } catch (e) {
+      setBridgeError(errorMessage(e));
+    } finally {
+      setLiveBusy(false);
+    }
   }
 
   // Where focus goes in the chat: the message field.
@@ -429,7 +593,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || r.busy || r.bridge || dispatcher.busy) return;
+    if (!text || r.busy || r.bridge || r.v2Agent || dispatcher.busy) return;
     if (!sourceRef.current) return;
     // Each request goes the way chosen when it's sent (the key can be forgotten or entered mid-chat).
     r.agent ??= createAgent({
@@ -453,6 +617,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     r.approved = r.stopped = false;
     const fromSend = document.activeElement?.id === "builder-send";
     r.busy = true;
+    r.presence?.setOccupied(BUILT_IN); // remembered agents can't bind while it works
     flushSync(() => setBusy(true));
     if (fromSend) inputRef.current?.focus(); // Send is disabled while Claude works
     setWorking("Thinking…");
@@ -467,6 +632,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
       await commitTurn(text);
       if (!r.gone) onTurnEnd(r.turnChanged || commandRev() !== r.cmdRev);
     } finally {
+      r.presence?.setOccupied(r.bridge ? "a desktop agent" : null);
       for (const decline of r.approvals) decline(); // its command is gone (stopped, timed out, or left running)
       if (r.approved && r.stopped) on({ type: "notice", text: "If the deploy had started uploading, it may still go live: check the app.", error: true });
       r.busy = false;
@@ -525,7 +691,8 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
     running: () => tools.running > 0,
     actor: () => r.remoteAgent ?? "Claude",
     disconnectAgent: () => {
-      r.bridge?.disconnect();
+      if (r.bridge) r.bridge.disconnect();
+      else if (r.v2Agent) void pauseAgents();
     },
     busy: () => r.busy || dispatcher.busy,
     turn: () => {
@@ -573,7 +740,11 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
 
   const remotePaired = bridgeState?.phase === "paired";
   const remotePending = bridgeState?.phase === "connecting" || bridgeState?.phase === "awaiting_approval";
-  const showFeed = !!source || remotePaired || (items.length > 0 && !wantSetup);
+  // A remembered agent bound through the presence, or a code-paired one: either drives the project.
+  const v2Agent = presence?.binding?.agent ?? null;
+  const agentName = remotePaired ? bridgeState.agent : v2Agent;
+  const agentConnected = !!agentName;
+  const showFeed = !!source || agentConnected || (items.length > 0 && !wantSetup);
   const setupShown = !showFeed, credited = source === "credits";
   // The chat as turns: a request and what followed it (notices before the first request stand alone).
   type Turn = { user: Extract<Item, { kind: "user" }> | null; items: Item[] };
@@ -662,17 +833,18 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
         <h2 id="builder-title" className="pane-title">Build with Claude</h2>
         <button className="icon-btn" id="builder-connect" type="button"
           aria-label="Connect desktop agent"
-          title={!user ? "Log in to connect a desktop agent" : remotePaired ? `Connected to ${bridgeState.agent}` : "Connect desktop agent (cresslet connect)"}
+          title={!user ? "Log in to connect a desktop agent" : agentName ? `Connected to ${agentName}` : "Connect desktop agent (cresslet connect)"}
           aria-expanded={connectOpen}
-          disabled={!user || busy || remotePaired || remotePending}
+          disabled={!user || busy || agentConnected || remotePending}
           onClick={() => {
+            if (!connectOpen) loadRemembered();
             setConnectOpen((v) => !v);
             setBridgeError("");
             setTimeout(() => bridgeCodeRef.current?.focus(), 0);
           }}>
           <Icon name="link" />
         </button>
-        <button className="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat" disabled={busy || bridgeBusy || remotePaired} onClick={() => {
+        <button className="icon-btn" id="builder-new" type="button" aria-label="New chat" title="New chat" disabled={busy || bridgeBusy || agentConnected} onClick={() => {
           if (r.busy) return;
           // A new feature starts from the default branch: offer to go back to it (this branch stays on GitHub).
           const g = r.git, s = g?.connected ? g.state : undefined;
@@ -710,18 +882,69 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
           <span className="bridge-banner-text"><Icon name="link" /><span>Connected to <strong>{bridgeState.agent}</strong></span></span>
           <button className="btn sm" id="bridge-disconnect" type="button" onClick={() => r.bridge?.disconnect()}>Disconnect</button>
         </div>
+      ) : presence?.binding ? (
+        <div className="bridge-banner" id="bridge-connected" role="status">
+          <span className="bridge-banner-text"><Icon name="link" /><span>Connected to <strong>{presence.binding.agent}</strong></span></span>
+          <span className="row start">
+            <button className="btn sm" id="bridge-disconnect" type="button" disabled={liveBusy} title="Stop it now; it stays disconnected from this project until you click Resume" onClick={() => void pauseAgents()}>Disconnect</button>
+            <button className="btn sm" id="bridge-forget" type="button" disabled={liveBusy} title="Revoke it: it needs a pairing code to connect again" onClick={() => void forgetAgent(presence.binding!.credentialId, presence.binding!.agent)}>Forget agent</button>
+          </span>
+        </div>
+      ) : presence?.paused ? (
+        <div className="bridge-banner" id="bridge-paused" role="status">
+          <span className="bridge-banner-text"><Icon name="link" /><span>Desktop agents are disconnected from this project.</span></span>
+          <button className="btn sm" id="bridge-resume" type="button" disabled={liveBusy || presence.phase !== "online"} onClick={() => void resumeAgents()}>Resume</button>
+        </div>
       ) : null}
+      {presence?.switches.map((sw) => (
+        <div className="bridge-panel approval" key={sw.id} id={`bridge-switch-${sw.id}`}>
+          <p><strong>{sw.agent}</strong> wants to switch to <strong>{appName}</strong>{sw.from ? <> from <strong>{sw.from}</strong></> : null}.</p>
+          <p className="muted small">You allowed it here before. It keeps working on its current project until you confirm.</p>
+          <div className="row start">
+            <button className="btn primary sm" type="button" disabled={busy || remotePaired} onClick={() => r.presence?.acceptSwitch(sw.id)}>{`Use with ${sw.agent}`}</button>
+            <button className="btn sm" type="button" onClick={() => r.presence?.declineSwitch(sw.id)}>Not now</button>
+          </div>
+        </div>
+      ))}
+      {presence?.binding ? presence.waiting.map((w) => (
+        <div className="bridge-panel approval" key={w.instanceId} id={`bridge-waiting-${w.instanceId}`}>
+          <p><strong>{w.agent}</strong> wants to control <strong>{appName}</strong>, which <strong>{presence.binding!.agent}</strong> is using.</p>
+          <div className="row start">
+            <button className="btn sm" type="button" onClick={() => r.presence?.takeOver(w.instanceId)}>Take over</button>
+          </div>
+        </div>
+      )) : null}
       {bridgeState?.phase === "awaiting_approval" ? (
         <div className="bridge-panel approval" id="bridge-approve-card">
           <p><strong>{bridgeState.agent}</strong> wants to control <strong>{appName}</strong>.</p>
           <p className="muted small">It can read and edit files and run commands in this project. Deploys still ask for your approval here.</p>
+          {bridgeState.canRemember ? (
+            <label className="check small" htmlFor="bridge-remember">
+              <input type="checkbox" id="bridge-remember" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+              <span>Remember this agent <span className="muted">(it connects again without a code, to projects you allow)</span></span>
+            </label>
+          ) : null}
           <div className="row start">
-            <button className="btn primary sm" id="bridge-allow" type="button" disabled={busy} onClick={() => !r.busy && r.bridge?.decide(true)}>Allow</button>
+            <button className="btn primary sm" id="bridge-allow" type="button" disabled={busy} onClick={() => !r.busy && r.bridge?.decide(true, remember)}>Allow</button>
             <button className="btn sm" id="bridge-deny" type="button" onClick={() => r.bridge?.decide(false)}>Deny</button>
           </div>
         </div>
       ) : connectOpen && !remotePaired ? (
         <form className="bridge-panel" id="bridge-code-form" onSubmit={startBridge}>
+          {remembered?.length && presence?.phase === "online" ? (
+            <div className="field" id="bridge-remembered">
+              <p className="small">Remembered agents (no code needed):</p>
+              <ul className="plain">
+                {remembered.map((a) => (
+                  <li key={a.id} className="row between">
+                    <span><strong>{a.label}</strong>{a.lastUsedAt ? <span className="muted small"> · used <TimeAgo iso={a.lastUsedAt} /></span> : null}</span>
+                    <button className="btn primary sm" type="button" disabled={liveBusy || busy} onClick={() => void allowRemembered(a)}>Allow</button>
+                  </li>
+                ))}
+              </ul>
+              <p className="muted small">Or pair another agent with its code:</p>
+            </div>
+          ) : null}
           <div className="field">
             <label htmlFor="bridge-code">Pairing code from <code className="mono">cresslet connect</code></label>
             <div className="row start">
@@ -810,8 +1033,8 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
           </ol>
         </div>
         <div className="working" id="builder-working" hidden={!working}><span className="spinner" aria-hidden="true" /><span id="builder-working-text">{working || "Working…"}</span></div>
-        {remotePaired ? (
-          <p className="bridge-foot muted small">Controlled by {bridgeState.agent}. Disconnect to chat with built-in Claude.</p>
+        {agentName ? (
+          <p className="bridge-foot muted small">Controlled by {agentName}. Disconnect to chat with built-in Claude.</p>
         ) : !source ? (
           <div className="bridge-foot row between">
             <span className="muted small">No built-in Claude key configured.</span>
@@ -851,7 +1074,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
                 r.agent?.stop();
                 inputRef.current?.focus(); // the Stop button hides
               }}><Icon name="x" />Stop</button>
-              <button className="btn primary sm" id="builder-send" type="submit" disabled={busy || bridgeBusy} hidden={busy}><Icon name="arrow-up" />Send</button>
+              <button className="btn primary sm" id="builder-send" type="submit" disabled={busy || bridgeBusy || agentConnected} hidden={busy}><Icon name="arrow-up" />Send</button>
             </div>
           </div>
         </form>

@@ -45,6 +45,17 @@ export interface Token {
   current?: boolean;
 }
 
+/** A remembered Live Link agent (GET /v1/me/agents). */
+export interface RememberedAgent {
+  id: string;
+  label: string;
+  /** The Studio browser installation that enrolled it. */
+  browserInstallId: string;
+  createdAt: string | null;
+  lastUsedAt: string | null;
+  projects: { handle: string; projectId: string; name: string }[];
+}
+
 export interface LedgerEntry {
   kind: "usage" | "grant";
   at: string;

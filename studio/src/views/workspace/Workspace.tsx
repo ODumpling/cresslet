@@ -664,7 +664,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           </span>
         </div>
         {container ? (
-          <Builder ref={builder} c={container} owner={ownsProject(project.id)} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
+          <Builder ref={builder} c={container} owner={ownsProject(project.id)} projectId={project.id} deployName={deploy?.name ?? null} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
             onStackStale={() => setGitTick((n) => n + 1)} appName={name} onAgentChange={setConnectedAgent}
             ship={{ url: deploy?.url, at: deploy?.at, deploying, pending, line: deploying ? lastLine : deployFailed ?? undefined, failed: !!deployFailed }}
             onTurnEnd={(changed) => changed && setTurnsSince((n) => n + 1)}
