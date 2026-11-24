@@ -188,6 +188,8 @@ test("staging: its own deploy, private host, data, sandbox and secrets; promote 
   const prod = await (await t.call("/api/env", { host: "shop.test.local" })).json();
   // The same bundle, production's own environment, data and secrets.
   assert.deepEqual([prod.mark, prod.env, prod.deployId, prod.n, prod.secrets.B], ["s1", "production", s1.body.deploy.id, 0, "prod-b"]);
+  // A caller that saw production serve something else is told so, even now it serves this one.
+  assert.equal((await t.send("POST", "/v1/apps/shop/promote", { deployId: s1.body.deploy.id, expectProduction: p1.body.deploy.id })).status, 409);
   // Again: nothing to do.
   assert.equal((await t.send("POST", "/v1/apps/shop/promote", { deployId: s1.body.deploy.id })).body.promoted, false);
   const detail = await t.send("GET", "/v1/apps/shop");
@@ -216,9 +218,9 @@ test("staging: its own deploy, private host, data, sandbox and secrets; promote 
 
   // Deleting it: its sandbox, data and host go; production stays. A second delete queued behind it finds it gone.
   assert.equal((await t.send("DELETE", "/v1/apps/shop/envs/staging", undefined, stranger)).status, 403);
-  const [del, again] = await Promise.all([t.send("DELETE", "/v1/apps/shop/envs/staging"), t.send("DELETE", "/v1/apps/shop/envs/staging")]);
-  assert.equal(again.status, 404);
-  assert.equal(del.status, 200, del.text);
+  const both = await Promise.all([t.send("DELETE", "/v1/apps/shop/envs/staging"), t.send("DELETE", "/v1/apps/shop/envs/staging")]);
+  assert.deepEqual(both.map((x) => x.status).sort(), [200, 404]); // whichever goes first deletes it
+  const del = both.find((x) => x.status === 200)!;
   assert.deepEqual(del.body.environments.map((e: { name: string }) => e.name), ["production"]);
   assert.ok(!t.srv.runtime.procs.has(envId));
   assert.ok(!existsSync(paths(t.srv.cfg, s1.body.app.id).env("staging").data));

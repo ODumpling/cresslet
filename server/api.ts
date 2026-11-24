@@ -1288,7 +1288,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       const already = prod === d.id;
       // Production deployed to while this waited for the lock (its deploys and rollbacks take it too): refused before
       // anything moves on GitHub.
-      if (!already && prod !== was) {
+      // (A caller who said what it saw is told it changed, even when production now serves this deploy.)
+      if (prod !== was && (!already || input.expectProduction !== undefined)) {
         throw Object.assign(new HttpError(409, `production was deployed to meanwhile: nothing was changed, promote again`, "stale"), { extra: { productionDeployId: prod } });
       }
       const fresh = (await store.deploy(d.id)) ?? d; // (its tag as it is now: another promotion may have given it one)
