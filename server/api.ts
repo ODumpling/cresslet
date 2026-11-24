@@ -1072,31 +1072,32 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (deployId !== undefined && typeof deployId !== "string") throw new HttpError(400, "deployId must be a string");
     const e = await envOf(c, a, env ?? c.req.query("env"));
     const serving = () => e ? store.environmentById(e.id).then((x) => x?.current_deploy_id ?? null) : store.appById(a.id).then((x) => x?.current_deploy_id ?? null);
-    const list = await store.envDeploys(a.id, e?.name ?? null, 1000);
-    // Default: the deploy before the one served (not the second newest: after a rollback that'd roll forward).
-    const cur = await serving();
-    const previous = () => {
+    // Chosen and swapped under the environments' lock (production's too: not under a promotion in progress), so the
+    // previous deploy is the one before what's served then.
+    const d = await envSerial(a.id, async () => {
+      const list = await store.envDeploys(a.id, e?.name ?? null, 1000);
+      // Default: the deploy before the one served (not the second newest: after a rollback that'd roll forward).
+      const cur = await serving();
       const i = list.findIndex((x) => x.id === cur);
-      return i < 0 ? list[1] : list[i + 1];
-    };
-    // Only one of this environment's (production never rolls back to a staging deploy that wasn't promoted).
-    const d = deployId ? list.find((x) => x.id === deployId) : previous();
-    if (!d || d.app_id !== a.id || beingRemoved(d.id)) throw new HttpError(404, "deploy not found", "not_found");
-    const file = join(paths(cfg, a.id).deploy(d.id), "deploy.json");
-    const json = await readFile(file, "utf8").catch((e) => {
-      throw e?.code === "ENOENT" ? new HttpError(404, "deploy not found", "not_found") : e;
+      // Only one of this environment's (production never rolls back to a staging deploy that wasn't promoted).
+      const d = deployId ? list.find((x) => x.id === deployId) : i < 0 ? list[1] : list[i + 1];
+      if (!d || d.app_id !== a.id || beingRemoved(d.id)) throw new HttpError(404, "deploy not found", "not_found");
+      const file = join(paths(cfg, a.id).deploy(d.id), "deploy.json");
+      const json = await readFile(file, "utf8").catch((err) => {
+        throw err?.code === "ENOENT" ? new HttpError(404, "deploy not found", "not_found") : err;
+      });
+      const config = JSON.parse(json);
+      // A prune may have picked it (or moved it aside) meanwhile: checked again, under the lock a prune
+      // chooses under, together with the swap.
+      await store.serialized(deploysLock(a.id), async () => {
+        if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
+        if (e) {
+          if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
+          await store.setEnvDeploy(e.id, d.id, config);
+        } else await store.setCurrentDeploy(a.id, d.id, config);
+      });
+      return d;
     });
-    const config = JSON.parse(json);
-    // A prune may have picked it (or moved it aside) meanwhile: checked again, under the lock a prune
-    // chooses under, together with the swap.
-    const swap = () => store.serialized(deploysLock(a.id), async () => {
-      if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
-      if (e) {
-        if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
-        await store.setEnvDeploy(e.id, d.id, config);
-      } else await store.setCurrentDeploy(a.id, d.id, config);
-    });
-    await envSerial(a.id, swap); // (production's too: not under a promotion in progress)
     runtime.stop(keyOf(a, e));
     runtime.logs.push(keyOf(a, e), "system", `rolled back to ${d.id}`);
     const now = (await store.appById(a.id))!;
@@ -1179,8 +1180,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         runtime.cronRuns.drop(e.id);
         await removeEnvFiles(cfg, a.id, e.name);
       }
+      // Its other deploys go before a deploy queued behind this can make it again (they'd be in its history).
+      await pruneDeploys(cfg, store, a.id, (await store.appById(a.id))?.current_deploy_id ?? "");
     });
-    await pruneDeploys(cfg, store, a.id, a.current_deploy_id ?? "");
     return c.json({ deleted: e.name, environments: await environmentsView(a) });
   });
 
@@ -1253,7 +1255,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "deploy");
-    const input = await body<{ from?: unknown; deployId?: unknown } | null>(c) ?? {};
+    const input = await body<{ from?: unknown; deployId?: unknown; expectProduction?: unknown } | null>(c) ?? {};
     await authorize(c, a, "deploy");
     const e = await envOf(c, a, input.from ?? "staging");
     if (!e) throw new HttpError(400, "from must be an environment other than production", "bad_request");
@@ -1270,8 +1272,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       throw new HttpError(429, `too many deploys of ${a.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
     }
     const config = JSON.parse(await readFile(file, "utf8"));
-    // What production serves as this starts: a deploy to it meanwhile (a merge, say) isn't overwritten with this one.
-    const was = a.current_deploy_id;
+    // What production served when the caller looked (`expectProduction`), else as this starts: a deploy to it meanwhile
+    // (a merge, say) isn't overwritten with this one.
+    if (input.expectProduction !== undefined && input.expectProduction !== null && typeof input.expectProduction !== "string") {
+      throw new HttpError(400, "expectProduction must be a deploy id or null", "bad_request");
+    }
+    const was = input.expectProduction !== undefined ? (input.expectProduction as string | null) : a.current_deploy_id;
     // Under the environments' lock: staging can't be redeployed, rolled back or deleted between landing its commit on
     // the default branch (refused there: production unchanged) and production's pointer moving to it.
     const r = await envSerial(a.id, async () => {
@@ -1282,7 +1288,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       const already = prod === d.id;
       // Production deployed to while this waited for the lock (its deploys and rollbacks take it too): refused before
       // anything moves on GitHub.
-      if (!already && prod !== was) throw new HttpError(409, `production was deployed to meanwhile: nothing was changed, promote again`, "stale");
+      if (!already && prod !== was) {
+        throw Object.assign(new HttpError(409, `production was deployed to meanwhile: nothing was changed, promote again`, "stale"), { extra: { productionDeployId: prod } });
+      }
       const fresh = (await store.deploy(d.id)) ?? d; // (its tag as it is now: another promotion may have given it one)
       // (Already: nothing to land; only its tag, below, if it has none.)
       const landed = already ? null : await git.promoteCommit(c, a, d);
@@ -1302,7 +1310,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       const repo = d.git_sha && !r.tag ? await store.getAppRepo(a.id) : undefined;
       if (repo && d.git_sha) {
         try {
-          const tag = await git.tagDeploy(c, a, d.id, { sha: d.git_sha, branch: repo.default_branch, repo: `${repo.owner}/${repo.name}` });
+          const tag = await git.tagDeploy(c, a, d.id, { sha: d.git_sha, branch: repo.default_branch, repo: `${repo.owner}/${repo.name}` }, { anyName: true });
           if (tag) out.tag = tag;
         } catch (err) {
           out.warning = `commit not tagged: ${err instanceof HttpError ? err.message : "couldn't tag it"}`;

@@ -176,7 +176,11 @@ test("staging: its own deploy, private host, data, sandbox and secrets; promote 
   const stale = await t.send("POST", "/v1/apps/shop/promote", { deployId: p1.body.deploy.id });
   assert.equal(stale.status, 409);
   assert.equal(stale.body.currentDeployId, s1.body.deploy.id);
-  const pr = await t.send("POST", "/v1/apps/shop/promote", { from: "staging", deployId: s1.body.deploy.id });
+  // Production isn't what the caller saw (another deploy since): refused, nothing changed.
+  const unseen = await t.send("POST", "/v1/apps/shop/promote", { deployId: s1.body.deploy.id, expectProduction: "dep_other" });
+  assert.equal(unseen.status, 409);
+  assert.equal(unseen.body.productionDeployId, p1.body.deploy.id);
+  const pr = await t.send("POST", "/v1/apps/shop/promote", { from: "staging", deployId: s1.body.deploy.id, expectProduction: p1.body.deploy.id });
   assert.equal(pr.status, 200, pr.text);
   assert.equal(pr.body.promoted, true);
   assert.equal(pr.body.app.currentDeployId, s1.body.deploy.id);

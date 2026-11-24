@@ -161,7 +161,7 @@ function Promote() {
     if (!confirm(`Promote ${id} from staging to production?\n\nProduction serves this same deploy from the next request, with production's own data and secrets.${linked}`)) return;
     setBusy(true);
     try {
-      const r = await api<{ deploy: { tag?: string; warning?: string } }>(envPath(name, "production", "/promote"), json("POST", { from: "staging", deployId: id }));
+      const r = await api<{ deploy: { tag?: string; warning?: string } }>(envPath(name, "production", "/promote"), json("POST", { from: "staging", deployId: id, expectProduction: prodEnv?.currentDeployId ?? null }));
       toast(`${id} promoted to production${r.deploy.tag ? ` as ${r.deploy.tag}` : ""}${r.deploy.warning ? ` (${r.deploy.warning})` : ""}`);
     } catch (e) {
       toast(`Could not promote: ${errorMessage(e)}`);

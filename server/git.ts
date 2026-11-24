@@ -1609,7 +1609,8 @@ export function gitRoutes(
    * null when the deploy isn't one of those (no account behind it, no repository, another one or another branch).
    * GitHub refusing (no access, a ruleset on tags) throws: the deploy is live either way.
    */
-  async function tagDeploy(c: Context<Env>, a: App, deployId: string, git: { sha: string; branch: string | null; repo: string | null } | null) {
+  /** `anyName`: the commit is the default branch's whatever it's called now (a retry: the record may predate a rename). */
+  async function tagDeploy(c: Context<Env>, a: App, deployId: string, git: { sha: string; branch: string | null; repo: string | null } | null, { anyName = false } = {}) {
     const acct = c.get("account");
     if (!gh || !git || !acct) return null;
     const repo = await store.getAppRepo(a.id);
@@ -1621,7 +1622,7 @@ export function gitRoutes(
     // The repository by its id (renamed: still the one; another one given the old name: never), as it is now.
     const info = await client.repoById(repo.repo_id);
     const names = [`${repo.owner}/${repo.name}`, info.fullName].map((n) => n.toLowerCase());
-    if (git.branch !== info.defaultBranch || !names.includes(git.repo.toLowerCase())) return null;
+    if ((!anyName && git.branch !== info.defaultBranch) || !names.includes(git.repo.toLowerCase())) return null;
     // A version is a commit of the default branch, whatever the request called it.
     const r = { owner: info.owner, name: info.name };
     const head = await client.branchHead(r, info.defaultBranch);
