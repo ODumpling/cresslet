@@ -197,8 +197,11 @@ export interface SocketLike {
 
 export type BridgeState =
   | { phase: "connecting" }
-  | { phase: "awaiting_approval"; agent: string }
+  /** `canRemember`: the agent and this browser can be remembered (Live Link v2: a v2 CLI, a proven installation). */
+  | { phase: "awaiting_approval"; agent: string; canRemember: boolean }
   | { phase: "paired"; agent: string }
+  /** Remembered: the agent reconnects with its credential and binds to this project through the tab's presence. */
+  | { phase: "enrolled"; agent: string; credentialId: string }
   | { phase: "closed"; error?: string; reason?: string };
 
 export interface BridgeClientOptions {
@@ -207,6 +210,9 @@ export interface BridgeClientOptions {
   token?: string;
   code: string;
   projectName: string;
+  /** This browser's installation and the project's id (live-link.ts): offered so the agent can be remembered. */
+  install?: { id: string; secret: string };
+  projectId?: string;
   dispatcher: ReturnType<typeof createBridgeDispatcher>;
   onState: (state: BridgeState) => void;
   createSocket?: (url: string) => SocketLike;
@@ -222,6 +228,8 @@ export function connectBridge({
   token,
   code,
   projectName,
+  install,
+  projectId,
   dispatcher,
   onState,
   createSocket = (url) => new WebSocket(url) as unknown as SocketLike,
@@ -247,7 +255,7 @@ export function connectBridge({
   };
 
   ws.addEventListener("open", () => {
-    send({ type: "hello", role: "studio", ...(token ? { token } : {}), code, projectName });
+    send({ type: "hello", role: "studio", ...(token ? { token } : {}), code, projectName, ...(install && projectId ? { install, projectId } : {}) });
   });
 
   ws.addEventListener("message", (ev) => {
@@ -268,7 +276,14 @@ export function connectBridge({
     if (msg.type === "pair_request" && phase === "connecting") {
       const agent = typeof msg.agent === "string" ? msg.agent : "Desktop agent";
       phase = "awaiting_approval";
-      onState({ phase: "awaiting_approval", agent });
+      onState({ phase: "awaiting_approval", agent, canRemember: msg.canRemember === true });
+      return;
+    }
+    if (msg.type === "enrolled" && phase === "awaiting_approval") {
+      const agent = typeof msg.agent === "string" ? msg.agent : "Desktop agent";
+      closed = true; // the relay closes this socket: the presence carries the agent from here
+      phase = "closed";
+      onState({ phase: "enrolled", agent, credentialId: typeof msg.credentialId === "string" ? msg.credentialId : "" });
       return;
     }
     if (msg.type === "paired" && phase === "awaiting_approval") {
@@ -300,9 +315,10 @@ export function connectBridge({
   });
 
   return {
-    decide(allow: boolean) {
+    /** `remember`: Remember this agent (it connects again without a code). */
+    decide(allow: boolean, remember = false) {
       if (closed || phase !== "awaiting_approval") return;
-      send({ type: "pair_decision", allow });
+      send({ type: "pair_decision", allow, ...(allow && remember ? { remember: true } : {}) });
       if (!allow) {
         try { ws.close(1000, "denied"); } catch { /* already closed */ }
         finish(undefined, "Denied.");

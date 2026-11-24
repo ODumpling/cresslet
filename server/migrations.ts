@@ -329,6 +329,36 @@ async function passwords(db: Db) {
   if (!(await cols(db, "accounts")).includes("password_hash")) await db.exec("ALTER TABLE accounts ADD COLUMN password_hash TEXT");
 }
 
+/**
+ * Live Link v2 (server/relay.ts): browser installations (a Studio browser profile's id + secret hash), remembered
+ * agents (a CLI's secret hash, bound to the account, the CLI token and the browser that enrolled it), the projects each
+ * may reach (`project_handle` = install id + ":" + project id, with an epoch fencing calls made before a Disconnect or a
+ * switch), and per-project pauses (Disconnect until Resume). An older server ignores them: only code pairing works.
+ */
+async function liveLink(db: Db) {
+  const big = db.dialect === "postgres" ? "BIGINT" : "INTEGER";
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS browser_installs (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, install_id TEXT NOT NULL,
+      secret_hash TEXT NOT NULL, created_at ${big} NOT NULL, last_seen_at ${big},
+      PRIMARY KEY (account_id, install_id));
+    CREATE TABLE IF NOT EXISTS agent_credentials (
+      id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      cli_token_id TEXT NOT NULL, browser_install_id TEXT NOT NULL, secret_hash TEXT NOT NULL, label TEXT NOT NULL,
+      created_at ${big} NOT NULL, last_used_at ${big}, revoked_at ${big});
+    CREATE INDEX IF NOT EXISTS agent_credentials_account ON agent_credentials (account_id);
+    CREATE INDEX IF NOT EXISTS agent_credentials_token ON agent_credentials (cli_token_id);
+    CREATE TABLE IF NOT EXISTS agent_grants (
+      credential_id TEXT NOT NULL REFERENCES agent_credentials(id) ON DELETE CASCADE, project_handle TEXT NOT NULL,
+      project_name TEXT NOT NULL, epoch ${big} NOT NULL DEFAULT 1, created_at ${big} NOT NULL,
+      PRIMARY KEY (credential_id, project_handle));
+    CREATE INDEX IF NOT EXISTS agent_grants_handle ON agent_grants (project_handle);
+    CREATE TABLE IF NOT EXISTS agent_pauses (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, project_handle TEXT NOT NULL,
+      created_at ${big} NOT NULL, PRIMARY KEY (account_id, project_handle));
+  `);
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
@@ -342,13 +372,14 @@ export const MIGRATIONS: Migration[] = [
   { version: 9, name: "stack_synced_from", up: stackSyncedFrom },
   { version: 10, name: "deploy_git_tag", up: deployGitTag },
   { version: 11, name: "passwords", up: passwords },
+  { version: 12, name: "live_link", up: liveLink },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */
 export const TABLES = [
   "accounts", "orgs", "apps", "tokens", "deploys", "secrets", "domains", "meta", "collaborators", "invites",
   "page_sessions", "rate_hits", "ai_wallets", "ai_ledger", "org_members", "git_connections", "app_repos",
-  "stack_changes",
+  "stack_changes", "browser_installs", "agent_credentials", "agent_grants", "agent_pauses",
 ] as const;
 
 export interface MigrateResult {

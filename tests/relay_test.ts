@@ -214,7 +214,7 @@ test("relay pairs same-account CLI and studio, relays frames, and enforces isola
     const cliClosed = waitClose(cli);
     studio.close();
     await cliClosed;
-    assert.deepEqual(srv.relay.stats(), { pending: 0, paired: 0, unauth: 0 });
+    assert.deepEqual(srv.relay.stats(), { pending: 0, paired: 0, unauth: 0, presence: 0, agents: 0, bound: 0 });
   } finally {
     http.close();
     await srv.close();

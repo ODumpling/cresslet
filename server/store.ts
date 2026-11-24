@@ -1,3 +1,5 @@
+import { EventEmitter } from "node:events";
+import { timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { type Db, isUniqueViolation, openDb, SqliteDb } from "./db.ts";
@@ -199,6 +201,31 @@ export interface Token {
   last_used_at: number | null;
 }
 
+/** A remembered Live Link agent (server/relay.ts): only its secret's hash is stored. */
+export interface AgentCredential {
+  id: string;
+  account_id: string;
+  /** The CLI login (token) it was enrolled with: reconnecting needs that token too, and revoking it revokes this. */
+  cli_token_id: string;
+  /** The Studio browser installation that enrolled it. */
+  browser_install_id: string;
+  label: string;
+  created_at: number;
+  last_used_at: number | null;
+  revoked_at: number | null;
+}
+export interface AgentGrant {
+  credential_id: string;
+  /** Install id + ":" + Studio project id. */
+  project_handle: string;
+  project_name: string;
+  /** Bumped by Disconnect and switches: calls made under an older one aren't run. */
+  epoch: number;
+  created_at: number;
+}
+/** A remembered agent unused this long needs a code again. */
+export const AGENT_EXPIRY_MS = 90 * 86_400_000;
+
 /** Organization roles: admins manage members and own the org's apps; members get admin access to them. */
 export const ORG_ROLES = ["admin", "member"] as const;
 export type OrgRole = (typeof ORG_ROLES)[number];
@@ -270,6 +297,9 @@ export interface Domain {
 export const id = (prefix: string, bytes = 10) =>
   `${prefix}_${encodeHex(crypto.getRandomValues(new Uint8Array(bytes)))}`;
 
+/** Equal hex digests, compared in constant time. */
+const safeEqual = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
 export async function sha256(s: string): Promise<string> {
   return encodeHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
 }
@@ -289,6 +319,11 @@ export interface RateHits {
 
 export class Store implements RateHits {
   readonly db: Db;
+  /**
+   * `tokens-revoked` (accountId, tokenIds | null = all of the account's), `agents-revoked` (accountId, credentialIds):
+   * the relay ends their live sessions at once.
+   */
+  readonly events = new EventEmitter();
   #box: SecretBox;
 
   private constructor(db: Db, box: SecretBox) {
@@ -433,8 +468,8 @@ export class Store implements RateHits {
    * server from before disabling existed (after a rollback). Under the account's lock, which token issuing takes
    * too: nothing issued meanwhile survives. Its org apps go to another org admin (reassignOrgApps).
    */
-  disableAccount(accountId: string): Promise<boolean> {
-    return this.serialized(accountLock(accountId), async () => {
+  async disableAccount(accountId: string): Promise<boolean> {
+    const done = await this.serialized(accountLock(accountId), async () => {
       // Each organization's lock (in a fixed order), as member changes take, before this account's row is
       // locked by the update: two disables handing apps to each other wait here rather than deadlock.
       const orgs = (await this.orgsFor(accountId)).map((o) => o.id).sort();
@@ -446,10 +481,13 @@ export class Store implements RateHits {
         Date.now(), accountId,
       );
       await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+      await this.db.run("UPDATE agent_credentials SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL", Date.now(), accountId);
       await this.db.run("DELETE FROM page_sessions WHERE account_id = ?", accountId);
       for (const o of orgs) await this.reassignOrgApps(o, accountId);
       return r.changes > 0;
     });
+    this.events.emit("tokens-revoked", accountId, null); // its Live Link sessions end now
+    return done;
   }
   /**
    * Re-enables it, putting its email and GitHub id back: "taken" if another account has either now (that
@@ -542,7 +580,11 @@ export class Store implements RateHits {
         "UPDATE accounts SET github_id = ?, github_login = ?, password_hash = NULL WHERE id = ? AND disabled_at IS NULL AND github_id IS NULL",
         github.id, github.login, accountId,
       );
-      if (r.changes) await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+      if (r.changes) {
+        await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+        await this.db.run("UPDATE agent_credentials SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL", Date.now(), accountId);
+        this.events.emit("tokens-revoked", accountId, null);
+      }
       return this.accountById(accountId);
     });
   }
@@ -560,6 +602,8 @@ export class Store implements RateHits {
   }
   async revokeTokens(accountId: string) {
     await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+    await this.db.run("UPDATE agent_credentials SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL", Date.now(), accountId);
+    this.events.emit("tokens-revoked", accountId, null);
   }
   accountByEmail(email: string): Promise<Account | undefined> {
     return this.db.get<Account>("SELECT * FROM accounts WHERE email = ?", email.toLowerCase());
@@ -624,7 +668,167 @@ export class Store implements RateHits {
   }
   /** False if there's no such token on this account. */
   async revokeToken(accountId: string, tokenId: string): Promise<boolean> {
-    return (await this.db.run("DELETE FROM tokens WHERE account_id = ? AND id = ?", accountId, tokenId)).changes > 0;
+    const gone = (await this.db.run("DELETE FROM tokens WHERE account_id = ? AND id = ?", accountId, tokenId)).changes > 0;
+    // Its remembered agents go with it (they reconnect with that token).
+    const agents = await this.db.all<{ id: string }>(
+      "SELECT id FROM agent_credentials WHERE account_id = ? AND cli_token_id = ? AND revoked_at IS NULL", accountId, tokenId,
+    );
+    if (agents.length) await this.revokeAgentCredentials(accountId, agents.map((a) => a.id));
+    if (gone) this.events.emit("tokens-revoked", accountId, [tokenId]);
+    return gone;
+  }
+
+  // ---- Live Link (server/relay.ts)
+  /** The token still exists and its account is enabled (checked before every Live Link dispatch). */
+  async tokenLive(accountId: string, tokenId: string): Promise<boolean> {
+    return !!(await this.db.get(
+      "SELECT 1 AS x FROM tokens t JOIN accounts a ON a.id = t.account_id WHERE t.id = ? AND t.account_id = ? AND a.disabled_at IS NULL",
+      tokenId, accountId,
+    ));
+  }
+  /**
+   * A Studio browser installation proving its secret: registered on first use (bound to this account), checked
+   * after. False if the id is the account's with another secret.
+   */
+  async proveInstall(accountId: string, installId: string, secret: string): Promise<boolean> {
+    const hash = await sha256(secret);
+    const now = Date.now();
+    await this.db.run(
+      `INSERT INTO browser_installs (account_id, install_id, secret_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (account_id, install_id) DO NOTHING`,
+      accountId, installId, hash, now, now,
+    );
+    const row = await this.db.get<{ secret_hash: string; last_seen_at: number | null }>(
+      "SELECT secret_hash, last_seen_at FROM browser_installs WHERE account_id = ? AND install_id = ?", accountId, installId,
+    );
+    if (!row || !safeEqual(row.secret_hash, hash)) return false;
+    if (!row.last_seen_at || now - row.last_seen_at > 60_000) {
+      await this.db.run("UPDATE browser_installs SET last_seen_at = ? WHERE account_id = ? AND install_id = ?", now, accountId, installId);
+    }
+    return true;
+  }
+
+  /** Remembers an agent (its secret's hash, sent by the CLI) and approves the project it was enrolled on. */
+  async createAgentCredential(c: {
+    accountId: string; cliTokenId: string; installId: string; secretHash: string; label: string; handle: string; projectName: string;
+  }): Promise<AgentCredential> {
+    const now = Date.now();
+    const cred: AgentCredential = {
+      id: id("agt"), account_id: c.accountId, cli_token_id: c.cliTokenId, browser_install_id: c.installId,
+      label: c.label, created_at: now, last_used_at: now, revoked_at: null,
+    };
+    await this.db.tx(async () => {
+      await this.db.run(
+        `INSERT INTO agent_credentials (id, account_id, cli_token_id, browser_install_id, secret_hash, label, created_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        cred.id, cred.account_id, cred.cli_token_id, cred.browser_install_id, c.secretHash, cred.label, now, now,
+      );
+      await this.db.run(
+        "INSERT INTO agent_grants (credential_id, project_handle, project_name, epoch, created_at) VALUES (?, ?, ?, 1, ?)",
+        cred.id, c.handle, c.projectName, now,
+      );
+    });
+    return cred;
+  }
+
+  /**
+   * The remembered agent `credentialId` if `secret` is its secret, it belongs to this account and CLI login, and it's
+   * neither revoked nor expired (unused for AGENT_EXPIRY_MS). Records its use.
+   */
+  async useAgentCredential(credentialId: string, secret: string, accountId: string, cliTokenId: string, now = Date.now()): Promise<AgentCredential | undefined> {
+    const row = await this.db.get<AgentCredential & { secret_hash: string }>("SELECT * FROM agent_credentials WHERE id = ?", credentialId);
+    if (!row || row.revoked_at || row.account_id !== accountId || row.cli_token_id !== cliTokenId) return undefined;
+    if (!safeEqual(row.secret_hash, await sha256(secret))) return undefined;
+    if (now - (row.last_used_at ?? row.created_at) > AGENT_EXPIRY_MS) return undefined;
+    if (!row.last_used_at || now - row.last_used_at > 60_000) {
+      await this.db.run("UPDATE agent_credentials SET last_used_at = ? WHERE id = ?", now, credentialId);
+      row.last_used_at = now;
+    }
+    const { secret_hash: _, ...cred } = row;
+    return cred;
+  }
+
+  /** Still usable (not revoked, not expired): checked again before every dispatch by the relay's sweep. */
+  async agentCredentialLive(credentialId: string, now = Date.now()): Promise<boolean> {
+    const row = await this.db.get<{ revoked_at: number | null; last_used_at: number | null; created_at: number }>(
+      "SELECT revoked_at, last_used_at, created_at FROM agent_credentials WHERE id = ?", credentialId,
+    );
+    return !!row && !row.revoked_at && now - (row.last_used_at ?? row.created_at) <= AGENT_EXPIRY_MS;
+  }
+
+  /** The account's remembered agents (revoked ones left out), with the projects each may reach. */
+  async agentCredentials(accountId: string): Promise<(AgentCredential & { grants: AgentGrant[] })[]> {
+    const creds = await this.db.all<AgentCredential>(
+      `SELECT id, account_id, cli_token_id, browser_install_id, label, created_at, last_used_at, revoked_at
+       FROM agent_credentials WHERE account_id = ? AND revoked_at IS NULL ORDER BY created_at`, accountId,
+    );
+    const now = Date.now();
+    const live = creds.filter((c) => now - (c.last_used_at ?? c.created_at) <= AGENT_EXPIRY_MS);
+    return Promise.all(live.map(async (c) => ({ ...c, grants: await this.agentGrants(c.id) })));
+  }
+
+  agentGrants(credentialId: string): Promise<AgentGrant[]> {
+    return this.db.all<AgentGrant>(
+      "SELECT credential_id, project_handle, project_name, epoch, created_at FROM agent_grants WHERE credential_id = ? ORDER BY created_at",
+      credentialId,
+    );
+  }
+
+  agentGrant(credentialId: string, handle: string): Promise<AgentGrant | undefined> {
+    return this.db.get<AgentGrant>(
+      "SELECT credential_id, project_handle, project_name, epoch, created_at FROM agent_grants WHERE credential_id = ? AND project_handle = ?",
+      credentialId, handle,
+    );
+  }
+
+  /** Approves another project for a remembered agent (only the Studio, proving its install, calls this). */
+  async addAgentGrant(credentialId: string, handle: string, projectName: string): Promise<AgentGrant> {
+    const now = Date.now();
+    await this.db.run(
+      `INSERT INTO agent_grants (credential_id, project_handle, project_name, epoch, created_at) VALUES (?, ?, ?, 1, ?)
+       ON CONFLICT (credential_id, project_handle) DO UPDATE SET project_name = excluded.project_name`,
+      credentialId, handle, projectName, now,
+    );
+    return (await this.agentGrant(credentialId, handle))!;
+  }
+
+  /** Bumps the epoch of a project's grants (all agents', or one's): calls made before aren't run. Resolves to the new epochs. */
+  async bumpAgentEpoch(accountId: string, handle: string, credentialId?: string): Promise<Map<string, number>> {
+    // Only this account's agents (one browser profile may be logged in to several accounts: the same handles).
+    const mine = `credential_id IN (SELECT id FROM agent_credentials WHERE account_id = ?)${credentialId ? " AND credential_id = ?" : ""}`;
+    const args = [handle, accountId, ...(credentialId ? [credentialId] : [])];
+    await this.db.run(`UPDATE agent_grants SET epoch = epoch + 1 WHERE project_handle = ? AND ${mine}`, ...args);
+    const rows = await this.db.all<{ credential_id: string; epoch: number }>(
+      `SELECT credential_id, epoch FROM agent_grants WHERE project_handle = ? AND ${mine}`, ...args,
+    );
+    return new Map(rows.map((r) => [r.credential_id, Number(r.epoch)]));
+  }
+
+  /** Revokes remembered agents of this account (Forget, logout, their token revoked). Resolves to those revoked. */
+  async revokeAgentCredentials(accountId: string, ids: string[]): Promise<string[]> {
+    const revoked: string[] = [];
+    for (const cid of ids) {
+      const r = await this.db.run("UPDATE agent_credentials SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at IS NULL", Date.now(), cid, accountId);
+      if (r.changes) revoked.push(cid);
+    }
+    if (revoked.length) this.events.emit("agents-revoked", accountId, revoked);
+    return revoked;
+  }
+
+  /** Disconnect (paused: true) until Resume, per project. */
+  async setAgentPause(accountId: string, handle: string, paused: boolean) {
+    if (paused) {
+      await this.db.run(
+        "INSERT INTO agent_pauses (account_id, project_handle, created_at) VALUES (?, ?, ?) ON CONFLICT (account_id, project_handle) DO NOTHING",
+        accountId, handle, Date.now(),
+      );
+    } else {
+      await this.db.run("DELETE FROM agent_pauses WHERE account_id = ? AND project_handle = ?", accountId, handle);
+    }
+  }
+
+  async agentPaused(accountId: string, handle: string): Promise<boolean> {
+    return !!(await this.db.get("SELECT 1 AS x FROM agent_pauses WHERE account_id = ? AND project_handle = ?", accountId, handle));
   }
 
   // ---- apps

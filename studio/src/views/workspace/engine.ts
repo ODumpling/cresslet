@@ -10,6 +10,7 @@ import { createCresslet, localOnly, mergeDotenv, privateDotenvLines, projectSour
 import { createGitWorkspace, type GitFile, type GitWorkspace, type ProjectGitState } from "../../../git.ts";
 import { api, errorMessage, meta } from "../../lib/api.ts";
 import { session } from "../../lib/session.ts";
+import { projectWrites, type WriteQueue } from "../../../project-lock.ts";
 
 export interface TreeItem {
   path: string;
@@ -96,6 +97,8 @@ export class Engine {
 
   private project: StoredProject;
   private cb: Callbacks;
+  /** The project's writes from this tab, one at a time (project-lock.ts): a slow save can't land after a later one. */
+  private writes: WriteQueue;
   /** Source control (studio/git.ts): its app's repository, when linked. */
   readonly git: GitWorkspace;
   /** Paths a pull or merge just wrote (until when): the watcher's reports of those aren't the user's changes. */
@@ -114,13 +117,14 @@ export class Engine {
   constructor(project: StoredProject, cb: Callbacks, editorEl: HTMLElement) {
     this.project = project;
     this.cb = cb;
+    this.writes = projectWrites(project.id);
     this.git = createGitWorkspace({
       app: () => project.deploy?.name,
       api: (path, init) => api(path, init),
       state: () => project.git,
       save: async (s) => {
         project.git = s;
-        await projects.put(project);
+        await this.persist();
         if (!this.disposed) cb.git(s);
       },
       files: () => projectSources(this.c!), // booted: the workspace's tools run after
@@ -272,7 +276,7 @@ export class Engine {
       project: () => project,
       onDeployed: async (r) => {
         const deploy: Deploy = project.deploy = { name: r.app.name, deployKey: r.deployKey ?? project.deploy?.deployKey, url: r.app.url };
-        const saved = await projects.put(project).catch(() => false);
+        const saved = await this.persist().catch(() => false);
         if (!saved && deploy.deployKey) {
           // Site storage refused the key; it's not kept anywhere app code can read, so hand it over.
           prompt("This browser blocked saving the app's deploy key. Copy it now (needed to redeploy without logging in):", deploy.deployKey);
@@ -366,6 +370,11 @@ export class Engine {
     void this.input?.write("npm install && cresslet dev\r");
   }
 
+  /** The project as it is now into IndexedDB, after the writes queued before (its files as last exported). */
+  persist() {
+    return this.writes.run(() => projects.put(this.project));
+  }
+
   /** The project's source files into IndexedDB, debounced. */
   save() {
     clearTimeout(this.saveTimer);
@@ -377,12 +386,12 @@ export class Engine {
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
     this.dirty = false;
-    const run = (async () => {
+    // Exported and put in turn: an export that started earlier can't put an older snapshot over a later one.
+    const run = this.writes.run(async () => {
       const tree = await c.export(c.workdir, { excludes: ["node_modules/**", "dist/**", ".cresslet/**"] });
       this.project.files = Object.fromEntries(Object.entries(fromTree(tree)).filter(([p]) => !ignored(p)));
       await projects.put(this.project);
-      if (!this.disposed) await this.renderTree();
-    })();
+    }).then(() => (this.disposed ? undefined : this.renderTree()));
     const done: Promise<void> = run.catch(() => {}).finally(() => {
       if (this.saving === done) this.saving = null;
     });
@@ -549,7 +558,10 @@ export class Engine {
     return this.cresslet ? this.cresslet.config().catch(() => undefined) : Promise.resolve(undefined);
   }
 
-  /** Stops everything: its edits saved first (an in-app navigation away), then the container, terminal and editor. */
+  /**
+   * Stops everything: its edits saved first (an in-app navigation away; queued now, so the project's lock is let go
+   * only after it commits), then the container, terminal and editor.
+   */
   dispose() {
     if (this.disposed) return;
     const pending = this.saveTimer !== undefined || this.dirty ? this.saveNow() : this.saving;

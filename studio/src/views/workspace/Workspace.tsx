@@ -9,6 +9,7 @@ import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useSta
 import { flushSync } from "react-dom";
 import type { Container } from "../../../vendor/cresslet-container/cresslet-container.js";
 import { projects, type Deploy, type StoredProject } from "../../../store.ts";
+import { lockProject, ownsProject, projectWrites } from "../../../project-lock.ts";
 import type { CressletConfig } from "../../../cresslet-plugin.ts";
 import type * as API from "../../../api-types.ts";
 import { api, errorMessage, meta, mustLogIn } from "../../lib/api.ts";
@@ -27,30 +28,110 @@ import { GitDialog, type GitDialogHandle } from "./GitDialog.tsx";
 import { StackPanel } from "./StackPanel.tsx";
 import { Engine, type TreeItem } from "./engine.ts";
 
-/** The project, once loaded; keyed by its id, so opening another project starts over (and disposes of this one). */
+/**
+ * The project, once loaded; keyed by its id, so opening another project starts over (and disposes of this one). One
+ * tab owns a project (project-lock.ts): this one takes its lock before reading the snapshot; while another tab holds
+ * it, the project shows read-only, and once that tab closes this one reads what it last saved and starts.
+ */
 export function Workspace() {
   const { id } = useParams({ from: "/p/$id" });
   const navigate = useNavigate();
   const { user } = useSession();
   const [project, setProject] = useState<StoredProject | null>(null);
+  // Whose the project is: this tab's, another tab's (shown read-only meanwhile), or not known yet.
+  const [lock, setLock] = useState<{ id: string; is: "owner" | "elsewhere" }>();
+  const owning = lock?.id === id ? lock.is : null;
+  const [stored, setStored] = useState<StoredProject | null>(null); // as another tab last saved it
   useEffect(() => {
     let live = true;
-    void (async () => {
+    const l = lockProject(id, { blocked: () => live && setLock({ id, is: "elsewhere" }) });
+    void l.owned.then((o) => live && o && setLock({ id, is: "owner" }));
+    return () => {
+      live = false;
+      setProject(null); // taken again later: read again then
+      void l.release(); // after the workspace's final save (queued as it goes)
+    };
+  }, [id]);
+  useEffect(() => {
+    if (!owning) return;
+    let live = true;
+    const load = async () => {
       // Projects need the session when this server offers login: leave them for the landing page.
       if (await mustLogIn()) {
         if (!live) return;
         rememberAfterLogin(`/p/${id}`);
         return void navigate({ to: "/", replace: true });
       }
-      const p = await projects.get(id);
+      const p = await projects.get(id); // what its last owner committed
       if (!live) return;
       if (!p) return void navigate({ to: "/", replace: true });
+      if (owning === "elsewhere") return setStored(p);
+      setStored(null);
       setProject((old) => (old?.id === p.id ? old : p));
-    })();
-    return () => void (live = false);
-  }, [id, user, navigate]);
-  useView("workspace", project ? project.name : null);
-  return project?.id === id ? <ProjectWorkspace key={id} project={project} /> : <main id="workspace" className="workspace" aria-labelledby="workspace-title"><h1 className="sr-only" id="workspace-title" tabIndex={-1}>Project</h1></main>;
+    };
+    void load();
+    // Read-only: what the other tab has saved since, when this one is looked at again.
+    const seen = () => document.visibilityState === "visible" && void load();
+    if (owning === "elsewhere") document.addEventListener("visibilitychange", seen);
+    return () => {
+      live = false;
+      document.removeEventListener("visibilitychange", seen);
+    };
+  }, [id, user, navigate, owning]);
+  const shown = owning === "owner" ? project : owning === "elsewhere" ? stored : null;
+  useView("workspace", shown?.id === id ? shown.name : null);
+  if (owning === "elsewhere" && stored?.id === id) return <OpenElsewhere project={stored} />;
+  return owning === "owner" && project?.id === id ? <ProjectWorkspace key={id} project={project} /> : <main id="workspace" className="workspace" aria-labelledby="workspace-title"><h1 className="sr-only" id="workspace-title" tabIndex={-1}>Project</h1></main>;
+}
+
+/** Another tab owns the project: nothing runs or saves here; its files as last saved, to read. */
+function OpenElsewhere({ project }: { project: StoredProject }) {
+  useLayoutEffect(viewShown, []);
+  const [file, setFile] = useState<string | null>(null);
+  const items: TreeItem[] = [];
+  const dirs = new Set<string>();
+  for (const path of Object.keys(project.files).sort()) {
+    const parts = path.split("/");
+    parts.slice(0, -1).forEach((name, depth) => {
+      const dir = parts.slice(0, depth + 1).join("/");
+      if (dirs.has(dir)) return;
+      dirs.add(dir);
+      items.push({ path: dir, name, depth, dir: true });
+    });
+    items.push({ path, name: parts.at(-1)!, depth: parts.length - 1, dir: false });
+  }
+  const data = file === null ? undefined : project.files[file];
+  return (
+    <>
+      <header className="topbar" id="topbar">
+        <Link className="topbar-home" to="/">
+          <Icon name="logo" className="brand-mark" />
+          <SrOnly>Cresslet: all projects</SrOnly>
+        </Link>
+        <div className="project-title" id="project-title">
+          <span className="status" id="status" data-state="idle"><span className="status-dot" aria-hidden="true" /><span id="status-text">Read-only</span></span>
+        </div>
+      </header>
+      <main id="workspace" className="page narrow" aria-labelledby="workspace-title" data-readonly="">
+        <header className="page-head">
+          <div><h1 id="workspace-title" tabIndex={-1}>{project.name}</h1></div>
+        </header>
+        <div className="panel callout" id="open-elsewhere" role="status">
+          <h2>Open in another tab</h2>
+          <p>This project is open in another tab of this browser, so it's read-only here: nothing runs or saves in this tab. When that tab closes or leaves the project, it opens here with what that tab saved.</p>
+        </div>
+        <section className="block" aria-labelledby="files-title">
+          <div className="block-head"><h2 id="files-title">Files</h2><span className="muted small">As last saved</span></div>
+          <div className="panel"><Tree items={items} current={file} open={setFile} /></div>
+          {file !== null ? (
+            <pre className="panel deploy-log mono" id="readonly-file" tabIndex={0} aria-label={file}>
+              {typeof data === "string" ? data : `(binary file, ${data?.length ?? 0} bytes)`}
+            </pre>
+          ) : null}
+        </section>
+      </main>
+    </>
+  );
 }
 
 const LAYOUT = "cresslet.workspace";
@@ -148,6 +229,8 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const previewBase = useRef<string | null>(null);
   const navigate = useNavigate();
   const { user } = useSession();
+  /** The project as it is now, after this tab's other writes to it (project-lock.ts). */
+  const persist = () => projectWrites(project.id).run(() => projects.put(project));
   // The preview's database, through the running `cresslet dev` (null until the container is up).
   const runSql = useCallback<RunSql>(async (sql) => {
     const e = engine.current;
@@ -207,7 +290,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       },
       deployed(d) {
         d.at = Date.now();
-        void projects.put(project);
+        void persist();
         setDeploy({ ...d });
         setTurnsSince(0);
         setDeployFailed(null);
@@ -306,7 +389,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
       project.name = el.value.trim() || project.name;
       el.value = project.name;
       setName(project.name);
-      await projects.rename(project.id, project.name);
+      await projectWrites(project.id).run(() => projects.rename(project.id, project.name));
       projectsChanged();
     };
     el.addEventListener("change", change);
@@ -396,7 +479,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     if (!name) return null;
     const r = await api<{ app: { name: string; url: string } }>("/v1/apps", { method: "POST", body: JSON.stringify({ name }) });
     project.deploy = { name: r.app.name, url: r.app.url };
-    await projects.put(project);
+    await persist();
     setDeploy(project.deploy);
     return r.app.name;
   }
@@ -581,7 +664,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
           </span>
         </div>
         {container ? (
-          <Builder ref={builder} c={container} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
+          <Builder ref={builder} c={container} owner={ownsProject(project.id)} projectId={project.id} deployName={deploy?.name ?? null} open={chat} setOpen={setBuilderOpen} git={engine.current?.git ?? null} commandRev={() => engine.current?.commandRev ?? 0}
             onStackStale={() => setGitTick((n) => n + 1)} appName={name} onAgentChange={setConnectedAgent}
             ship={{ url: deploy?.url, at: deploy?.at, deploying, pending, line: deploying ? lastLine : deployFailed ?? undefined, failed: !!deployFailed }}
             onTurnEnd={(changed) => changed && setTurnsSince((n) => n + 1)}

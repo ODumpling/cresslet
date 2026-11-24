@@ -568,6 +568,8 @@ a.deploy-link:hover { color: var(--accent-text); }
 .terminal .xterm-rows .xterm-dim { color: var(--text-2) !important; }
 .deploy-log { flex: 1; margin: 0; padding: 12px 14px; overflow: auto; white-space: pre-wrap; color: var(--text-2); font-size: 12.5px; line-height: 1.6; background: var(--surface); }
 .deploy-log-empty { font-family: var(--sans); }
+/* Read-only (another tab owns the project): a file as last saved. */
+#readonly-file { margin-top: 12px; max-height: 60vh; }
 
 /* Studio's status line */
 .statusline {
@@ -678,6 +680,8 @@ button.statusline-item:hover { color: var(--text); }
 .bridge-banner-text { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent-text); }
 .bridge-panel { margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2, var(--surface)); display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
 .bridge-panel .input { flex: 1; min-width: 0; text-transform: uppercase; }
+.bridge-panel ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.bridge-panel ul.plain > li { gap: 8px; min-width: 0; }
 .bridge-foot { padding: 10px 14px; border-top: 1px solid var(--line); margin: 0; }
 .bridge-pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px 2px 8px; border: 1px solid var(--accent-text); border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 12px; }
 .bridge-pill-name { max-width: 10rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }

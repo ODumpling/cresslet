@@ -137,7 +137,7 @@ test("a SQLite database from before migrations upgrades in place, data kept", as
 async function fill(store: Store) {
   const owner = await store.createAccount("owner@b.co", { id: 7, login: "own" });
   const guest = await store.createAccount("guest@b.co");
-  const { token } = await store.issueToken(owner.id, { name: "cli" });
+  const { token, info: cli } = await store.issueToken(owner.id, { name: "cli" });
   await store.issueToken(owner.id, { name: "ci", role: "deploy", apps: [] });
   const { app } = await store.createApp("shop", owner.id);
   await store.setCurrentDeploy(app.id, "dep_1", { routes: ["/api/*"], crons: ["* * * * *"] });
@@ -173,7 +173,13 @@ async function fill(store: Store) {
   await store.setOrgMember(org.id, guest.id, "member");
   const { app: orgApp } = await store.createApp("tool", owner.id);
   await store.setAppOrg(orgApp.id, org.id, owner.id);
-  return { owner, guest, token, app, orgApp: (await store.appById(orgApp.id))! };
+  await store.proveInstall(owner.id, "ins_1", "install-secret");
+  const agent = await store.createAgentCredential({
+    accountId: owner.id, cliTokenId: cli.id, installId: "ins_1", secretHash: "c".repeat(64), label: "Claude Code",
+    handle: `ins_1:${app.id}`, projectName: "shop",
+  });
+  await store.setAgentPause(owner.id, `ins_1:${app.id}`, true);
+  return { owner, guest, token, app, agent, orgApp: (await store.appById(orgApp.id))! };
 }
 
 test("SQLite → Postgres → SQLite: every row and secret copied and checked; the source untouched", { skip: needsPg }, async () => {
@@ -202,13 +208,16 @@ test("SQLite → Postgres → SQLite: every row and secret copied and checked; t
     assert.deepEqual(rows, {
       accounts: 2, apps: 3, tokens: 2, deploys: 3, secrets: 2, domains: 1, meta: 1, collaborators: 1, invites: 1,
       page_sessions: 1, rate_hits: 1, ai_wallets: 1, ai_ledger: 2, orgs: 1, org_members: 2, git_connections: 1, app_repos: 1,
-      stack_changes: 1,
+      stack_changes: 1, browser_installs: 1, agent_credentials: 1, agent_grants: 1, agent_pauses: 1,
     });
 
     // The copy works as the database of a server.
     const store = await Store.open(dir, s.database);
     try {
       assert.equal((await store.useToken(seed.token))?.account.email, "owner@b.co");
+      const agents = await store.agentCredentials(seed.owner.id);
+      assert.deepEqual(agents.map((a) => [a.id, a.grants.map((g) => g.project_name)]), [[seed.agent.id, ["shop"]]]);
+      assert.ok(await store.agentPaused(seed.owner.id, `ins_1:${seed.app.id}`));
       assert.deepEqual(await store.secrets(seed.app.id), { API_KEY: "s3cret", OTHER: "ünïcode ✓" });
       assert.deepEqual((await store.deploys(seed.app.id)).map((d) => d.id), ["dep_3", "dep_2", "dep_1"]);
       assert.equal((await store.deploys(seed.app.id))[2].git_repo, "own/shop");

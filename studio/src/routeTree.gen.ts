@@ -27,6 +27,7 @@ import { Route as OrgsIndexRouteImport } from './routes/orgs.index'
 import { Route as OrgsNameRouteImport } from './routes/orgs.$name'
 import { Route as PIdRouteImport } from './routes/p.$id'
 import { Route as SettingsIndexRouteImport } from './routes/settings.index'
+import { Route as SettingsAgentsRouteImport } from './routes/settings.agents'
 import { Route as SettingsArtifactsRouteImport } from './routes/settings.artifacts'
 import { Route as SettingsCreditsRouteImport } from './routes/settings.credits'
 import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
@@ -129,6 +130,11 @@ const SettingsIndexRoute = SettingsIndexRouteImport.update({
   path: '/',
   getParentRoute: () => SettingsRoute,
 } as any)
+const SettingsAgentsRoute = SettingsAgentsRouteImport.update({
+  id: '/agents',
+  path: '/agents',
+  getParentRoute: () => SettingsRoute,
+} as any)
 const SettingsArtifactsRoute = SettingsArtifactsRouteImport.update({
   id: '/artifacts',
   path: '/artifacts',
@@ -201,6 +207,7 @@ export interface FileRoutesByFullPath {
   '/apps/$name': typeof AppsNameRouteWithChildren
   '/orgs/$name': typeof OrgsNameRoute
   '/p/$id': typeof PIdRoute
+  '/settings/agents': typeof SettingsAgentsRoute
   '/settings/artifacts': typeof SettingsArtifactsRoute
   '/settings/credits': typeof SettingsCreditsRoute
   '/settings/tokens': typeof SettingsTokensRoute
@@ -230,6 +237,7 @@ export interface FileRoutesByTo {
   '/admin/$name': typeof AdminNameRoute
   '/orgs/$name': typeof OrgsNameRoute
   '/p/$id': typeof PIdRoute
+  '/settings/agents': typeof SettingsAgentsRoute
   '/settings/artifacts': typeof SettingsArtifactsRoute
   '/settings/credits': typeof SettingsCreditsRoute
   '/settings/tokens': typeof SettingsTokensRoute
@@ -262,6 +270,7 @@ export interface FileRoutesById {
   '/apps/$name': typeof AppsNameRouteWithChildren
   '/orgs/$name': typeof OrgsNameRoute
   '/p/$id': typeof PIdRoute
+  '/settings/agents': typeof SettingsAgentsRoute
   '/settings/artifacts': typeof SettingsArtifactsRoute
   '/settings/credits': typeof SettingsCreditsRoute
   '/settings/tokens': typeof SettingsTokensRoute
@@ -295,6 +304,7 @@ export interface FileRouteTypes {
     | '/apps/$name'
     | '/orgs/$name'
     | '/p/$id'
+    | '/settings/agents'
     | '/settings/artifacts'
     | '/settings/credits'
     | '/settings/tokens'
@@ -324,6 +334,7 @@ export interface FileRouteTypes {
     | '/admin/$name'
     | '/orgs/$name'
     | '/p/$id'
+    | '/settings/agents'
     | '/settings/artifacts'
     | '/settings/credits'
     | '/settings/tokens'
@@ -355,6 +366,7 @@ export interface FileRouteTypes {
     | '/apps/$name'
     | '/orgs/$name'
     | '/p/$id'
+    | '/settings/agents'
     | '/settings/artifacts'
     | '/settings/credits'
     | '/settings/tokens'
@@ -522,6 +534,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsIndexRouteImport
       parentRoute: typeof SettingsRoute
     }
+    '/settings/agents': {
+      id: '/settings/agents'
+      path: '/agents'
+      fullPath: '/settings/agents'
+      preLoaderRoute: typeof SettingsAgentsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
     '/settings/artifacts': {
       id: '/settings/artifacts'
       path: '/artifacts'
@@ -603,6 +622,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface SettingsRouteChildren {
+  SettingsAgentsRoute: typeof SettingsAgentsRoute
   SettingsArtifactsRoute: typeof SettingsArtifactsRoute
   SettingsCreditsRoute: typeof SettingsCreditsRoute
   SettingsTokensRoute: typeof SettingsTokensRoute
@@ -610,6 +630,7 @@ interface SettingsRouteChildren {
 }
 
 const SettingsRouteChildren: SettingsRouteChildren = {
+  SettingsAgentsRoute: SettingsAgentsRoute,
   SettingsArtifactsRoute: SettingsArtifactsRoute,
   SettingsCreditsRoute: SettingsCreditsRoute,
   SettingsTokensRoute: SettingsTokensRoute,

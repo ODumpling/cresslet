@@ -1,5 +1,6 @@
-// /settings[/credits|/tokens|/artifacts] (logged in): the account's settings, one tab each: the account and logging
-// this browser out, AI credits, API tokens (the CLI's, CI's and agents'), and the defaults for new artifacts.
+// /settings[/credits|/tokens|/agents|/artifacts] (logged in): the account's settings, one tab each: the account and
+// logging this browser out, AI credits, API tokens (the CLI's, CI's and agents'), Live Link's remembered agents, and
+// the defaults for new artifacts.
 import { Link, Outlet, useLocation, useMatchRoute, useNavigate } from "@tanstack/react-router";
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { auth } from "../../../store.ts";
@@ -101,6 +102,7 @@ function Tabs() {
       <Link {...p} to="/settings"><Icon name="users" />Account</Link>
       {credits.data || onCredits ? <Link {...p} to="/settings/credits" id="settings-tab-credits"><Icon name="sparkles" />AI credits</Link> : null}
       <Link {...p} to="/settings/tokens"><Icon name="key" />API tokens</Link>
+      <Link {...p} to="/settings/agents" id="settings-tab-agents"><Icon name="link" />Connected agents</Link>
       <Link {...p} to="/settings/artifacts"><Icon name="file" />Artifact defaults</Link>
     </nav>
   );

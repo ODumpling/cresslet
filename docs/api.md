@@ -45,6 +45,10 @@ Creating apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin`
 | GET | `/v1/me/tokens` | `{tokens: [{id, name, role, apps, createdAt, lastUsedAt, current}]}`; never the secret |
 | POST | `/v1/me/tokens` | `{name, role?: read\|deploy\|admin (default admin), apps?: ["name", …] \| null}` → `{token, info}` (201). The secret is only in this response. Scoped tokens start `clv_scoped_` |
 | DELETE | `/v1/me/tokens/:id` | revoke one token |
+| POST | `/v1/me/token/revoke` | any token: revokes the calling token itself → `{revoked: id}` (`cresslet logout` of a browser-login token). Its remembered Live Link agents go with it |
+| GET | `/v1/me/agents` | full-access token: Live Link's remembered agents → `{agents: [{id, label, browserInstallId, createdAt, lastUsedAt, projects: [{handle, projectId, name}]}]}` (revoked and expired ones, unused for 90 days, left out) |
+| POST | `/v1/me/agents/:id/forget` | the Studio's session only: `{install: {id, secret}}` (one of the account's Studio browsers) → `{revoked: id}`. Its live sessions end at once |
+| POST | `/v1/me/agents/revoke` | any token: revokes the agents remembered with the calling token (`cresslet logout`) → `{revoked: [id, …]}` |
 | POST | `/v1/me/token` | revoke all of this account's tokens → `{account, token}` (new full-access one). A password stays (the operator can reset one you didn't set) |
 | POST | `/v1/auth/password` | password login on: `{email, password}` → `{account, token}` (a new full-access token; from the studio's origin it goes in the session cookie instead, and the answer is `{account}`); 401 `invalid_credentials` for a wrong email or password alike. No signup: only accounts that have a password. 10 tries per email and 30 per client per 10 min (429 `rate_limited`) |
 | PUT | `/v1/me/password` | password login on, full-access token: `{password, currentPassword?}` → `{account}`. Sets the password (8-256 characters); changing one needs `currentPassword` (403 `wrong_password`; 10 tries per account per 10 min). 409 `conflict` if the password or the calling token changed meanwhile. Other tokens stay valid: revoke them to end other sessions |
