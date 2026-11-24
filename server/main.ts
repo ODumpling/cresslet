@@ -19,6 +19,7 @@ import { settled as sandboxSettled } from "./sandbox.ts";
 import { bindingsSettled } from "./bindings.ts";
 import { type Cluster, singleNode } from "./cluster.ts";
 import { createRelay } from "./relay.ts";
+import { resolveKey, splitLabel } from "./envs.ts";
 
 const RETIRE_SW = `self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil((async () => {
@@ -42,9 +43,14 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
   }
   // Each app's crons fire on the node that owns it (checked again at dispatch: runs queue).
   const run = scheduled(cfg, store, runtime);
+  // (Keys: an app's id, or an environment's for its Run now: owned by the app's node.)
+  const owner = async (key: string) => key.startsWith("env_") ? (await resolveKey(store, key))?.app.id : key;
   const scheduler = new Scheduler(
     { appsWithCrons: async () => (await store.appsWithCrons()).filter((a) => cluster.local(a.id)) },
-    async (appId, cron, at, manual) => cluster.local(appId) ? run(appId, cron, at, manual) : undefined,
+    async (key, cron, at, manual) => {
+      const appId = await owner(key);
+      return appId && cluster.local(appId) ? run(key, cron, at, manual) : undefined;
+    },
   );
   const control = api(cfg, store, runtime, cluster, scheduler);
   const serveApp = host(cfg, store, runtime);
@@ -75,10 +81,10 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
   // A failed pass (the database unreachable, say) is logged; the next one tries again.
   const reaper = setInterval(() => void reap().catch((e) => console.error("cresslet: reaping failed:", e)), 10 * 60_000);
 
-  /** An app host's request: served here, or by the node that owns the app. */
-  const appHost = async (req: Request, name: string, app?: App) => {
+  /** An app host's request: served here, or by the node that owns the app (and its environments). */
+  const appHost = async (req: Request, name: string, app?: App, env: string | null = null) => {
     app ??= await store.appByName(name);
-    return app && !cluster.local(app.id) ? cluster.forward(app.id, req) : serveApp(req, name, app);
+    return app && !cluster.local(app.id) ? cluster.forward(app.id, req) : serveApp(req, name, app, env);
   };
 
   /**
@@ -112,6 +118,9 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
     if (hostname === cfg.previewHost) return servePreviewHost(req);
     if (hostname.endsWith(suffix)) {
       const sub = hostname.slice(0, -suffix.length);
+      // `<app>--<env>`: one of the app's environments (an unknown one: no app by that name either).
+      const label = sub && !sub.includes(".") ? splitLabel(sub) : null;
+      if (label) return appHost(req, label.app, undefined, label.env);
       if (sub && !sub.includes(".")) return appHost(req, sub);
     } else if (hostname !== cfg.domain) {
       const custom = await store.appByDomain(hostname);
@@ -158,10 +167,11 @@ export async function createServer(cfg: Config = loadConfig(), cluster: Cluster 
       let name = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : "";
       const custom = !name && hostname !== cfg.domain ? await store.appByDomain(hostname) : undefined;
       if (custom) name = custom.name;
-      if (!name || name.includes(".")) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
-      const app = custom ?? await store.appByName(name);
+      const label = name && !name.includes(".") ? (custom ? { app: name, env: null } : splitLabel(name)) : null;
+      if (!label) return void socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+      const app = custom ?? await store.appByName(label.app);
       if (app && !cluster.local(app.id)) return cluster.forwardUpgrade(app.id, req, socket, head);
-      await upgradeApp(req, socket, head, name, app);
+      await upgradeApp(req, socket, head, label.app, app, label.env);
     })().catch(() => socket.destroy());
   }
 

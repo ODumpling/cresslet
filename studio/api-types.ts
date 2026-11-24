@@ -121,6 +121,21 @@ export interface DeployInfo {
   /** The commit it was built from (source control). */
   /** `tag`: the version tag the commit got when it deployed (`v3`). */
   git?: { sha: string; branch: string | null; repo: string | null; tag?: string | null; url: string | null } | null;
+  /** The environment it was deployed to ("production", "staging"). */
+  env?: string;
+  /** When production was promoted to it (a staging deploy). */
+  promotedAt?: string | null;
+}
+
+/** One environment of an app (GET /v1/apps/:name/envs): production, or staging (private). */
+export interface Environment {
+  name: string;
+  url: string;
+  private: boolean;
+  currentDeployId: string | null;
+  config: { server?: boolean; crons?: string[]; routes?: string[] } | null;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 /** An app's linked repository (source control). */
@@ -180,8 +195,14 @@ export interface AppDetail {
     createdAt: string;
   };
   runtime: { running: boolean };
+  /** The environment this detail is of (`?env=`): its deploys, sandbox and secrets. */
+  env?: string;
+  environments?: Environment[];
   deploys: DeployInfo[];
+  /** The secret names its sandbox sees (another environment: production's and its own). */
   secrets: string[];
+  /** Another environment: whose each one is (`production`, or its own name: an override). */
+  secretSources?: Record<string, string>;
   /** Its linked repository, if any. */
   repo?: AppRepo | null;
 }
@@ -209,6 +230,9 @@ export interface CronRun {
 
 /** GET /v1/apps/:name/crons (and what pause, resume and run answer). */
 export interface Crons {
+  /** Another environment's crons (`?env=`): they never run on schedule there (`scheduled: false`), only Run now. */
+  env?: string;
+  scheduled?: boolean;
   crons: {
     cron: string;
     paused: boolean;

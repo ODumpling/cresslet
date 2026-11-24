@@ -160,11 +160,12 @@ export interface DeployResult {
   deployKey?: string;
 }
 
-/** Where a deploy goes. `create`: a new app only. */
+/** Where a deploy goes. `create`: a new app only. `env`: one of the app's environments (`staging`), not production. */
 export interface Target {
   app: string | undefined;
   deployKey?: string;
   create?: boolean;
+  env?: string;
 }
 
 export interface CressletOptions {
@@ -189,7 +190,8 @@ export interface CressletOptions {
    * commits and merges its branch here (it may change the workspace's files), and resolves to the commit to build
    * and record; it throws to stop the deploy before anything is built. Null: not linked.
    */
-  beforeDeploy?: (log: (line: string) => void, signal: AbortSignal | undefined, app: string | undefined) => Promise<{ sha: string; branch: string; repo: string; source?: string } | null>;
+  /** `env`: a deploy to that environment (staging): the branch is committed, not merged (promoting merges it). */
+  beforeDeploy?: (log: (line: string) => void, signal: AbortSignal | undefined, app: string | undefined, env?: string) => Promise<{ sha: string; branch: string; repo: string; source?: string } | null>;
   /** The database of the `cresslet dev` serving `port` changed (its server or a script wrote to it), once it's saved. */
   dbChanged?: (port: number) => void;
 }
@@ -317,7 +319,8 @@ export function createCresslet(c: Container, opts: CressletOptions) {
   async function deploy(log: Log = () => {}, signal: AbortSignal | undefined = undefined, cfg: CressletConfig | undefined = undefined, target: Target | undefined = undefined): Promise<DeployResult> {
     cfg ??= await config();
     target ??= targetOf(cfg);
-    const prepared = await opts.beforeDeploy?.(log, signal, target.app) ?? null;
+    if (target.env && (!target.app || target.create)) throw new Error(`deploy the app to production once before deploying it to ${target.env}`);
+    const prepared = await opts.beforeDeploy?.(log, signal, target.app, target.env) ?? null;
     const git = prepared && { sha: prepared.sha, branch: prepared.branch, repo: prepared.repo };
     signal?.throwIfAborted();
     // The merge may have brought another cresslet.json: its routes and crons are what's built (the target stays).
@@ -341,7 +344,7 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     if (prepared?.source !== undefined && sourceDigest(sources) !== prepared.source) throw new Error(`the workspace changed while building, so it isn't ${git!.branch} @ ${git!.sha.slice(0, 7)} any more: nothing was deployed, deploy again`);
     log(`uploading ${files.length} files…`);
     const payload = {
-      app: target.app,
+      ...(target.env ? {} : { app: target.app }),
       ...(target.create ? { create: true } : {}), // a new app only: never a deploy over one that took the name meanwhile
       files,
       server,
@@ -353,12 +356,14 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     const user = opts.user?.();
     if (user) headers["x-cresslet-user"] = user; // the account the tab shows (server/api.ts)
     const credentials: RequestCredentials = user ? "same-origin" : "omit";
-    let res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify(payload), signal, credentials });
+    // An environment's deploy has its own route (a server without environments answers 404, never production).
+    const to = target.env ? `/v1/apps/${encodeURIComponent(target.app!)}/envs/${encodeURIComponent(target.env)}/deploys` : "/v1/deploys";
+    let res = await fetch(to, { method: "POST", headers, body: JSON.stringify(payload), signal, credentials });
     // An error from a proxy in front of the server may not be JSON: then the status says it.
     let body: DeployResult & { error?: string; message?: string } = await res.json().catch(() => ({}));
     if (res.status === 413 && body?.error === "body_too_large" && sources.length) {
       log("warning: project source omitted (request exceeded server upload limit)");
-      res = await fetch("/v1/deploys", { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }), signal, credentials });
+      res = await fetch(to, { method: "POST", headers, body: JSON.stringify({ ...payload, sources: undefined }), signal, credentials });
       body = await res.json().catch(() => ({}));
     }
     if (!res.ok) throw new Error(body.message ?? `deploy failed (${res.status})`);
@@ -367,12 +372,14 @@ export function createCresslet(c: Container, opts: CressletOptions) {
     // removed meanwhile isn't put back.
     const now = await config().catch(() => null);
     if (!cfg.name && now && !now.name) await c.fs.writeFile(p("cresslet.json"), JSON.stringify({ ...now, name: body.app.name }, null, 2) + "\n");
-    log(`deployed ${body.app.name} → ${body.app.url}`);
+    const envUrl = (body as { environment?: { url: string } }).environment?.url;
+    log(target.env ? `deployed ${body.app.name} to ${target.env} → ${envUrl ?? "(private)"} (cresslet promote, or Promote in the dashboard, takes it to production)` : `deployed ${body.app.name} → ${body.app.url}`);
     if (body.deploy?.tag && git) log(`tagged ${git.sha.slice(0, 7)} as ${body.deploy.tag}`);
     if (body.deploy?.warning) log(`warning: ${body.deploy.warning}`);
     // An anonymous app from before every app needed an account: it expires, and can't be kept.
     if (!body.app.claimed && body.app.expiresAt) log(`no owner: expires ${new Date(body.app.expiresAt).toLocaleString()}`);
-    opts.onDeployed?.(body);
+    // (Production's deploy: the project's app and what's live. A staging deploy changes neither.)
+    if (!target.env) opts.onDeployed?.(body);
     return body;
   }
 
@@ -829,21 +836,25 @@ export function createCresslet(c: Container, opts: CressletOptions) {
         // (Its own running count, not just the env var: a command can unset that.) The app named is the one deployed
         // to: cresslet.json is read once, before asking.
         const cfg = await config();
-        const target = targetOf(cfg);
+        const ei = args.findIndex((a) => a === "--env" || a.startsWith("--env="));
+        const env = ei < 0 ? undefined : args[ei].startsWith("--env=") ? args[ei].slice(6) : args[ei + 1];
+        if (ei >= 0 && !env) throw new Error("--env needs an environment, e.g. --env staging");
+        const target: Target = { ...targetOf(cfg), ...(env && env !== "production" ? { env } : {}) };
+        const named = target.app && target.env ? `${target.app} (${target.env})` : target.app ?? null;
         const fromBuilder = opts.builderRunning?.() || !!ctx.env.CRESSLET_AI_BUILDER;
-        if (fromBuilder && !(await opts.approveDeploy?.(target.app ?? null, ctx.signal))) {
+        if (fromBuilder && !(await opts.approveDeploy?.(named, ctx.signal))) {
           err("deploy not approved by the user");
           return 1;
         }
         // Anything else in the container (the user, or the project's own code: it runs as the project opens) asks too.
-        if (!fromBuilder && opts.confirmDeploy && !(await opts.confirmDeploy(target.app ?? null))) {
+        if (!fromBuilder && opts.confirmDeploy && !(await opts.confirmDeploy(named))) {
           err("deploy not confirmed by the user");
           return 1;
         }
         await deploy(out, ctx.signal, cfg, target);
         return 0;
       }
-      out("usage: cresslet dev [--port 3000] | build | deploy\r\n(other commands: use the real CLI: npx cresslet, or npm i -g cresslet)");
+      out("usage: cresslet dev [--port 3000] | build | deploy [--env staging]\r\n(other commands: use the real CLI: npx cresslet, or npm i -g cresslet)");
       return sub ? 1 : 0;
     } catch (e) {
       err((e as Error).message ?? String(e));

@@ -6,8 +6,9 @@ import { appUrl, type Config, paths, rootUrl } from "./config.ts";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { App, Store } from "./store.ts";
-import type { AppSpec, Runtime } from "./runtime.ts";
+import type { Runtime } from "./runtime.ts";
 import { pausedCrons, type RunCron } from "./cron.ts";
+import { appSpec, ENV_SEP, envTarget, prodTarget, resolveKey, type Target } from "./envs.ts";
 
 export function matchRoute(pattern: string, path: string): boolean {
   if (pattern.endsWith("/*")) {
@@ -40,37 +41,46 @@ async function isFile(p: string) {
   }
 }
 
-export function appSpec(cfg: Config, store: Store, app: App): AppSpec {
-  return {
-    appId: app.id,
-    seq: () => store.uidSeq(app.id),
-    appName: app.name,
-    appUrl: appUrl(cfg, app.name),
-    deployId: app.current_deploy_id!,
-    secrets: () => store.secrets(app.id),
-    // Outbound network is only for claimed apps (enforced by the sandbox).
-    net: !!app.account_id,
-    egress: app.egress ? JSON.parse(app.egress) : null,
-  };
+/**
+ * The app (or environment) an app host names: production for `<app>`, the environment for `<app>--<env>` (only an
+ * environment it has, deployed to).
+ */
+async function hostTarget(store: Store, appName: string, app: App | undefined, env: string | null): Promise<Target | undefined> {
+  app ??= await store.appByName(appName);
+  if (!app) return undefined;
+  if (!env) return prodTarget(app);
+  if (app.kind !== "app") return undefined;
+  const e = await store.environment(app.id, env);
+  return e && envTarget(app, e);
 }
 
 /** HTTP upgrades (WebSockets) on server routes go to the sandbox; anything else is refused. */
 export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
-  return async (req: IncomingMessage, socket: Duplex, head: Buffer, appName: string, app?: App) => {
-    app ??= await store.appByName(appName);
+  const gate = envGate(cfg, store);
+  return async (req: IncomingMessage, socket: Duplex, head: Buffer, appName: string, app?: App, env: string | null = null) => {
+    const t = await hostTarget(store, appName, app, env);
     const target = req.url ?? "/";
     if (!target.startsWith("/") || target.startsWith("//")) {
       socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
       return;
     }
     const url = new URL(`${cfg.scheme}://${req.headers.host ?? appName}${target}`);
-    const config = app ? JSON.parse(app.config) as { routes?: string[]; server?: boolean } : {};
-    if (!app?.current_deploy_id || !config.server || !serverRoute(config.routes, url.pathname)) {
+    const config = t ? JSON.parse(t.config) as { routes?: string[]; server?: boolean } : {};
+    if (!t?.deployId || !config.server || !serverRoute(config.routes, url.pathname)) {
       socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
       return;
     }
-    const status = await runtime.upgrade(appSpec(cfg, store, app), req, socket, head, url.href);
-    runtime.logs.push(app.id, "request", `WS ${url.pathname} ${status}`);
+    if (t.env) {
+      // A private environment: a viewer's session, from a page of its own origin (another app under the domain is the
+      // same site, so its pages' sockets would carry the cookie too), which the app never sees.
+      if (!await gate.socketViewer(t, req)) {
+        socket.end("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+        return;
+      }
+      stripRawCookie(cfg, req);
+    }
+    const status = await runtime.upgrade(appSpec(cfg, store, t), req, socket, head, url.href);
+    runtime.logs.push(t.key, "request", `WS ${url.pathname} ${status}`);
   };
 }
 
@@ -79,17 +89,19 @@ export function upgrader(cfg: Config, store: Store, runtime: Runtime) {
  * `manual`: Run now (from the studio), which runs a paused cron too.
  */
 export function scheduled(cfg: Config, store: Store, runtime: Runtime): RunCron {
-  return async (appId, cron, at, manual = false) => {
-    const app = await store.appById(appId);
+  return async (key, cron, at, manual = false) => {
+    // `key`: an app's id (production), or an environment's: its crons run on Run now only.
+    const t = await resolveKey(store, key);
     // Checked at dispatch: a run queued behind another may outlive a redeploy that dropped the cron, or a pause.
-    if (!app?.current_deploy_id || !app.account_id || !(JSON.parse(app.config).crons ?? []).includes(cron)) return;
-    if (!manual && pausedCrons(app).has(cron)) return;
+    if (!t?.deployId || !t.app.account_id || !(JSON.parse(t.config).crons ?? []).includes(cron)) return;
+    if (!manual && (t.env || pausedCrons(t.app).has(cron))) return;
+    const url = appSpec(cfg, store, t).appUrl;
     const startedAt = Date.now(), started = performance.now();
     let status = 0;
     try {
       const res = await runtime.fetch(
-        appSpec(cfg, store, app),
-        new Request(`${appUrl(cfg, app.name)}/`, {
+        appSpec(cfg, store, t),
+        new Request(`${url}/`, {
           method: "POST",
           headers: { "x-cresslet-scheduled": JSON.stringify({ cron, scheduledTime: at.getTime() }) },
         }),
@@ -101,9 +113,9 @@ export function scheduled(cfg: Config, store: Store, runtime: Runtime): RunCron 
       const ms = Math.round(performance.now() - started);
       const ok = status >= 200 && status < 300;
       // Nothing for an app deleted meanwhile (its logs and history are gone). null: deleted; undefined: couldn't tell.
-      const now = await store.appById(app.id).then((a) => a ?? null, () => undefined);
-      if (now !== null) runtime.logs.push(app.id, "system", `cron "${cron}"${manual ? " (run now)" : ""} ${ok ? "ok" : `failed (${status || "error"})`} ${ms}ms`);
-      if (now) runtime.cronRuns.record(app.id, { cron, at: at.getTime(), startedAt, ms, status, manual }, JSON.parse(now.config).crons ?? []);
+      const now = await resolveKey(store, key).then((a) => a ?? null, () => undefined);
+      if (now !== null) runtime.logs.push(key, "system", `cron "${cron}"${manual ? " (run now)" : ""} ${ok ? "ok" : `failed (${status || "error"})`} ${ms}ms`);
+      if (now) runtime.cronRuns.record(key, { cron, at: at.getTime(), startedAt, ms, status, manual }, JSON.parse(now.config).crons ?? []);
     }
   };
 }
@@ -188,41 +200,148 @@ function pages(cfg: Config, store: Store) {
   };
 }
 
+/** A private environment's session cookie value, if the header has it once (over http another host can add one). */
+function oneCookie(req: Request, name: string): string | undefined {
+  const all = cookies(req, name);
+  return all.length === 1 ? all[0] : undefined;
+}
+
+/** The `Cookie` header without the platform's session cookies (the app never sees them). */
+function withoutSessionCookie(cfg: Config, header: string): string {
+  const names = new Set([pageCookie(cfg), "cresslet_page", "__Host-cresslet_page"]);
+  return header.split(";").filter((part) => {
+    const i = part.indexOf("=");
+    return !(i > 0 && names.has(part.slice(0, i).trim()));
+  }).join(";").trim();
+}
+
+function stripRawCookie(cfg: Config, req: IncomingMessage) {
+  for (let i = 0; i < req.rawHeaders.length; i += 2) {
+    if (req.rawHeaders[i].toLowerCase() === "cookie") req.rawHeaders[i + 1] = withoutSessionCookie(cfg, req.rawHeaders[i + 1]);
+  }
+}
+
+/**
+ * Staging (any environment but production) is private: its owner, admins, viewers and organization members, signed in
+ * through the studio as for a private artifact (a one-time ticket from `POST /v1/apps/:name/envs/:env/view`, then a
+ * session cookie for that host only). Unlike an artifact it has a server: every method and WebSocket is gated, the
+ * cookie only counts on requests its own pages (or a navigation) send, and it's taken out before the app sees the request.
+ */
+function envGate(cfg: Config, store: Store) {
+  const own = (t: Target) => new URL(appSpec(cfg, store, t).appUrl).origin;
+  const viewer = async (t: Target, token: string | undefined) => {
+    if (!token) return undefined;
+    const acct = await store.pageSession(t.app.id, token, t.env!.id);
+    return acct && await store.access(t.app, acct) ? acct : undefined;
+  };
+  return {
+    /** A WebSocket handshake: browsers always send its page's origin; only this environment's own counts. */
+    async socketViewer(t: Target, req: IncomingMessage) {
+      if (req.headers.origin !== own(t)) return undefined;
+      const r = new Request("http://x/", { headers: { cookie: req.headers.cookie ?? "" } });
+      return viewer(t, oneCookie(r, pageCookie(cfg)));
+    },
+    /** A denial (sign in, or not allowed), or the request to serve, its session cookie taken out. */
+    async http(t: Target, req: Request): Promise<{ deny: Response } | { req: Request }> {
+      const url = new URL(req.url);
+      const extra = { "x-robots-tag": "noindex, nofollow", "referrer-policy": "no-referrer", "cache-control": "no-store" };
+      const read = req.method === "GET" || req.method === "HEAD";
+      const ticket = url.searchParams.get(PAGE_TICKET_PARAM);
+      if (ticket !== null && read) {
+        url.searchParams.delete(PAGE_TICKET_PARAM);
+        const s = await store.redeemPageTicket(t.app.id, ticket, PAGE_SESSION_MS, t.env!.id);
+        if (!s || !await store.access(t.app, s.account_id)) {
+          return { deny: new Response("This sign-in link expired or was already used. Open the app again.", { status: 403, headers: { "content-type": "text/plain; charset=utf-8", ...extra } }) };
+        }
+        const secure = cfg.scheme === "https" ? "; Secure" : "";
+        const back = "/" + url.pathname.replace(/^[/\\]+/, "") + url.search;
+        return {
+          deny: new Response(null, {
+            status: 303,
+            headers: { location: back, "set-cookie": `${pageCookie(cfg)}=${s.token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${PAGE_SESSION_MS / 1000}${secure}`, ...extra },
+          }),
+        };
+      }
+      // Other apps under the domain are the same site: their pages' requests carry the cookie (SameSite=Lax), so it
+      // counts only from this origin's own pages, or on a top-level navigation (a link: it reads, it doesn't act).
+      const origin = req.headers.get("origin"), site = req.headers.get("sec-fetch-site");
+      const navigation = read && req.headers.get("sec-fetch-mode") === "navigate";
+      const trusted = (!origin || origin === own(t)) && (!site || site === "same-origin" || site === "none" || navigation);
+      if (!trusted || !await viewer(t, oneCookie(req, pageCookie(cfg)))) {
+        const page = read && (req.headers.get("sec-fetch-mode") === "navigate" || (req.headers.get("accept") ?? "").includes("text/html"));
+        if (page) {
+          const login = pageLoginUrl(cfg, `${t.app.name}${ENV_SEP}${t.env!.name}`, url.pathname + url.search);
+          return { deny: new Response(null, { status: 302, headers: { location: login, ...extra } }) };
+        }
+        return { deny: new Response(`${t.env!.name} is private: open it from the studio first.`, { status: 401, headers: { "content-type": "text/plain; charset=utf-8", ...extra } }) };
+      }
+      const headers = new Headers(req.headers);
+      const rest = withoutSessionCookie(cfg, req.headers.get("cookie") ?? "");
+      if (rest) headers.set("cookie", rest);
+      else headers.delete("cookie");
+      const body = read ? null : req.body;
+      return { req: new Request(req.url, { method: req.method, headers, body, signal: req.signal, ...(body ? { duplex: "half" } : {}) } as RequestInit) };
+    },
+  };
+}
+
+/** A private environment's response: not cached by anything shared, not indexed. */
+function privately(res: Response): Response {
+  const h = new Headers(res.headers);
+  h.set("cache-control", "private, no-store");
+  h.set("x-robots-tag", "noindex, nofollow");
+  h.set("referrer-policy", "no-referrer");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+}
+
+/** `env`: the environment the host names (`<app>--<env>`); null: production (or a custom domain). */
 export function host(cfg: Config, store: Store, runtime: Runtime) {
   const servePage = pages(cfg, store);
-  return async (req: Request, appName: string, app?: App): Promise<Response> => {
+  const gate = envGate(cfg, store);
+  return async (req: Request, appName: string, app?: App, env: string | null = null): Promise<Response> => {
     app ??= await store.appByName(appName);
-    if (app?.kind === "page") return servePage(req, app);
-    if (!app || !app.current_deploy_id) {
-      return new Response(`No app named "${appName}" is deployed here.`, {
+    if (app?.kind === "page" && !env) return servePage(req, app);
+    const t = app && await hostTarget(store, appName, app, env);
+    const label = env ? `${appName}${ENV_SEP}${env}` : appName;
+    if (!t || !t.deployId) {
+      return new Response(`No app named "${label}" is deployed here.`, {
         status: 404,
         headers: { "content-type": "text/plain" },
       });
     }
+    if (t.env) {
+      const g = await gate.http(t, req);
+      if ("deny" in g) return g.deny;
+      return privately(await serve(t, g.req));
+    }
+    return serve(t, req);
+  };
+
+  async function serve(t: Target, req: Request): Promise<Response> {
     const url = new URL(req.url);
-    const config = JSON.parse(app.config) as { routes?: string[]; server?: boolean };
+    const config = JSON.parse(t.config) as { routes?: string[]; server?: boolean };
     const started = performance.now();
-    const p = paths(cfg, app.id);
+    const p = paths(cfg, t.app.id);
 
     if (config.server && serverRoute(config.routes, url.pathname)) {
-      const res = await runtime.fetch(appSpec(cfg, store, app), req);
+      const res = await runtime.fetch(appSpec(cfg, store, t), req);
       runtime.logs.push(
-        app.id,
+        t.key,
         "request",
         `${req.method} ${url.pathname} ${res.status} ${Math.round(performance.now() - started)}ms`,
       );
-      runtime.metrics.record(app.id, res.status, performance.now() - started);
+      runtime.metrics.record(t.key, res.status, performance.now() - started);
       return res;
     }
 
     if (req.method !== "GET" && req.method !== "HEAD") {
-      runtime.metrics.record(app.id, 405);
+      runtime.metrics.record(t.key, 405);
       return new Response("Method Not Allowed", { status: 405 });
     }
-    const res = await serveStatic(req, join(p.deploy(app.current_deploy_id), "public"), url);
-    runtime.metrics.record(app.id, res.status);
+    const res = await serveStatic(req, join(p.deploy(t.deployId!), "public"), url);
+    runtime.metrics.record(t.key, res.status);
     return res;
-  };
+  }
 }
 
 /** A deploy's static files: exact path, `.html`, directory index, SPA fallback (unless `spa: false`), then 404.html. */

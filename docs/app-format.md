@@ -90,7 +90,7 @@ export default {
 | `kv` | SDK only (cresslet ≥ 0.3.0, contract 1): `get(key)` → JSON value \| null, `set(key, value, { ttl })` (seconds), `delete(key)`, `incr(key, by = 1, { ttl })` (atomic; ttl applies when the counter starts), `list(prefix, { limit })` → `{key, value, expiresAt}[]`. Kept in the app's database (table `_cresslet_kv`), so it counts toward its size and moves with it |
 | `files` | `put(key, body, {contentType})`, `get(key) → Response \| null`, `delete(key)`, `list(prefix) → {key,size,contentType,updatedAt}[]` |
 | `secrets` | `get(name)` (throws, naming it, if unset), `optional(name) → string \| undefined`, record access (`secrets.NAME`, `Object.keys(secrets)`). Set via `cresslet secrets set`; `.env.cresslet` locally |
-| `app` | `{ id, name, url, deployId }` |
+| `app` | `{ id, name, url, deployId, env }`: `env` is `"production"`, or `"staging"` on the app's private staging host ([environments](api.md#environments)), whose `url` is `<app>--staging.<domain>` |
 
 `env` has the same `db` (minus `sql`; `query/first/run/exec` take SQL strings, `batch` takes `{sql, params}[]`), `files`,
 `secrets` (a plain record) and `app`.

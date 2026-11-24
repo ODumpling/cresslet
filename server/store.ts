@@ -77,9 +77,29 @@ export interface App {
 
 export type AppKind = "app" | "page";
 
+/**
+ * An environment of an app other than its production (docs/architecture.md#environments): its own deploy pointer and
+ * config (routes, server, crons), sandbox (uid), data and secret overrides, on `<app>--<name>.<domain>`.
+ */
+export interface Environment {
+  /** `env_…`: its runtime identity (sandbox, logs, metrics), as an app's id is production's. */
+  id: string;
+  app_id: string;
+  /** "staging" (ENV_NAMES in server/envs.ts). */
+  name: string;
+  current_deploy_id: string | null;
+  /** JSON: { routes, server, crons }, from its deploy's deploy.json. */
+  config: string;
+  uid_seq: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
 /** A one-time ticket (exchanged on the page's host for a session cookie), or that session. */
 export interface PageSession {
   app_id: string;
+  /** A private environment's session (migration 13); null: the page's. */
+  env_id?: string | null;
   account_id: string;
   ticket: number;
   expires_at: number;
@@ -100,6 +120,10 @@ export interface Deploy {
   git_repo?: string | null;
   /** The version tag the commit was given in that repository when it deployed (`v3`). */
   git_tag?: string | null;
+  /** The environment it was deployed to (`staging`); null: production. */
+  env?: string | null;
+  /** When it last became production's deploy by a promotion (a staging deploy). */
+  promoted_at?: number | null;
 }
 
 /** Source control providers (server/git.ts). */
@@ -1037,26 +1061,27 @@ export class Store implements RateHits {
 
   // ---- private page sessions (see host.ts)
   /** A one-time ticket for `accountId` to open the page, good for `ttlMs`. */
-  async pageTicket(appId: string, accountId: string, ttlMs: number): Promise<string> {
+  /** `envId`: for that environment of the app (a private staging host), not the page. */
+  async pageTicket(appId: string, accountId: string, ttlMs: number, envId: string | null = null): Promise<string> {
     const t = id("pvt", 24);
-    await this.db.run("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at) VALUES (?, ?, ?, 1, ?)",
-      await sha256(t), appId, accountId, Date.now() + ttlMs);
+    await this.db.run("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at, env_id) VALUES (?, ?, ?, 1, ?, ?)",
+      await sha256(t), appId, accountId, Date.now() + ttlMs, envId);
     return t;
   }
   /** Spends a ticket for this page: a session token good for `ttlMs`, or undefined. */
-  async redeemPageTicket(appId: string, ticket: string, ttlMs: number): Promise<{ token: string; account_id: string } | undefined> {
+  async redeemPageTicket(appId: string, ticket: string, ttlMs: number, envId: string | null = null): Promise<{ token: string; account_id: string } | undefined> {
     const hash = await sha256(ticket);
     const row = await this.db.get<PageSession>("DELETE FROM page_sessions WHERE hash = ? AND ticket = 1 RETURNING *", hash);
-    if (!row || row.app_id !== appId || row.expires_at < Date.now()) return undefined;
+    if (!row || row.app_id !== appId || (row.env_id ?? null) !== envId || row.expires_at < Date.now()) return undefined;
     const token = id("pvs", 24);
-    await this.db.run("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at) VALUES (?, ?, ?, 0, ?)",
-      await sha256(token), appId, row.account_id, Date.now() + ttlMs);
+    await this.db.run("INSERT INTO page_sessions (hash, app_id, account_id, ticket, expires_at, env_id) VALUES (?, ?, ?, 0, ?, ?)",
+      await sha256(token), appId, row.account_id, Date.now() + ttlMs, envId);
     return { token, account_id: row.account_id };
   }
-  /** The account a live session for this page belongs to. */
-  async pageSession(appId: string, token: string): Promise<string | undefined> {
+  /** The account a live session for this page (or this environment of the app) belongs to. */
+  async pageSession(appId: string, token: string, envId: string | null = null): Promise<string | undefined> {
     const row = await this.db.get<PageSession>("SELECT * FROM page_sessions WHERE hash = ? AND ticket = 0", await sha256(token));
-    return row && row.app_id === appId && row.expires_at > Date.now() ? row.account_id : undefined;
+    return row && row.app_id === appId && (row.env_id ?? null) === envId && row.expires_at > Date.now() ? row.account_id : undefined;
   }
   async prunePageSessions(now = Date.now()) {
     await this.db.run("DELETE FROM page_sessions WHERE expires_at < ?", now);
@@ -1286,11 +1311,28 @@ export class Store implements RateHits {
   // ---- deploys
   async addDeploy(d: Deploy) {
     await this.db.run(
-      `INSERT INTO deploys (id, app_id, created_at, bytes, file_count, has_server, source, git_sha, git_branch, git_repo)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, app_id, created_at, bytes, file_count, has_server, source, git_sha, git_branch, git_repo, env)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       d.id, d.app_id, d.created_at, d.bytes, d.file_count, d.has_server, d.source,
-      d.git_sha ?? null, d.git_branch ?? null, d.git_repo ?? null,
+      d.git_sha ?? null, d.git_branch ?? null, d.git_repo ?? null, d.env ?? null,
     );
+  }
+  /**
+   * An environment's deploy history, newest first: production's (`env` null) is what it was deployed or promoted to
+   * (ordered by when it got there); another environment's, what was deployed to it.
+   */
+  envDeploys(appId: string, env: string | null, limit = 20): Promise<Deploy[]> {
+    return env === null
+      ? this.db.all<Deploy>(`SELECT ${DEPLOY} FROM deploys WHERE app_id = ? AND (env IS NULL OR promoted_at IS NOT NULL)
+          ORDER BY COALESCE(promoted_at, created_at) DESC, rowid DESC LIMIT ?`, appId, limit)
+      : this.db.all<Deploy>(`SELECT ${DEPLOY} FROM deploys WHERE app_id = ? AND env = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`, appId, env, limit);
+  }
+  /** Production serves `deployId` (a staging deploy), promoted now: its pointer, config and history. */
+  async promoteDeploy(appId: string, deployId: string, config: unknown) {
+    await this.db.tx(async () => {
+      await this.db.run("UPDATE deploys SET promoted_at = ? WHERE id = ? AND app_id = ?", Date.now(), deployId, appId);
+      await this.setCurrentDeploy(appId, deployId, config);
+    });
   }
   setDeployTag(deployId: string, tag: string) {
     return this.db.run("UPDATE deploys SET git_tag = ? WHERE id = ?", tag, deployId);
@@ -1330,6 +1372,67 @@ export class Store implements RateHits {
   }
   async deleteSecret(appId: string, key: string) {
     await this.db.run("DELETE FROM secrets WHERE app_id = ? AND key = ?", appId, key);
+  }
+
+  // ---- environments (server/envs.ts)
+  environments(appId: string): Promise<Environment[]> {
+    return this.db.all<Environment>("SELECT * FROM environments WHERE app_id = ? ORDER BY created_at, name", appId);
+  }
+  environment(appId: string, name: string): Promise<Environment | undefined> {
+    return this.db.get<Environment>("SELECT * FROM environments WHERE app_id = ? AND name = ?", appId, name);
+  }
+  environmentById(envId: string): Promise<Environment | undefined> {
+    return this.db.get<Environment>("SELECT * FROM environments WHERE id = ?", envId);
+  }
+  /** The app's environment `name`, made if it has none yet (a first deploy to it). */
+  async ensureEnvironment(appId: string, name: string): Promise<Environment> {
+    const now = Date.now();
+    await this.db.run(
+      "INSERT INTO environments (id, app_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (app_id, name) DO NOTHING",
+      id("env"), appId, name, now, now,
+    );
+    return (await this.environment(appId, name))!;
+  }
+  async setEnvDeploy(envId: string, deployId: string, config: unknown) {
+    await this.db.run("UPDATE environments SET current_deploy_id = ?, config = ?, updated_at = ? WHERE id = ?",
+      deployId, JSON.stringify(config ?? {}), Date.now(), envId);
+  }
+  async deleteEnvironment(envId: string) {
+    await this.db.run("DELETE FROM environments WHERE id = ?", envId);
+  }
+  /** As uidSeq, for an environment's own sandbox uid (from the same counter: never an app's). */
+  async envUidSeq(envId: string): Promise<number> {
+    const get = () => this.db.get<{ uid_seq: number | null }>("SELECT uid_seq FROM environments WHERE id = ?", envId);
+    const row = await get();
+    if (!row) throw new Error(`no environment ${envId}`);
+    if (row.uid_seq !== null) return row.uid_seq;
+    return this.serialized("cresslet:uid-seq", async () => {
+      const again = await get();
+      if (!again) throw new Error(`no environment ${envId}`);
+      if (again.uid_seq !== null) return again.uid_seq;
+      const n = ((await this.db.get<{ value: number }>("SELECT value FROM meta WHERE key = 'uid_seq'"))?.value ?? 0) + 1;
+      await this.db.run("INSERT INTO meta (key, value) VALUES ('uid_seq', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", n);
+      await this.db.run("UPDATE environments SET uid_seq = ? WHERE id = ?", n, envId);
+      return n;
+    });
+  }
+  /** An environment's own secrets (overrides of production's, sealed bound to the environment and key). */
+  async envSecretKeys(envId: string): Promise<string[]> {
+    return (await this.db.all<{ key: string }>("SELECT key FROM env_secrets WHERE env_id = ? ORDER BY key", envId)).map((r) => r.key);
+  }
+  /** What an environment's sandbox sees: production's secrets, its own overriding them. */
+  async envSecrets(env: Pick<Environment, "id" | "app_id">): Promise<Record<string, string>> {
+    const rows = await this.db.all<{ key: string; value: Uint8Array }>("SELECT key, value FROM env_secrets WHERE env_id = ?", env.id);
+    return { ...await this.secrets(env.app_id), ...Object.fromEntries(rows.map((r) => [r.key, this.#box.open(env.id, r.key, Buffer.from(r.value).toString()).value])) };
+  }
+  async setEnvSecret(envId: string, key: string, value: string) {
+    await this.db.run(
+      "INSERT INTO env_secrets (env_id, key, value) VALUES (?, ?, ?) ON CONFLICT (env_id, key) DO UPDATE SET value = excluded.value",
+      envId, key, this.#seal(envId, key, value),
+    );
+  }
+  async deleteEnvSecret(envId: string, key: string) {
+    await this.db.run("DELETE FROM env_secrets WHERE env_id = ? AND key = ?", envId, key);
   }
 
   // ---- source control (server/git.ts). Tokens are sealed bound to the account and which token it is, so a
@@ -1715,7 +1818,7 @@ export class AccountDisabledError extends Error {
 export const inviteLock = (appId: string) => `cresslet:invite:${appId}`;
 
 /** Explicit columns where Postgres has a `rowid` column (SQLite's is implicit): rows look the same in both. */
-const DEPLOY = "id, app_id, created_at, bytes, file_count, has_server, source, git_sha, git_branch, git_repo, git_tag";
+const DEPLOY = "id, app_id, created_at, bytes, file_count, has_server, source, git_sha, git_branch, git_repo, git_tag, env, promoted_at";
 /** SecretBox binding for an account's source control tokens (app secrets use the app id: `app_…`). */
 const gitScope = (accountId: string) => `acct:${accountId}`;
 const gitKey = (provider: string, which: "access" | "refresh") => `git:${provider}:${which}`;

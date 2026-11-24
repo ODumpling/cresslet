@@ -2,7 +2,7 @@
 // handler and builds the documented `env` (docs/app-format.md) on top of workerd bindings:
 //   HOST     service binding to the control plane, which owns the app's db and files
 //   (secrets are fetched once from HOST /secrets, so they never sit on disk in plaintext)
-//   APP      json binding { id, name, url, deployId }
+//   APP      json binding { id, name, url, deployId, env } (env: "production", or the environment, e.g. "staging")
 // The env is also published for the `cresslet` SDK (cresslet-runtime.ts, imported before the app).
 import { Buffer } from "node:buffer";
 import { runtime } from "cresslet-runtime";
@@ -19,7 +19,7 @@ interface ExecutionContext {
 /** This worker's bindings (server/runtime.ts workerdConfig). */
 interface Bindings {
   HOST: { fetch(url: string, init?: RequestInit): Promise<Response> };
-  APP: { id: string; name: string; url: string; deployId: string };
+  APP: { id: string; name: string; url: string; deployId: string; env?: string };
 }
 type Env = Awaited<ReturnType<typeof makeEnv>>;
 /** A bound SQL value, or what a query returns (bigints and blobs tagged on the wire). */

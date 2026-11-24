@@ -8,21 +8,31 @@ import { useAlive } from "../../lib/hooks.ts";
 import { toast } from "../../lib/toast.tsx";
 import { FormError } from "../../ui/bits.tsx";
 import { Icon, SrOnly } from "../../ui/icons.tsx";
-import { appPath, useApp } from "./AppLayout.tsx";
+import { envPath, useApp } from "./AppLayout.tsx";
 
 const SECRET_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 
 export function AppSecrets() {
-  const { name, d } = useApp();
+  const { name, env, d } = useApp();
   const alive = useAlive();
   const a = d.app, manage = canManage(a.access) && a.claimed;
-  // The names (Refresh brings the detail's again).
+  const prod = env === "production";
+  // The names (Refresh brings the detail's again); another environment: whose each is (its own override, or production's).
   const [keys, setKeys] = useState(d.secrets);
+  const [sources, setSources] = useState(d.secretSources ?? {});
   const [shown, setShown] = useState(d);
   if (shown !== d) {
     setShown(d);
     setKeys(d.secrets);
+    setSources(d.secretSources ?? {});
   }
+  const own = (k: string) => prod || sources[k] === env;
+  type Saved = { keys: string[]; secrets?: { key: string; source: string }[] };
+  const take = (r: Saved) => {
+    if (!r.secrets) return setKeys(r.keys);
+    setKeys(r.secrets.map((x) => x.key));
+    setSources(Object.fromEntries(r.secrets.map((x) => [x.key, x.source])));
+  };
   const [status, setStatus] = useState("");
   const [deleting, setDeleting] = useState<ReadonlySet<string>>(new Set());
   const [key, setKey] = useState("");
@@ -35,7 +45,8 @@ export function AppSecrets() {
   const exists = keys.includes(key.trim().toUpperCase());
 
   async function remove(k: string) {
-    if (!confirm(`Delete secret ${k} from ${name}? The app restarts without it.`)) return;
+    if (!confirm(prod ? `Delete secret ${k} from ${name}? The app (and its environments that don't override it) restart without it.`
+      : `Delete ${env}'s own ${k}? ${env} restarts with production's${sources[k] ? "" : " (if it has one)"}.`)) return;
     const done = () => setDeleting((s) => {
       const n = new Set(s);
       n.delete(k);
@@ -43,7 +54,8 @@ export function AppSecrets() {
     });
     setDeleting((s) => new Set(s).add(k));
     try {
-      await api(appPath(name, `/secrets/${encodeURIComponent(k)}`), { method: "DELETE" });
+      const r = await api<Saved>(envPath(name, env, `/secrets/${encodeURIComponent(k)}`), { method: "DELETE" });
+      if (alive.current && !prod) flushSync(() => take(r));
     } catch (e) {
       if (alive.current) done();
       toast(`Could not delete ${k}: ${errorMessage(e)}`);
@@ -53,7 +65,7 @@ export function AppSecrets() {
     if (!alive.current) return;
     flushSync(() => {
       done();
-      setKeys((ks) => ks.filter((x) => x !== k));
+      if (prod) setKeys((ks) => ks.filter((x) => x !== k));
       setStatus(`${k} deleted`);
     });
     refocusId("secrets-title");
@@ -67,14 +79,14 @@ export function AppSecrets() {
       keyIn.current?.focus();
       return;
     }
-    const msg = keys.includes(k) ? `${k} replaced` : `${k} added`;
+    const msg = !keys.includes(k) ? `${k} added` : own(k) ? `${k} replaced` : `${k} overridden in ${env}`;
     setSaving(true);
     try {
-      const r = await api<{ keys: string[] }>(appPath(name, "/secrets"), json("PUT", { [k]: value }));
+      const r = await api<Saved>(envPath(name, env, "/secrets"), json("PUT", { [k]: value }));
       toast(msg);
       if (!alive.current) return;
       flushSync(() => {
-        setKeys(r.keys);
+        take(r);
         setStatus(msg);
         setKey("");
         setValue("");
@@ -91,7 +103,8 @@ export function AppSecrets() {
   return (
     <>
       <p className="muted lead">Your server reads these with <code>{'secrets.get("NAME")'}</code>
-        {" (import { secrets } from \"cresslet\"). Values are write-only: you can replace or delete one, never read it back."}</p>
+        {" (import { secrets } from \"cresslet\"). Values are write-only: you can replace or delete one, never read it back."}
+        {prod ? null : ` ${env[0]!.toUpperCase() + env.slice(1)} sees production's secrets; one set here overrides production's for ${env} only.`}</p>
       {!a.claimed ? <p className="muted small">Secrets need an app with an owner (this is an anonymous app from before every app needed an account).</p>
         : !canManage(a.access) ? <p className="muted small">Only the owner and admins can change secrets.</p> : null}
       <div className={manage ? "detail-grid" : ""}>
@@ -103,21 +116,23 @@ export function AppSecrets() {
               <tbody>
                 {keys.length ? keys.map((k) => (
                   <tr key={k}>
-                    <td><span className="mono">{k}</span></td>
+                    <td><span className="mono">{k}</span>{prod ? null : <span className="badge">{own(k) ? env : "production"}</span>}</td>
                     <td className="muted mono" aria-hidden="true">••••••••</td>
                     <td className="actions">
                       {manage ? (
                         <>
-                          <button className="btn sm" type="button" id={`replace-${k}`} aria-label={`Replace ${k}`} onClick={() => {
+                          <button className="btn sm" type="button" id={`replace-${k}`} aria-label={`${own(k) ? "Replace" : "Override"} ${k}`} onClick={() => {
                             flushSync(() => {
                               setKey(k);
                               setValue("");
                             });
                             valIn.current?.focus();
-                          }}>Replace</button>
-                          <button className="btn sm danger" type="button" id={`delete-${k}`} aria-label={`Delete ${k}`} disabled={deleting.has(k)} onClick={() => void remove(k)}>
-                            <Icon name="trash" />Delete
-                          </button>
+                          }}>{own(k) ? "Replace" : "Override"}</button>
+                          {own(k) ? (
+                            <button className="btn sm danger" type="button" id={`delete-${k}`} aria-label={`Delete ${k}`} disabled={deleting.has(k)} onClick={() => void remove(k)}>
+                              <Icon name="trash" />Delete
+                            </button>
+                          ) : null}
                         </>
                       ) : null}
                     </td>

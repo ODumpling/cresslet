@@ -10,6 +10,7 @@ import { credits as toCredits, ledgerEntry, ledgerPage, nextPeriod, period, peri
 import type { Runtime } from "./runtime.ts";
 import { inspect } from "./inspect.ts";
 import { HttpError, KEEP_DEPLOYS, removeAppFiles } from "./deploys.ts";
+import { targetKeys } from "./envs.ts";
 
 export type Env = { Bindings: { remoteAddr?: string }; Variables: { account?: Account; token?: Token; bearer?: string } };
 
@@ -34,13 +35,16 @@ export function siteAdminActor(cfg: Config, c: Context<Env>, isAdminToken: (bear
 
 /** Permanently removes an app: process, rows (deploys, secrets, domains cascade), logs, files. */
 export async function purgeApp(cfg: Config, store: Store, runtime: Runtime, a: App) {
+  const keys = await targetKeys(store, a.id); // production's and its environments' sandboxes
   await store.deleteApp(a.id); // first: no new request starts its sandbox
   try {
-    await runtime.stopSettled(a.id);
+    await Promise.all(keys.map((k) => runtime.stopSettled(k)));
   } finally {
-    runtime.logs.drop(a.id);
-    runtime.metrics.drop(a.id);
-    runtime.cronRuns.drop(a.id);
+    for (const k of keys) {
+      runtime.logs.drop(k);
+      runtime.metrics.drop(k);
+      runtime.cronRuns.drop(k);
+    }
     await removeAppFiles(cfg, a.id); // no row is left to retry from
   }
 }
@@ -63,17 +67,20 @@ async function dirBytes(dir: string): Promise<number> {
 
 const fileBytes = (p: string) => lstat(p).then((s) => s.size, () => 0);
 
+/** Disk an app uses: its deploys, and its data (production's and its environments', which count as the app's). */
 export async function usage(cfg: Config, appId: string) {
   const p = paths(cfg, appId);
-  const [deploys, files, db, wal, shm] = await Promise.all([
+  const envs = await readdir(join(p.app, "env")).catch(() => [] as string[]);
+  const dbBytes = async (db: string) => (await Promise.all([db, db + "-wal", db + "-shm"].map(fileBytes))).reduce((x, y) => x + y, 0);
+  const [deploys, files, database, envBytes] = await Promise.all([
     dirBytes(p.deploys),
     dirBytes(p.files),
-    fileBytes(p.db),
-    fileBytes(p.db + "-wal"),
-    fileBytes(p.db + "-shm"),
+    dbBytes(p.db),
+    Promise.all(envs.map(async (n) => ({ name: n, database: await dbBytes(p.env(n).db), files: await dirBytes(p.env(n).files) }))),
   ]);
-  const database = db + wal + shm;
-  return { deploys, database, files, total: deploys + database + files };
+  const environments = Object.fromEntries(envBytes.map((e) => [e.name, { database: e.database, files: e.files }]));
+  const envTotal = envBytes.reduce((x, e) => x + e.database + e.files, 0);
+  return { deploys, database, files, ...(envBytes.length ? { environments } : {}), total: deploys + database + files + envTotal };
 }
 
 /**
@@ -219,7 +226,7 @@ export function adminRoutes(
     }
     if (!a.deleted_at) {
       await store.setDeleted(a.id, Date.now()); // first: no request starts it again after the stop
-      runtime.stop(a.id);
+      for (const k of await targetKeys(store, a.id)) runtime.stop(k);
       runtime.logs.push(a.id, "system", `site deleted by site admin ${who}`);
     }
     return c.json({ site: await siteView((await store.appById(a.id, true))!) });

@@ -34,8 +34,11 @@ import type { Config } from "./config.ts";
 
 const CONTROLLERS = ["cpu", "memory", "pids"];
 const MAX_UID = 4294967294;
-/** Run dirs (and cgroups) are `<instance>-<appId>-<6 hex>`; `instance` is persisted in the data dir. */
-export const RUN_DIR_RE = /^([A-Za-z0-9_-]{8})-app_[0-9a-f]+-[0-9a-f]{6}$/;
+/**
+ * Run dirs (and cgroups) are `<instance>-<key>-<6 hex>`, the key an app's id or an environment's (`env_…`, as long);
+ * `instance` is persisted in the data dir.
+ */
+export const RUN_DIR_RE = /^([A-Za-z0-9_-]{8})-(?:app|env)_[0-9a-f]+-[0-9a-f]{6}$/;
 /** Longest run-dir name + "/a.sock": keeps unix socket paths under the ~104-byte limit (macOS). */
 const RUN_SUFFIX = 1 + 8 + 1 + 24 + 1 + 6 + "/a.sock".length;
 /** gVisor: runsc's state dir is `<run dir>.gv` and holds its control socket (Linux cap: 107 bytes). */

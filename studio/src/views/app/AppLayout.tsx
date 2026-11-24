@@ -2,7 +2,7 @@
 // only): the header, its actions and tabs. The app's detail loads here and the tabs read it (useApp); Refresh
 // reloads it and the open tab's own data.
 import { Link, Outlet, useNavigate, useParams } from "@tanstack/react-router";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type * as API from "../../../api-types.ts";
 import { api, errorMessage } from "../../lib/api.ts";
 import { refocus } from "../../lib/focus.ts";
@@ -13,9 +13,16 @@ import { useSession } from "../../lib/session.ts";
 import { ExtLink, Icon, SrOnly } from "../../ui/icons.tsx";
 
 export const appPath = (name: string, rest = "") => `/v1/apps/${encodeURIComponent(name)}${rest}`;
+/** As appPath, of one of the app's environments (`?env=`; production: none). */
+export const envPath = (name: string, env: string, rest = "") => {
+  const p = appPath(name, rest);
+  return env === "production" ? p : `${p}${p.includes("?") ? "&" : "?"}env=${encodeURIComponent(env)}`;
+};
 
 interface AppCtx {
   name: string;
+  /** The environment the dashboard shows ("production", "staging"): its deploys, logs, database, secrets, crons. */
+  env: string;
   d: API.AppDetail;
   /** Reloads the detail and the open tab's data; resolves true once both are in the page. */
   refresh: () => Promise<boolean>;
@@ -69,9 +76,30 @@ export function AppLayout() {
   return user ? <AppPage key={`${user}\n${name}`} name={name} /> : null;
 }
 
+/** The environment the dashboard showed last for this app, in this tab. */
+const envKey = (name: string) => `cresslet.app-env.${name}`;
+function savedEnv(name: string) {
+  try {
+    return sessionStorage.getItem(envKey(name)) ?? "production";
+  } catch {
+    return "production";
+  }
+}
+
 function AppPage({ name }: { name: string }) {
   const navigate = useNavigate();
-  const detail = useLoad(() => api<API.AppDetail>(appPath(name)), [name]);
+  const [env, setEnvState] = useState(() => savedEnv(name));
+  const setEnv = useCallback((e: string) => {
+    setEnvState(e);
+    try {
+      sessionStorage.setItem(envKey(name), e);
+    } catch { /* storage blocked */ }
+  }, [name]);
+  const detail = useLoad(() => api<API.AppDetail>(envPath(name, env)), [name, env]);
+  // An environment that's gone (deleted elsewhere): back to production.
+  useEffect(() => {
+    if (env !== "production" && detail.error?.status === 404) setEnv("production");
+  }, [env, detail.error, setEnv]);
   const tabReload = useRef<(() => Promise<boolean>) | null>(null);
   const register = useCallback((fn: () => Promise<boolean>) => {
     tabReload.current = fn;
@@ -87,7 +115,9 @@ function AppPage({ name }: { name: string }) {
   const again = () => void refresh().then((ok) => ok && refocus(document.querySelector<HTMLElement>("#site-actions button")));
 
   const d = detail.data;
-  const ctx = useMemo(() => (d ? { name, d, refresh, register } : null), [name, d, refresh, register]);
+  // (The detail of the environment asked for: while another loads, the one shown stays until it's in.)
+  const shown = d && (d.env ?? "production") === env ? d : null;
+  const ctx = useMemo(() => (shown ? { name, env, d: shown, refresh, register } : null), [name, env, shown, refresh, register]);
   const a = d?.app;
   const sub = a
     ? [ACCESS_LABEL[a.access] ? `You're ${a.access === "owner" ? (a.org ? "an owner" : "the owner") : `${a.access === "admin" ? "an" : "a"} ${a.access}`}` : null,
@@ -130,13 +160,32 @@ function AppPage({ name }: { name: string }) {
           ) : null}
         </div>
       </header>
+      {d?.environments && d.environments.length > 1 ? <EnvSwitch envs={d.environments} env={env} setEnv={setEnv} /> : null}
       <Tabs name={name} />
       <section id="site-body" aria-labelledby="site-title">
-        {ctx ? <AppContext value={ctx}><Outlet /></AppContext>
+        {ctx ? <AppContext value={ctx}><Outlet key={env} /></AppContext>
           : err ? <p className="error">{hidden ? `There's no app named ${name} that you can see.` : `Could not load: ${err.message}`}</p>
           : <p className="muted">Loading…</p>}
       </section>
     </main>
+  );
+}
+
+/** Production | staging: which environment the dashboard (every tab) shows. */
+function EnvSwitch({ envs, env, setEnv }: { envs: API.Environment[]; env: string; setEnv: (e: string) => void }) {
+  const cur = envs.find((e) => e.name === env);
+  return (
+    <div className="row start env-switch" id="env-switch" role="group" aria-label="Environment">
+      {envs.map((e) => (
+        <button key={e.name} type="button" className={`btn sm${e.name === env ? " primary" : ""}`} aria-pressed={e.name === env}
+          id={`env-${e.name}`} onClick={() => setEnv(e.name)}>
+          {e.name === "production" ? "Production" : e.name[0]!.toUpperCase() + e.name.slice(1)}
+        </button>
+      ))}
+      {cur && cur.name !== "production" ? (
+        <span className="muted small"><ExtLink href={cur.url}>{cur.url.replace(/^https?:\/\//, "")}</ExtLink>{" · private: you, its collaborators and organization"}</span>
+      ) : null}
+    </div>
   );
 }
 

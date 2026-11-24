@@ -33,6 +33,7 @@ data/cresslet.db                         metadata (unless CRESSLET_DATABASE_URL:
 data/apps/<appId>/deploys/<depId>/     immutable: public/, server.js, deploy.json
 data/apps/<appId>/data/db.sqlite       app database (survives deploys)
 data/apps/<appId>/data/files/          app file storage
+data/apps/<appId>/env/<name>/          an environment's own db.sqlite and files/ (staging: docs/architecture.md#environments)
 /tmp/cresslet-sock/<inst>-<appId>-<n>/  per-spawn run dir (<inst>: id in data/instance, so instances sharing the dir never sweep each other's; don't point copies of one data dir at the same socket or cgroup dir), fresh each start, all the sandbox can see:
                                          config.capnp, worker.js, app.js (copy of server.js), app.json,
                                          a.sock (workerd's listener, created by the control plane), h.sock (bindings: one app per socket = identity),
@@ -70,6 +71,22 @@ data/apps/<appId>/data/files/          app file storage
 2. `POST /v1/deploys` with files + server bundle → written to new immutable deploy dir.
 3. Pointer swap (`apps.current_deploy_id`), sandbox stopped → next request cold-starts new code (~70 ms).
 4. Last 5 deploys kept; `rollback` swaps the pointer back. A page (`PUT /v1/pages/:name`) keeps only the version it serves (a replaced one goes a minute later, so requests in flight finish, or sooner past 3 versions).
+
+## Environments
+
+An app can have a `staging` environment ([api.md](api.md#environments)); the model is general (`ENV_NAMES` in [`server/envs.ts`](../server/envs.ts): later, per-pull-request previews), only `staging` is allowed.
+
+- **Production is the app**, unchanged: `apps.current_deploy_id`, `apps.config`, `secrets`, `data/apps/<id>/data/`, `<app>.<domain>` and custom domains. Nothing migrates for existing apps.
+- **Another environment is a row of `environments`** (migration 13): its own deploy pointer and config (copied from the deploy's `deploy.json`, as production's), uid number (from the same counter as apps: never shared), and secret overrides (`env_secrets`, sealed bound to the environment and key). Deploys share the app's deploys dir and table; each records the environment it went to (`deploys.env`) and, when production was promoted to it, `promoted_at`.
+- **A target** (`Target` in `server/envs.ts`) is what serves one environment: the app, the environment or null, its deploy and config, and a runtime key, the app's id or the environment's (`env_…`, the same length, so run dirs and socket paths fit: `RUN_DIR_RE`). `Runtime`, `Logs`, `Metrics` and `CronRuns` are keyed by it, so staging has its own sandbox process, bindings thread and socket (identity), uid, logs and metrics; the bundle comes from the app's deploys dir, the data from the environment's dir. Placement, authorization, the egress allowlist and the per-app deploy rate stay the app's: `cluster.local(app.id)`, so an environment always runs where its app does.
+- **Host**: `<app>--<env>.<domain>` (`splitLabel`; `validName` already refuses `--` in app names). Custom domains are production only.
+- **Private**: `host.ts` `envGate`: a session from a one-time ticket (`page_sessions`, its `env_id` bound, so a session for one host never counts on another), single cookie value, honoured only from the environment's own origin or a top-level navigation (other apps under the domain are the same site: SameSite=Lax doesn't stop their requests), every method and WebSocket (origin must be its own) gated, the cookie stripped before the sandbox sees the request.
+- **Promote** (`POST /v1/apps/:name/promote`): production's pointer moves to the environment's current deploy (the one the caller saw, checked again under `deploysLock` together with the swap). A deploy built from a commit of the linked repository first lands on the default branch (`promoteCommit` in `server/git.ts`): exactly that commit, fast-forward only (a stack's top through `landUpTo`; another branch: `moveBranch`, never forced), verified at the default branch's head, so production serves the commit the default branch then holds; then it's tagged `v<n>`. A refusal moves nothing; a promotion that stopped after landing finds the default branch at the commit and carries on. As for deploys, the commit is the client's word (provenance); the server checks it's that commit on GitHub, not that the bundle was built from it.
+- **History and pruning**: production's history is deploys with `env` null or `promoted_at` set (by when they got there), staging's those deployed to it; rollback stays within one. Each environment keeps its current deploy and last 5; a deploy goes when no environment keeps it.
+- **Crons**: staging's never fire on schedule (the scheduler only queues production's); Run now runs one in its sandbox.
+- **Seed**: `node:sqlite` `backup()` of production's live database (WAL; off the event loop) into a temp file, then staging's sandbox stopped and settled and the file moved in. Files aren't copied (their index is a database of its own).
+- **Lifecycle**: purge, soft delete, secret and egress changes stop every target of the app (`targetKeys`); deleting an environment stops it, removes its data and lets its deploys be pruned.
+- **Rollback of the server**: an older server ignores the tables. It would serve production as before, but its prune keeps only `apps.current_deploy_id` (staging's live deploy may go) and its rollback can pick a staging deploy. Don't downgrade while staging is in use.
 
 ## Source control
 

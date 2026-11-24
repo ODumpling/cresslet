@@ -699,7 +699,8 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
      * or a protected branch.
      */
     /** `builder.running`: the deploy was asked for by one of the AI builder's commands (as opposed to by hand). */
-    prepareDeploy: (log: (line: string) => void = () => {}, signal?: AbortSignal, builder?: { turn: () => { title: string; prompt: string } | null; running: () => boolean }) => serial(async (): Promise<Provenance> => {
+    /** `merge: false` (a staging deploy): the branch committed and built as it is, not merged (promoting merges it). */
+    prepareDeploy: (log: (line: string) => void = () => {}, signal?: AbortSignal, builder?: { turn: () => { title: string; prompt: string } | null; running: () => boolean }, { merge = true } = {}) => serial(async (): Promise<Provenance> => {
       signal?.throwIfAborted();
       // The AI builder's request, as of now (this step may have waited for others): a deploy from one of its commands
       // commits it as its change; any other waits (deployed now, its edits would go into the change before).
@@ -727,7 +728,7 @@ export function createGitWorkspace(o: GitWorkspaceOptions) {
       }
       // What's built must be what was committed: a change made since stops the deploy (it stays, unpushed).
       unchangedSince(rev, "deploying");
-      if (s.activeBranch === s.defaultBranch) return { sha: synced.sha, branch: s.defaultBranch, repo, files: synced.files };
+      if (s.activeBranch === s.defaultBranch || !merge) return { sha: synced.sha, branch: s.activeBranch, repo, files: synced.files };
       signal?.throwIfAborted(); // stopped: nothing merged
       log(`merging ${s.activeBranch} into ${s.defaultBranch}…`);
       let m: { mergedSha: string; fastForward: boolean; treeChanged: boolean; files?: GitFile[]; filesError?: string };

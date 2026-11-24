@@ -8,20 +8,22 @@ import { fmtBytes, plural } from "../../lib/format.ts";
 import { useAlive, useLoad } from "../../lib/hooks.ts";
 import { EmptyState } from "../../ui/bits.tsx";
 import { Icon } from "../../ui/icons.tsx";
-import { appPath, TabError, useApp, useTabReload } from "./AppLayout.tsx";
+import { envPath, TabError, useApp, useTabReload } from "./AppLayout.tsx";
 
 const DB_PAGE = 50;
 /** The page you were on, by app + table (for this page load). */
 const pages: Record<string, number> = {};
 const quoteIdent = (n: string) => `"${n.replace(/"/g, '""')}"`;
-const query = <T,>(name: string, sql: string, params?: unknown[]) => api<T>(appPath(name, "/db/query"), json("POST", params ? { sql, params } : { sql }));
+/** `at`: the app and environment (its own database). */
+const query = <T,>(at: { name: string; env: string }, sql: string, params?: unknown[]) =>
+  api<T>(envPath(at.name, at.env, "/db/query"), json("POST", params ? { sql, params } : { sql }));
 
 type Table = { name: string; count: number; schema?: string };
 
 export function AppDatabase() {
-  const { name } = useApp();
+  const { name, env } = useApp();
   const { table = "" } = useParams({ from: "/apps/$name/database/{-$table}" });
-  const db = useLoad(() => api<API.DbTables>(appPath(name, "/db?limit=0")), [name], { keep: true });
+  const db = useLoad(() => api<API.DbTables>(envPath(name, env, "/db?limit=0")), [name, env], { keep: true });
   // Refresh: the tables, then the rows shown (Browse reloads with them).
   const reload = db.reload;
   useTabReload(reload);
@@ -101,8 +103,9 @@ function ResultTable({ rows, label, columns = null }: { rows: API.DbRows["rows"]
 
 /** The selected table, a page at a time. */
 function Browse({ sel, tables }: { sel: Table; tables: API.DbTables }) {
-  const { name } = useApp();
-  const key = `${name}\n${sel.name}`;
+  const { name, env } = useApp();
+  const at = { name, env };
+  const key = `${name}\n${env}\n${sel.name}`;
   const [offset, setOffset] = useState(() => pages[key] ?? 0);
   /** The pager button pressed, until its page is in. */
   const moved = useRef<"db-prev" | "db-next" | null>(null);
@@ -111,14 +114,14 @@ function Browse({ sel, tables }: { sel: Table; tables: API.DbTables }) {
   const cols = useRef<{ of: API.DbTables; cols: Promise<Column[]> } | null>(null);
   const load = useCallback(async () => {
     if (cols.current?.of !== tables) {
-      const p = query<{ rows: { name: string; type: string; pk: number }[] }>(name, "SELECT name, type, pk FROM pragma_table_info(?) ORDER BY cid", [sel.name]).then((x) => x.rows);
+      const p = query<{ rows: { name: string; type: string; pk: number }[] }>(at, "SELECT name, type, pk FROM pragma_table_info(?) ORDER BY cid", [sel.name]).then((x) => x.rows);
       cols.current = { of: tables, cols: p };
       p.catch(() => cols.current?.cols === p && (cols.current = null)); // a failed read is tried again
     }
     const c = await cols.current.cols;
-    const r = await query<API.DbRows>(name, `SELECT * FROM ${quoteIdent(sel.name)} LIMIT ? OFFSET ?`, [DB_PAGE, offset]);
+    const r = await query<API.DbRows>(at, `SELECT * FROM ${quoteIdent(sel.name)} LIMIT ? OFFSET ?`, [DB_PAGE, offset]);
     return { cols: c, rows: r.rows, offset };
-  }, [name, sel.name, offset, tables]);
+  }, [name, env, sel.name, offset, tables]);
   const page = useLoad(load, [load], { keep: true });
   useEffect(() => {
     const from = moved.current;
@@ -168,7 +171,8 @@ type Out = { running: true } | { rows: API.DbRows; ms: number } | { error: strin
 
 /** Any read-only SQL. */
 function Query({ sel }: { sel: Table }) {
-  const { name } = useApp();
+  const { name, env } = useApp();
+  const at = { name, env };
   const alive = useAlive();
   const [sql, setSql] = useState(`SELECT * FROM ${quoteIdent(sel.name)} LIMIT 100`);
   const [out, setOut] = useState<Out>(null);
@@ -181,7 +185,7 @@ function Query({ sel }: { sel: Table }) {
     const started = performance.now();
     setOut({ running: true });
     try {
-      const r = await query<API.DbRows>(name, sql);
+      const r = await query<API.DbRows>(at, sql);
       if (alive.current) setOut({ rows: r, ms: Math.round(performance.now() - started) });
     } catch (err) {
       if (alive.current) setOut({ error: errorMessage(err) });

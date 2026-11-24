@@ -14,7 +14,7 @@ import {
   assertLinked, assertNotBelowTop, assertSyncable, carryOn, changePull, type PullError, commitChange, deleteSetAside, fold, followed, undoPlan, goBack, landed, landNext, landUpTo, locked, pullIn, readStacks, restore,
   restack, setAsideBranches, stackPulls, submitStack, updateBottom,
 } from "./stack.ts";
-import { type Account, type App, type AppRepo, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
+import { type Account, type App, type AppRepo, type Deploy, type GitConnection, type GitProvider, id, type Role, type Store } from "./store.ts";
 
 /** Refresh an access token this long before it expires. */
 const REFRESH_EARLY_MS = 5 * 60_000;
@@ -1631,5 +1631,63 @@ export function gitRoutes(
     return tag;
   }
 
-  return { repoView, callback, tagDeploy };
+  /**
+   * Promoting a staging deploy built from a commit of the linked repository (docs/architecture.md#environments): the
+   * default branch is moved to exactly that commit, as the user, a fast-forward only (never a merge commit, so
+   * production serves the commit the default branch then holds): a stack's top change lands as a Deploy's merge does
+   * (each change's pull request merged with its own turn), another branch's commit is moved to directly. Refused, with
+   * nothing moved: the default branch has commits the deploy doesn't (`default_moved`), takes no direct moves
+   * (`branch_protected`), the deploy's branch was pushed to since (`moved`), the commit isn't on GitHub. Already at it
+   * (a promotion that stopped after landing, or a staging deploy of the default branch): nothing to move. Resolves to
+   * the provenance to tag once production serves it; null: not built from the linked repository (pointer only).
+   */
+  async function promoteCommit(c: Context<Env>, a: App, d: Deploy): Promise<{ sha: string; branch: string; repo: string } | null> {
+    if (!d.git_sha) return null;
+    const repo = await store.getAppRepo(a.id);
+    if (!repo || !gh) return null;
+    const acct = c.get("account");
+    const where = `${repo.owner}/${repo.name}`;
+    if (!acct) throw new HttpError(401, `${a.name} is linked to ${where}: promote it signed in (it merges on GitHub as you; a deploy key can't)`, "unauthorized");
+    await authorize(c, a, "deploy", { account: true });
+    if (!await store.getGitConnection(acct.id, provider)) {
+      throw new HttpError(403, `connect GitHub first: promoting ${a.name} moves ${where}'s ${repo.default_branch} as you`, "git_not_connected");
+    }
+    const { client } = await as(acct);
+    const info = await client.repoById(repo.repo_id);
+    const names = [where, info.fullName].map((n) => n.toLowerCase());
+    if (d.git_repo && !names.includes(d.git_repo.toLowerCase())) {
+      throw new HttpError(409, `this staging deploy was built from ${d.git_repo}, not ${info.fullName}: deploy to staging again`, "conflict");
+    }
+    const r = { owner: info.owner, name: info.name }, def = info.defaultBranch, sha = d.git_sha, short = sha.slice(0, 7);
+    const now = { ...repo, owner: info.owner, name: info.name, default_branch: def };
+    const head = await client.branchHead(r, def);
+    if (!head) throw new HttpError(404, `no branch ${def} on GitHub`, "branch_not_found");
+    if (head !== sha) {
+      const ahead = await client.contains(r, sha, head).catch((e) => {
+        if (e instanceof HttpError && e.status === 404) throw new HttpError(409, `${short} isn't on GitHub (push it), so ${def} can't be moved to it`, "not_pushed");
+        throw e;
+      });
+      if (!ahead) {
+        throw new HttpError(409, `${def} has commits this staging deploy (${short}) doesn't: bring ${def} into ${d.git_branch ?? "its branch"} (Update stack), deploy to staging again, then promote. Nothing was merged`, "default_moved");
+      }
+      const top = d.git_branch ? (await store.openStackChanges(a.id)).find((x) => x.branch === d.git_branch && x.sha === sha) : undefined;
+      if (top) {
+        await landUpTo({ provider: client, store, appId: a.id, repo: now, r }, top.id, sha);
+      } else {
+        const guarded = await client.branchProtection(r, def);
+        if (guarded) throw new HttpError(422, `${guarded}: merge ${d.git_branch ?? short} through its pull request, deploy ${def} to staging, then promote`, "branch_protected");
+        if (d.git_branch && d.git_branch !== def) {
+          const at = await client.branchHead(r, d.git_branch);
+          if (at && at !== sha) throw new HttpError(409, `${d.git_branch} was pushed to since this staging deploy (${short}): deploy to staging again`, "moved");
+        }
+        await client.moveBranch(r, def, head, sha);
+      }
+      const landed = await client.branchHead(r, def);
+      if (landed !== sha) throw new HttpError(409, `${def} is at ${landed?.slice(0, 7) ?? "nothing"}, not ${short}: production wasn't changed`, "conflict");
+      await store.updateAppRepoSync(repo, { sha, upstream: sha }).catch((e) => console.error(e));
+    }
+    return { sha, branch: def, repo: info.fullName };
+  }
+
+  return { repoView, callback, tagDeploy, promoteCommit };
 }

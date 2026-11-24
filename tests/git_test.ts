@@ -1456,3 +1456,66 @@ test("stack: undo puts back a dotenv file's public entries (its private lines ke
   const v = await t.send("GET", `/v1/apps/shop/git/stack/undo?change=${c4.change.id}`, tok);
   assert.deepEqual([v.status, v.body.error, v.body.paths], [409, "merge_unresolvable", ["deploy.sh"]]);
 }));
+
+// ---- environments: promote a staging deploy of a branch (docs/architecture.md#environments)
+
+test("promote: staging deploys a stack's top unmerged; promote lands it on the default branch (fast-forward) and tags it", withServer(async (t) => {
+  const { tok, deployKey, linked } = await linkedShop(t);
+  const repo = t.gh.repo("octo/shop");
+  const files = (x: string) => [...linked.files, { path: "app.txt", data: x }];
+  const c1 = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: "main", baseSha: linked.sha, files: files("1"), title: "One" });
+  const c2 = await t.send("POST", "/v1/apps/shop/git/stack", tok, { from: c1.body.branch, baseSha: c1.body.sha, files: files("2"), title: "Two" });
+  const stage = (sha: string, branch: string, who = tok) => t.send("POST", "/v1/apps/shop/envs/staging/deploys", who, {
+    files: [{ path: "index.html", data: sha }], git: { sha, branch, repo: "octo/shop" },
+  });
+  const s1 = await stage(c2.body.sha, c2.body.branch);
+  assert.equal(s1.status, 201, JSON.stringify(s1.body));
+  // Not merged, not a version.
+  assert.equal(s1.body.deploy.tag, undefined);
+  assert.equal(repo.refs.get("main"), linked.sha);
+  assert.equal(repo.tags.size, 0);
+  const promote = (deployId: string, who = tok) => t.send("POST", "/v1/apps/shop/promote", who, { deployId });
+  // A deploy key can't merge on GitHub: refused, nothing moved.
+  assert.equal((await promote(s1.body.deploy.id, deployKey)).status, 401);
+  assert.equal(repo.refs.get("main"), linked.sha);
+  const p = await promote(s1.body.deploy.id);
+  assert.equal(p.status, 200, JSON.stringify(p.body));
+  assert.equal(p.body.app.currentDeployId, s1.body.deploy.id);
+  assert.equal(p.body.deploy.tag, "v1");
+  assert.equal(repo.refs.get("main"), c2.body.sha);
+  assert.equal(repo.tags.get("v1"), c2.body.sha);
+  // The stack landed with it.
+  assert.deepEqual((await t.srv.store.openStackChanges(p.body.app.id)).length, 0);
+
+  // The default branch moved on GitHub since: refused, production unchanged, nothing merged.
+  repo.refs.set("feat/x", c2.body.sha);
+  const x = t.gh.write(repo, "feat/x", { "x.txt": "x" });
+  const moved = t.gh.write(repo, "main", { "m.txt": "elsewhere" });
+  const s2 = await stage(x, "feat/x");
+  const r2 = await promote(s2.body.deploy.id);
+  assert.equal(r2.status, 409);
+  assert.equal(r2.body.error, "default_moved");
+  assert.equal(repo.refs.get("main"), moved);
+  assert.equal((await t.send("GET", "/v1/apps/shop", tok)).body.app.currentDeployId, s1.body.deploy.id);
+
+  // A branch pushed to since its staging deploy: refused (the commit promoted would differ from the branch's).
+  repo.refs.set("feat/y", moved);
+  const y = t.gh.write(repo, "feat/y", { "y.txt": "y" });
+  const s3 = await stage(y, "feat/y");
+  t.gh.write(repo, "feat/y", { "y.txt": "y2" });
+  assert.equal((await promote(s3.body.deploy.id)).body.error, "moved");
+  assert.equal(repo.refs.get("main"), moved);
+
+  // A protected default branch takes no direct move: refused.
+  const s4 = await stage(t.gh.write(repo, "feat/y", { "y.txt": "y3" }), "feat/y");
+  repo.protected.add("main");
+  const r4 = await promote(s4.body.deploy.id);
+  assert.equal(r4.status, 422);
+  assert.equal(r4.body.error, "branch_protected");
+  repo.protected.delete("main");
+  // Then it goes: main fast-forwarded to exactly that commit.
+  const r5 = await promote(s4.body.deploy.id);
+  assert.equal(r5.status, 200, JSON.stringify(r5.body));
+  assert.equal(repo.refs.get("main"), t.gh.repo("octo/shop").refs.get("feat/y"));
+  assert.equal(r5.body.deploy.tag, "v2");
+}));
