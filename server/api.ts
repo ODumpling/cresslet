@@ -1170,6 +1170,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       // Deleted already (a delete queued before this one), maybe made again since: its data dir is the new one's now.
       if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
       await store.deleteEnvironment(e.id); // first: no new request starts its sandbox
+      await store.detachEnvDeploys(a.id, e.name); // promoted ones stay production's only (not a new staging's history)
       try {
         await runtime.stopSettled(e.id);
       } finally {
@@ -1203,9 +1204,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       await mkdir(dst.data, { recursive: true });
       if (existsSync(src)) {
         // A consistent copy of the live database (WAL: production keeps writing), made off the event loop.
-        const db = new DatabaseSync(src, { readOnly: true });
+        const db = new DatabaseSync(src, { readOnly: true, timeout: 5000 });
         try {
-          await backup(db, tmp);
+          // In one step (one read transaction, which WAL lets production write beside): in small steps, each write of
+          // production's would restart the copy.
+          await backup(db, tmp, { rate: 2 ** 31 - 1 }); // (node takes no -1 "all": this many pages is all of it)
         } finally {
           db.close();
         }
@@ -1275,8 +1278,13 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       const at = await store.environmentById(e.id);
       if (at?.current_deploy_id !== d.id) throw new HttpError(409, `${e.name} was deployed to meanwhile: promote again`, "stale");
       // Promoted already (another request, or an earlier one whose tag failed): only the tag is tried again.
-      const already = (await store.appById(a.id))?.current_deploy_id === d.id;
-      // (Already: only for its tag, if it has none; a default branch that moved on since isn't an error then.)
+      const prod = (await store.appById(a.id))?.current_deploy_id ?? null;
+      const already = prod === d.id;
+      // Production deployed to while this waited for the lock (its deploys and rollbacks take it too): refused before
+      // anything moves on GitHub.
+      if (!already && prod !== was) throw new HttpError(409, `production was deployed to meanwhile: nothing was changed, promote again`, "stale");
+      const fresh = (await store.deploy(d.id)) ?? d; // (its tag as it is now: another promotion may have given it one)
+      // (Already: nothing to land; only its tag, below, if it has none.)
       const landed = already ? null : await git.promoteCommit(c, a, d);
       if (!already) {
         await store.serialized(deploysLock(a.id), async () => {
@@ -1285,13 +1293,13 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
           await store.promoteDeploy(a.id, d.id, config);
         });
       }
-      return { landed, already };
+      return { landed, already, tag: fresh.git_tag ?? null };
     });
     const landed = r.landed;
     if (r.already) {
-      const out: { id: string; tag?: string; warning?: string } = { id: d.id, ...(d.git_tag ? { tag: d.git_tag } : {}) };
+      const out: { id: string; tag?: string; warning?: string } = { id: d.id, ...(r.tag ? { tag: r.tag } : {}) };
       // Its commit, as on the default branch (tagDeploy checks it is): nothing on GitHub moves.
-      const repo = d.git_sha && !d.git_tag ? await store.getAppRepo(a.id) : undefined;
+      const repo = d.git_sha && !r.tag ? await store.getAppRepo(a.id) : undefined;
       if (repo && d.git_sha) {
         try {
           const tag = await git.tagDeploy(c, a, d.id, { sha: d.git_sha, branch: repo.default_branch, repo: `${repo.owner}/${repo.name}` });
@@ -1301,7 +1309,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         }
       }
       const now = (await store.appById(a.id))!;
-      return c.json({ app: view(now), environment: envView(now, e), deploy: out, promoted: false });
+      return c.json({ app: view(now), environment: envView(now, (await store.environmentById(e.id)) ?? e), deploy: out, promoted: false });
     }
     runtime.stop(a.id); // next request boots the promoted bundle
     const out: { id: string; tag?: string; warning?: string } = { id: d.id };
@@ -1648,6 +1656,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       if (!SECRET_KEY_RE.test(k)) throw new HttpError(400, `invalid secret name: ${k} (use UPPER_SNAKE)`);
       if (v !== null && (typeof v !== "string" || v.length > 32_768)) throw new HttpError(400, `invalid value for ${k}`);
     }
+    if (e && !await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
     for (const [k, v] of entries) {
       if (e) {
         if (v === null) await store.deleteEnvSecret(e.id, k);

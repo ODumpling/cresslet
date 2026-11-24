@@ -63,6 +63,7 @@ export function appSpec(cfg: Config, store: Store, t: Target): AppSpec {
     env: env?.name ?? null,
     dataDir: targetData(cfg, t).data,
     seq: () => env ? store.envUidSeq(env.id) : store.uidSeq(app.id),
+    ...(env ? { live: async () => !!await store.environmentById(env.id) } : {}),
     appName: app.name,
     appUrl: appUrl(cfg, app.name, env?.name),
     deployId: t.deployId!,

@@ -218,11 +218,17 @@ test("staging: its own deploy, private host, data, sandbox and secrets; promote 
   assert.deepEqual(del.body.environments.map((e: { name: string }) => e.name), ["production"]);
   assert.ok(!t.srv.runtime.procs.has(envId));
   assert.ok(!existsSync(paths(t.srv.cfg, s1.body.app.id).env("staging").data));
+  // A request that resolved staging just before the delete starts no sandbox (nor data dir) after it.
+  const gone = { key: envId, appId: s1.body.app.id, env: "staging", dataDir: paths(t.srv.cfg, s1.body.app.id).env("staging").data, live: async () => false };
+  const late = await t.srv.runtime.fetch({ ...gone, seq: async () => 0, appName: "shop", appUrl: "http://x", deployId: s1.body.deploy.id, secrets: async () => ({}), net: false, egress: null }, new Request("http://x/api/env"));
+  assert.equal(late.status, 502);
+  assert.ok(!t.srv.runtime.procs.has(envId) && !existsSync(gone.dataDir));
   assert.equal((await t.call("/", { host: STAGING })).status, 404);
   assert.equal(await (await t.call("/", { host: "shop.test.local" })).text(), "prod 1");
   // The promoted deploy is still in production's history (rollback can reach it); staging's other one is gone.
   const ids = (await t.srv.store.deploys(s1.body.app.id)).map((d) => d.id);
   assert.ok(ids.includes(s1.body.deploy.id) && !ids.includes(s2.body.deploy.id), JSON.stringify(ids));
+  assert.equal((await t.srv.store.deploy(s1.body.deploy.id))?.env, null); // production's alone now (not a new staging's history)
 }));
 
 test("staging: keeps its own deploys for rollback, without pushing production's out; purging the app stops both", withServer(async (t) => {

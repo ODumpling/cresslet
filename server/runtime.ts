@@ -53,6 +53,8 @@ export interface AppSpec {
   appName: string;
   appUrl: string;
   deployId: string;
+  /** Still there (an environment deleted meanwhile isn't): checked before a sandbox starts. Absent: always. */
+  live?: () => Promise<boolean>;
   /** Read at sandbox start; served over the HOST binding, never written to disk. */
   secrets: () => Promise<Record<string, string>>;
   net: boolean;
@@ -455,6 +457,8 @@ export class Runtime {
   async #spawn(spec: AppSpec): Promise<Proc> {
     const cfg = this.#cfg;
     const p = paths(cfg, spec.appId);
+    // A request that found its environment just before it was deleted: no sandbox (nor data dir) after it.
+    if (spec.live && !await spec.live()) throw new Error("this environment was deleted");
     await mkdir(spec.dataDir, { recursive: true });
     // Fresh dir per spawn: a dying predecessor's cleanup must not touch ours. It holds everything
     // the sandbox can see (config, code, sockets), and nothing under dataDir.

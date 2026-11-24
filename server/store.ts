@@ -1405,6 +1405,10 @@ export class Store implements RateHits {
   async deleteEnvironment(envId: string) {
     await this.db.run("DELETE FROM environments WHERE id = ?", envId);
   }
+  /** An environment deleted: the deploys production was promoted to are production's alone from now on. */
+  async detachEnvDeploys(appId: string, name: string) {
+    await this.db.run("UPDATE deploys SET env = NULL WHERE app_id = ? AND env = ? AND promoted_at IS NOT NULL", appId, name);
+  }
   /** As uidSeq, for an environment's own sandbox uid (from the same counter: never an app's). */
   async envUidSeq(envId: string): Promise<number> {
     const get = () => this.db.get<{ uid_seq: number | null }>("SELECT uid_seq FROM environments WHERE id = ?", envId);
