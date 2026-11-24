@@ -885,7 +885,7 @@ export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = 
       ) : presence?.binding ? (
         <div className="bridge-banner" id="bridge-connected" role="status">
           <span className="bridge-banner-text"><Icon name="link" /><span>Connected to <strong>{presence.binding.agent}</strong></span></span>
-          <span className="row start">
+          <span className="bridge-banner-actions">
             <button className="btn sm" id="bridge-disconnect" type="button" disabled={liveBusy} title="Stop it now; it stays disconnected from this project until you click Resume" onClick={() => void pauseAgents()}>Disconnect</button>
             <button className="btn sm" id="bridge-forget" type="button" disabled={liveBusy} title="Revoke it: it needs a pairing code to connect again" onClick={() => void forgetAgent(presence.binding!.credentialId, presence.binding!.agent)}>Forget agent</button>
           </span>
