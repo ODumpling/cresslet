@@ -225,6 +225,11 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
   const agentsByAccount = new Map<string, Set<Agent>>();
   /** Who was last bound to a project (accountId|handle → instanceId): it gets it back first when the tab returns. */
   const lastBound = new Map<string, string>();
+  /**
+   * The project each agent process (accountId|instanceId) confirmed (its user's or its own explicit choice): moving
+   * away from it needs a click in the target tab, bound or not (a reconnect keeps it).
+   */
+  const pinned = new Map<string, string>();
   let generation = 0;
 
   const clientIp = (req: IncomingMessage) => {
@@ -348,7 +353,12 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
   function endBinding(b: Binding, reason: string, message: string) {
     if (b.agent.binding === b) b.agent.binding = null;
     if (b.presence.binding === b) b.presence.binding = null;
-    b.switching = null;
+    if (b.switching) {
+      // An accepted switch waiting for this binding's call: it lapses with it (else it'd block every later one).
+      const req = b.switching;
+      b.switching = null;
+      dropSwitch(req, "closed");
+    }
     // Unbound first: the agent then sends nothing more under this binding (its queued calls aren't run).
     sendJson(b.agent.ws, { type: "unbound", handle: b.handle, reason, message, projectName: b.presence.projectName });
     if (b.inflight) {
@@ -511,20 +521,27 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
     }
     const from = old?.presence.projectName ?? null;
     if (old && old.presence !== p) {
-      await store.bumpAgentEpoch(old.handle, old.credentialId);
+      old.switching = null; // this switch: settled here, not dropped by endBinding
+      await store.bumpAgentEpoch(a.accountId, old.handle, old.credentialId);
       endBinding(old, "switched", `Switched to project ${p.projectName}.`);
       sendJson(old.presence.ws, { type: "notice", text: `${a.label} switched to ${p.projectName}.` });
     }
-    if (p.binding && p.binding.agent !== a) {
-      const other = p.binding;
-      await store.bumpAgentEpoch(other.handle, other.credentialId);
-      other.agent.want = null;
-      endBinding(other, "taken_over", `Project ${p.projectName} was taken over by ${a.label} in Cresslet Studio.`);
-    }
     const g = await store.agentGrant(req.credentialId, p.handle);
-    if (!g || !isOpen(a.ws) || !isOpen(p.ws)) {
+    // Checked again after the awaits: closed, paused or taken meanwhile, the switch lapses (nothing binds).
+    if (!g || !isOpen(a.ws) || !isOpen(p.ws) || presences.get(pkey(p.accountId, p.handle)) !== p) {
       return sendJson(a.ws, { type: "switch_expired", handle: p.handle, projectName: p.projectName, reason: "closed" });
     }
+    if (p.paused || p.occupiedBy) {
+      return sendJson(a.ws, { type: "switch_expired", handle: p.handle, projectName: p.projectName, reason: p.paused ? "paused" : "in_use" });
+    }
+    if (p.binding && p.binding.agent !== a) {
+      // The user's click in this tab hands it over (like Take over).
+      const other = p.binding;
+      other.agent.want = null;
+      endBinding(other, "taken_over", `Project ${p.projectName} was taken over by ${a.label} in Cresslet Studio.`);
+      void store.bumpAgentEpoch(other.agent.accountId, other.handle, other.credentialId);
+    }
+    pinned.set(pkey(a.accountId, a.instanceId), p.handle);
     establish(a, p, req.credentialId, Number(g.epoch), { switched: true, ...(from ? { from } : {}) });
     sendJson(p.ws, { type: "notice", text: from ? `${a.label} switched here from ${from}.` : `${a.label} connected.` });
   }
@@ -834,7 +851,11 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
         clearTimeout(authTimer);
         releaseUnauth();
       };
-      if (msg.role === "presence") return helloPresence(msg, account, token, done);
+      if (msg.role === "presence") {
+        // The browser's own session (the HttpOnly cookie), never a token in the hello: a CLI token can't pose as a tab.
+        if (!studioSession) return sendErrorAndClose(ws, "unauthorized", "Studio presence needs the Studio's session.", 4001);
+        return helloPresence(msg, account, token, done);
+      }
       if (msg.role === "agent") return helloAgent(msg, account, token, done);
 
       if (msg.role === "cli") {
@@ -991,7 +1012,11 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
       // Effective pause: the tab's own record or the server's.
       const localPause = msg.paused === true;
       const serverPause = await store.agentPaused(account.id, handle);
-      if (localPause && !serverPause) await store.setAgentPause(account.id, handle, true);
+      if (localPause && !serverPause) {
+        // Disconnected while offline (the tab recorded it, the server never heard): calls made before it never run.
+        await store.setAgentPause(account.id, handle, true);
+        await store.bumpAgentEpoch(account.id, handle);
+      }
       if (!isOpen(ws)) return;
       // A new presence for the same project replaces a stale one (its close handler then finds it isn't current).
       const replaced = presences.get(key);
@@ -1050,7 +1075,7 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
           for (const req of [...p.switches]) dropSwitch(req, "paused");
           p.waiting.clear();
           await store.setAgentPause(p.accountId, p.handle, true);
-          await store.bumpAgentEpoch(p.handle);
+          await store.bumpAgentEpoch(p.accountId, p.handle);
           sendJson(ws, { type: "paused" });
           presenceState(p);
           return;
@@ -1076,6 +1101,7 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
           for (const a of agentsByAccount.get(p.accountId) ?? []) {
             if (a.credentials.has(cid) && !a.binding && (a.want === p.handle || a.want === null)) {
               // An agent with nothing bound gets this project as its pin; one that asked for it before binds now.
+              pinned.set(pkey(a.accountId, a.instanceId), p.handle);
               void bind(a, p.handle, { quiet: true, extra: { approved: true } });
               break;
             }
@@ -1083,7 +1109,10 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
           return;
         }
         case "forget": {
+          // This browser's agents (those that can reach this tab); others from Settings → Connected agents.
           const cid = typeof msg.credentialId === "string" ? msg.credentialId : "";
+          const cred = (await store.agentCredentials(p.accountId)).find((c) => c.id === cid);
+          if (!cred || cred.browser_install_id !== p.installId) return sendJson(ws, { type: "forgotten", credentialId: cid, ok: false });
           const revoked = await store.revokeAgentCredentials(p.accountId, [cid]);
           sendJson(ws, { type: "forgotten", credentialId: cid, ok: revoked.length > 0 });
           return;
@@ -1109,14 +1138,15 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
           p.waiting.delete(a);
           if (p.binding) {
             const other = p.binding;
-            await store.bumpAgentEpoch(other.handle, other.credentialId);
+            await store.bumpAgentEpoch(other.agent.accountId, other.handle, other.credentialId);
             other.agent.want = null;
             endBinding(other, "taken_over", `Project ${p.projectName} was taken over by ${a.label} in Cresslet Studio.`);
           }
           if (a.binding && a.binding.presence !== p) {
-            await store.bumpAgentEpoch(a.binding.handle, a.binding.credentialId);
+            await store.bumpAgentEpoch(a.accountId, a.binding.handle, a.binding.credentialId);
             endBinding(a.binding, "switched", `Switched to project ${p.projectName}.`);
           }
+          pinned.set(pkey(a.accountId, a.instanceId), p.handle);
           return bind(a, p.handle, { extra: { approved: true } });
         }
         default:
@@ -1129,10 +1159,6 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
       const instanceId = typeof msg.instanceId === "string" && ID_RE.test(msg.instanceId) ? msg.instanceId : null;
       const list = Array.isArray(msg.credentials) ? msg.credentials.slice(0, MAX_CREDENTIALS_PER_HELLO) : [];
       if (!instanceId || !list.length) return sendErrorAndClose(ws, "bad_frame", "Agent hello needs instanceId and credentials.", 1008);
-      const firstId = (list[0] as { id?: unknown })?.id;
-      if (!await agentConnects.take(typeof firstId === "string" ? firstId : account.id, now())) {
-        return sendErrorAndClose(ws, "rate_limited", "Too many reconnects; wait a few minutes.", 4029);
-      }
       const credentials = new Map<string, AgentCredential>();
       const revoked: string[] = [];
       for (const c of list as { id?: unknown; secret?: unknown }[]) {
@@ -1146,6 +1172,10 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
         await noteAuthFailure(ip);
         sendJson(ws, { type: "revoked", credentials: revoked });
         return sendErrorAndClose(ws, "unauthorized_agent", "This remembered agent was forgotten, expired, or belongs to another login: pair again with a code.", 4001);
+      }
+      // Its own reconnect budget, keyed on a verified credential (not one anyone could name).
+      if (!await agentConnects.take(credentials.keys().next().value!, now())) {
+        return sendErrorAndClose(ws, "rate_limited", "Too many reconnects; wait a few minutes.", 4029);
       }
       // The same process reconnecting replaces its own stale socket.
       for (const a of [...agentsByAccount.get(account.id) ?? []]) {
@@ -1168,7 +1198,12 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
         onClose: () => closeAgent(a),
       };
       sendJson(ws, { type: "ready", credentials: [...credentials.keys()], revoked, tokenId: token.id, projects: await listProjects(a) });
-      if (typeof msg.bind === "string" && msg.bind.length <= 200) await bind(a, msg.bind, { quiet: msg.quiet === true });
+      if (typeof msg.bind === "string" && msg.bind.length <= 200) {
+        // Its pin (a reconnect, or a restart that restored it); `confirmed`: the user (or it, explicitly) chose it.
+        const key = pkey(a.accountId, instanceId);
+        if (msg.confirmed === true && !pinned.has(key)) pinned.set(key, msg.bind);
+        await bind(a, pinned.get(key) ?? msg.bind, { quiet: msg.quiet === true });
+      }
     }
 
     async function agentFrame(a: Agent, msg: Record<string, unknown>) {
@@ -1178,12 +1213,32 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
           return void sendJson(ws, { type: "projects", projects: await listProjects(a) });
         case "bind": {
           if (typeof msg.handle !== "string" || !msg.handle || msg.handle.length > 200) return sendErrorAndClose(ws, "bad_frame", "Invalid bind.", 1008);
-          if (a.binding && a.binding.handle !== msg.handle) return requestSwitch(a, msg.handle);
-          if (a.binding && a.switchReq) {
+          const handle = msg.handle, pin = pinned.get(pkey(a.accountId, a.instanceId));
+          if (a.binding?.handle === handle || (!a.binding && pin === handle)) {
             // use_project(<current>): the pending switch is withdrawn.
-            dropSwitch(a.switchReq, "withdrawn");
+            if (a.switchReq) dropSwitch(a.switchReq, "withdrawn");
+            if (msg.confirm === true) pinned.set(pkey(a.accountId, a.instanceId), handle);
+            return bind(a, handle);
           }
-          return bind(a, msg.handle);
+          // Away from a confirmed pin (bound now or not): the target tab asks the user.
+          if (pin) return requestSwitch(a, handle);
+          // Not confirmed yet (picked automatically, never acted on): the agent may choose another freely, if it can bind
+          // there (else it keeps the one it has).
+          if (a.binding) {
+            const r = await checkBind(a, handle);
+            if (!r.ok) {
+              return sendJson(ws, { type: "bind_error", handle, code: r.code, message: r.message, ...(r.projectName ? { projectName: r.projectName } : {}), ...(r.url ? { url: r.url } : {}) });
+            }
+            if (a.binding) endBinding(a.binding, "switched", "Switched project before confirming this one.");
+          }
+          if (a.switchReq) dropSwitch(a.switchReq, "withdrawn");
+          if (msg.confirm === true) pinned.set(pkey(a.accountId, a.instanceId), handle);
+          return bind(a, handle);
+        }
+        case "confirm": {
+          // confirm_project: the automatically picked project, confirmed.
+          if (a.binding && a.binding.handle === msg.handle) pinned.set(pkey(a.accountId, a.instanceId), a.binding.handle);
+          return;
         }
         case "tool_call": {
           if (typeof msg.id !== "string" || !msg.id || msg.id.length > MAX_ID_LEN) return sendErrorAndClose(ws, "bad_frame", "Invalid tool_call id.", 1008);
@@ -1201,12 +1256,20 @@ export function createRelay(cfg: Config, store: Store, opts: RelayOptions = {}) 
           if (b.inflight || a.checking.size) return fail("busy", "Another tool call is still running in Studio: wait for it.");
           a.checking.add(id);
           // The whole tuple again, from the database, before this dispatch.
-          const [live, grant, paused] = await Promise.all([
+          const [live, grant, paused, cliToken, studioToken] = await Promise.all([
             store.agentCredentialLive(b.credentialId, now()),
             store.agentGrant(b.credentialId, b.handle),
             store.agentPaused(a.accountId, b.handle),
+            store.tokenLive(a.accountId, a.tokenId),
+            store.tokenLive(b.presence.accountId, b.presence.tokenId),
           ]).finally(() => a.checking.delete(id));
-          if (a.cancelled.delete(id)) return; // cancelled meanwhile (MCP: no reply)
+          // Cancelled meanwhile: never sent to the tab; the result says so (the agent waits for this id's result).
+          if (a.cancelled.delete(id)) return fail("cancelled", "Cancelled.");
+          if (!cliToken) return sendErrorAndClose(ws, "unauthorized", "Session token revoked or account disabled.", 4001);
+          if (!studioToken) {
+            sendErrorAndClose(b.presence.ws, "unauthorized", "Session token revoked or account disabled.", 4001);
+            return fail("not_bound", `Project ${b.presence.projectName} isn't connected any more (its Studio session ended): not run.`);
+          }
           if (a.binding !== b || b.presence.binding !== b || !isOpen(b.presence.ws)) return fail("not_bound", `Project ${b.presence.projectName} isn't connected any more: not run.`);
           if (!live) {
             dropCredential(a, b.credentialId, "This agent was forgotten or expired in Cresslet Studio: pair again with a code.");

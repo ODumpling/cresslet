@@ -105,8 +105,8 @@ async function setup(opts: RelayOptions = {}) {
 
   /** The owning tab of `projectId`. */
   async function presence(projectId: string, extra: Msg = {}, inst = install, token = session.token) {
-    const p = await open(studioHeaders);
-    p.send({ type: "hello", role: "presence", token, install: inst, projectId, projectName: `Project ${projectId}`, ...extra });
+    const p = await open({ ...studioHeaders, cookie: `cresslet_session=${token}` }); // the browser's session cookie
+    p.send({ type: "hello", role: "presence", install: inst, projectId, projectName: `Project ${projectId}`, ...extra });
     return p;
   }
   /** Enrols an agent with code + Allow + Remember on `projectId` (its tab: `tab`). */
@@ -179,9 +179,13 @@ test("presence: tracked per open project, replaced by a newer socket, refused wi
     // A wrong secret for this installation, or none, is refused.
     const bad = await t.presence("aaaa1111", {}, { id: t.install.id, secret: secret() });
     assert.equal((await bad.next("error")).code, "unauthorized");
-    const none = await t.open(t.studioHeaders);
-    none.send({ type: "hello", role: "presence", token: t.session.token, projectId: "x1" });
+    const none = await t.open({ ...t.studioHeaders, cookie: `cresslet_session=${t.session.token}` });
+    none.send({ type: "hello", role: "presence", projectId: "x1" });
     assert.equal((await none.next("error")).code, "bad_frame");
+    // A token in the hello (a CLI posing as a tab, origin forged) isn't a Studio session.
+    const posing = await t.open(t.studioHeaders);
+    posing.send({ type: "hello", role: "presence", token: t.cli.token, install: { id: "fresh1", secret: secret() }, projectId: "x1" });
+    assert.equal((await posing.next("error")).code, "unauthorized");
     // Not from the studio's origin: refused.
     const elsewhere = await t.open();
     elsewhere.send({ type: "hello", role: "presence", token: t.session.token, install: t.install, projectId: "x1" });
@@ -341,7 +345,7 @@ test("several projects: list, pick one, writes land only there; a closed pinned 
     const ready = await a.next("ready");
     assert.deepEqual((ready.projects as Msg[]).map((p) => p.name).sort(), ["Project proj0001", "Project proj0002"]);
     const h2 = `${t.install.id}:proj0002`;
-    a.send({ type: "bind", handle: h2 });
+    a.send({ type: "bind", handle: h2, confirm: true }); // use_project: its own explicit choice
     const bound = await a.next("bound");
     assert.equal(bound.handle, h2);
     a.send({ type: "tool_call", id: "w", name: "write_file", arguments: {}, handle: h2, epoch: bound.epoch });
@@ -403,7 +407,7 @@ test("switching projects needs a click in the target tab; ignored requests expir
     tab2.send({ type: "grant", credentialId: cred.id });
     await tab2.next("granted");
     const h1 = cred.handle, h2 = `${t.install.id}:proj0002`;
-    const a = await t.agent([cred], "inst-1", { bind: h1 });
+    const a = await t.agent([cred], "inst-1", { bind: h1, confirmed: true });
     const b1 = await a.next("bound");
 
     // Asking to switch: the agent keeps its pin until the user clicks.
@@ -665,5 +669,91 @@ test("HTTP: list remembered agents, Forget from a Studio browser only, `cresslet
   } finally {
     await srv.close();
     await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("review fixes: moving needs a click even unbound; unconfirmed picks move freely; offline Disconnect fences; cancel during the check answers", async () => {
+  const t = await setup();
+  try {
+    const tab1 = await t.presence("proj0001"), tab2 = await t.presence("proj0002");
+    await Promise.all([tab1.next("presence_ok"), tab2.next("presence_ok")]);
+    t.autoRun(tab1);
+    t.autoRun(tab2);
+    const cred = await t.enrol("proj0001");
+    tab2.send({ type: "grant", credentialId: cred.id });
+    await tab2.next("granted");
+    const h1 = cred.handle, h2 = `${t.install.id}:proj0002`;
+
+    // Picked automatically (not confirmed): another project, freely.
+    const free = await t.agent([cred], "free-1", { bind: h1 });
+    await free.next("bound");
+    free.send({ type: "bind", handle: h2, confirm: true });
+    assert.equal((await free.next("unbound")).reason, "switched");
+    assert.equal((await free.next("bound")).handle, h2);
+    free.close();
+    await free.waitClose();
+
+    // Confirmed on project 1, then disconnected there: moving to project 2 still needs the click.
+    const a = await t.agent([cred], "pinned-1", { bind: h1, confirmed: true });
+    const b1 = await a.next("bound");
+    tab1.send({ type: "pause" });
+    await tab1.next("paused");
+    await a.next("unbound");
+    a.send({ type: "bind", handle: h2, confirm: true });
+    assert.equal((await a.next("switch_pending")).handle, h2);
+    await a.none("bound");
+    tab1.send({ type: "resume" });
+    await tab1.next("resumed");
+    const b2 = await a.next("bound");
+    assert.ok((b2.epoch as number) > (b1.epoch as number));
+
+    // A cancel during the authorization check still gets an answer (the agent waits for this id's result).
+    a.send({ type: "tool_call", id: "cc", name: "read_file", arguments: {}, handle: h1, epoch: b2.epoch });
+    a.send({ type: "tool_cancel", id: "cc" });
+    const r = await a.next((m) => m.type === "tool_result" && m.id === "cc");
+    assert.ok(r.code === "cancelled" || r.text === "ran read_file");
+
+    // Disconnected while the tab was offline (its record only): calls made before don't run after Resume.
+    tab1.close();
+    await a.next("unbound");
+    const back = await t.presence("proj0001", { paused: true });
+    await back.next("presence_ok");
+    back.send({ type: "resume" });
+    await back.next("resumed");
+    const b3 = await a.next("bound");
+    assert.ok((b3.epoch as number) > (b2.epoch as number));
+  } finally {
+    await t.done();
+  }
+});
+
+test("review fixes: disabling the account cuts a bound agent; Forget from a tab is this browser's agents only; epochs are per account", async () => {
+  const t = await setup();
+  try {
+    const tab = await t.presence("proj0001");
+    await tab.next("presence_ok");
+    t.autoRun(tab);
+    const cred = await t.enrol("proj0001");
+    // Another browser's tab can't forget this browser's agent.
+    const other = await t.presence("proj0002", {}, { id: "otherInst", secret: secret() });
+    await other.next("presence_ok");
+    other.send({ type: "forget", credentialId: cred.id });
+    assert.equal((await other.next("forgotten")).ok, false);
+    assert.equal(await t.store.agentCredentialLive(cred.id), true);
+
+    // Another account on the same browser profile bumping the same handle leaves this account's epochs alone.
+    const bob = await t.store.createAccount("bob@example.com");
+    const before = (await t.store.agentGrant(cred.id, cred.handle))!.epoch;
+    await t.store.bumpAgentEpoch(bob.id, cred.handle);
+    assert.equal((await t.store.agentGrant(cred.id, cred.handle))!.epoch, before);
+
+    const a = await t.agent([cred], "i1", { bind: cred.handle });
+    await a.next("bound");
+    await t.store.disableAccount(t.acct.id);
+    assert.match((await a.next("error")).code as string, /^unauthorized/);
+    await a.waitClose();
+    assert.equal(await t.store.agentCredentialLive(cred.id), false);
+  } finally {
+    await t.done();
   }
 });

@@ -468,8 +468,8 @@ export class Store implements RateHits {
    * server from before disabling existed (after a rollback). Under the account's lock, which token issuing takes
    * too: nothing issued meanwhile survives. Its org apps go to another org admin (reassignOrgApps).
    */
-  disableAccount(accountId: string): Promise<boolean> {
-    return this.serialized(accountLock(accountId), async () => {
+  async disableAccount(accountId: string): Promise<boolean> {
+    const done = await this.serialized(accountLock(accountId), async () => {
       // Each organization's lock (in a fixed order), as member changes take, before this account's row is
       // locked by the update: two disables handing apps to each other wait here rather than deadlock.
       const orgs = (await this.orgsFor(accountId)).map((o) => o.id).sort();
@@ -481,10 +481,13 @@ export class Store implements RateHits {
         Date.now(), accountId,
       );
       await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+      await this.db.run("UPDATE agent_credentials SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL", Date.now(), accountId);
       await this.db.run("DELETE FROM page_sessions WHERE account_id = ?", accountId);
       for (const o of orgs) await this.reassignOrgApps(o, accountId);
       return r.changes > 0;
     });
+    this.events.emit("tokens-revoked", accountId, null); // its Live Link sessions end now
+    return done;
   }
   /**
    * Re-enables it, putting its email and GitHub id back: "taken" if another account has either now (that
@@ -577,7 +580,11 @@ export class Store implements RateHits {
         "UPDATE accounts SET github_id = ?, github_login = ?, password_hash = NULL WHERE id = ? AND disabled_at IS NULL AND github_id IS NULL",
         github.id, github.login, accountId,
       );
-      if (r.changes) await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+      if (r.changes) {
+        await this.db.run("DELETE FROM tokens WHERE account_id = ?", accountId);
+        await this.db.run("UPDATE agent_credentials SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL", Date.now(), accountId);
+        this.events.emit("tokens-revoked", accountId, null);
+      }
       return this.accountById(accountId);
     });
   }
@@ -672,6 +679,13 @@ export class Store implements RateHits {
   }
 
   // ---- Live Link (server/relay.ts)
+  /** The token still exists and its account is enabled (checked before every Live Link dispatch). */
+  async tokenLive(accountId: string, tokenId: string): Promise<boolean> {
+    return !!(await this.db.get(
+      "SELECT 1 AS x FROM tokens t JOIN accounts a ON a.id = t.account_id WHERE t.id = ? AND t.account_id = ? AND a.disabled_at IS NULL",
+      tokenId, accountId,
+    ));
+  }
   /**
    * A Studio browser installation proving its secret: registered on first use (bound to this account), checked
    * after. False if the id is the account's with another secret.
@@ -779,14 +793,13 @@ export class Store implements RateHits {
   }
 
   /** Bumps the epoch of a project's grants (all agents', or one's): calls made before aren't run. Resolves to the new epochs. */
-  async bumpAgentEpoch(handle: string, credentialId?: string): Promise<Map<string, number>> {
-    await this.db.run(
-      `UPDATE agent_grants SET epoch = epoch + 1 WHERE project_handle = ?${credentialId ? " AND credential_id = ?" : ""}`,
-      handle, ...(credentialId ? [credentialId] : []),
-    );
+  async bumpAgentEpoch(accountId: string, handle: string, credentialId?: string): Promise<Map<string, number>> {
+    // Only this account's agents (one browser profile may be logged in to several accounts: the same handles).
+    const mine = `credential_id IN (SELECT id FROM agent_credentials WHERE account_id = ?)${credentialId ? " AND credential_id = ?" : ""}`;
+    const args = [handle, accountId, ...(credentialId ? [credentialId] : [])];
+    await this.db.run(`UPDATE agent_grants SET epoch = epoch + 1 WHERE project_handle = ? AND ${mine}`, ...args);
     const rows = await this.db.all<{ credential_id: string; epoch: number }>(
-      `SELECT credential_id, epoch FROM agent_grants WHERE project_handle = ?${credentialId ? " AND credential_id = ?" : ""}`,
-      handle, ...(credentialId ? [credentialId] : []),
+      `SELECT credential_id, epoch FROM agent_grants WHERE project_handle = ? AND ${mine}`, ...args,
     );
     return new Map(rows.map((r) => [r.credential_id, Number(r.epoch)]));
   }
