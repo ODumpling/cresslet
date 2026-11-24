@@ -280,6 +280,8 @@ export function createCresslet(c: Container, opts: CressletOptions) {
       mainFields: ["module", "main"],
       conditions: ["worker", "browser", "import", "default"],
       external: ["node:*"],
+      // `.sql` imports are their text (drizzle-kit's drizzle/migrations.js), as in cresslet-cli's build
+      loader: { ".sql": "text" },
       outfile: p(".cresslet/build/server.js"),
       write: false,
       plugins: [sdkPlugin],

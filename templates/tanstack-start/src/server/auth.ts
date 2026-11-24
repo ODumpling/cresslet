@@ -1,8 +1,10 @@
 // Auth server functions: called from components like normal async functions; their bodies run only on the server
 // (TanStack Start replaces them with RPC calls in the client bundle, so the *.server.ts imports never ship).
 import { createMiddleware, createServerFn } from "@tanstack/react-start";
-import { db } from "cresslet";
+import { eq } from "drizzle-orm";
 import { currentUser, endSession, hashPassword, rateLimit, startSession, UserError, verifyPassword } from "./auth.server";
+import { orm } from "./db.server";
+import { users } from "./schema";
 
 export type { User } from "./auth.server";
 
@@ -50,9 +52,8 @@ export const signUp = createServerFn({ method: "POST" })
       if (password.length > 200) throw new UserError("Password is too long");
       await rateLimit("signup", 10, 3600);
       const hash = await hashPassword(password);
-      const row = await db.first(db.sql<{ id: number }>`
-        INSERT INTO users (email, name, password_hash, created_at) VALUES (${email}, ${name}, ${hash}, ${Date.now()})
-        ON CONFLICT (email) DO NOTHING RETURNING id`);
+      const row = await orm.insert(users).values({ email, name, passwordHash: hash, createdAt: Date.now() })
+        .onConflictDoNothing({ target: users.email }).returning({ id: users.id }).get();
       if (!row) throw new UserError("An account with that email already exists");
       await startSession(row.id);
     })
@@ -68,10 +69,9 @@ export const signIn = createServerFn({ method: "POST" })
       const email = str(data.email, "Email", 254).toLowerCase();
       const password = typeof data.password === "string" ? data.password : "";
       await rateLimit("signin", 10, 600);
-      const user = await db.first(
-        db.sql<{ id: number; password_hash: string }>`SELECT id, password_hash FROM users WHERE email = ${email}`,
-      );
-      if (!user || !(await verifyPassword(password, user.password_hash))) throw new UserError("Wrong email or password");
+      const user = await orm.select({ id: users.id, passwordHash: users.passwordHash }).from(users)
+        .where(eq(users.email, email)).get();
+      if (!user || !(await verifyPassword(password, user.passwordHash))) throw new UserError("Wrong email or password");
       await startSession(user.id);
     })
   );

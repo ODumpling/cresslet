@@ -1,53 +1,14 @@
-// Schema migrations for the app's SQLite database (`db` from "cresslet"). Append to MIGRATIONS; never edit one that
-// has shipped. Each runs in one db.batch (all or nothing) with its version row, so concurrent first requests are safe.
+// The app's database through Drizzle: `orm` for queries (tables in ./schema.ts), `migrate()` to bring the schema up to
+// date. src/start.ts runs migrate() before every request (once per sandbox; after that it returns at once), so the
+// tables exist from the app's first request and queries don't call it themselves. Migrations come from drizzle-kit
+// (`npm run db:generate` after editing schema.ts); never write or edit them by hand.
 import { db } from "cresslet";
+import { drizzle, migrate as migrateDb } from "cresslet/drizzle";
+import migrations from "../../drizzle/migrations";
+import * as schema from "./schema";
 
-const MIGRATIONS: string[][] = [
-  [
-    `CREATE TABLE users (
-      id INTEGER PRIMARY KEY,
-      email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-      name TEXT NOT NULL,
-      password_hash TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    )`,
-    `CREATE TABLE todos (
-      id INTEGER PRIMARY KEY,
-      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      title TEXT NOT NULL,
-      done INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL
-    )`,
-    `CREATE INDEX todos_user ON todos (user_id, created_at)`,
-  ],
-];
+/** Drizzle on the app's `db`. Several writes that must land together: `orm.batch([...])` (one transaction). */
+export const orm = drizzle(db, { schema });
 
-let ready: Promise<void> | null = null;
-
-/** Brings the schema up to date (once per sandbox). src/start.ts runs it before every request, so queries needn't. */
-export function migrate(): Promise<void> {
-  ready ??= run().catch((e) => {
-    ready = null; // try again on the next request
-    throw e;
-  });
-  return ready;
-}
-
-async function version(): Promise<number> {
-  await db.exec("CREATE TABLE IF NOT EXISTS _schema (version INTEGER PRIMARY KEY)");
-  const row = await db.first(db.sql<{ v: number | null }>`SELECT max(version) AS v FROM _schema`);
-  return row?.v ?? 0;
-}
-
-async function run() {
-  let current = await version();
-  for (let v = current + 1; v <= MIGRATIONS.length; v++) {
-    try {
-      await db.batch([...MIGRATIONS[v - 1], db.sql`INSERT INTO _schema (version) VALUES (${v})`]);
-    } catch (e) {
-      // another request ran it first
-      if ((await version()) < v) throw e;
-    }
-    current = v;
-  }
-}
+/** Applies the migrations in drizzle/ the database hasn't had (each in one transaction). */
+export const migrate = () => migrateDb(db, migrations);

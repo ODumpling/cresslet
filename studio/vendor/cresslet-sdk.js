@@ -28,6 +28,8 @@
                             
               
                       
+                                                                                                    
+                
  
 
 /** The database as the `env` argument has it: SQL strings with `?` parameters. */
@@ -38,6 +40,8 @@
                                    
                                                                                                   
                                                          
+                                                                                                                            
+                                                                 
  
 
                         
@@ -56,6 +60,8 @@
                
               
                    
+                                                                                                         
+               
  
 
 /** The `env` argument of fetch(req, env, ctx) and scheduled(event, env, ctx). */
@@ -106,12 +112,18 @@
                                                                         
                                              
                                                               
+     
+                                                                                                                  
+                                                                             
+     
+                                               
+                                                                
                                                                
                                    
      
                                                                                                                      
                                                                                                                                              
-                                                
+                                                                                                                        
      
                                                                                  
  
@@ -171,10 +183,13 @@
                                             
 
 /** This SDK's version. */
-const VERSION         = "0.3.0";
+const VERSION         = "0.6.0";
 const KEY = Symbol.for("cresslet.runtime");
-/** Runtime contract each SDK feature needs. 1: env published for the SDK, db.batch, paramStyle. */
-const FEATURES                         = { db: 1, "db.batch": 1, kv: 1, files: 1, secrets: 1, app: 1 };
+/**
+ * Runtime contract each SDK feature needs. 1: env published for the SDK, db.batch, paramStyle. 2: env.db.raw and
+ * `raw` batch statements (rows as arrays).
+ */
+const FEATURES                         = { db: 1, "db.batch": 1, "db.raw": 2, kv: 1, files: 1, secrets: 1, app: 1 };
 /** The runtime contract this SDK needs for all of its features. */
 const CONTRACT         = Math.max(...Object.values(FEATURES));
 
@@ -304,15 +319,23 @@ export const db           = Object.freeze({
     const [rt, s] = statement("db.run", q, params);
     return rt.env.db.run(s.sql, ...s.params);
   },
+  async raw(q                         , ...params            )                       {
+    const [rt, s] = statement("db.raw", q, params);
+    if (typeof rt.env.db.raw !== "function") {
+      throw new CressletError(`cresslet: db.raw isn't supported by this runtime (${rt.runtime ?? "unknown"}); update it`);
+    }
+    return rt.env.db.raw(s.sql, ...s.params);
+  },
   async exec(q        )                {
     if (typeof q !== "string") throw new CressletError("cresslet: db.exec takes a SQL string (no parameters)");
     return env("db.exec").db.exec(q);
   },
   /** Runs the statements in one transaction (all or none), with no other statement in between. */
   async batch(statements                                         )                         {
-    const rt = runtime("db.batch");
     if (!Array.isArray(statements)) throw new CressletError("cresslet: db.batch takes an array of statements");
-    const list = statements.map((q         , i) => {
+    const raw = statements.some((q) => !!q && typeof q === "object" && !isQuery(q) && (q             ).raw === true);
+    const rt = runtime(raw ? "db.raw" : "db.batch");
+    const list = statements.map((q         , i)            => {
       if (isQuery(q)) return q.compile(rt.paramStyle ?? "?");
       if (typeof q === "string") return { sql: q, params: [] };
       const st = q                             ;
@@ -320,7 +343,7 @@ export const db           = Object.freeze({
         if (st.params !== undefined && !Array.isArray(st.params)) {
           throw new CressletError(`cresslet: db.batch statement ${i + 1}: params must be an array`);
         }
-        return { sql: st.sql, params: [...(st.params ?? [])] };
+        return st.raw === true ? { sql: st.sql, params: [...(st.params ?? [])], raw: true } : { sql: st.sql, params: [...(st.params ?? [])] };
       }
       throw new CressletError(`cresslet: db.batch statement ${i + 1} is not a db.sql query, SQL string or { sql, params }`);
     });
@@ -503,6 +526,10 @@ export const app                                            = Object.freeze({
   },
   get deployId() {
     return env("app").app.deployId;
+  },
+  /** "production", or the environment (`staging`); older servers and `cresslet dev`: "production". */
+  get env() {
+    return env("app").app.env ?? "production";
   },
   toJSON()          {
     return { ...env("app").app };

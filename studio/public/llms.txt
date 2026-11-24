@@ -5,6 +5,7 @@
 ## Fastest path (CLI)
 - `npx cresslet new my-app --api <this server>` then `cd my-app && npm install` (the project remembers the server; default is https://cresslet.dev)
 - Edit `src/` (client) and `server/index.ts` (`export default { fetch(req) }`, gets `/api/*`). Bindings: `import { db, files, secrets, app } from "cresslet"`; SQL as ``db.sql`SELECT * FROM t WHERE id = ${id}` `` (values are parameters), `db.batch([...])` for one transaction, `secrets.get("KEY")`. Use them inside handlers, not at module top level.
+- Tables: Drizzle via `cresslet/drizzle` (`drizzle(db, { schema })`, `await migrate(db, migrations)` before queries), migrations from `npx drizzle-kit generate` with `driver: "durable-sqlite"`; never hand-written migration SQL. Guide: https://github.com/ODumpling/cresslet-cli#database-schema-drizzle-cressletdrizzle
 - `npx cresslet deploy` → prints URL. Then `npx cresslet logs`, `npx cresslet db`.
 - Read the app's AGENTS.md for rules.
 

@@ -38,7 +38,7 @@ let snapshotsPosted = 0; // database snapshots posted (a Database view result sa
 let serial: Promise<unknown> | null = null; // with init's `serial`: the request being handled (a promise), the next one waits for it
 // Where the `cresslet` SDK (`import { db } from "cresslet"`, cresslet-cli sdk/index.js) finds the env: published once
 // the app's module has loaded (bindings exist only once a handler runs). Contract: runtime/cresslet-runtime.ts.
-const runtime: { contract: number; runtime: string; paramStyle: string; env: Env | null } = { contract: 1, runtime: "studio preview", paramStyle: "?", env: null };
+const runtime: { contract: number; runtime: string; paramStyle: string; env: Env | null } = { contract: 2, runtime: "studio preview", paramStyle: "?", env: null };
 (globalThis as unknown as Record<symbol, unknown>)[Symbol.for("cresslet.runtime")] = runtime;
 
 const fmt = (args: unknown[]) =>
@@ -289,12 +289,15 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
       }
       return Number(p);
     });
-  /** `max`: stop after that many rows (first(): one, as node:sqlite's get() steps once). */
-  const all = (sql: string, params: Param[], max = Infinity) => {
+  /**
+   * `max`: stop after that many rows (first(): one, as node:sqlite's get() steps once). `raw`: rows as arrays of values
+   * in column order (env.db.raw, `raw` batch statements; contract 2).
+   */
+  const all = (sql: string, params: Param[], max = Infinity, raw = false) => {
     const stmt = db.prepare(sql);
     try {
       stmt.bind(norm(params));
-      const rows: Row[] = [];
+      const rows: (Row | unknown[])[] = [];
       const cols = stmt.getColumnNames();
       // As node:sqlite (the platform, cresslet dev) does: an integer past 2^53 is an error, not a rounded number, and
       // every column (`__proto__` too) is an own property.
@@ -307,7 +310,7 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
       };
       while (rows.length < max && stmt.step()) {
         const vals = stmt.get(null, { useBigInt: true });
-        rows.push(Object.fromEntries(cols.map((c, i) => [c, cell(vals[i])])));
+        rows.push(raw ? vals.map(cell) : Object.fromEntries(cols.map((c, i) => [c, cell(vals[i])])));
       }
       return rows;
     } finally {
@@ -347,7 +350,7 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
   // DETACH in it (after comments and an EXPLAIN prefix).
   const notInBatch = (sql: string) =>
     /^(?:begin|commit|end|rollback|savepoint|release|pragma|attach|detach)\b/i.test(sql.replace(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, " ").replace(/^[\s;]+/, "").replace(/^explain\s+(?:query\s+plan\s+)?/i, ""));
-  const batch = (statements: { sql: string; params?: Param[] }[]) => {
+  const batch = (statements: { sql: string; params?: Param[]; raw?: boolean }[]) => {
     if (!Array.isArray(statements)) throw new TypeError("batch takes an array of { sql, params }");
     statements.forEach((s, i) => {
       const { sql, params } = s ?? {};
@@ -358,10 +361,10 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
     const changesBefore = one("SELECT total_changes()");
     db.exec("SAVEPOINT cresslet_batch");
     try {
-      const out = statements.map(({ sql, params = [] }, i) => {
+      const out = statements.map(({ sql, params = [], raw }, i) => {
         try {
           const before = one("SELECT total_changes()");
-          const rows = all(sql, params);
+          const rows = all(sql, params, Infinity, raw === true);
           const changed = one("SELECT total_changes()") !== before;
           return { rows, changes: changed ? db.getRowsModified() : 0, lastInsertRowid: rowid() };
         } catch (e) {
@@ -382,10 +385,10 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
   };
   db.exec("PRAGMA foreign_keys = ON;");
   // query/first can write too (INSERT … RETURNING): save when they changed anything
-  const reading = (sql: string, params: Param[], max?: number) => {
+  const reading = (sql: string, params: Param[], max?: number, raw = false) => {
     const before = one("SELECT total_changes()");
     try {
-      return all(sql, params, max);
+      return all(sql, params, max, raw);
     } finally {
       // a statement that failed part-way may still have written (INSERT OR FAIL … RETURNING)
       if (one("SELECT total_changes()") !== before || mayWrite(sql)) persist();
@@ -458,8 +461,9 @@ function createDb(SQL: SqlJsStatic, bytes: Uint8Array | null) {
     return { ...out, changes, statements, transaction: viewTransaction };
   };
   const binding = {
-    batch: async (statements: { sql: string; params?: Param[] }[]) => batch(statements),
+    batch: async (statements: { sql: string; params?: Param[]; raw?: boolean }[]) => batch(statements),
     query: async (sql: string, ...params: Param[]) => reading(sql, params),
+    raw: async (sql: string, ...params: Param[]) => reading(sql, params, Infinity, true),
     first: async (sql: string, ...params: Param[]) => reading(sql, params, 1)[0] ?? null,
     // persist in finally: a statement (or script) that failed part-way may still have written
     run: async (sql: string, ...params: Param[]) => {

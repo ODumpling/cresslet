@@ -1,8 +1,12 @@
-// Email + password auth. Users live in `db`; sessions and rate-limit counters in `kv` (both from "cresslet").
+// Email + password auth. Users live in `db` (the `users` table, through Drizzle); sessions and rate-limit counters in `kv` (both from "cresslet").
 // A session is a random token in an HttpOnly cookie; kv stores only its SHA-256, so a copy of the database holds no
 // live sessions. Passwords: PBKDF2-SHA256 via Web Crypto (100k iterations is the most workerd allows).
-import { db, kv } from "cresslet";
+import { kv } from "cresslet";
+import { eq } from "drizzle-orm";
 import { deleteCookie, getCookie, getRequestHeader, getRequestUrl, setCookie } from "@tanstack/react-start/server";
+
+import { orm } from "./db.server";
+import { users } from "./schema";
 
 export type User = { id: number; email: string; name: string };
 
@@ -63,7 +67,9 @@ export async function currentUser(): Promise<User | null> {
   if (!token) return null;
   const session = await kv.get<{ userId: number }>(await sessionKey(token));
   if (!session) return null;
-  return db.first(db.sql<User>`SELECT id, email, name FROM users WHERE id = ${session.userId}`);
+  const user = await orm.select({ id: users.id, email: users.email, name: users.name }).from(users)
+    .where(eq(users.id, session.userId)).get();
+  return user ?? null;
 }
 
 /** An error whose message is safe to show the user. */

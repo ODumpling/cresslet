@@ -126,7 +126,7 @@ test("host /db/batch: atomic, nests in an app transaction, validates its input",
 test("studio: `cresslet` in server code is the vendored SDK (virtual module), not node_modules", async () => {
   const plugin = "../studio/cresslet-plugin.ts"; // browser module: typed by studio/tsconfig.json, not this program
   const { createCresslet } = await import(plugin);
-  let options: { plugins: { name: string; setup(b: unknown): void }[] } | undefined;
+  let options: { plugins: { name: string; setup(b: unknown): void }[]; loader?: Record<string, string> } | undefined;
   const c = {
     workdir: "/project",
     fs: { exists: async (p: string) => p === "/project/server/index.ts", readFile: async () => { throw new Error("none"); }, writeFile: async () => {} },
@@ -138,6 +138,7 @@ test("studio: `cresslet` in server code is the vendored SDK (virtual module), no
   globalThis.fetch = (async (url: URL) => new Response(await readFile(url, "utf8"))) as unknown as typeof fetch;
   try {
     await createCresslet(c, { project: () => null }).build();
+    assert.equal(options!.loader?.[".sql"], "text", "`.sql` imports are text (drizzle-kit's drizzle/migrations.js)");
     const hooks: { resolve?: (a: { path: string }) => unknown; load?: () => Promise<{ contents: string }>; filter?: RegExp } = {};
     options!.plugins.find((p) => p.name === "cresslet-sdk")!.setup({
       onResolve: (o: { filter: RegExp }, f: typeof hooks.resolve) => ((hooks.filter = o.filter), (hooks.resolve = f)),
