@@ -543,6 +543,55 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.json({ revoked: c.req.param("id") });
   });
 
+  // Revokes the calling token itself (`cresslet logout` of a token its browser login minted). Any role.
+  app.post("/me/token/revoke", async (c) => {
+    const a = c.get("account"), t = c.get("token");
+    if (!a || !t) throw new HttpError(401, "login required", "unauthorized");
+    await store.revokeToken(a.id, t.id);
+    return c.json({ revoked: t.id });
+  });
+
+  // ---- Live Link remembered agents (server/relay.ts)
+  /** The Studio browser installation the request proves (Forget needs one of the account's browsers). */
+  const proveInstall = async (c: Context<Env>, accountId: string) => {
+    const input = await body<{ install?: { id?: unknown; secret?: unknown } } | null>(c) ?? {};
+    const id = input.install?.id, secret = input.install?.secret;
+    if (typeof id !== "string" || typeof secret !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id) || !/^[A-Za-z0-9_-]{32,128}$/.test(secret)
+      || !await store.proveInstall(accountId, id, secret)) {
+      throw new HttpError(403, "this browser's installation couldn't be proved: reload the Studio and try again", "forbidden");
+    }
+  };
+  app.get("/me/agents", async (c) => {
+    const a = accountWide(c, "admin");
+    const agents = await store.agentCredentials(a.id);
+    return c.json({
+      agents: agents.map((x) => ({
+        id: x.id,
+        label: x.label,
+        browserInstallId: x.browser_install_id,
+        createdAt: iso(x.created_at),
+        lastUsedAt: iso(x.last_used_at),
+        projects: x.grants.map((g) => ({ handle: g.project_handle, projectId: g.project_handle.slice(g.project_handle.indexOf(":") + 1), name: g.project_name })),
+      })),
+    });
+  });
+  // Forget: revoked at once (the relay closes its sockets and cancels its calls). From a Studio browser of the account.
+  app.post("/me/agents/:id/forget", async (c) => {
+    const a = accountWide(c, "admin");
+    if (!c.get("session")) throw new HttpError(403, "only the Studio can forget an agent", "forbidden");
+    await proveInstall(c, a.id);
+    const revoked = await store.revokeAgentCredentials(a.id, [c.req.param("id")]);
+    if (!revoked.length) throw new HttpError(404, "agent not found", "not_found");
+    return c.json({ revoked: revoked[0] });
+  });
+  // `cresslet logout`: revokes the agents remembered with the calling token (not other logins').
+  app.post("/me/agents/revoke", async (c) => {
+    const a = c.get("account"), t = c.get("token");
+    if (!a || !t) throw new HttpError(401, "login required", "unauthorized");
+    const mine = (await store.agentCredentials(a.id)).filter((x) => x.cli_token_id === t.id).map((x) => x.id);
+    return c.json({ revoked: await store.revokeAgentCredentials(a.id, mine) });
+  });
+
   // ---- the studio's session cookie
   /** A studio logged in before session cookies (its token in localStorage, sent as a bearer): the cookie takes it over. */
   app.post("/auth/session", async (c) => {
