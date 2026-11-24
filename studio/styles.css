@@ -403,7 +403,8 @@ a.deploy-link:hover { color: var(--accent-text); }
   font: 500 11px var(--mono); padding: 0 5px; border-radius: 5px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--text-2);
 }
 .topbar-right { display: flex; align-items: center; gap: 8px; flex: none; }
-.topbar-right .btn { min-height: 32px; padding: 4px 11px; }
+.topbar-right .btn { min-height: 0; height: 34px; padding: 0 11px; border-radius: 9px; border-color: var(--line); color: var(--text-2); font-size: 13px; }
+.topbar-right .btn:hover:not(:disabled) { border-color: var(--line-strong); color: var(--text); background: var(--surface-2); }
 #builder-btn[aria-expanded="true"], #drawer-btn[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-text); }
 .git-pill .mono { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; }
 /* Short of room (the top bar wraps only at 900px and below): tighter gaps (more than the theme button's 40px), a
@@ -676,14 +677,24 @@ button.statusline-item:hover { color: var(--text); }
 .notice { font-size: 12.5px; color: var(--text-2); }
 .notice[data-error] { color: var(--danger); }
 .approval { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--accent-text); border-radius: 10px; background: var(--accent-soft); font-size: 13px; }
-.bridge-banner { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--accent-soft); font-size: 12.5px; }
-.bridge-banner-text { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent-text); }
+/* The rail is narrow: the actions take the next line when the text and they don't fit on one. */
+.bridge-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--accent-soft); font-size: 12.5px; }
+.bridge-banner-text { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--accent-text); }
+.bridge-banner-text > span { min-width: 0; overflow-wrap: anywhere; }
+.bridge-banner-actions { display: flex; gap: 6px; flex: none; }
+/* Its buttons and the top bar's Disconnect: the segmented control's inner button (white on the tinted strip). */
+.bridge-banner .btn, .bridge-pill .btn {
+  min-height: 0; height: 26px; padding: 0 10px; border-radius: 7px; border: 0; font-size: 12.5px;
+  background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--line-strong), 0 1px 2px #0000000f;
+}
+.bridge-banner .btn:hover:not(:disabled), .bridge-pill .btn:hover:not(:disabled) { background: var(--surface-3); }
 .bridge-panel { margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2, var(--surface)); display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
 .bridge-panel .input { flex: 1; min-width: 0; text-transform: uppercase; }
 .bridge-panel ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .bridge-panel ul.plain > li { gap: 8px; min-width: 0; }
 .bridge-foot { padding: 10px 14px; border-top: 1px solid var(--line); margin: 0; }
-.bridge-pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px 2px 8px; border: 1px solid var(--accent-text); border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 12px; }
+.bridge-pill { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 3px 0 10px; border: 1px solid color-mix(in srgb, var(--accent-text) 30%, transparent); border-radius: 9px; background: var(--accent-soft); color: var(--accent-text); font-size: 13px; }
+.topbar-right .bridge-pill .btn { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; color: var(--text); }
 .bridge-pill-name { max-width: 10rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 
 /* the ship line: a band across the rail */
@@ -1207,8 +1218,8 @@ button.statusline-item:hover { color: var(--text); }
 .modal p { margin: 0; }
 
 /* Source control: the workspace's branch pill (studio/src/views/workspace/GitDialog.tsx). */
-.git-pill { gap: 6px; max-width: 16rem; }
-.git-pill #git-btn-branch { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-pill { gap: 6px; max-width: 16rem; font-weight: 500; }
+.git-pill #git-btn-branch { font-family: inherit; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-dirty { width: 7px; height: 7px; border-radius: 50%; background: var(--warning, var(--accent-text)); flex: none; }
 #git-dialog fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
 #git-dialog legend { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
