@@ -260,7 +260,7 @@ test("templates are served", withServer(async (t) => {
   const cfg = JSON.parse(files.find((f) => f.path === "cresslet.json")!.data);
   assert.deepEqual(cfg.build, { command: "vite build", static: "dist/client", server: "dist/server/server.js", dev: "vite dev" });
   assert.deepEqual(cfg.routes.slice(0, 2), ["/*", "!/assets/*"]);
-  for (const p of ["vite.config.ts", "src/routes/__root.tsx", "src/routeTree.gen.ts", "src/server/auth.server.ts", ".gitignore", "AGENTS.md"]) {
+  for (const p of ["vite.config.ts", "src/routes/__root.tsx", "src/routeTree.gen.ts", "src/server/auth.server.ts", "src/server/schema.ts", "drizzle.config.ts", "drizzle/migrations.js", "drizzle/0000_init.sql", "drizzle/meta/_journal.json", ".gitignore", "AGENTS.md"]) {
     assert.ok(files.some((f) => f.path === p), `tanstack-start: missing ${p}`);
   }
 }));

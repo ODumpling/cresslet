@@ -544,7 +544,9 @@ startTransition(() => { hydrateRoot(document, <StrictMode><StartClient /></Stric
         outfile: p(".cresslet/build/server.js"),
         external: preview ? [] : ["node:*"], // preview: node:async_hooks is the shim
         define: preview ? { ...defines, "process.env": "{}" } : defines, // a browser Worker has no `process`
-        loader: { ".css": "empty" }, // stylesheets reach pages through `?url` and the manifest, not the server bundle
+        // stylesheets reach pages through `?url` and the manifest, not the server bundle; `.sql` imports are their text
+        // (drizzle-kit's drizzle/migrations.js), as in cresslet-cli's build
+        loader: { ".css": "empty", ".sql": "text" },
         plugins: [startPlugin("server", virtuals), sdkPlugin],
       });
       fail("server", r);

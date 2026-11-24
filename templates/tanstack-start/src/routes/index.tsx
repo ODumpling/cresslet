@@ -32,7 +32,7 @@ function Home() {
         </div>
         <div className="card">
           <h3>Data</h3>
-          <p>Users and todos in <code>db</code> with versioned migrations. <code>GET /api/health</code> is a server route.</p>
+          <p>Users and todos in <code>db</code>: a Drizzle schema, migrations from drizzle-kit. <code>GET /api/health</code> is a server route.</p>
         </div>
       </section>
     </main>

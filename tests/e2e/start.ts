@@ -59,7 +59,7 @@ try {
   // The Database view, open from the start: the app's tables are listed as soon as its first request (the preview's
   // page load) has made them, before anyone signs up (the view relists on the app's writes).
   await page.getByRole("button", { name: "Database", exact: true }).click();
-  for (const t of ["users", "todos", "_schema"]) await page.locator(`#db-tables-pane button[data-table="${t}"]`).waitFor({ timeout: 240000 });
+  for (const t of ["users", "todos", "__drizzle_migrations"]) await page.locator(`#db-tables-pane button[data-table="${t}"]`).waitFor({ timeout: 240000 });
   console.log("database initialized from the start:", (await page.locator("#db-tables-pane [data-table]").evaluateAll((b) => b.map((e) => e.getAttribute("data-table")))).join(", "));
   await page.screenshot({ path: `${shots}/start-database.png` });
   // The app writing while the view is open: a failed sign-in in the (hidden) preview counts the attempt in kv, a table

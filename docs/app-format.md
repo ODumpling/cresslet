@@ -86,13 +86,13 @@ export default {
 
 | Binding | API |
 |---|---|
-| `db` | ``sql`…${v}` `` → a statement whose values are parameters (a nested `db.sql` is spliced in); `query(q)` → rows (or `await q`), `first(q)` → row \| null, `run(q)` → `{changes, lastInsertRowid}`; each also takes `(sql, ...params)` with `?`. `exec(sql)` (DDL, no params). `batch([q, "sql", {sql, params}, …])` → `{rows, changes, lastInsertRowid}[]`: one transaction (a savepoint), all or none, with no other statement in between; transaction control (`BEGIN`, `COMMIT`, `SAVEPOINT`, …) isn't allowed in it, nor are `PRAGMA`, `ATTACH` and `DETACH` (a rollback doesn't undo them). Each item is one statement: as with `query`/`run`, SQL after its first statement isn't run (use `exec` for scripts). Inside a transaction the app opened with `exec("BEGIN")`, a batch is part of it, and SQLite's `OR ROLLBACK` conflict clause rolls back that whole transaction. Per-app SQLite, SQLite SQL (`ATTACH`/`VACUUM INTO`, temp tables, `temp_store_directory`, `fts3_tokenizer` and the size/journal pragmas are refused; plain `VACUUM` works) |
+| `db` | ``sql`…${v}` `` → a statement whose values are parameters (a nested `db.sql` is spliced in); `query(q)` → rows (or `await q`), `first(q)` → row \| null, `run(q)` → `{changes, lastInsertRowid}`; each also takes `(sql, ...params)` with `?`. `exec(sql)` (DDL, no params). `batch([q, "sql", {sql, params}, …])` → `{rows, changes, lastInsertRowid}[]`: one transaction (a savepoint), all or none, with no other statement in between; transaction control (`BEGIN`, `COMMIT`, `SAVEPOINT`, …) isn't allowed in it, nor are `PRAGMA`, `ATTACH` and `DETACH` (a rollback doesn't undo them). Each item is one statement: as with `query`/`run`, SQL after its first statement isn't run (use `exec` for scripts). `raw(q)` (contract 2) → the rows as arrays of values in column order (same-named columns, a join's `id`s, each keep theirs), and a `{sql, params, raw: true}` statement in a batch answers its rows so too: what query builders use (`cresslet/drizzle`). Inside a transaction the app opened with `exec("BEGIN")`, a batch is part of it, and SQLite's `OR ROLLBACK` conflict clause rolls back that whole transaction. Per-app SQLite, SQLite SQL (`ATTACH`/`VACUUM INTO`, temp tables, `temp_store_directory`, `fts3_tokenizer` and the size/journal pragmas are refused; plain `VACUUM` works) |
 | `kv` | SDK only (cresslet ≥ 0.3.0, contract 1): `get(key)` → JSON value \| null, `set(key, value, { ttl })` (seconds), `delete(key)`, `incr(key, by = 1, { ttl })` (atomic; ttl applies when the counter starts), `list(prefix, { limit })` → `{key, value, expiresAt}[]`. Kept in the app's database (table `_cresslet_kv`), so it counts toward its size and moves with it |
 | `files` | `put(key, body, {contentType})`, `get(key) → Response \| null`, `delete(key)`, `list(prefix) → {key,size,contentType,updatedAt}[]` |
 | `secrets` | `get(name)` (throws, naming it, if unset), `optional(name) → string \| undefined`, record access (`secrets.NAME`, `Object.keys(secrets)`). Set via `cresslet secrets set`; `.env.cresslet` locally |
 | `app` | `{ id, name, url, deployId, env }`: `env` is `"production"`, or `"staging"` on the app's private staging host ([environments](api.md#environments)), whose `url` is `<app>--staging.<domain>` |
 
-`env` has the same `db` (minus `sql`; `query/first/run/exec` take SQL strings, `batch` takes `{sql, params}[]`), `files`,
+`env` has the same `db` (minus `sql`; `query/first/run/raw/exec` take SQL strings, `batch` takes `{sql, params, raw?}[]`), `files`,
 `secrets` (a plain record) and `app`.
 
 Same API in three runtimes: platform sandbox (workerd), `cresslet dev` (Node), studio preview (browser worker, sql.js).
@@ -117,6 +117,16 @@ here) is how `db.sql` writes placeholders, so a provider with `$1`-style paramet
 | Contract | Adds | cresslet (SDK) |
 |---|---|---|
 | 1 | env published for the SDK, `env.db.batch` (host `POST /db/batch {statements}`), `paramStyle` | 0.2.0 |
+| 2 | `env.db.raw` (host `POST /db/raw {sql, params}`: rows as arrays), `raw` batch statements | 0.6.0 (`db.raw`, `cresslet/drizzle`) |
+
+### Database tables
+
+An app that needs tables defines them with Drizzle and lets drizzle-kit write its migrations: `cresslet/drizzle` gives
+`drizzle(db, { schema })` (Drizzle on `db.raw` and `db.batch`) and `migrate(db, migrations)` (drizzle-kit's
+`drizzle/migrations.js` with `driver: "durable-sqlite"`; each migration in one batch, `__drizzle_migrations` as Drizzle
+keeps it, table rebuilds with foreign keys off). Builds load `.sql` imports as text for it (cresslet-cli's build and
+`cresslet/vite`, the studio's builds). The guide is in the [cresslet package's README](https://github.com/ODumpling/cresslet-cli#database-schema-drizzle-cressletdrizzle);
+the templates' AGENTS.md tell agents the same.
 
 Runtime: Web-standard APIs (fetch, Request/Response, URL, crypto, streams, TextEncoder). npm deps are bundled by esbuild (`platform: neutral`, conditions `worker`/`browser`). No filesystem, env vars, or subprocesses. `node:` built-ins work on the platform (workerd Node compat) but not necessarily in the studio preview, so prefer Web APIs.
 

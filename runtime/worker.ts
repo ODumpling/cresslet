@@ -66,10 +66,11 @@ async function makeEnv(bindings: Bindings) {
   return {
     db: {
       query: (sql: string, ...params: SqlValue[]) => db("query", { sql, params }),
+      raw: (sql: string, ...params: SqlValue[]) => db("raw", { sql, params }),
       first: (sql: string, ...params: SqlValue[]) => db("first", { sql, params }),
       run: (sql: string, ...params: SqlValue[]) => db("run", { sql, params }),
       exec: async (sql: string) => void (await db("exec", { sql })),
-      batch: (statements: { sql: string; params?: SqlValue[] }[]) => db("batch", { statements }),
+      batch: (statements: { sql: string; params?: SqlValue[]; raw?: boolean }[]) => db("batch", { statements }),
     },
     files: {
       async put(key: string, body: BodyInit | null, opts: { contentType?: string } = {}) {

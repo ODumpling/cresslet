@@ -98,9 +98,18 @@ export function createDb(path: string, maxBytes?: number) {
       vacuuming = false;
     }
   };
+  /** `raw`: rows as arrays of values in column order (env.db.raw, `raw` batch statements; contract 2). */
+  const prepare = (sql: string, raw = false) => {
+    const stmt = db.prepare(sql);
+    if (raw) stmt.setReturnArrays(true);
+    return stmt;
+  };
   return {
     query(sql: string, ...params: SQLInputValue[]) {
       return guard(sql, () => db.prepare(sql).all(...params));
+    },
+    raw(sql: string, ...params: SQLInputValue[]) {
+      return guard(sql, () => prepare(sql, true).all(...params));
     },
     first(sql: string, ...params: SQLInputValue[]) {
       return guard(sql, () => db.prepare(sql).get(...params) ?? null);
@@ -119,17 +128,17 @@ export function createDb(path: string, maxBytes?: number) {
      * (statements that return any), changes, lastInsertRowid. Same in cresslet-cli lib/bindings.js and
      * studio/server-worker.ts.
      */
-    batch(statements: { sql: string; params?: SQLInputValue[] }[]) {
+    batch(statements: { sql: string; params?: SQLInputValue[]; raw?: boolean }[]) {
       const total = db.prepare("SELECT total_changes() n");
       const counts = db.prepare("SELECT changes() changes, last_insert_rowid() id");
       counts.setReadBigInts(true); // a rowid past 2^53 would throw otherwise
       db.exec("SAVEPOINT cresslet_batch");
       try {
-        const out = statements.map(({ sql, params = [] }, i) => {
+        const out = statements.map(({ sql, params = [], raw }, i) => {
           try {
             return guard(sql, () => {
               const before = (total.get() as { n: number }).n;
-              const rows = db.prepare(sql).all(...params); // runs any statement; [] when it returns no rows
+              const rows = prepare(sql, raw === true).all(...params); // runs any statement; [] when it returns no rows
               const c = counts.get() as { changes: number; id: number | bigint };
               return { rows, changes: (total.get() as { n: number }).n === before ? 0 : num(c.changes), lastInsertRowid: num(c.id) };
             });
@@ -370,7 +379,7 @@ export function createBindings(
         const body = JSON.parse(new TextDecoder().decode(raw), reviver) as {
           sql: string;
           params?: SQLInputValue[];
-          statements?: { sql: string; params?: SQLInputValue[] }[];
+          statements?: { sql: string; params?: SQLInputValue[]; raw?: boolean }[];
         };
         const { sql, params = [] } = body;
         let result: unknown;
@@ -387,6 +396,7 @@ export function createBindings(
           result = db.batch(list);
         } else if (typeof sql !== "string") return text("sql required", 400);
         else if (op === "query") result = db.query(sql, ...params);
+        else if (op === "raw") result = db.raw(sql, ...params);
         else if (op === "first") result = db.first(sql, ...params);
         else if (op === "run") result = db.run(sql, ...params);
         else if (op === "exec") result = db.exec(sql);

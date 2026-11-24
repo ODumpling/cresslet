@@ -12,10 +12,14 @@ store, `files` and `secrets`; built assets are served statically. Ships with ema
 - `src/server/` — server code. `*.server.ts` files are server-only (import protection keeps them out of the client).
   - `auth.ts` — `getUser`, `signUp`, `signIn`, `signOut` server functions; `authed` middleware (`context.user`).
   - `auth.server.ts` — PBKDF2 passwords, sessions in `kv` (cookie `sid`, 30 days), `rateLimit` (kv counters).
-  - `db.server.ts` — versioned migrations (append, never edit shipped ones), run before every request by `src/start.ts`:
-    the tables exist from the app's first request, so queries don't call `migrate()` themselves.
+  - `schema.ts` — the tables (Drizzle: `users`, `todos`). Change them here, then `npm run db:generate`.
+  - `db.server.ts` — `orm` (Drizzle on `db`) for queries, and `migrate()`, which `src/start.ts` runs before every
+    request: the tables exist from the app's first request, so queries don't call `migrate()` themselves.
   - `todos.ts` — example CRUD server functions scoped to the user.
 - `src/start.ts` — request middleware: CSRF check for non-GET requests, then the schema migrations.
+- `drizzle/` — migrations drizzle-kit generated from `schema.ts` (`NNNN_*.sql`, `meta/`, `migrations.js`), plus
+  `migrations.d.ts` (their type; yours). Commit all of it; never edit or delete a migration that has been deployed.
+- `drizzle.config.ts` — drizzle-kit's config (`driver: "durable-sqlite"`: it writes `drizzle/migrations.js`).
 - `public/` — copied as-is to the site root. Add each top-level file to the `!` routes in `cresslet.json`.
 - `cresslet.json` — `name` (subdomain), `routes` (`/*` to the server except `!/assets/*` and public files),
   `build` (how `cresslet build`/`dev` run Vite; `dist/client` is served, `dist/server/server.js` is the server).
@@ -27,6 +31,7 @@ store, `files` and `secrets`; built assets are served statically. Ships with ema
   rebuilds and reloads the preview (no HMR), and Vite plugins added to `vite.config.ts` don't run there. TanStack
   versions are pinned: Studio's build uses their internals, tested with these versions.
 - `npm run typecheck` — `tsc --noEmit`.
+- `npm run db:generate` — `drizzle-kit generate`: the next migration in `drizzle/` from the changes to `schema.ts`.
 - `npx cresslet build` — `vite build` + bundles the server into `.cresslet/build/server.js`.
 - `npx cresslet deploy` — build + deploy, prints the URL. First deploy creates the app and stores a deploy key in
   `.cresslet/app.json` (gitignored; keep it).
@@ -37,13 +42,26 @@ store, `files` and `secrets`; built assets are served statically. Ships with ema
   Call them from loaders or components: `await addTodo({ data: { title } })`, then `router.invalidate()` to reload.
 - Cookies/headers: `getCookie`, `setCookie`, `getRequestHeader`, … from `@tanstack/react-start/server`.
 - Bindings: `import { db, kv, files, secrets, app } from "cresslet"`, inside handlers only (never at module top level).
-  - `db` (SQLite): ``db.sql`… ${value}` `` (values are parameters), `db.query/first/run`, `db.batch([...])` (atomic), `db.exec` (DDL).
+  - `db` (SQLite): query it through `orm` (`db.server.ts`, below). Plain SQL still works for one-offs:
+    ``db.sql`… ${value}` `` (values are parameters), `db.query/first/run`, `db.batch([...])` (atomic).
   - `kv` (kept in the same database): `get(key)`, `set(key, value, { ttl })` (seconds), `delete`, `incr(key, by, { ttl })`
     (atomic counter; ttl starts the window), `list(prefix)`. Values are JSON.
   - `files.put/get/delete/list`, `secrets.get("KEY")`, `app.name/url`.
 - Web-standard APIs (`fetch`, `crypto.subtle`, streams). `node:` built-ins work on the platform (workerd Node compat).
   npm packages are bundled; pure-JS only. 30s per request, 256MB memory. Keep state in db/kv/files, not globals.
 - Deploying needs `npx cresslet login`: every app belongs to an account.
+
+## Database: Drizzle
+- Tables live in `src/server/schema.ts` (`sqliteTable` from `drizzle-orm/sqlite-core`). To add or change one: edit it,
+  run `npm run db:generate`, commit `drizzle/`. Don't write migration SQL by hand, and don't add `CREATE TABLE IF NOT
+  EXISTS` / `ALTER TABLE` to request code. Data changes: `npx drizzle-kit generate --custom` makes an empty migration
+  (one statement per `--> statement-breakpoint`).
+- Queries: `import { orm } from "./db.server"` and the tables from `./schema`; `eq`, `and`, `desc`, … from `drizzle-orm`.
+  `orm.select().from(todos).where(eq(todos.userId, id))`, `orm.insert(t).values({...}).returning()`, joins,
+  `orm.query.*` (pass `relations` in the schema for it).
+- `orm.batch([...])` for writes that must land together (one transaction, all or none). `orm.transaction()` throws: its
+  statements would span awaits with other requests' in between; use `orm.batch`.
+- Full guide: `node_modules/cresslet/README.md` ("Database schema: Drizzle").
 
 ## Verify
 After deploy: `curl <url>/api/health` and `npx cresslet logs`.
