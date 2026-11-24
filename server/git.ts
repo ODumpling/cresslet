@@ -1643,11 +1643,12 @@ export function gitRoutes(
    */
   async function promoteCommit(c: Context<Env>, a: App, d: Deploy): Promise<{ sha: string; branch: string; repo: string } | null> {
     const repo = await store.getAppRepo(a.id);
-    if (!repo || !gh) return null;
+    if (!repo) return null;
     // Linked: production serves what its default branch holds, so a bundle without a commit isn't promoted.
     if (!d.git_sha) {
       throw new HttpError(409, `${a.name} is linked to ${repo.owner}/${repo.name}, but this staging deploy records no commit (built from uncommitted changes?): deploy a commit to staging, then promote`, "no_commit");
     }
+    if (!gh) return null; // source control off on this server: the pointer only, as for a deploy
     const acct = c.get("account");
     const where = `${repo.owner}/${repo.name}`;
     if (!acct) throw new HttpError(401, `${a.name} is linked to ${where}: promote it signed in (it merges on GitHub as you; a deploy key can't)`, "unauthorized");

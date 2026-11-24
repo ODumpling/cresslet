@@ -410,6 +410,11 @@ export class Store implements RateHits {
           if (stale) await update(r, value);
         }
       }
+      // Environments' own secrets: re-sealed under the primary key too (never stored plaintext).
+      for (const r of await this.db.all<{ env_id: string; key: string; value: Uint8Array }>("SELECT env_id, key, value FROM env_secrets")) {
+        const { value, stale } = this.#box.open(r.env_id, r.key, Buffer.from(r.value).toString());
+        if (stale) await this.db.run("UPDATE env_secrets SET value = ? WHERE env_id = ? AND key = ?", this.#seal(r.env_id, r.key, value), r.env_id, r.key);
+      }
       // Source control tokens: only re-sealed under the primary key (they're never stored plaintext).
       const conns = await this.db.all<{ account_id: string; provider: string; access_token: Uint8Array; refresh_token: Uint8Array | null }>(
         "SELECT account_id, provider, access_token, refresh_token FROM git_connections",

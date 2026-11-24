@@ -909,7 +909,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     let deploy: Awaited<ReturnType<typeof writeDeploy>> & { warning?: string; tag?: string };
     try {
       if (createdKey) await appDeploys.take(target.id);
-      deploy = await writeDeploy(cfg, store, target, input);
+      // (Production's pointer doesn't move under a promotion in progress: it waits, then goes on top.)
+      const to = target;
+      deploy = await envSerial(to.id, () => writeDeploy(cfg, store, to, input));
     } catch (e) {
       if (createdKey) {
         await store.deleteApp(target.id);
@@ -1094,7 +1096,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         await store.setEnvDeploy(e.id, d.id, config);
       } else await store.setCurrentDeploy(a.id, d.id, config);
     });
-    await (e ? envSerial(a.id, swap) : swap());
+    await envSerial(a.id, swap); // (production's too: not under a promotion in progress)
     runtime.stop(keyOf(a, e));
     runtime.logs.push(keyOf(a, e), "system", `rolled back to ${d.id}`);
     const now = (await store.appById(a.id))!;
@@ -1165,6 +1167,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!e) throw new HttpError(400, "production can't be deleted here (delete the app)", "bad_request");
     // Under the environments' lock: a deploy that would make it again (the same data dir) waits until its files are gone.
     await envSerial(a.id, async () => {
+      // Deleted already (a delete queued before this one), maybe made again since: its data dir is the new one's now.
+      if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
       await store.deleteEnvironment(e.id); // first: no new request starts its sandbox
       try {
         await runtime.stopSettled(e.id);
@@ -1273,7 +1277,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       // Promoted already (another request, or an earlier one whose tag failed): only the tag is tried again.
       const already = (await store.appById(a.id))?.current_deploy_id === d.id;
       // (Already: only for its tag, if it has none; a default branch that moved on since isn't an error then.)
-      const landed = !already ? await git.promoteCommit(c, a, d) : d.git_tag ? null : await git.promoteCommit(c, a, d).catch(() => null);
+      const landed = already ? null : await git.promoteCommit(c, a, d);
       if (!already) {
         await store.serialized(deploysLock(a.id), async () => {
           if ((await store.appById(a.id))?.current_deploy_id !== was) throw new HttpError(409, `production was deployed to meanwhile: it wasn't changed`, "stale");
@@ -1286,9 +1290,11 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const landed = r.landed;
     if (r.already) {
       const out: { id: string; tag?: string; warning?: string } = { id: d.id, ...(d.git_tag ? { tag: d.git_tag } : {}) };
-      if (landed && !d.git_tag) {
+      // Its commit, as on the default branch (tagDeploy checks it is): nothing on GitHub moves.
+      const repo = d.git_sha && !d.git_tag ? await store.getAppRepo(a.id) : undefined;
+      if (repo && d.git_sha) {
         try {
-          const tag = await git.tagDeploy(c, a, d.id, landed);
+          const tag = await git.tagDeploy(c, a, d.id, { sha: d.git_sha, branch: repo.default_branch, repo: `${repo.owner}/${repo.name}` });
           if (tag) out.tag = tag;
         } catch (err) {
           out.warning = `commit not tagged: ${err instanceof HttpError ? err.message : "couldn't tag it"}`;

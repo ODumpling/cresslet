@@ -210,9 +210,10 @@ test("staging: its own deploy, private host, data, sandbox and secrets; promote 
   assert.equal(seeded.status, 200, seeded.text);
   assert.equal((await (await get()).json()).n, 2);
 
-  // Deleting it: its sandbox, data and host go; production stays.
+  // Deleting it: its sandbox, data and host go; production stays. A second delete queued behind it finds it gone.
   assert.equal((await t.send("DELETE", "/v1/apps/shop/envs/staging", undefined, stranger)).status, 403);
-  const del = await t.send("DELETE", "/v1/apps/shop/envs/staging");
+  const [del, again] = await Promise.all([t.send("DELETE", "/v1/apps/shop/envs/staging"), t.send("DELETE", "/v1/apps/shop/envs/staging")]);
+  assert.equal(again.status, 404);
   assert.equal(del.status, 200, del.text);
   assert.deepEqual(del.body.environments.map((e: { name: string }) => e.name), ["production"]);
   assert.ok(!t.srv.runtime.procs.has(envId));
