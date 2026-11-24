@@ -359,6 +359,36 @@ async function liveLink(db: Db) {
   `);
 }
 
+/**
+ * Environments inside an app (docs/architecture.md#environments): `staging` beside the app's own production (which
+ * stays `apps.current_deploy_id`, `apps.config`, `secrets` and `data/apps/<id>/data/`). Each environment has its own
+ * deploy pointer and config, sandbox uid and secret overrides; deploys record the environment they went to and when
+ * one was promoted to production; private-environment sessions name their environment. An older server ignores all
+ * of it: staging deploys look like production deploys that aren't served.
+ */
+async function environments(db: Db) {
+  const pg = db.dialect === "postgres";
+  const big = pg ? "BIGINT" : "INTEGER";
+  const blob = pg ? "BYTEA" : "BLOB";
+  const text = pg ? `TEXT COLLATE "C"` : "TEXT";
+  const addCol = async (table: string, col: string, def: string) => {
+    if (pg) return db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${def}`);
+    if (!(await cols(db, table)).includes(col)) await db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+  };
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS environments (
+      id TEXT PRIMARY KEY, app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE, name TEXT NOT NULL,
+      current_deploy_id TEXT, config TEXT NOT NULL DEFAULT '{}', uid_seq ${big},
+      created_at ${big} NOT NULL, updated_at ${big} NOT NULL, UNIQUE (app_id, name));
+    CREATE TABLE IF NOT EXISTS env_secrets (
+      env_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE, key ${text} NOT NULL,
+      value ${blob} NOT NULL, PRIMARY KEY (env_id, key));
+  `);
+  await addCol("deploys", "env", "TEXT");
+  await addCol("deploys", "promoted_at", big);
+  await addCol("page_sessions", "env_id", "TEXT");
+}
+
 /** Every migration, oldest first. Append only. */
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "baseline", up: baseline },
@@ -373,13 +403,14 @@ export const MIGRATIONS: Migration[] = [
   { version: 10, name: "deploy_git_tag", up: deployGitTag },
   { version: 11, name: "passwords", up: passwords },
   { version: 12, name: "live_link", up: liveLink },
+  { version: 13, name: "environments", up: environments },
 ];
 
 /** Tables in foreign-key order (parents first), for copying between databases. */
 export const TABLES = [
   "accounts", "orgs", "apps", "tokens", "deploys", "secrets", "domains", "meta", "collaborators", "invites",
   "page_sessions", "rate_hits", "ai_wallets", "ai_ledger", "org_members", "git_connections", "app_repos",
-  "stack_changes", "browser_installs", "agent_credentials", "agent_grants", "agent_pauses",
+  "stack_changes", "browser_installs", "agent_credentials", "agent_grants", "agent_pauses", "environments", "env_secrets",
 ] as const;
 
 export interface MigrateResult {

@@ -66,9 +66,15 @@ import {
   reservedName,
   removeAppFiles,
   validName,
+  pruneDeploys,
+  removeEnvFiles,
   writeDeploy,
   writePage,
 } from "./deploys.ts";
+import { backup, DatabaseSync } from "node:sqlite";
+import { mkdir, rename, rm as rmFile, stat } from "node:fs/promises";
+import { ENV_NAMES, isEnvName, targetData, targetKeys } from "./envs.ts";
+import type { Deploy, Environment } from "./store.ts";
 
 export const VERSION = "0.1.0";
 const TEMPLATES = join(import.meta.dirname, "../templates");
@@ -203,7 +209,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   const toOwnerJson = toOwner(jsonBodyLimit);
   const toOwnerDeploy = toOwner(deployBodyLimit);
   // Syncing sends the project's files: as big as a deploy's.
-  app.use("/apps/:name/*", (c, next) => (/\/git\/(?:sync|connect)$/.test(c.req.path) ? toOwnerDeploy : toOwnerJson)(c, next));
+  // (A deploy to one of the app's environments too.)
+  app.use("/apps/:name/*", (c, next) => (/\/git\/(?:sync|connect)$|\/envs\/[^/]+\/deploys$/.test(c.req.path) ? toOwnerDeploy : toOwnerJson)(c, next));
   app.use("/admin/sites/:name/*", toOwnerJson);
   app.use("/pages/:name", (c, next) => (c.req.method === "PUT" ? toOwnerDeploy : toOwnerJson)(c, next));
   app.use("/pages/:name/*", toOwnerJson);
@@ -365,6 +372,50 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   function notPage(a: App) {
     if (a.kind === "page") throw new HttpError(409, `${a.name} is an artifact (static files, no server): change it with /v1/pages/${a.name}`, "is_page");
   }
+
+  /**
+   * The environment a request names (`?env=`, docs/api.md#environments): null for production (none, or
+   * `production`); the app's environment, which must exist (it's made by its first deploy).
+   */
+  async function envOf(c: Context<Env>, a: App, v: unknown = c.req.query("env")): Promise<Environment | null> {
+    if (v === undefined || v === null || v === "" || v === "production") return null;
+    if (!isEnvName(v)) throw new HttpError(400, `env must be production or one of ${ENV_NAMES.join(", ")}`, "bad_request");
+    const e = await store.environment(a.id, v);
+    if (!e) throw new HttpError(404, `${a.name} has no ${v} environment yet (deploy to it first: cresslet deploy --env ${v})`, "env_not_found");
+    return e;
+  }
+  /** Runtime key, data and name of production (`env` null) or an environment of the app. */
+  const keyOf = (a: App, e: Environment | null) => e?.id ?? a.id;
+  /** Stops every sandbox of the app (production's, its environments'): after a change they all share. */
+  const stopAll = async (a: App) => {
+    for (const k of await targetKeys(store, a.id)) runtime.stop(k);
+  };
+  const envView = (a: App, e: Environment) => ({
+    name: e.name,
+    url: appUrl(cfg, a.name, e.name),
+    private: true,
+    currentDeployId: e.current_deploy_id,
+    config: JSON.parse(e.config),
+    createdAt: iso(e.created_at),
+    updatedAt: iso(e.updated_at),
+  });
+  const environmentsView = async (a: App) => [
+    { name: "production", url: appUrl(cfg, a.name), private: false, currentDeployId: a.current_deploy_id, config: JSON.parse(a.config), createdAt: iso(a.created_at), updatedAt: iso(a.updated_at) },
+    ...(await store.environments(a.id)).map((e) => envView(a, e)),
+  ];
+  const deployView = (a: App, d: Deploy, current: string | null) => ({
+    id: d.id,
+    createdAt: new Date(d.created_at).toISOString(),
+    bytes: d.bytes,
+    files: d.file_count,
+    server: !!d.has_server,
+    source: d.source,
+    hasSource: existsSync(join(paths(cfg, a.id).deploy(d.id), "source")), // the project source came with it
+    current: d.id === current,
+    env: d.env ?? "production",
+    promotedAt: iso(d.promoted_at ?? null),
+    git: d.git_sha ? { sha: d.git_sha, branch: d.git_branch, repo: d.git_repo, tag: d.git_tag ?? null, url: d.git_repo ? `${githubSync(cfg)?.webUrl ?? cfg.git.webUrl}/${d.git_repo}/commit/${d.git_sha}` : null } : null,
+  });
 
   const accountView = (a: Account) => ({
     id: a.id,
@@ -822,6 +873,10 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new HttpError(400, "invalid JSON body", "bad_request");
     const input = raw as DeployInput & { app?: string; create?: boolean };
     if (input.app !== undefined && typeof input.app !== "string") throw new HttpError(400, `app name must be ${NAME_RULES}`, "invalid_name");
+    // Never silently to production: an environment's deploy has a route of its own (a server without it answers 404).
+    if ((input as { env?: unknown }).env != null && (input as { env?: unknown }).env !== "production") {
+      throw new HttpError(400, "deploy to an environment with POST /v1/apps/:name/envs/:env/deploys", "bad_request");
+    }
     let target = input.app ? await store.appByName(input.app) : undefined;
     // `create`: a new app only (the studio's address picker), never a deploy over one that took the name meanwhile.
     if (target && input.create === true) throw new HttpError(409, `app name unavailable: ${target.name}`, "conflict");
@@ -854,7 +909,9 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     let deploy: Awaited<ReturnType<typeof writeDeploy>> & { warning?: string; tag?: string };
     try {
       if (createdKey) await appDeploys.take(target.id);
-      deploy = await writeDeploy(cfg, store, target, input);
+      // (Production's pointer doesn't move under a promotion in progress: it waits, then goes on top.)
+      const to = target;
+      deploy = await envSerial(to.id, () => writeDeploy(cfg, store, to, input));
     } catch (e) {
       if (createdKey) {
         await store.deleteApp(target.id);
@@ -953,25 +1010,23 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.json({ apps: apps.map((x) => ({ ...view(x, org(x)), access: x.access })) });
   });
 
+  // `?env=staging`: that environment's deploys, sandbox and secrets (production's otherwise); `environments`: all of them.
   app.get("/apps/:name", async (c) => {
     const a = await getApp(c.req.param("name"));
     const access = await authorize(c, a, "read");
+    const e = a.kind === "app" ? await envOf(c, a) : null;
+    const current = e ? e.current_deploy_id : a.current_deploy_id;
+    const list = a.kind === "app" ? await store.envDeploys(a.id, e?.name ?? null, KEEP_DEPLOYS) : await store.deploys(a.id, KEEP_DEPLOYS);
     return c.json({
       app: { ...view(a, (await orgRefs(store, [a]))(a)), access: access ?? null },
-      deploys: (await store.deploys(a.id, KEEP_DEPLOYS)).map((d) => ({
-        id: d.id,
-        createdAt: new Date(d.created_at).toISOString(),
-        bytes: d.bytes,
-        files: d.file_count,
-        server: !!d.has_server,
-        source: d.source,
-        hasSource: existsSync(join(paths(cfg, a.id).deploy(d.id), "source")), // the project source came with it
-        current: d.id === a.current_deploy_id,
-        git: d.git_sha ? { sha: d.git_sha, branch: d.git_branch, repo: d.git_repo, tag: d.git_tag ?? null, url: d.git_repo ? `${githubSync(cfg)?.webUrl ?? cfg.git.webUrl}/${d.git_repo}/commit/${d.git_sha}` : null } : null,
-      })),
+      env: e?.name ?? "production",
+      environments: a.kind === "app" ? await environmentsView(a) : [],
+      deploys: list.map((d) => deployView(a, d, current)),
       repo: (r => r ? git.repoView(r) : null)(await store.getAppRepo(a.id)),
-      runtime: { running: runtime.status(a.id).running }, // no pid or host details for app users
-      secrets: await store.secretKeys(a.id),
+      runtime: { running: runtime.status(keyOf(a, e)).running }, // no pid or host details for app users
+      ...(e
+        ? await secretsView(a, e).then((v) => ({ secrets: v.map((x) => x.key), secretSources: Object.fromEntries(v.map((x) => [x.key, x.source])) }))
+        : { secrets: await store.secretKeys(a.id) }),
     });
   });
 
@@ -980,16 +1035,17 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "read");
+    const e = await envOf(c, a);
     const database: { tables: { name: string; rows: number }[]; error: string | null; truncated?: true } = { tables: [], error: null };
     try {
-      const r = await inspect<{ tables: { name: string; rows: number }[]; truncated: boolean }>(a.id, paths(cfg, a.id).db, { kind: "counts" });
+      const r = await inspect<{ tables: { name: string; rows: number }[]; truncated: boolean }>(keyOf(a, e), targetData(cfg, { app: a, env: e }).db, { kind: "counts" });
       database.tables = r?.tables ?? [];
       if (r?.truncated) database.truncated = true;
     } catch (e) {
       database.error = (e as Error).message;
     }
     return c.json({
-      ...runtime.metrics.view(a.id),
+      ...runtime.metrics.view(keyOf(a, e)),
       usage: await usage(cfg, a.id),
       database,
       domains: (await store.domains(a.id)).map((d) => ({ domain: d.domain, verified: !!d.verified_at })),
@@ -1006,65 +1062,316 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return c.json({ deleted: a.name });
   });
 
+  // `env`: that environment's own history (production's: what it was deployed or promoted to).
   app.post("/apps/:name/rollback", async (c) => {
     const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "deploy");
-    const { deployId } = await body<{ deployId?: unknown } | null>(c) ?? {};
+    const { deployId, env } = await body<{ deployId?: unknown; env?: unknown } | null>(c) ?? {};
     await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
     if (deployId !== undefined && typeof deployId !== "string") throw new HttpError(400, "deployId must be a string");
-    // Default: the deploy before the one served (not the second newest: after a rollback that'd roll forward).
-    const previous = async () => {
-      const list = await store.deploys(a.id);
-      const i = list.findIndex((x) => x.id === a.current_deploy_id);
-      return i < 0 ? list[1] : list[i + 1];
-    };
-    const d = deployId ? await store.deploy(deployId) : await previous();
-    if (!d || d.app_id !== a.id || beingRemoved(d.id)) throw new HttpError(404, "deploy not found", "not_found");
-    const file = join(paths(cfg, a.id).deploy(d.id), "deploy.json");
-    const json = await readFile(file, "utf8").catch((e) => {
-      throw e?.code === "ENOENT" ? new HttpError(404, "deploy not found", "not_found") : e;
+    const e = await envOf(c, a, env ?? c.req.query("env"));
+    const serving = () => e ? store.environmentById(e.id).then((x) => x?.current_deploy_id ?? null) : store.appById(a.id).then((x) => x?.current_deploy_id ?? null);
+    // Chosen and swapped under the environments' lock (production's too: not under a promotion in progress), so the
+    // previous deploy is the one before what's served then.
+    const d = await envSerial(a.id, async () => {
+      const list = await store.envDeploys(a.id, e?.name ?? null, 1000);
+      // Default: the deploy before the one served (not the second newest: after a rollback that'd roll forward).
+      const cur = await serving();
+      const i = list.findIndex((x) => x.id === cur);
+      // Only one of this environment's (production never rolls back to a staging deploy that wasn't promoted).
+      const d = deployId ? list.find((x) => x.id === deployId) : i < 0 ? list[1] : list[i + 1];
+      if (!d || d.app_id !== a.id || beingRemoved(d.id)) throw new HttpError(404, "deploy not found", "not_found");
+      const file = join(paths(cfg, a.id).deploy(d.id), "deploy.json");
+      const json = await readFile(file, "utf8").catch((err) => {
+        throw err?.code === "ENOENT" ? new HttpError(404, "deploy not found", "not_found") : err;
+      });
+      const config = JSON.parse(json);
+      // A prune may have picked it (or moved it aside) meanwhile: checked again, under the lock a prune
+      // chooses under, together with the swap.
+      await store.serialized(deploysLock(a.id), async () => {
+        if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
+        if (e) {
+          if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
+          await store.setEnvDeploy(e.id, d.id, config);
+        } else await store.setCurrentDeploy(a.id, d.id, config);
+      });
+      return d;
     });
-    const config = JSON.parse(json);
-    // A prune may have picked it (or moved it aside) meanwhile: checked again, under the lock a prune
-    // chooses under, together with the swap.
-    await store.serialized(deploysLock(a.id), async () => {
-      if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
-      await store.setCurrentDeploy(a.id, d.id, config);
+    runtime.stop(keyOf(a, e));
+    runtime.logs.push(keyOf(a, e), "system", `rolled back to ${d.id}`);
+    const now = (await store.appById(a.id))!;
+    return c.json({ app: view(now), ...(e ? { environment: envView(now, (await store.environmentById(e.id))!) } : {}) });
+  });
+
+  // ---- environments (docs/api.md#environments): staging beside production, private, made by its first deploy.
+  /**
+   * One change to an app's environments at a time (in this process: an app's requests all run on its node): a deploy
+   * to one, its rollback, seed or deletion, and a promotion from first GitHub move to production's pointer, so what a
+   * promotion landed is what production serves.
+   */
+  const envLocks = new Map<string, Promise<unknown>>();
+  const envSerial = <T,>(appId: string, fn: () => Promise<T>): Promise<T> => {
+    const p = (envLocks.get(appId) ?? Promise.resolve()).then(fn, fn);
+    const tail = p.catch(() => {});
+    envLocks.set(appId, tail);
+    void tail.then(() => envLocks.get(appId) === tail && envLocks.delete(appId));
+    return p;
+  };
+  app.get("/apps/:name/envs", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    notPage(a);
+    await authorize(c, a, "read");
+    return c.json({ environments: await environmentsView(a) });
+  });
+
+  /** A deploy to one of the app's environments (not production): `POST /v1/deploys`'s body, without `app`/`create`. */
+  app.post("/apps/:name/envs/:env/deploys", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    notPage(a);
+    await authorize(c, a, "deploy");
+    const name = c.req.param("env");
+    if (!isEnvName(name)) throw new HttpError(400, `env must be one of ${ENV_NAMES.join(", ")} (production: POST /v1/deploys)`, "bad_request");
+    if (!a.account_id) throw new HttpError(403, "environments need an app with an owner (anonymous apps expire)", "unclaimed");
+    const raw = await body<unknown>(c, deployBodyLimit);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new HttpError(400, "invalid JSON body", "bad_request");
+    await authorize(c, a, "deploy"); // again: access may have changed while the body arrived
+    if (!await appDeploys.take(a.id)) {
+      throw new HttpError(429, `too many deploys of ${a.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
+    }
+    const { e, deploy } = await envSerial(a.id, async () => {
+      const e = await store.ensureEnvironment(a.id, name);
+      try {
+        // Never tagged: a version is what production serves (promote tags it).
+        return { e, deploy: await writeDeploy(cfg, store, a, raw as DeployInput, e) };
+      } catch (err) {
+        // Its first deploy refused (a bad body, too large): no environment with nothing deployed is left behind.
+        if (!e.current_deploy_id && !(await store.environmentById(e.id))?.current_deploy_id) {
+          await store.deleteEnvironment(e.id);
+          await removeEnvFiles(cfg, a.id, e.name);
+        }
+        throw err;
+      }
     });
-    runtime.stop(a.id);
-    runtime.logs.push(a.id, "system", `rolled back to ${d.id}`);
-    return c.json({ app: view((await store.appById(a.id))!) });
+    runtime.stop(e.id); // next request boots the new version
+    runtime.logs.push(e.id, "system", `deployed ${deploy.id} to ${name} (${deploy.files} files${deploy.server ? ", server" : ""})`);
+    const now = (await store.appById(a.id))!;
+    return c.json({ app: view(now), environment: envView(now, (await store.environmentById(e.id))!), deploy }, 201);
+  });
+
+  // Deletes the environment: its sandbox, data, secret overrides and deploys (ones production was promoted to stay).
+  app.delete("/apps/:name/envs/:env", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    notPage(a);
+    await authorize(c, a, "admin");
+    const e = await envOf(c, a, c.req.param("env"));
+    if (!e) throw new HttpError(400, "production can't be deleted here (delete the app)", "bad_request");
+    // Under the environments' lock: a deploy that would make it again (the same data dir) waits until its files are gone.
+    await envSerial(a.id, async () => {
+      // Deleted already (a delete queued before this one), maybe made again since: its data dir is the new one's now.
+      if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
+      await store.deleteEnvironment(e.id); // first: no new request starts its sandbox
+      await store.detachEnvDeploys(a.id, e.name); // promoted ones stay production's only (not a new staging's history)
+      try {
+        await runtime.stopSettled(e.id);
+      } finally {
+        runtime.logs.drop(e.id);
+        runtime.metrics.drop(e.id);
+        runtime.cronRuns.drop(e.id);
+        await removeEnvFiles(cfg, a.id, e.name);
+      }
+      // Its other deploys go before a deploy queued behind this can make it again (they'd be in its history).
+      await pruneDeploys(cfg, store, a.id, (await store.appById(a.id))?.current_deploy_id ?? "");
+    });
+    return c.json({ deleted: e.name, environments: await environmentsView(a) });
+  });
+
+  /**
+   * Seeds an environment's database with a snapshot of production's (`from: "production"`), replacing its own. Only the
+   * database: files aren't copied. The environment's sandbox is stopped for the swap.
+   */
+  app.post("/apps/:name/envs/:env/seed", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    notPage(a);
+    await authorize(c, a, "deploy");
+    const { from } = await body<{ from?: unknown } | null>(c) ?? {};
+    await authorize(c, a, "deploy");
+    if (from !== "production") throw new HttpError(400, `from must be "production" (a snapshot of its database)`, "bad_request");
+    const e = await envOf(c, a, c.req.param("env"));
+    if (!e) throw new HttpError(400, "production can't be seeded", "bad_request");
+    const src = paths(cfg, a.id).db, dst = targetData(cfg, { app: a, env: e });
+    const tmp = `${dst.db}.seed-${id("t", 6)}`;
+    const bytes = await envSerial(a.id, async () => {
+      if (!await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
+      await mkdir(dst.data, { recursive: true });
+      if (existsSync(src)) {
+        // A consistent copy of the live database (WAL: production keeps writing), made off the event loop.
+        const db = new DatabaseSync(src, { readOnly: true, timeout: 5000 });
+        try {
+          // In one step (one read transaction, which WAL lets production write beside): in small steps, each write of
+          // production's would restart the copy.
+          await backup(db, tmp, { rate: 2 ** 31 - 1 }); // (node takes no -1 "all": this many pages is all of it)
+        } finally {
+          db.close();
+        }
+      }
+      // Its sandbox stopped and its bindings thread gone (the database closed), none started until the new one's in.
+      return runtime.hold(e.id, dst.files, async () => {
+        await Promise.all(["", "-wal", "-shm"].map((x) => rmFile(dst.db + x, { force: true })));
+        if (existsSync(tmp)) await rename(tmp, dst.db);
+        return (await stat(dst.db).catch(() => null))?.size ?? 0;
+      });
+    }).finally(() => rmFile(tmp, { force: true }));
+    runtime.logs.push(e.id, "system", `database seeded from production (${bytes} bytes)`);
+    return c.json({ seeded: e.name, from, bytes });
+  });
+
+  // A one-time sign-in link to a private environment (`<app>--<env>`), for the studio's /view page (as for a private artifact).
+  app.post("/apps/:name/envs/:env/view", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    notPage(a);
+    await authorize(c, a, "read", { account: true });
+    const e = await envOf(c, a, c.req.param("env"));
+    if (!e) throw new HttpError(400, "production isn't private", "bad_request");
+    const input = await body<{ path?: unknown } | null>(c).catch((err) => {
+      if (err instanceof HttpError && err.status === 413) throw err;
+      return null;
+    }) ?? {};
+    const path = typeof input.path === "string" && input.path.startsWith("/") && !input.path.startsWith("//") ? input.path : "/";
+    const base = appUrl(cfg, a.name, e.name);
+    const url = new URL(path, base);
+    if (url.origin !== new URL(base).origin) throw new HttpError(400, "invalid path");
+    url.searchParams.set(PAGE_TICKET_PARAM, await store.pageTicket(a.id, c.get("account")!.id, PAGE_TICKET_MS, e.id));
+    c.header("cache-control", "no-store");
+    return c.json({ url: url.href, expiresIn: PAGE_TICKET_MS / 1000 });
+  });
+
+  /**
+   * Production serves an environment's deploy (`deployId`: the one the caller saw it serve), the same immutable bundle,
+   * not rebuilt. Built from a commit of the linked repository: the default branch is moved to that commit first (as the
+   * user, fast-forward only: git.ts promoteCommit), and the commit gets the next version tag once production serves it.
+   */
+  app.post("/apps/:name/promote", async (c) => {
+    const a = await getApp(c.req.param("name"));
+    notPage(a);
+    await authorize(c, a, "deploy");
+    const input = await body<{ from?: unknown; deployId?: unknown; expectProduction?: unknown } | null>(c) ?? {};
+    await authorize(c, a, "deploy");
+    const e = await envOf(c, a, input.from ?? "staging");
+    if (!e) throw new HttpError(400, "from must be an environment other than production", "bad_request");
+    if (typeof input.deployId !== "string") throw new HttpError(400, `deployId required: the ${e.name} deploy to promote (what it serves now)`, "bad_request");
+    if (e.current_deploy_id !== input.deployId) {
+      throw Object.assign(new HttpError(409, e.current_deploy_id ? `${e.name} serves ${e.current_deploy_id} now, not ${input.deployId}: reload and promote again` : `nothing is deployed to ${e.name}`, "stale"), {
+        extra: { currentDeployId: e.current_deploy_id },
+      });
+    }
+    const d = await store.deploy(input.deployId);
+    const file = join(paths(cfg, a.id).deploy(input.deployId), "deploy.json");
+    if (!d || d.app_id !== a.id || beingRemoved(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
+    if (a.current_deploy_id !== d.id && !await appDeploys.take(a.id)) {
+      throw new HttpError(429, `too many deploys of ${a.name} (${cfg.limits.deploysPerHour} per hour): try later`, "rate_limited");
+    }
+    const config = JSON.parse(await readFile(file, "utf8"));
+    // What production served when the caller looked (`expectProduction`), else as this starts: a deploy to it meanwhile
+    // (a merge, say) isn't overwritten with this one.
+    if (input.expectProduction !== undefined && input.expectProduction !== null && typeof input.expectProduction !== "string") {
+      throw new HttpError(400, "expectProduction must be a deploy id or null", "bad_request");
+    }
+    const was = input.expectProduction !== undefined ? (input.expectProduction as string | null) : a.current_deploy_id;
+    // Under the environments' lock: staging can't be redeployed, rolled back or deleted between landing its commit on
+    // the default branch (refused there: production unchanged) and production's pointer moving to it.
+    const r = await envSerial(a.id, async () => {
+      const at = await store.environmentById(e.id);
+      if (at?.current_deploy_id !== d.id) throw new HttpError(409, `${e.name} was deployed to meanwhile: promote again`, "stale");
+      // Promoted already (another request, or an earlier one whose tag failed): only the tag is tried again.
+      const prod = (await store.appById(a.id))?.current_deploy_id ?? null;
+      const already = prod === d.id;
+      // Production deployed to while this waited for the lock (its deploys and rollbacks take it too): refused before
+      // anything moves on GitHub.
+      // (A caller who said what it saw is told it changed, even when production now serves this deploy.)
+      if (prod !== was && (!already || input.expectProduction !== undefined)) {
+        throw Object.assign(new HttpError(409, `production was deployed to meanwhile: nothing was changed, promote again`, "stale"), { extra: { productionDeployId: prod } });
+      }
+      const fresh = (await store.deploy(d.id)) ?? d; // (its tag as it is now: another promotion may have given it one)
+      // (Already: nothing to land; only its tag, below, if it has none.)
+      const landed = already ? null : await git.promoteCommit(c, a, d);
+      if (!already) {
+        await store.serialized(deploysLock(a.id), async () => {
+          if ((await store.appById(a.id))?.current_deploy_id !== was) throw new HttpError(409, `production was deployed to meanwhile: it wasn't changed`, "stale");
+          if (beingRemoved(d.id) || !await store.deploy(d.id) || !existsSync(file)) throw new HttpError(404, "deploy not found", "not_found");
+          await store.promoteDeploy(a.id, d.id, config);
+        });
+      }
+      return { landed, already, tag: fresh.git_tag ?? null };
+    });
+    const landed = r.landed;
+    if (r.already) {
+      const out: { id: string; tag?: string; warning?: string } = { id: d.id, ...(r.tag ? { tag: r.tag } : {}) };
+      // Its commit, as on the default branch (tagDeploy checks it is): nothing on GitHub moves.
+      const repo = d.git_sha && !r.tag ? await store.getAppRepo(a.id) : undefined;
+      if (repo && d.git_sha) {
+        try {
+          const tag = await git.tagDeploy(c, a, d.id, { sha: d.git_sha, branch: repo.default_branch, repo: `${repo.owner}/${repo.name}` }, { anyName: true });
+          if (tag) out.tag = tag;
+        } catch (err) {
+          out.warning = `commit not tagged: ${err instanceof HttpError ? err.message : "couldn't tag it"}`;
+        }
+      }
+      const now = (await store.appById(a.id))!;
+      return c.json({ app: view(now), environment: envView(now, (await store.environmentById(e.id)) ?? e), deploy: out, promoted: false });
+    }
+    runtime.stop(a.id); // next request boots the promoted bundle
+    const out: { id: string; tag?: string; warning?: string } = { id: d.id };
+    try {
+      const tag = landed ? await git.tagDeploy(c, a, d.id, landed) : null;
+      if (tag) out.tag = tag;
+    } catch (err) {
+      if (!(err instanceof HttpError)) console.error(err);
+      out.warning = `commit not tagged: ${err instanceof HttpError ? err.message : "couldn't tag it"}`;
+    }
+    const msg = `promoted ${d.id} from ${e.name}${landed ? ` (${landed.branch} @ ${landed.sha.slice(0, 7)})` : ""}${out.tag ? ` as ${out.tag}` : ""}`;
+    runtime.logs.push(a.id, "system", msg);
+    runtime.logs.push(e.id, "system", msg);
+    await pruneDeploys(cfg, store, a.id, d.id);
+    const now = (await store.appById(a.id))!;
+    return c.json({ app: view(now), environment: envView(now, (await store.environmentById(e.id)) ?? e), deploy: out, promoted: true });
   });
 
   // ---- crons (docs/app-format.md): the app's schedule, recent runs (in memory on the node that runs them),
-  // pause / resume (stored: they skip their scheduled runs until resumed) and Run now.
+  // pause / resume (stored: they skip their scheduled runs until resumed) and Run now. `?env=staging`: that
+  // environment's crons, which never run on schedule (Run now only).
   const appCrons = (a: App): string[] => JSON.parse(a.config).crons ?? [];
-  const cronsView = (a: App) => {
-    const paused = pausedCrons(a), runs = runtime.cronRuns.list(a.id), now = Date.now();
+  const cronsView = (a: App, e: Environment | null = null) => {
+    const key = keyOf(a, e);
+    const list: string[] = e ? JSON.parse(e.config).crons ?? [] : appCrons(a);
+    const paused = e ? new Set(list) : pausedCrons(a), runs = runtime.cronRuns.list(key), now = Date.now();
     const runView = (r: (typeof runs)[number]) => ({
       cron: r.cron, at: iso(r.at), startedAt: iso(r.startedAt), ms: r.ms, status: r.status, ok: r.status >= 200 && r.status < 300, manual: r.manual,
     });
     return {
-      crons: appCrons(a).map((c) => {
+      ...(e ? { env: e.name, scheduled: false } : {}),
+      crons: list.map((c) => {
         let next: string[] = [];
         try {
           // Unclaimed apps' crons don't fire.
           if (a.account_id && !paused.has(c)) next = upcoming(c, now).map((t) => iso(t)!);
         } catch { /* stored before validation tightened: never fires */ }
-        const last = runtime.cronRuns.last(a.id, c);
-        return { cron: c, paused: paused.has(c), state: scheduler?.state(a.id, c) ?? null, next, last: last ? runView(last) : null };
+        const last = runtime.cronRuns.last(key, c);
+        return { cron: c, paused: paused.has(c), state: scheduler?.state(key, c) ?? null, next, last: last ? runView(last) : null };
       }),
       runs: runs.map(runView),
       since: iso(runtime.cronRuns.since),
     };
   };
-  /** The body's cron, and the app as it is now (a deploy may have changed its crons while the body arrived). */
-  const cronParam = async (c: Context<Env>, a: App) => {
+  /** The body's cron, and the app (or environment) as it is now (a deploy may have changed its crons while the body arrived). */
+  const cronParam = async (c: Context<Env>, a: App, e: Environment | null = null) => {
     const cron = (await body<{ cron?: unknown } | null>(c))?.cron;
     const now = await store.appById(a.id);
     if (!now) throw new HttpError(404, `app not found: ${a.name}`, "not_found");
-    return { cron: hasCron(now, cron), app: now };
+    const env = e ? await store.environmentById(e.id) ?? null : null;
+    if (e && !env) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
+    if (env && !(JSON.parse(env.config).crons ?? []).includes(cron)) throw new HttpError(404, `no cron ${JSON.stringify(cron)} in ${a.name}'s ${env.name} deploy`, "not_found");
+    return { cron: env ? cron as string : hasCron(now, cron), app: now, env };
   };
   /** A cron the app's current deploy declares (as in its config). */
   const hasCron = (a: App, cron: unknown) => {
@@ -1076,7 +1383,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     const a = await getApp(c.req.param("name"));
     notPage(a);
     await authorize(c, a, "read");
-    return c.json(cronsView(a));
+    return c.json(cronsView(a, await envOf(c, a)));
   });
 
   app.post("/apps/:name/crons/run", async (c) => {
@@ -1084,11 +1391,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     notPage(a);
     await authorize(c, a, "deploy");
     if (!a.account_id) throw new HttpError(403, "crons need an app with an owner (anonymous apps expire)", "unclaimed");
-    const { cron, app: now } = await cronParam(c, a);
+    const e = await envOf(c, a);
+    const { cron, app: now, env } = await cronParam(c, a, e);
     await authorize(c, a, "deploy"); // again: access may have changed while the body arrived (a collaborator removed)
     if (!scheduler) throw new HttpError(503, "crons aren't running on this server", "unavailable");
-    if (!scheduler.runNow(a.id, cron)) throw new HttpError(409, `cron "${cron}" is already running or queued`, "busy");
-    return c.json(cronsView(now), 202);
+    if (!scheduler.runNow(keyOf(a, env), cron)) throw new HttpError(409, `cron "${cron}" is already running or queued`, "busy");
+    return c.json(cronsView(now, env), 202);
   });
 
   for (const [path, pause] of [["pause", true], ["resume", false]] as const) {
@@ -1096,6 +1404,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       const a = await getApp(c.req.param("name"));
       notPage(a);
       await authorize(c, a, "deploy");
+      if (await envOf(c, a)) throw new HttpError(409, "crons of an environment other than production don't run on schedule (Run now runs one)", "not_scheduled");
       const { cron } = await cronParam(c, a);
       // Under a per-app lock (two pauses can't drop each other's); only crons the current deploy still has are kept.
       const now = await store.serialized(cronsLock(a.id), async () => {
@@ -1250,7 +1559,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.get("/apps/:name/source", async (c) => {
     const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
-    const deployId = c.req.query("deploy") ?? a.current_deploy_id;
+    const e = a.kind === "app" && !c.req.query("deploy") ? await envOf(c, a) : null;
+    const deployId = c.req.query("deploy") ?? (e ? e.current_deploy_id : a.current_deploy_id);
     const d = deployId ? await store.deploy(deployId) : undefined;
     if (!d || d.app_id !== a.id) throw new HttpError(404, "deploy not found", "not_found");
     const source = await deploySource(cfg, a.id, d.id);
@@ -1271,6 +1581,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.get("/apps/:name/logs", async (c) => {
     const a = await getApp(c.req.param("name"));
     const access = await authorize(c, a, "read");
+    const key = keyOf(a, a.kind === "app" ? await envOf(c, a) : null);
     const n = Math.min(Number(c.req.query("n") ?? 200), cfg.limits.logLines);
     // An account's stream ends when it loses access (removed, left, out of the org, disabled): checked per line
     // and every 15s.
@@ -1289,7 +1600,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     let ended = false;
     const stream = new ReadableStream<Uint8Array>({
       start(ctrl) {
-        for (const l of runtime.logs.recent(a.id, n)) ctrl.enqueue(line(l));
+        for (const l of runtime.logs.recent(key, n)) ctrl.enqueue(line(l));
         if (!follow) return ctrl.close();
         const end = () => {
           if (ended) return;
@@ -1299,7 +1610,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
         };
         // In order: each line waits for the access check before it (and the ones before that).
         let queue = Promise.resolve();
-        const sub = runtime.logs.subscribe(a.id, (l) => {
+        const sub = runtime.logs.subscribe(key, (l) => {
           queue = queue.then(async () => {
             if (ended) return;
             if (await revoked()) end();
@@ -1322,11 +1633,21 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     return new Response(stream, { headers: { "content-type": "application/x-ndjson", "cache-control": "private, no-store" } });
   });
 
-  // ---- secrets (claimed apps only; values are write-only)
+  // ---- secrets (claimed apps only; values are write-only). `?env=staging`: that environment's overrides (it sees
+  // production's secrets, its own replacing them); a production change reaches every environment.
+  /** An environment's secrets: each key it sees, and whether it's its own or production's. */
+  const secretsView = async (a: App, e: Environment) => {
+    const own = new Set(await store.envSecretKeys(e.id));
+    const all = [...new Set([...await store.secretKeys(a.id), ...own])].sort();
+    return all.map((key) => ({ key, source: own.has(key) ? e.name : "production" }));
+  };
+  const secretsOut = async (a: App, e: Environment | null) =>
+    e ? { keys: await store.envSecretKeys(e.id), env: e.name, secrets: await secretsView(a, e) } : { keys: await store.secretKeys(a.id) };
+
   app.get("/apps/:name/secrets", async (c) => {
     const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
-    return c.json({ keys: await store.secretKeys(a.id) });
+    return c.json(await secretsOut(a, a.kind === "app" ? await envOf(c, a) : null));
   });
 
   app.put("/apps/:name/secrets", async (c) => {
@@ -1334,6 +1655,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     notPage(a);
     await authorize(c, a, "admin");
     if (!a.account_id) throw new HttpError(403, "secrets need an app with an owner (anonymous apps expire)", "unclaimed");
+    const e = await envOf(c, a);
     const input = await body<Record<string, unknown> | null>(c);
     await authorize(c, a, "admin"); // again: access may have changed while the body arrived (a collaborator removed)
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new HttpError(400, "expected an object of secrets");
@@ -1343,20 +1665,31 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       if (!SECRET_KEY_RE.test(k)) throw new HttpError(400, `invalid secret name: ${k} (use UPPER_SNAKE)`);
       if (v !== null && (typeof v !== "string" || v.length > 32_768)) throw new HttpError(400, `invalid value for ${k}`);
     }
+    if (e && !await store.environmentById(e.id)) throw new HttpError(404, `${a.name} has no ${e.name} environment`, "env_not_found");
     for (const [k, v] of entries) {
-      if (v === null) await store.deleteSecret(a.id, k);
+      if (e) {
+        if (v === null) await store.deleteEnvSecret(e.id, k);
+        else await store.setEnvSecret(e.id, k, v as string);
+      } else if (v === null) await store.deleteSecret(a.id, k);
       else await store.setSecret(a.id, k, v as string);
     }
-    runtime.stop(a.id);
-    return c.json({ keys: await store.secretKeys(a.id) });
+    if (e) runtime.stop(e.id);
+    else await stopAll(a);
+    return c.json(await secretsOut(a, e));
   });
 
   app.delete("/apps/:name/secrets/:key", async (c) => {
     const a = await getApp(c.req.param("name"));
     await authorize(c, a, "admin");
-    await store.deleteSecret(a.id, c.req.param("key"));
-    runtime.stop(a.id);
-    return c.json({ keys: await store.secretKeys(a.id) });
+    const e = a.kind === "app" ? await envOf(c, a) : null;
+    if (e) {
+      await store.deleteEnvSecret(e.id, c.req.param("key"));
+      runtime.stop(e.id);
+    } else {
+      await store.deleteSecret(a.id, c.req.param("key"));
+      await stopAll(a);
+    }
+    return c.json(await secretsOut(a, e));
   });
 
   // ---- egress allowlist (claimed apps; null = any public host)
@@ -1382,7 +1715,7 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
       }
     }
     await store.setEgress(a.id, list);
-    runtime.stop(a.id);
+    await stopAll(a); // every environment's allowlist is the app's
     runtime.logs.push(a.id, "system", list ? `egress allowlist: ${list.join(", ") || "(none)"}` : "egress: any public host");
     return c.json({ allow: list });
   });
@@ -1672,11 +2005,12 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
   app.post("/apps/:name/db/query", async (c) => {
     const a = await getApp(c.req.param("name"));
     await authorize(c, a, "read");
+    const e = a.kind === "app" ? await envOf(c, a) : null;
     const { sql, params = [] } = await body<{ sql?: unknown; params?: unknown } | null>(c) ?? {};
     await authorize(c, a, "read"); // again: access may have changed while the body arrived
     if (!sql) throw new HttpError(400, "sql required");
     if (typeof sql !== "string" || !Array.isArray(params)) throw new HttpError(400, "sql must be a string, params an array");
-    const r = await inspect<{ rows: unknown[]; truncated: boolean }>(a.id, paths(cfg, a.id).db, {
+    const r = await inspect<{ rows: unknown[]; truncated: boolean }>(keyOf(a, e), targetData(cfg, { app: a, env: e }).db, {
       kind: "query", sql, params, maxRows: INSPECT_LIMITS.maxRows,
     });
     return c.json(r ? { rows: r.rows, ...(r.truncated ? { truncated: true } : {}) } : { rows: [] });
@@ -1687,7 +2021,8 @@ export function api(cfg: Config, store: Store, runtime: Runtime, cluster: Cluste
     await authorize(c, a, "read");
     const n = Math.trunc(Number(c.req.query("limit") ?? 100));
     const limit = Number.isFinite(n) ? Math.min(Math.max(n, 0), 1000) : 100;
-    const r = await inspect<{ tables: Record<string, unknown>; truncated: boolean }>(a.id, paths(cfg, a.id).db, { kind: "tables", limit });
+    const e = a.kind === "app" ? await envOf(c, a) : null;
+    const r = await inspect<{ tables: Record<string, unknown>; truncated: boolean }>(keyOf(a, e), targetData(cfg, { app: a, env: e }).db, { kind: "tables", limit });
     return c.json({ tables: r?.tables ?? {}, ...(r?.truncated ? { truncated: true } : {}) });
   });
 

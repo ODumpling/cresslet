@@ -204,6 +204,11 @@ test("secrets: encrypted at rest, plaintext rows migrated, env key takes over fr
       assert.match(Buffer.from(r.value).toString(), /^v1:/);
     }
 
+    // A staging environment's own secret, sealed under the file key too.
+    store = await Store.open(dir);
+    const staging = await store.ensureEnvironment(app.id, "staging");
+    await store.setEnvSecret(staging.id, "TOKEN", "staging-token");
+    await store.close();
     // Operator sets CRESSLET_SECRETS_KEY later: rows are re-sealed, the file key is no longer needed.
     const before = raw().map((r) => Buffer.from(r.value).toString());
     process.env.CRESSLET_SECRETS_KEY = "operator-key";
@@ -213,6 +218,7 @@ test("secrets: encrypted at rest, plaintext rows migrated, env key takes over fr
       await rm(join(dir, "secrets.key"));
       store = await Store.open(dir);
       assert.deepEqual(await store.secrets(app.id), all);
+      assert.deepEqual(await store.envSecrets(staging), { ...all, TOKEN: "staging-token" }); // re-sealed with the others
       assert.ok(!existsSync(join(dir, "secrets.key")));
       await store.close();
     } finally {

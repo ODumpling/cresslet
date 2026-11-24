@@ -17,7 +17,7 @@ import { type Config, paths } from "./config.ts";
 import type { Logs } from "./logs.ts";
 import { Metrics } from "./metrics.ts";
 import { CronRuns } from "./cron.ts";
-import { serveBindings } from "./bindings.ts";
+import { filesSettled, serveBindings } from "./bindings.ts";
 import { createEgressProxy } from "./egress.ts";
 import { adoptListener, instanceId, jail, prepareHost, sweep } from "./sandbox.ts";
 import { stripTypes } from "./strip.ts";
@@ -37,12 +37,24 @@ async function entryJs(name: string): Promise<string> {
 const COMPAT_DATE = "2026-11-01";
 
 export interface AppSpec {
+  /**
+   * What the sandbox is keyed by (its process, logs, metrics, cron runs, run dir): the app's id for production, an
+   * environment's id (`env_…`) for another environment of it (docs/architecture.md#environments).
+   */
+  key: string;
+  /** The app (its deploys dir holds the bundle: environments share it). */
   appId: string;
+  /** The environment's name (`staging`); null: production. */
+  env: string | null;
+  /** Its database and files (`data/apps/<id>/data`, or the environment's own). */
+  dataDir: string;
   /** Never-reused per-app number (store.uidSeq): uid = CRESSLET_SANDBOX_UID_BASE + seq. Only read with per-app uids. */
   seq: () => Promise<number>;
   appName: string;
   appUrl: string;
   deployId: string;
+  /** Still there (an environment deleted meanwhile isn't): checked before a sandbox starts. Absent: always. */
+  live?: () => Promise<boolean>;
   /** Read at sandbox start; served over the HOST binding, never written to disk. */
   secrets: () => Promise<Record<string, string>>;
   net: boolean;
@@ -180,7 +192,7 @@ export class Runtime {
       proc = await this.#get(spec);
     } catch (e) {
       if (e instanceof SandboxesBusy) return busy();
-      this.logs.push(spec.appId, "system", `failed to start: ${(e as Error).message}`);
+      this.logs.push(spec.key, "system", `failed to start: ${(e as Error).message}`);
       return new Response("App failed to start. See `cresslet logs`.", { status: 502 });
     }
     let streaming = false;
@@ -226,12 +238,12 @@ export class Runtime {
     } catch (e) {
       if (timeout?.aborted) {
         // Likely a runaway handler; restart the sandbox.
-        this.logs.push(spec.appId, "system", `request timed out after ${this.#cfg.limits.requestMs}ms; restarting`);
-        this.stop(spec.appId);
+        this.logs.push(spec.key, "system", `request timed out after ${this.#cfg.limits.requestMs}ms; restarting`);
+        this.stop(spec.key);
         return new Response("Gateway Timeout", { status: 504 });
       }
       if (req.signal.aborted) return new Response(null, { status: 499 });
-      this.logs.push(spec.appId, "system", `proxy error: ${(e as Error).message}`);
+      this.logs.push(spec.key, "system", `proxy error: ${(e as Error).message}`);
       return new Response("Bad Gateway", { status: 502 });
     } finally {
       if (!streaming) release();
@@ -279,7 +291,7 @@ export class Runtime {
         client.end(BUSY_RAW);
         return 503;
       }
-      this.logs.push(spec.appId, "system", `failed to start: ${(e as Error).message}`);
+      this.logs.push(spec.key, "system", `failed to start: ${(e as Error).message}`);
       client.end("HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
       return 502;
     }
@@ -341,7 +353,7 @@ export class Runtime {
         client.pipe(socket);
         const expire = (why: string) => () => {
           if (done) return;
-          this.logs.push(spec.appId, "system", `websocket ${u.pathname} closed: ${why}`);
+          this.logs.push(spec.key, "system", `websocket ${u.pathname} closed: ${why}`);
           close();
         };
         if (lim.wsIdleMs) {
@@ -387,20 +399,22 @@ export class Runtime {
 
   /** A running sandbox for `spec`, with this caller counted in-flight (it must decrement `inflight`). */
   async #get(spec: AppSpec): Promise<Proc> {
-    const cur = this.procs.get(spec.appId);
+    // Its data is being replaced (seeding an environment's database): no sandbox, nor bindings thread, until it's in.
+    for (let h; (h = this.#held.get(spec.key));) await h;
+    const cur = this.procs.get(spec.key);
     // Network policy is part of the identity: a sandbox started under an old policy (e.g. a cold
     // start racing a PUT /egress) is replaced on the next request.
     if (cur && !cur.exited && !cur.stale && cur.spec.deployId === spec.deployId && samePolicy(cur.spec, spec)) {
       await cur.ready;
       // It may have been evicted (#makeRoom) or stopped while we waited: then start over.
-      if (cur.exited || this.procs.get(spec.appId) !== cur) return this.#get(spec);
+      if (cur.exited || this.procs.get(spec.key) !== cur) return this.#get(spec);
       // Counted before returning (synchronously with the check), so it can't be evicted once handed out.
       cur.inflight++;
       cur.lastUsed = Date.now();
       return cur;
     }
-    if (cur) this.stop(spec.appId);
-    const starting = this.#starting.get(spec.appId);
+    if (cur) this.stop(spec.key);
+    const starting = this.#starting.get(spec.key);
     if (starting) {
       // Re-check once it's up: it may have been started for another deploy or policy. A failed start
       // is shared by waiters that wanted the same sandbox (no serial retries of a crashing app).
@@ -414,8 +428,8 @@ export class Runtime {
     entry.p = this.#spawn(spec).then((proc) => {
       if (entry.stale) proc.stale = true;
       return proc;
-    }).finally(() => this.#starting.delete(spec.appId));
-    this.#starting.set(spec.appId, entry);
+    }).finally(() => this.#starting.delete(spec.key));
+    this.#starting.set(spec.key, entry);
     return entry.p;
   }
 
@@ -443,10 +457,12 @@ export class Runtime {
   async #spawn(spec: AppSpec): Promise<Proc> {
     const cfg = this.#cfg;
     const p = paths(cfg, spec.appId);
-    await mkdir(p.data, { recursive: true });
+    // A request that found its environment just before it was deleted: no sandbox (nor data dir) after it.
+    if (spec.live && !await spec.live()) throw new Error("this environment was deleted");
+    await mkdir(spec.dataDir, { recursive: true });
     // Fresh dir per spawn: a dying predecessor's cleanup must not touch ours. It holds everything
     // the sandbox can see (config, code, sockets), and nothing under dataDir.
-    const tag = `${this.#instance}-${spec.appId}-${randomBytes(3).toString("hex")}`; // see RUN_DIR_RE
+    const tag = `${this.#instance}-${spec.key}-${randomBytes(3).toString("hex")}`; // see RUN_DIR_RE
     const run = join(cfg.sockDir, tag);
     await mkdir(run, { mode: 0o700 });
     // The control plane creates workerd's listening socket and hands it over as fd 3: nothing a
@@ -478,24 +494,24 @@ export class Runtime {
     try {
       // Bindings socket: the sandbox's only way to its data. One per app, so identity = socket. Served
       // from the app's own thread: its SQL can't stall the control plane. If that thread dies, so does the sandbox.
-      bindings = await serveBindings(p.data, hostSock, {
+      bindings = await serveBindings(spec.dataDir, hostSock, {
         secrets: await spec.secrets(),
         maxDbBytes: cfg.limits.appDbBytes,
         maxFilesBytes: cfg.limits.appFilesBytes,
       }, () => {
         lost = true;
-        this.logs.push(spec.appId, "system", "bindings thread crashed; sandbox stopped");
-        if (self && this.procs.get(spec.appId) === self) this.stop(spec.appId);
+        this.logs.push(spec.key, "system", "bindings thread crashed; sandbox stopped");
+        if (self && this.procs.get(spec.key) === self) this.stop(spec.key);
       });
       if (egressSock) {
-        const eg = egress = createEgressProxy(spec.egress, (l) => this.logs.push(spec.appId, "system", l));
+        const eg = egress = createEgressProxy(spec.egress, (l) => this.logs.push(spec.key, "system", l));
         await new Promise<void>((res, rej) => eg.once("error", rej).listen(egressSock, res));
       }
       for (const name of ENTRY) await writeFile(join(run, `${name}.js`), await entryJs(name));
       await copyFile(join(p.deploy(spec.deployId), "server.js"), join(run, "app.js"));
       await writeFile(
         join(run, "app.json"),
-        JSON.stringify({ id: spec.appId, name: spec.appName, url: spec.appUrl, deployId: spec.deployId }),
+        JSON.stringify({ id: spec.appId, name: spec.appName, url: spec.appUrl, deployId: spec.deployId, env: spec.env ?? "production" }),
       );
       const listen = gvisor ? join(run, "l", "a.sock") : null;
       await writeFile(join(run, "config.capnp"), workerdConfig(spec, hostSock, egressSock, cfg.limits.memoryMb, listen));
@@ -553,7 +569,7 @@ export class Runtime {
       inflight: 0,
       exited: false,
     };
-    this.procs.set(spec.appId, proc);
+    this.procs.set(spec.key, proc);
     self = proc;
     if (lost) fail(new Error("bindings thread exited during start"));
 
@@ -564,7 +580,7 @@ export class Runtime {
         buf += chunk;
         // No newline for a long while: flush it as a line (Logs truncates it), not an ever-growing buffer.
         if (buf.length > MAX_LINE && !buf.includes("\n")) {
-          this.logs.push(spec.appId, kind, buf);
+          this.logs.push(spec.key, kind, buf);
           buf = "";
         }
         let i;
@@ -572,10 +588,10 @@ export class Runtime {
           const line = buf.slice(0, i);
           buf = buf.slice(i + 1);
           // workerd follows internal errors with native stack addresses; not useful to app authors.
-          if (!line.startsWith("stack: ")) this.logs.push(spec.appId, kind, line);
+          if (!line.startsWith("stack: ")) this.logs.push(spec.key, kind, line);
         }
       });
-      stream.on("end", () => buf && this.logs.push(spec.appId, kind, buf));
+      stream.on("end", () => buf && this.logs.push(spec.key, kind, buf));
     };
     pipe(child.stdout!, "stdout");
     pipe(child.stderr!, "stderr");
@@ -585,21 +601,21 @@ export class Runtime {
       proc.client.close().catch(() => {});
       proc.bindings.close();
       jl.release();
-      if (this.procs.get(spec.appId) === proc) this.procs.delete(spec.appId);
+      if (this.procs.get(spec.key) === proc) this.procs.delete(spec.key);
       fail(e);
     });
     child.once("exit", (code, sig) => {
       proc.exited = true;
       proc.client.close().catch(() => {});
       proc.bindings.close();
-      if (this.procs.get(spec.appId) === proc) this.procs.delete(spec.appId);
+      if (this.procs.get(spec.key) === proc) this.procs.delete(spec.key);
       fail(new Error(`sandbox exited with code ${code}`));
-      if (jl.oomKilled()) this.logs.push(spec.appId, "system", "sandbox killed: out of memory");
+      if (jl.oomKilled()) this.logs.push(spec.key, "system", "sandbox killed: out of memory");
       // Kills anything the sandbox forked that outlived it, then removes the cgroup.
       jl.release();
-      if (code === 97) this.logs.push(spec.appId, "system", "sandbox couldn't join its cgroup");
+      if (code === 97) this.logs.push(spec.key, "system", "sandbox couldn't join its cgroup");
       else if (code !== 0 && sig !== "SIGTERM" && sig !== "SIGKILL") {
-        this.logs.push(spec.appId, "system", `sandbox exited (code ${code})`);
+        this.logs.push(spec.key, "system", `sandbox exited (code ${code})`);
       }
     });
 
@@ -614,7 +630,7 @@ export class Runtime {
     try {
       await Promise.race([proc.ready, failed]);
     } catch (e) {
-      this.stop(spec.appId);
+      this.stop(spec.key);
       throw e;
     }
     // The request that started it is in flight from here (while it's still in #starting: never evictable in between).
@@ -635,6 +651,25 @@ export class Runtime {
     // Synchronously, so a shutdown that exits right after still kills forked processes.
     proc.release();
   }
+
+  /**
+   * Runs `fn` with `key`'s sandbox stopped, its bindings thread gone (its database and files closed: filesSettled of
+   * `filesDir`), and no new one started until `fn` is done: requests for it wait meanwhile.
+   */
+  async hold<T>(key: string, filesDir: string, fn: () => Promise<T>): Promise<T> {
+    for (let h; (h = this.#held.get(key));) await h;
+    let done!: () => void;
+    this.#held.set(key, new Promise<void>((r) => (done = r)));
+    try {
+      await this.stopSettled(key);
+      await filesSettled(filesDir);
+      return await fn();
+    } finally {
+      this.#held.delete(key);
+      done();
+    }
+  }
+  #held = new Map<string, Promise<void>>();
 
   /** stop(), after a start in flight for the app is done (it would serve, and recreate files of, a purged app). */
   async stopSettled(appId: string) {

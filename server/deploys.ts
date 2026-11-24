@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix, relative } from "node:path";
 import { type Config, paths, previewAppName } from "./config.ts";
-import { type App, type Deploy, id, type Store } from "./store.ts";
+import { type App, type Deploy, type Environment, id, type Store } from "./store.ts";
 import { normalizeCrons } from "./cron.ts";
 import { filesSettled } from "./bindings.ts";
 
@@ -215,8 +215,11 @@ function decodeFiles(cfg: Config, files: DeployFile[], budget: { bytes: number; 
   return { decoded, bytes };
 }
 
-/** Write a deploy to disk and activate it. Deploys are immutable; activation swaps a pointer. */
-export async function writeDeploy(cfg: Config, store: Store, app: App, input: DeployInput) {
+/**
+ * Write a deploy to disk and activate it. Deploys are immutable; activation swaps a pointer: production's, or `env`'s
+ * (that environment's: docs/architecture.md#environments).
+ */
+export async function writeDeploy(cfg: Config, store: Store, app: App, input: DeployInput, env: Environment | null = null) {
   if (!Array.isArray(input.files)) throw new HttpError(400, "files must be an array");
   if (input.files.length > cfg.limits.deployFiles) {
     throw new HttpError(413, `too many files (max ${cfg.limits.deployFiles})`, "too_large");
@@ -285,8 +288,10 @@ export async function writeDeploy(cfg: Config, store: Store, app: App, input: De
       git_sha: git?.sha ?? null,
       git_branch: git?.branch ?? null,
       git_repo: git?.repo ?? null,
+      env: env?.name ?? null,
     });
-    await store.setCurrentDeploy(app.id, deployId, config);
+    if (env) await store.setEnvDeploy(env.id, deployId, config);
+    else await store.setCurrentDeploy(app.id, deployId, config);
   });
   await pruneDeploys(cfg, store, app.id, deployId);
   return { id: deployId, bytes, files: decoded.length, server: !!server, ...(warning ? { warning } : {}) };
@@ -341,13 +346,31 @@ const pageLock = (appId: string) => `cresslet:page:${appId}`;
 /** Deploys an app keeps for rollback (the current one included). */
 export const KEEP_DEPLOYS = 5;
 
-/** Keep `keep`, the current deploy, and the most recent others: `keepCount` in all. */
-async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = KEEP_DEPLOYS) {
+/**
+ * Per environment (production, and each other one: its history, as Store.envDeploys), keep `keep` if it's of that
+ * environment, its current deploy, and its most recent others: `keepCount` in all. A deploy goes only when no
+ * environment keeps it (a promoted one is in both staging's history and production's).
+ */
+export async function pruneDeploys(cfg: Config, store: Store, appId: string, keep: string, keepCount = KEEP_DEPLOYS) {
   const todo = await selectForRemoval(store, deploysLock(appId), async () => {
-    const current = (await store.appById(appId, true))?.current_deploy_id; // a rollback may have swapped it meanwhile
-    // Ones another prune is already removing don't count as kept.
-    const others = (await store.deploys(appId, 1000)).filter((d) => d.id !== keep && d.id !== current && !removing.has(d.id));
-    return others.slice(keepCount - (current && current !== keep ? 2 : 1));
+    // Pointers as they are now (a rollback or promotion may have swapped one meanwhile).
+    const app = await store.appById(appId, true);
+    const envs = await store.environments(appId);
+    const kept = new Set<string>([keep]);
+    for (const [name, current] of [[null, app?.current_deploy_id ?? null], ...envs.map((e) => [e.name, e.current_deploy_id] as const)] as const) {
+      const history = await store.envDeploys(appId, name, 1000);
+      const own = new Set([current, history.some((d) => d.id === keep) ? keep : null].filter((x): x is string => !!x));
+      for (const id of own) kept.add(id);
+      let n = own.size;
+      // Ones another prune is already removing don't count as kept.
+      for (const d of history) {
+        if (n >= keepCount) break;
+        if (own.has(d.id) || removing.has(d.id)) continue;
+        kept.add(d.id);
+        n++;
+      }
+    }
+    return (await store.deploys(appId, 1000)).filter((d) => !kept.has(d.id) && !removing.has(d.id));
   });
   await removeDeploys(cfg, store, todo);
 }
@@ -435,6 +458,15 @@ async function removeDeploys(cfg: Config, store: Store, todo: Pick<Deploy, "id" 
 
 export async function removeAppFiles(cfg: Config, appId: string) {
   const p = paths(cfg, appId);
-  await filesSettled(p.files); // writes its stopped sandbox had queued land first, then go with it
+  // Writes its stopped sandboxes (production's, its environments') had queued land first, then go with it.
+  const envs = await readdir(join(p.app, "env")).catch(() => [] as string[]);
+  await Promise.all([filesSettled(p.files), ...envs.map((n) => filesSettled(p.env(n).files))]);
   await rm(p.app, { recursive: true, force: true });
+}
+
+/** Removes an environment's data (its sandbox stopped first), once the file writes it had queued are done. */
+export async function removeEnvFiles(cfg: Config, appId: string, name: string) {
+  const e = paths(cfg, appId).env(name);
+  await filesSettled(e.files);
+  await rm(e.data, { recursive: true, force: true });
 }

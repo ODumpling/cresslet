@@ -1143,3 +1143,55 @@ test("merge conflicts: npm install failing after the merge's files are in still 
   await assert.rejects(g.git.resolveConflicts(), /npm install failed/); // app.txt conflicted, not package.json: said
   assert.equal(g.state.mergeParent, "f".repeat(40)); // but loaded
 });
+
+test("deploy to staging on a linked app: the branch committed and built as it is, never merged", async () => {
+  const g = fakeGit({ onDefault: false });
+  g.state.dirty = true;
+  const prov = await g.git.prepareDeploy(() => {}, undefined, undefined, { merge: false });
+  assert.deepEqual(g.calls.map((x) => x.path.split("/git")[1]), ["/sync"]);
+  assert.equal(prov.branch, "feat/x");
+  assert.equal(g.state.activeBranch, "feat/x"); // still on the branch: promoting lands it
+  // Edits on main: a change of their own, built from its branch (the stack's top), not merged.
+  const edited = fakeGit();
+  edited.state.dirty = true;
+  const p = await edited.git.prepareDeploy(() => {}, undefined, undefined, { merge: false });
+  assert.deepEqual(edited.calls.map((x) => x.path.split("/git")[1]), ["/stack"]);
+  assert.equal(p.branch, "feat/s/2-two");
+});
+
+test("cresslet deploy --env staging (studio): its own route, never /v1/deploys; the project's live deploy untouched", async () => {
+  const { createCresslet } = await import("../studio/cresslet-plugin.ts" as string);
+  const c = fakeContainer({ "cresslet.json": '{"name":"shop","routes":["/api/*"]}' });
+  let command!: (ctx: Json) => Promise<number>;
+  Object.assign(c, { registerCommand: (_n: string, fn: typeof command) => (command = fn), build: async () => ({ files: [] }), export: async () => ({}) });
+  const asked: Json[] = [], deployed: Json[] = [], prepared: Json[] = [];
+  const cresslet = createCresslet(c, {
+    user: () => null,
+    project: () => ({ deploy: { name: "shop", deployKey: "k" } }),
+    onDeployed: (r: Json) => deployed.push(r),
+    builderRunning: () => true,
+    approveDeploy: async (target: string | null) => (asked.push(target), true),
+    beforeDeploy: async (_log: Json, _s: Json, app: string, env?: string) => (prepared.push([app, env]), null),
+  });
+  assert.ok(cresslet.deploy);
+  const posted: Json[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init: Json) => {
+    posted.push({ url, body: JSON.parse(init.body) });
+    return Response.json({ app: { name: "shop", url: "http://shop.test" }, environment: { name: "staging", url: "http://shop--staging.test" }, deploy: { id: "dep_s" } }, { status: 201 });
+  }) as typeof fetch;
+  const out: string[] = [];
+  try {
+    const code = await command({ args: ["deploy", "--env", "staging"], env: {}, stdout: { write: (s: string) => out.push(s) }, stderr: { write() {} }, signal: new AbortController().signal });
+    assert.equal(code, 0);
+    assert.deepEqual(asked, ["shop (staging)"]);
+    assert.deepEqual(prepared, [["shop", "staging"]]);
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].url, "/v1/apps/shop/envs/staging/deploys");
+    assert.equal(posted[0].body.app, undefined);
+    assert.deepEqual(deployed, []); // production's deploy (what the workspace shows live) didn't change
+    assert.match(out.join(""), /deployed shop to staging → http:\/\/shop--staging\.test/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

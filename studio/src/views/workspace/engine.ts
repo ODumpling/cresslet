@@ -267,6 +267,8 @@ export class Engine {
     /** What a `cresslet deploy` command will do, as the user is asked it. */
     const deploying = (target: string | null) => {
       const g = this.git.connected ? project.git! : null;
+      // `<app> (staging)`: an environment's deploy builds the branch as it is (promoting merges it).
+      if (target && / \([a-z]+\)$/.test(target)) return `deploy ${target}${g ? ` from ${g.activeBranch}, not merged` : ""}`;
       return g && target && g.activeBranch !== g.defaultBranch
         ? `merge ${g.activeBranch} into ${g.defaultBranch} and deploy ${target} from ${g.defaultBranch}`
         : `deploy ${target ? `to ${target}` : "this project as a new app"}${g ? ` from ${g.defaultBranch}` : ""}`;
@@ -296,12 +298,12 @@ export class Engine {
         return ok;
       },
       // Linked to a repository: Deploy commits the branch, merges it into the default branch and deploys that.
-      beforeDeploy: async (log, signal, app) => {
+      beforeDeploy: async (log, signal, app, env) => {
         if (this.git.connected && (!app || app === project.deploy?.name)) {
           // Where it came from, as it was asked for (a builder command's, approved; or by hand): not when its queued
           // step runs, when another command of a request started since may be running.
           const fromBuilder = cb.builderRunning();
-          const { files, ...p } = await this.git.prepareDeploy(log, signal, { turn: () => cb.builderTurn(), running: () => fromBuilder });
+          const { files, ...p } = await this.git.prepareDeploy(log, signal, { turn: () => cb.builderTurn(), running: () => fromBuilder }, { merge: !env });
           return { ...p, source: sourceDigest(files) };
         }
         // Linked to a repository elsewhere (another browser, the CLI), not here: deploying this workspace would skip it.

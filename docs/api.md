@@ -81,7 +81,7 @@ Creating apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin`
 | GET | `/v1/me/invites` | token with `read` or more over the whole account (not limited to some apps): invites to this account's email (live apps) → `{invites: [{id, app, email, role, invitedBy, createdAt}]}` |
 | POST | `/v1/me/invites/:id/accept` | full-access token: become a collaborator → `{app}` (with `access`) |
 | DELETE | `/v1/me/invites/:id` | full-access token: decline |
-| POST | `/v1/apps/:name/rollback` | `{deployId?}` (default: previous) |
+| POST | `/v1/apps/:name/rollback` | `{deployId?, env?}` (default: previous; `env`: that [environment](#environments)'s own history. Production's is what it was deployed or promoted to: never a staging deploy it didn't serve) |
 | GET | `/v1/apps/:name/source?deploy=` | `{app, deployId, files: [{path, data, encoding}]}` source uploaded with the current (or given) deploy; 404 `no_source` if none |
 | GET | `/v1/apps/:name/metrics` | the dashboard's numbers: `{since, bucketMs, totals: {requests, errors, clientErrors, avgMs, maxMs}, series: [{t, requests, errors, avgMs}], usage: {deploys, database, files, total}, database: {tables: [{name, rows}], error}, domains}`. Requests are counted in memory over the last 24 h in 5-minute buckets (`since`: when counting started, at server start); `avgMs`/`maxMs` time server routes only |
 | GET | `/v1/apps/:name/logs?n=200&follow=1` | NDJSON `{t, kind: stdout\|stderr\|system\|request, msg}`; `follow` streams |
@@ -133,6 +133,45 @@ Creating apps and managing tokens (`/v1/me/tokens`, `/v1/me/token`) need `admin`
 | GET | `/v1/admin/credits` | **site admin**: `{enabled: false}`, or `{enabled: true, creditsPerUsd, monthlyCredits, period, resetsAt, totals: {used, free, usd, requests, granted, grants, balance, overdrawn, accounts, active}, days: [{date, credits, requests}] (last 30, UTC), models: [{model, credits, requests, usd, inputTokens, outputTokens}], accounts: [{id, email, github, available, balance, monthlyUsed, used, requests, lastUsedAt}]}`. `totals.used/free/usd/requests/granted/grants/active`, `models`, and each account's `used` and `requests` are this month (UTC); `totals.balance`/`overdrawn` are granted credits held / owed across all wallets now, `totals.accounts` counts every wallet; `accounts` lists every account that has used or been given credits, most used first |
 | GET | `/v1/admin/credits/activity?account=&offset=&limit=&upTo=` | **site admin**: the credit ledger across every account (or one: `account` = its id; 404 for an unknown id), newest first: `{enabled: true, entries: [ledger row + {account: {id, email, github}}], total, upTo}`, or `{enabled: false}`. Rows also carry `usd` and `free` (usage) or `by` (grants). Paged like `/v1/me/credits`: `limit` (default 50, at most 100) after `offset`; `total` counts every row up to `upTo`, which pass back to keep pages put while rows are added |
 | GET | `/v1/admin/credits/accounts/:id` | **site admin**: one account: `{enabled, monthlyCredits, resetsAt, account: {id, email, github, siteAdmin, available, balance, monthlyUsed, used, requests, lastUsedAt}}` (its ledger: `/v1/admin/credits/activity?account=`), or `{enabled: false}` without AI credits. 404 for an unknown id |
+
+<a id="environments"></a>
+
+## Environments
+
+An app can have a **staging** environment beside its production: build a feature, release it to staging, promote it
+to production. Production is the app as before (its pointer, data, secrets, URL and custom domains). Staging has:
+
+- its own host, `https://<app>--staging.<domain>` (one DNS label, so the `*.<domain>` certificate covers it; app names
+  never hold `--`), and no custom domains;
+- its own deploy pointer and config (routes, server, crons), its own sandbox (uid, logs, metrics), database and files
+  (`data/apps/<id>/env/staging/`, empty to start), counted in the app's storage;
+- production's secrets, its own (`?env=staging`) overriding them per key;
+- the app's egress allowlist;
+- crons that never run on schedule (Run now runs one);
+- **private** access: the app's owner, admins, viewers and organization members, signed in through the studio as for a
+  private artifact (`/view/<app>--staging` asks for a one-time link, the host turns it into a session cookie for that host
+  only). Without a session a browser page is sent to sign in; any other request gets 401. The cookie counts only on
+  requests from staging's own pages or top-level navigations (another app under the domain is the same site), and is
+  taken out of the request before the app sees it. Responses are `private, no-store`, `noindex`.
+
+It's made by its first deploy, for apps with an owner (not artifacts). The app's code sees which one serves it as
+`env.app.env` (`"production"` or `"staging"`).
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/v1/apps/:name/envs/:env/deploys` | `deploy`: `POST /v1/deploys`'s body without `app`/`create` → `{app, environment, deploy}` (201). Same limits and per-app deploy rate. Never tagged. `/v1/deploys` refuses `env` (400), so a client never reaches production by mistake on a server without environments (this route is a 404 there) |
+| GET | `/v1/apps/:name/envs` | `{environments: [{name, url, private, currentDeployId, config, createdAt, updatedAt}]}`, production first |
+| POST | `/v1/apps/:name/promote` | `deploy`: `{from?: "staging", deployId, expectProduction?}` (`deployId`: the deploy the caller saw it serve, else 409 `stale` with `currentDeployId`; `expectProduction`: the deploy the caller saw production serve, or null, else 409 `stale` with `productionDeployId`) → `{app, environment, deploy: {id, tag?, warning?}, promoted}`. Production serves that same deploy (not rebuilt; production's own data and secrets), its pointer moved as for a rollback; already serving it: `promoted: false`. Built from a commit of the [linked repository](#source-control): the default branch is first moved to exactly that commit, as the caller (signed in, GitHub connected: 401/403 otherwise; a deploy key can't), fast-forward only: a stack's top change lands with the stack, another branch's commit is moved to directly. Refused with nothing changed: 409 `default_moved` (the default branch has commits the deploy doesn't: update the branch, deploy to staging again), 422 `branch_protected` (merge its pull request, deploy the default branch to staging, then promote), 409 `moved` (the branch was pushed to since), 409 `not_pushed`, 409 `no_commit` (the deploy records no commit: built from uncommitted changes). One change to an app's environments at a time: a staging deploy, rollback, seed or deletion waits for a promotion in progress. Then the commit gets the next `v<n>` tag (a refusal is a `warning`). A promotion that stopped after landing finds the default branch at the commit and carries on |
+| DELETE | `/v1/apps/:name/envs/:env` | admin: its sandbox, data, secret overrides and deploys (ones production was promoted to stay in its history) |
+| POST | `/v1/apps/:name/envs/:env/seed` | `deploy`: `{from: "production"}` → `{seeded, from, bytes}`: its database replaced by a consistent snapshot of production's (made off the event loop; production keeps serving). Files aren't copied |
+| POST | `/v1/apps/:name/envs/:env/view` | any access, logged in: `{path?}` → `{url, expiresIn}`, a one-time sign-in link to the environment |
+
+`?env=staging` (production: none, or `production`) selects the environment on `GET /v1/apps/:name` (its deploys,
+runtime, secrets: `secrets` then lists every key it sees and `secretSources` whose each is), `/metrics`, `/logs`,
+`/crons`, `/crons/run` (pause and resume: 409 `not_scheduled`), `/secrets` (`GET` → `{keys, env, secrets: [{key,
+source}]}`; `PUT`/`DELETE` change its overrides only; a production change restarts staging too), `/db`, `/db/query` and
+`/source`. An environment the app doesn't have: 404 `env_not_found`. `GET /v1/apps/:name` also lists `environments`,
+and each deploy says its `env` and `promotedAt`. Each environment keeps its last 5 deploys for rollback.
 
 <a id="source-control"></a>
 

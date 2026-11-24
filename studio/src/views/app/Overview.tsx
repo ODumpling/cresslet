@@ -9,12 +9,12 @@ import { ago, canManage, fmtBytes, plural, STATUS } from "../../lib/format.ts";
 import { useAlive, useLoad } from "../../lib/hooks.ts";
 import { toast } from "../../lib/toast.tsx";
 import { Stat, StatusPill, TimeAgo, UsageBar } from "../../ui/bits.tsx";
-import { ExtLink, SrOnly } from "../../ui/icons.tsx";
-import { appPath, TabError, useApp, useTabReload } from "./AppLayout.tsx";
+import { ExtLink, Icon, SrOnly } from "../../ui/icons.tsx";
+import { envPath, TabError, useApp, useTabReload } from "./AppLayout.tsx";
 
 export function AppOverview() {
-  const { name } = useApp();
-  const m = useLoad(() => api<API.Metrics>(appPath(name, "/metrics")), [name]);
+  const { name, env } = useApp();
+  const m = useLoad(() => api<API.Metrics>(envPath(name, env, "/metrics")), [name, env]);
   useTabReload(m.reload);
   if (m.data) return <Body m={m.data} />;
   if (m.error) return <TabError error={m.error} />;
@@ -60,9 +60,12 @@ const KvList = ({ pairs }: { pairs: ([string, ReactNode] | null)[] }) => (
 );
 
 function Body({ m }: { m: API.Metrics }) {
-  const { name, d } = useApp();
+  const { name, env, d } = useApp();
   const a = d.app, rt = d.runtime, dep = d.deploys.find((x) => x.current);
-  const status = rt.running ? "running" : a.currentDeployId ? "idle" : "empty";
+  const here = d.environments?.find((e) => e.name === env);
+  const prod = env === "production";
+  const status = rt.running ? "running" : (prod ? a.currentDeployId : here?.currentDeployId) ? "idle" : "empty";
+  const config = prod ? a.config : here?.config;
   const manage = canManage(a.access);
   const db = m.database;
   const t = m.totals;
@@ -73,12 +76,13 @@ function Body({ m }: { m: API.Metrics }) {
   return (
     <>
       {dep ? (
-        <div className="banner"><StatusPill s="live" text="Live" />
+        <div className="banner"><StatusPill s="live" text={prod ? "Live" : `Live in ${env}`} />
           <span><span className="mono">{dep.id}</span>{` deployed ${ago(dep.createdAt)} via ${dep.source}`}</span>
         </div>
       ) : <div className="banner">Nothing deployed yet.</div>}
+      <Promote />
       <div className="stats">
-        <Stat label="Status" value={STATUS[status]} sub={rt.running ? "Serving requests" : a.config?.server ? "Starts on the next request" : "Static site"}
+        <Stat label="Status" value={STATUS[status]} sub={rt.running ? "Serving requests" : config?.server ? "Starts on the next request" : "Static site"}
           extra={<i className="dot" aria-hidden="true" data-s={status} />} />
         <Stat label="Requests" value={<>{t.requests.toLocaleString()}<small>24h</small></>}
           sub={`${plural(t.errors, "server error")} · ${t.requests ? Math.round((t.errors / t.requests) * 1000) / 10 : 0}% · ${t.clientErrors.toLocaleString()} 4xx`} />
@@ -97,12 +101,13 @@ function Body({ m }: { m: API.Metrics }) {
         <div className="panel">
           <h2>Overview</h2>
           <KvList pairs={[
-            ["URL", <ExtLink href={a.url}>{a.url.replace(/^https?:\/\//, "")}</ExtLink>],
-            ["Domains", domains.length ? <span>{domains.map((x, i) => <span key={x.domain}>{i ? ", " : null}<ExtLink href={`https://${x.domain}`}>{x.domain}</ExtLink></span>)}</span> : "—"],
+            ["URL", <ExtLink href={here?.url ?? a.url}>{(here?.url ?? a.url).replace(/^https?:\/\//, "")}</ExtLink>],
+            prod ? null : ["Access", "Private: you, the app's collaborators and its organization (signed in)"],
+            prod ? ["Domains", domains.length ? <span>{domains.map((x, i) => <span key={x.domain}>{i ? ", " : null}<ExtLink href={`https://${x.domain}`}>{x.domain}</ExtLink></span>)}</span> : "—"] : null,
             ["Repository", d.repo ? <ExtLink href={d.repo.url} id="app-repo">{d.repo.fullName}</ExtLink> : "Not linked"],
             d.repo ? ["Default branch", <span className="mono" id="app-branch">{d.repo.defaultBranch}</span>] : null,
             d.repo || git ? ["Commit", git ? <Commit git={git} repo={d.repo} /> : dep ? "No commit recorded" : "—"] : null,
-            ["Server", a.config?.server ? `Yes${a.config.crons?.length ? ` · ${plural(a.config.crons.length, "cron")}` : ""}` : "Static only"],
+            ["Server", config?.server ? `Yes${config.crons?.length ? ` · ${plural(config.crons.length, "cron")}${prod ? "" : " (Run now only)"}` : ""}` : "Static only"],
             ["Secrets", <Link to="/apps/$name/secrets" params={{ name }}>{d.secrets.length ? plural(d.secrets.length, "secret") : "None"}</Link>],
             ["Egress", a.egress === null ? "Any public host" : a.egress.length ? a.egress.join(", ") : "None"],
             a.expiresAt ? ["Expires", ago(a.expiresAt)] : null,
@@ -139,8 +144,42 @@ function Commit({ git, repo }: { git: NonNullable<API.DeployInfo["git"]>; repo: 
   );
 }
 
-function Deploys({ manage }: { manage: boolean }) {
+/**
+ * Staging's deploy, when production doesn't serve it: Promote makes production serve that same bundle (no rebuild). On a
+ * linked repository the server first moves the default branch to its commit (fast-forward only) and tags it.
+ */
+function Promote() {
   const { name, d, refresh } = useApp();
+  const alive = useAlive();
+  const [busy, setBusy] = useState(false);
+  const prodEnv = d.environments?.find((e) => e.name === "production");
+  const staging = d.environments?.find((e) => e.name === "staging");
+  if (!staging?.currentDeployId || !canManage(d.app.access) || staging.currentDeployId === prodEnv?.currentDeployId) return null;
+  const id = staging.currentDeployId;
+  async function promote() {
+    const linked = d.repo ? `\n\n${d.repo.fullName}'s ${d.repo.defaultBranch} moves to the commit it was built from (fast-forward only), which gets the next version tag.` : "";
+    if (!confirm(`Promote ${id} from staging to production?\n\nProduction serves this same deploy from the next request, with production's own data and secrets.${linked}`)) return;
+    setBusy(true);
+    try {
+      const r = await api<{ deploy: { tag?: string; warning?: string } }>(envPath(name, "production", "/promote"), json("POST", { from: "staging", deployId: id, expectProduction: prodEnv?.currentDeployId ?? null }));
+      toast(`${id} promoted to production${r.deploy.tag ? ` as ${r.deploy.tag}` : ""}${r.deploy.warning ? ` (${r.deploy.warning})` : ""}`);
+    } catch (e) {
+      toast(`Could not promote: ${errorMessage(e)}`);
+    }
+    if (!alive.current) return;
+    await refresh();
+    if (alive.current) setBusy(false);
+  }
+  return (
+    <div className="banner" id="promote-banner">
+      <span>{"Staging serves "}<span className="mono">{id}</span>{", not in production yet."}</span>
+      <button className="btn sm primary" type="button" id="promote" disabled={busy} onClick={() => void promote()}><Icon name="ship" />Promote to production</button>
+    </div>
+  );
+}
+
+function Deploys({ manage }: { manage: boolean }) {
+  const { name, env, d, refresh } = useApp();
   const alive = useAlive();
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const buttons = useRef(new Map<string, HTMLButtonElement>());
@@ -149,7 +188,7 @@ function Deploys({ manage }: { manage: boolean }) {
     if (!confirm(`Roll ${name} back to ${dep.id} (deployed ${ago(dep.createdAt)})?\n\nIt serves that deploy's files and server from the next request. Its database, files and secrets stay as they are.`)) return;
     setBusy((s) => new Set(s).add(dep.id));
     try {
-      await api(appPath(name, "/rollback"), json("POST", { deployId: dep.id }));
+      await api(envPath(name, "production", "/rollback"), json("POST", { deployId: dep.id, env }));
     } catch (e) {
       toast(`Could not roll back: ${errorMessage(e)}`);
       if (!alive.current) return;

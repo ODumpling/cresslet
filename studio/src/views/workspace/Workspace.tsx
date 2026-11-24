@@ -223,6 +223,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
   const editorEl = useRef<HTMLDivElement>(null), termEl = useRef<HTMLDivElement>(null), drawerEl = useRef<HTMLElement>(null);
   const iframe = useRef<HTMLIFrameElement>(null), previewEmpty = useRef<HTMLDivElement>(null);
   const previewPathEl = useRef<HTMLInputElement>(null), deployBtn = useRef<HTMLButtonElement>(null), drawerBtn = useRef<HTMLButtonElement>(null);
+  const stagingBtn = useRef<HTMLButtonElement>(null);
   const builderBtn = useRef<HTMLButtonElement>(null), logEl = useRef<HTMLPreElement>(null), nameEl = useRef<HTMLInputElement>(null);
   const builder = useRef<BuilderHandle>(null), dialog = useRef<DeployDialogHandle>(null);
   const engine = useRef<Engine | null>(null);
@@ -484,8 +485,9 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     return r.app.name;
   }
 
-  async function onDeploy() {
-    const btn = deployBtn.current!, e = engine.current;
+  /** `env`: to that environment of the app (staging: private, not merged), not production. */
+  async function onDeploy(env?: string) {
+    const btn = (env ? stagingBtn.current : null) ?? deployBtn.current!, e = engine.current;
     if (!e?.cresslet) return;
     // Linked: what the AI builder is changing becomes its request's change when the request ends; deployed now, it'd
     // go into the change before.
@@ -493,6 +495,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     // A new app: the user keeps the generated address or picks their own first. (A cresslet.json that won't parse
     // skips this: the deploy below reports it.)
     let cfg: CressletConfig | undefined, newApp: { app: string; create: boolean } | undefined;
+    if (env && !project.deploy?.name) return void toast(`Deploy the app once first, then to ${env}.`, 6000);
     if (!project.deploy?.name) {
       cfg = await e.config();
       if (cfg && !cfg.name) {
@@ -521,8 +524,10 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
         const info = await api<API.AppDetail>(`/v1/apps/${encodeURIComponent(target)}`).catch(() => null);
         if (info?.app.access === "viewer") throw new Error(`you're a viewer of ${target}: only its owner and admins can deploy it`);
       }
-      const r = await e.cresslet.deploy((line) => setDeployLog((l) => l + line + "\n"), undefined, cfg, newApp);
-      toast(<span>Deployed: <ExtLink href={r.app.url}>{r.app.url}</ExtLink></span>, 10000);
+      const to = env ? { app: project.deploy!.name, deployKey: project.deploy!.deployKey, env } : newApp;
+      const r = await e.cresslet.deploy((line) => setDeployLog((l) => l + line + "\n"), undefined, cfg, to);
+      const url = env ? (r as { environment?: { url: string } }).environment?.url ?? r.app.url : r.app.url;
+      toast(<span>{env ? `Deployed to ${env}: ` : "Deployed: "}<ExtLink href={url}>{url}</ExtLink></span>, 10000);
     } catch (err) {
       setDeployLog((l) => l + `\nerror: ${errorMessage(err)}\n`);
       setDeployFailed(errorMessage(err));
@@ -568,6 +573,7 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
     const list: Command[] = [];
     const add = (id: string, group: string, icon: string, label: string, run: () => void, keys?: string) => list.push({ id, group, icon, label, run, keys });
     add("deploy", "Actions", "ship", pending ? `Deploy ${pending} ${pending === 1 ? "change" : "changes"}` : "Deploy", () => deployBtn.current?.click());
+    if (deploy?.name) add("deploy-staging", "Actions", "ship", "Deploy to staging", () => stagingBtn.current?.click());
     if (container) add("builder", "Actions", "sparkles", chat ? "Hide the AI builder" : "Ask Claude for a change", () => setBuilderOpen(!chat), `${MOD}B`);
     add("reload", "Actions", "refresh", "Reload the preview", () => (setView("preview"), loadPreview()));
     if (deploy?.url) add("live", "Actions", "globe", "Open the live app", () => void open(deploy.url, "_blank", "noopener"));
@@ -644,6 +650,11 @@ function ProjectWorkspace({ project }: { project: StoredProject }) {
             <span id="deploy-btn-label">{deploying ? "Deploying…" : "Deploy"}</span>
             {pending && !deploying ? <span className="deploy-count">{`${pending} ${pending === 1 ? "change" : "changes"}`}</span> : null}
           </button>
+          {deploy?.name ? (
+            <button className="btn sm" id="deploy-staging-btn" type="button" ref={stagingBtn} disabled={deploying || !container}
+              title={`Deploy to ${deploy.name}'s staging: private, its own data${gitOn ? ", the branch not merged" : ""}. Promote takes it to production.`}
+              onClick={() => void onDeploy("staging")}>Staging</button>
+          ) : null}
         </div>
       </header>
 

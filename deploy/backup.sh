@@ -89,7 +89,8 @@ docker run --rm --init -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   # Everything except the databases and their sidecars (snapshotted below). A file changing or
   # vanishing mid-copy is tar status 1 (allowed: the server is running); anything worse fails.
   ex=""
-  for db in ./cresslet.db "./apps/*/data/db.sqlite" "./apps/*/data/files/index.sqlite"; do
+  # (apps/*/env/*: an app environment's own, e.g. staging.)
+  for db in ./cresslet.db "./apps/*/data/db.sqlite" "./apps/*/data/files/index.sqlite" "./apps/*/env/*/db.sqlite" "./apps/*/env/*/files/index.sqlite"; do
     for x in "" -wal -shm -journal; do ex="$ex --exclude=$db$x"; done
   done
   # secrets.key: not in the snapshot (kept apart, below). .restore: restore staging (docs).
@@ -103,7 +104,7 @@ docker run --rm --init -v "$VOL":/data -v "$DIR":/out alpine:3.24 sh -ec '
   [ "$(cat /tmp/rc)" -le 1 ] || { echo "copying the volume failed (tar status $(cat /tmp/rc))" >&2; exit 1; }
   # The databases (not app-stored files, whatever they are named), each a consistent copy with the
   # original owner and mode (the server may run as a non-root user).
-  for db in cresslet.db apps/*/data/db.sqlite apps/*/data/files/index.sqlite; do
+  for db in cresslet.db apps/*/data/db.sqlite apps/*/data/files/index.sqlite apps/*/env/*/db.sqlite apps/*/env/*/files/index.sqlite; do
     [ -f "$db" ] || continue
     # An app that set up its files after the copy: its dirs (top down), with their owners and modes.
     set --; d=$(dirname "$db")

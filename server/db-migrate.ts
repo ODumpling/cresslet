@@ -111,6 +111,12 @@ export async function copyStore(from: Store, to: Store, opts: { dryRun?: boolean
         if (JSON.stringify(Object.entries(a).sort()) !== JSON.stringify(Object.entries(b).sort())) throw new Error(`secrets of ${id} differ after the copy`);
         secrets += Object.keys(a).length;
       }
+      // An environment's own (sealed to the environment): what its sandbox sees, production's and its overrides.
+      for (const env of await from.db.all<{ id: string; app_id: string }>("SELECT id, app_id FROM environments")) {
+        const [a, b] = [await from.envSecrets(env), await to.envSecrets(env)];
+        if (JSON.stringify(Object.entries(a).sort()) !== JSON.stringify(Object.entries(b).sort())) throw new Error(`secrets of environment ${env.id} differ after the copy`);
+        secrets += (await from.envSecretKeys(env.id)).length;
+      }
       report = { tables, secrets, committed: !opts.dryRun };
       if (opts.dryRun) throw rollback;
     });

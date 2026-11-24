@@ -328,10 +328,11 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   };
 }
 
-export function appUrl(cfg: Config, name: string): string {
+/** `env`: that environment's host, `<name>--<env>` (one DNS label, so the `*.<domain>` certificate covers it). */
+export function appUrl(cfg: Config, name: string, env?: string | null): string {
   const defaultPort = cfg.scheme === "https" ? 443 : 80;
   const port = cfg.publicPort === defaultPort ? "" : `:${cfg.publicPort}`;
-  return `${cfg.scheme}://${name}.${cfg.domain}${port}`;
+  return `${cfg.scheme}://${env ? `${name}--${env}` : name}.${cfg.domain}${port}`;
 }
 
 /** The app name the preview host shadows (`preview` for `preview.<domain>`), if it's under the domain. */
@@ -380,6 +381,12 @@ export const paths = (cfg: Config, appId: string) => {
     data: join(app, "data"),
     db: join(app, "data", "db.sqlite"),
     files: join(app, "data", "files"),
+    /** An environment's own data (docs/architecture.md#environments), beside production's. */
+    env: (name: string) => ({
+      data: join(app, "env", name),
+      db: join(app, "env", name, "db.sqlite"),
+      files: join(app, "env", name, "files"),
+    }),
   };
 };
 
