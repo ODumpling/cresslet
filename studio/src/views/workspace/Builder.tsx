@@ -77,6 +77,8 @@ export interface Ship {
 
 export function Builder({ c, devLog, onChange, open, setOpen, git, commandRev = () => 0, stack = null, onStackStale = () => {}, appName, ship, onTurnEnd = () => {}, onAgentChange = () => {}, ref }: {
   c: Container;
+  /** Whether this tab owns the project (project-lock.ts; default true): only the owner may run or save it. */
+  owner?: boolean;
   /** The project's name (the empty chat asks what it should do). */
   appName: string;
   ship: Ship;

@@ -568,6 +568,8 @@ a.deploy-link:hover { color: var(--accent-text); }
 .terminal .xterm-rows .xterm-dim { color: var(--text-2) !important; }
 .deploy-log { flex: 1; margin: 0; padding: 12px 14px; overflow: auto; white-space: pre-wrap; color: var(--text-2); font-size: 12.5px; line-height: 1.6; background: var(--surface); }
 .deploy-log-empty { font-family: var(--sans); }
+/* Read-only (another tab owns the project): a file as last saved. */
+#readonly-file { margin-top: 12px; max-height: 60vh; }
 
 /* Studio's status line */
 .statusline {
